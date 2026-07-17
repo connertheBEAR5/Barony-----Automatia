@@ -28,7 +28,9 @@
 #include "mod_tools.hpp"
 #include "menu.hpp"
 #include "ui/MainMenu.hpp"
-
+// ==================== SECRET DOORWAY GLOBALS ====================
+bool secretDoorwayHasSpawned = false;   // Only one per entire run
+// ==================== END SECRET DOORWAY GLOBALS ====================
 int startfloor = 0;
 BaronyRNG map_rng;
 BaronyRNG map_server_rng;
@@ -1550,7 +1552,40 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 
 		loadSubRoomData(fullMapPath, &mapList);
 	}
+	// ==================== SECRET DOORWAY BIOME GROUPS (NO GENERIC) ====================
+GroupSubRooms_t minesSecretDoorways;
+GroupSubRooms_t swampSecretDoorways;
+GroupSubRooms_t labyrinthSecretDoorways;
 
+for (int i = 0; i < 100; ++i)
+{
+    char name[128];
+    snprintf(name, sizeof(name), "secret_doorway%02d", i);
+
+    std::string fullPath = physfsFormatMapName(name);
+    if (fullPath.empty()) break;
+
+    if (strstr(name, "mines_"))
+    {
+        if (loadSubRoomData(fullPath, &minesSecretDoorways.list))
+            ++minesSecretDoorways.count;
+    }
+    else if (strstr(name, "swamp_"))
+    {
+        if (loadSubRoomData(fullPath, &swampSecretDoorways.list))
+            ++swampSecretDoorways.count;
+    }
+    else if (strstr(name, "labyrinth_"))
+    {
+        if (loadSubRoomData(fullPath, &labyrinthSecretDoorways.list))
+            ++labyrinthSecretDoorways.count;
+    }
+}
+
+minesSecretDoorways.possibleRooms.resize(minesSecretDoorways.count, true);
+swampSecretDoorways.possibleRooms.resize(swampSecretDoorways.count, true);
+labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true);
+// ==================== END SECRET DOORWAY GROUPS ====================
 	if ( !secretlevel )
 	{
 		if ( treasure_room_generator.orb_floors.find(currentlevel) != treasure_room_generator.orb_floors.end() )
@@ -2035,33 +2070,91 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 			}
 			else
 			{
-				if ( !numlevels )
-				{
-					break;
-				}
-				levelnum = map_rng.rand() % (numlevels); // draw randomly from the pool
+				if (!numlevels) break;
 
-				// traverse the map list to the picked level
-				node = mapList.first;
-				i = 0;
-				j = -1;
-				while (1)
+				// ==================== SECRET DOORWAY (MINES / SWAMP / LABYRINTH ONLY) ====================
+				bool useSecretDoorway = false;
+				GroupSubRooms_t* chosenPool = nullptr;
+
+				if (!secretDoorwayHasSpawned)
 				{
-					if (possiblerooms[i])
+					if (!strncmp(map.name, "The Mines", 9))
 					{
-						++j;
-						if (j == levelnum)
+						if (minesSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
 						{
-							break;
+							chosenPool = &minesSecretDoorways;
+							useSecretDoorway = true;
 						}
 					}
-					node = node->next;
-					++i;
+					else if (!strncmp(map.name, "The Swamp", 9))
+					{
+						if (swampSecretDoorways.count > 0 && map_rng.rand() % 100 < 5)   // 5%
+						{
+							chosenPool = &swampSecretDoorways;
+							useSecretDoorway = true;
+						}
+					}
+					else if (!strncmp(map.name, "The Labyrinth", 13))
+					{
+						if (labyrinthSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
+						{
+							chosenPool = &labyrinthSecretDoorways;
+							useSecretDoorway = true;
+						}
+					}
+					// No else → 0% in all other biomes
 				}
-				levelnum2 = i;
-				node = ((list_t*)node->element)->first;
-				doorNode = node->next;
-				tempMap = (map_t*)node->element;
+
+				if (useSecretDoorway && chosenPool)
+				{
+					// Pick random variant from the chosen biome pool
+					int pick = map_rng.rand() % chosenPool->count;
+
+					node = chosenPool->list.first;
+					int j = -1;
+					int i = 0;
+					while (1)
+					{
+						if (chosenPool->possibleRooms[i])
+						{
+							++j;
+							if (j == pick) break;
+						}
+						node = node->next;
+						++i;
+					}
+
+					levelnum2 = i;
+					node = ((list_t*)node->element)->first;
+					doorNode = node->next;
+					tempMap = (map_t*)node->element;
+
+					secretDoorwayHasSpawned = true;
+				}
+				else
+				{
+					// Normal room selection
+					levelnum = map_rng.rand() % (numlevels);
+
+					node = mapList.first;
+					i = 0;
+					j = -1;
+					while (1)
+					{
+						if (possiblerooms[i])
+						{
+							++j;
+							if (j == levelnum) break;
+						}
+						node = node->next;
+						++i;
+					}
+					levelnum2 = i;
+					node = ((list_t*)node->element)->first;
+					doorNode = node->next;
+					tempMap = (map_t*)node->element;
+				}
+				// ==================== END SECRET DOORWAY ====================
 			}
 
 			// find locations where the selected room can be added to the level

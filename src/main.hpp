@@ -500,7 +500,12 @@ typedef struct map_t
 	}
 } map_t;
 
-#define MAPLAYERS 3 // number of layers contained in a single map
+#ifdef EDITOR
+    #define MAPLAYERS 32
+#else
+    #define MAPLAYERS 3
+#endif
+// number of layers contained in a single map ^
 #define OBSTACLELAYER 1 // obstacle layer in map
 #define MAPFLAGS 16 // map flags for custom properties
 #define MAPFLAGTEXTS 20 // map flags for custom properties

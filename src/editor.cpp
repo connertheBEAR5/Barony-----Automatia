@@ -622,7 +622,7 @@ void mainLogic(void)
 			strcpy(layerstatus, "CEILING");
 			break;
 		default:
-			strcpy(layerstatus, "UNKNOWN");
+			strcpy(layerstatus, "LAYER");
 			break;
 	}
 }
@@ -1715,6 +1715,11 @@ int main(int argc, char** argv)
 					{
 						map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
 					}
+				}
+				else if (z >= 3)
+				{
+					// Higher layers default to air (0)
+					map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
 				}
 				else
 				{
