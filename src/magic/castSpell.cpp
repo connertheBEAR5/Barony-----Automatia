@@ -3643,7 +3643,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 						}
 						else if ( map.skybox != 0 )
 						{
-							if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+							if ( !map.tiles[CEILINGLAYER + mapIndex] )
 							{
 								noroom = true;
 							}
@@ -3707,7 +3707,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 						}
 						else if ( map.skybox != 0 )
 						{
-							if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+							if ( !map.tiles[CEILINGLAYER + mapIndex] )
 							{
 								noroom = true;
 							}
@@ -4790,7 +4790,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 										int y = target->y / 16;
 										if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 										{
-											if ( !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+											if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
 											{
 												z = -23;
 											}
@@ -4826,7 +4826,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 										int y = target->y / 16;
 										if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 										{
-											if ( !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+											if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
 											{
 												spellTimer->z = -23;
 											}

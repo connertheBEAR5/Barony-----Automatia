@@ -503,6 +503,11 @@ typedef struct map_t
 
 #define MAPLAYERS 32
 // number of layers contained in a single map ^
+#define FLOORLAYER 0
+#define CEILINGLAYER 2
+
+#define LEGACY_MAPLAYERS 3
+#define FIRST_EXTRA_LAYER 3
 #define OBSTACLELAYER 1 // obstacle layer in map
 #define MAPFLAGS 16 // map flags for custom properties
 #define MAPFLAGTEXTS 20 // map flags for custom properties

@@ -1547,7 +1547,7 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 								int tiley = entity->y / 16;
 								if ( tilex >= 0 && tilex < map.width && tiley >= 0 && tiley < map.height )
 								{
-									if ( !map.tiles[(MAPLAYERS - 1) + tiley * MAPLAYERS + tilex * MAPLAYERS * map.height] )
+									if ( !map.tiles[CEILINGLAYER + tiley * MAPLAYERS + tilex * MAPLAYERS * map.height] )
 									{
 										if ( entity->behavior == &actMonster )
 										{

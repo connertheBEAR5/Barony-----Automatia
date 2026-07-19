@@ -1662,7 +1662,7 @@ void actBoulderTrapHole(Entity* my)
 		// in ceiling, delete self if ceiling no longer exists
 		int x = ((int)(my->x)) >> 4;
 		int y = ((int)(my->y)) >> 4;
-		if ( !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+		if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
 		{
 			list_RemoveNode(my->mynode);
 			return;

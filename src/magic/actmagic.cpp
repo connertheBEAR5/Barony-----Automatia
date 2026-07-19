@@ -10348,7 +10348,7 @@ void createParticleSap(Entity* parent)
 			entity->vel_y = 1 * sin(entity->yaw);
 			int x = entity->x / 16;
 			int y = entity->y / 16;
-			if ( !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
 			{
 				// no ceiling, bounce higher.
 				entity->vel_z = -0.4;
@@ -13168,7 +13168,7 @@ void actParticleTimer(Entity* my)
 					{
 						int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 						bool tallCeiling = false;
-						if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+						if ( !map.tiles[CEILINGLAYER + mapIndex] )
 						{
 							tallCeiling = true;
 						}
@@ -19800,7 +19800,7 @@ Entity* createMagicRadiusBadge(Entity& parent)
 	int mapy = entity->y / 16;
 	if ( mapx >= 0 && mapx < map.width && mapy >= 0 && mapy < map.height )
 	{
-		if ( !map.tiles[(MAPLAYERS - 1) + mapy * MAPLAYERS + mapx * MAPLAYERS * map.height] )
+		if ( !map.tiles[CEILINGLAYER + mapy * MAPLAYERS + mapx * MAPLAYERS * map.height] )
 		{
 			// no ceiling
 			entity->fskill[0] = *cvar_magic_radius_badge2;
@@ -21276,7 +21276,7 @@ void actParticleShatterEarth(Entity* my)
 			noground = true;
 		}
 
-		if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+		if ( !map.tiles[CEILINGLAYER + mapIndex] )
 		{
 			tallCeiling = true;
 		}
@@ -21614,7 +21614,7 @@ void createParticleShatterEarth(Entity* my, Entity* caster, real_t _x, real_t _y
 
 	int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 	bool tallCeiling = false;
-	if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+	if ( !map.tiles[CEILINGLAYER + mapIndex] )
 	{
 		tallCeiling = true;
 	}

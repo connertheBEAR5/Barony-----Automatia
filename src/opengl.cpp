@@ -2296,20 +2296,24 @@ std::vector<Chunk> chunks;
 constexpr float sky_size = CLIPFAR * 16.f;
 constexpr float sky_htex_size = sky_size / 64.f;
 constexpr float sky_ltex_size = sky_size / 32.f;
+
+constexpr float sky_height_lower = 16.f + 32.f * (MAPLAYERS - 2);
+constexpr float sky_height_upper = sky_height_lower + 1.f;
 Mesh skyMesh = {
     {
-        -sky_size, 65.f, -sky_size,
-         sky_size, 65.f, -sky_size,
-         sky_size, 65.f,  sky_size,
-        -sky_size, 65.f, -sky_size,
-         sky_size, 65.f,  sky_size,
-        -sky_size, 65.f,  sky_size,
-        -sky_size, 64.f, -sky_size,
-         sky_size, 64.f, -sky_size,
-         sky_size, 64.f,  sky_size,
-        -sky_size, 64.f, -sky_size,
-         sky_size, 64.f,  sky_size,
-        -sky_size, 64.f,  sky_size,
+        -sky_size, sky_height_upper, -sky_size,
+         sky_size, sky_height_upper, -sky_size,
+         sky_size, sky_height_upper,  sky_size,
+        -sky_size, sky_height_upper, -sky_size,
+         sky_size, sky_height_upper,  sky_size,
+        -sky_size, sky_height_upper,  sky_size,
+
+        -sky_size, sky_height_lower, -sky_size,
+         sky_size, sky_height_lower, -sky_size,
+         sky_size, sky_height_lower,  sky_size,
+        -sky_size, sky_height_lower, -sky_size,
+         sky_size, sky_height_lower,  sky_size,
+        -sky_size, sky_height_lower,  sky_size,
     }, // positions
     {
         0.f, 0.f,
@@ -2318,6 +2322,7 @@ Mesh skyMesh = {
         0.f, 0.f,
         sky_htex_size, sky_htex_size,
         0.f, sky_htex_size,
+
         0.f, 0.f,
         sky_ltex_size, 0.f,
         sky_ltex_size, sky_ltex_size,
@@ -2332,6 +2337,7 @@ Mesh skyMesh = {
         1.f, 1.f, 1.f, 1.f,
         1.f, 1.f, 1.f, 1.f,
         1.f, 1.f, 1.f, 1.f,
+
         1.f, 1.f, 1.f, .5f,
         1.f, 1.f, 1.f, .5f,
         1.f, 1.f, 1.f, .5f,
@@ -2664,25 +2670,48 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
     
     for (int x = startX; x < endX; ++x) {
         for (int y = startY; y < endY; ++y) {
-            for (int z = 0; z < MAPLAYERS + 1; ++z) {
-                const int index = z + y * MAPLAYERS + x * map.height * MAPLAYERS;
 
+            bool hasUpperStructure = false;
+
+            for (int checkZ = FIRST_EXTRA_LAYER;
+                checkZ < MAPLAYERS;
+                ++checkZ)
+            {
+                const int checkIndex =
+                    checkZ
+                    + y * MAPLAYERS
+                    + x * map.height * MAPLAYERS;
+
+                if (map.tiles[checkIndex] != 0
+                    && map.tiles[checkIndex] != TRANSPARENT_TILE)
+                {
+                    hasUpperStructure = true;
+                    break;
+                }
+            }
+
+            for (int z = 0; z < MAPLAYERS; ++z) {
+                const int index = z + y * MAPLAYERS + x * map.height * MAPLAYERS;
+                const bool validMapLayer = z >= 0 && z < MAPLAYERS;
+
+                const bool generatedCeiling =
+                ceiling
+                && z == FIRST_EXTRA_LAYER
+                && !hasUpperStructure;
+
+                const bool solidMapTile =
+                    validMapLayer
+                    && map.tiles[index] != 0
+                    && map.tiles[index] != TRANSPARENT_TILE;
                 // build walls
-                if (z >= 0 && z < MAPLAYERS) {
+                if (validMapLayer)
+                {
                     assert(index2 < sizeOfTiles);
                     this->tiles[index2] = map.tiles[index];
                     ++index2;
-                    
-                    // skip empty tiles
-                    if (map.tiles[index] == 0) {
-                        continue;
-                    }
 
-                    // skip special transparent tile
-                    if (map.tiles[index] == TRANSPARENT_TILE) {
-                        continue;
-                    }
-
+                    if (solidMapTile)
+                    {
                     // select texture
                     float tile = mapceilingtile;
                     if (map.tiles[index] >= 0 && map.tiles[index] < numtiles) {
@@ -2997,15 +3026,22 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                 }
-                
+}    
                 // build floor and ceiling
                 {
                     // select floor/ceiling texture
                     float tile = mapceilingtile;
-                    if (z >= 0 && z < MAPLAYERS) {
-                        if (map.tiles[index] < 0 || map.tiles[index] >= numtiles) {
+
+                    // A generated ceiling must use the map's configured ceiling texture.
+                    // Only real tile surfaces should take their texture from map.tiles[index].
+                    if (!generatedCeiling && validMapLayer)
+                    {
+                        if (map.tiles[index] < 0 || map.tiles[index] >= numtiles)
+                        {
                             tile = 0;
-                        } else {
+                        }
+                        else
+                        {
                             tile = map.tiles[index];
                         }
                     }
@@ -3021,7 +3057,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
                     
                     // build floor
-                    if (z < OBSTACLELAYER) {
+                    if (z < OBSTACLELAYER && solidMapTile) {
                         if (!map.tiles[index + 1] || map.tiles[index + 1] == TRANSPARENT_TILE) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3056,8 +3092,25 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
                     
                     // build ceiling
-                    else if (z > OBSTACLELAYER && (ceiling || z < MAPLAYERS)) {
-                        if (!map.tiles[index - 1] || map.tiles[index - 1] == TRANSPARENT_TILE) {
+                    else if (z > OBSTACLELAYER && (solidMapTile || generatedCeiling)) {
+                            bool drawCeilingSurface = false;
+
+                            if (generatedCeiling)
+                            {
+                                drawCeilingSurface = true;
+                            }
+                            else if (solidMapTile && z > OBSTACLELAYER)
+                            {
+                                const int belowIndex =
+                                    (z - 1)
+                                    + y * MAPLAYERS
+                                    + x * map.height * MAPLAYERS;
+
+                                drawCeilingSurface =
+                                    !map.tiles[belowIndex]
+                                    || map.tiles[belowIndex] == TRANSPARENT_TILE;
+                            }
+                            if (drawCeilingSurface) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
                             texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);

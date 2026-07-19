@@ -3626,19 +3626,19 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			bool arrowtrapspawn = false;
 			if ( !strncmp(map.name, "Hell", 4) )
 			{
-				if ( side == 0 && !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + (x + 1)*MAPLAYERS * map.height] )
+				if ( side == 0 && !map.tiles[CEILINGLAYER + y * MAPLAYERS + (x + 1)*MAPLAYERS * map.height] )
 				{
 					noceiling = true;
 				}
-				if ( side == 1 && !map.tiles[(MAPLAYERS - 1) + (y + 1)*MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( side == 1 && !map.tiles[CEILINGLAYER + (y + 1)*MAPLAYERS + x * MAPLAYERS * map.height] )
 				{
 					noceiling = true;
 				}
-				if ( side == 2 && !map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + (x - 1)*MAPLAYERS * map.height] )
+				if ( side == 2 && !map.tiles[CEILINGLAYER + y * MAPLAYERS + (x - 1)*MAPLAYERS * map.height] )
 				{
 					noceiling = true;
 				}
-				if ( side == 3 && !map.tiles[(MAPLAYERS - 1) + (y - 1)*MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( side == 3 && !map.tiles[CEILINGLAYER + (y - 1)*MAPLAYERS + x * MAPLAYERS * map.height] )
 				{
 					noceiling = true;
 				}
@@ -5135,7 +5135,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 								{
 									bellSpot = false;
 								}
-								else if ( map.tiles[(MAPLAYERS - 1) + checky * MAPLAYERS + checkx * MAPLAYERS * map.height]
+								else if ( map.tiles[CEILINGLAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height]
 									|| map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )
 								{
 									bellSpot = false;
@@ -6381,7 +6381,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 								int mapIndex = (ty)*MAPLAYERS + (tx)*MAPLAYERS * map.height;
 								if ( !map.tiles[OBSTACLELAYER + mapIndex] )
 								{
-									if ( !map.tiles[(MAPLAYERS - 1) + mapIndex] )
+									if ( !map.tiles[CEILINGLAYER + mapIndex] )
 									{
 										++openCeilings;
 										goodSpots[0].push_back(coord);
@@ -8586,7 +8586,7 @@ void assignActions(map_t* map)
 							childEntity->y = (y << 4) + 8;
 							//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 							childEntity->flags[PASSABLE] = true;
-							if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+							if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 							{
 								childEntity->z = -26.99;
 							}
@@ -8651,7 +8651,7 @@ void assignActions(map_t* map)
                 int y = entity->y / 16;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
                     {
                         entity->z = -6.25 - 16.0;
                     }
@@ -9057,7 +9057,7 @@ void assignActions(map_t* map)
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9099,7 +9099,7 @@ void assignActions(map_t* map)
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9141,7 +9141,7 @@ void assignActions(map_t* map)
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9183,7 +9183,7 @@ void assignActions(map_t* map)
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9322,7 +9322,7 @@ void assignActions(map_t* map)
                 entity->behavior = &actStalagCeiling;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
                     {
                         entity->flags[PASSABLE] = true;
                         entity->z -= 16;
@@ -9344,7 +9344,7 @@ void assignActions(map_t* map)
                 entity->behavior = &actStalagCeiling;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
                     {
                         entity->flags[PASSABLE] = true;
                         entity->z -= 16;
@@ -9569,7 +9569,7 @@ void assignActions(map_t* map)
 					const int y = entity->y / 16;
 					if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 					{
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							entity->z = -6.25 - 16.0;
 						}
@@ -9648,7 +9648,7 @@ void assignActions(map_t* map)
 						childEntity->y = entity->y;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
 						{
 							childEntity->z = -22.99;
 						}

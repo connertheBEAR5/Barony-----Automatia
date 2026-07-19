@@ -2568,53 +2568,161 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 		fp->read(&destmap->skybox, sizeof(Uint32), 1); // map skybox
 	}
 
-	// misc map flags
-	if ( editorVersion == 1 || editorVersion == 2 || editorVersion == 21 || editorVersion == 22 )
-	{
-		for ( c = 0; c < MAPFLAGS; c++ )
-		{
-			destmap->flags[c] = 0;
-		}
-	}
-	else
-	{
-		fp->read(destmap->flags, sizeof(Sint32), MAPFLAGS); // map flags
-	}
-	// number of map layers
-	if ( editorVersion >= 40 )
-	{
-		fp->read(&destmap->numLayers, sizeof(Uint32), 1);
-	}
-	else
-	{
-		// All older map formats are 3-layer maps.
-		destmap->numLayers = 3;
-	}
-	destmap->tiles = (Sint32*) malloc(sizeof(Sint32) * destmap->width * destmap->height * MAPLAYERS);
-	memset(destmap->tiles,
-       0,
-       sizeof(Sint32) * destmap->width * destmap->height * MAPLAYERS);
-	if ( destmap == &map )
-	{
-#ifdef EDITOR
-		camera.vismap = (bool*)malloc(sizeof(bool) * destmap->width * destmap->height);
-        memset(camera.vismap, 0, sizeof(bool) * destmap->height * destmap->width);
-#endif
-		menucam.vismap = (bool*)malloc(sizeof(bool) * destmap->width * destmap->height);
-        memset(menucam.vismap, 0, sizeof(bool) * destmap->height * destmap->width);
-		for ( int i = 0; i < MAXPLAYERS; ++i )
-		{
-			cameras[i].vismap = (bool*)malloc(sizeof(bool) * destmap->width * destmap->height);
-            memset(cameras[i].vismap, 0, sizeof(bool) * destmap->height * destmap->width);
-		}
-	}
-	fp->read(destmap->tiles,
-         sizeof(Sint32),
-         destmap->width * destmap->height * destmap->numLayers);
-	fp->read(&numentities, sizeof(Uint32), 1); // number of entities on the map
+// misc map flags
+if ( editorVersion == 1 || editorVersion == 2
+    || editorVersion == 21 || editorVersion == 22 )
+{
+    for ( c = 0; c < MAPFLAGS; ++c )
+    {
+        destmap->flags[c] = 0;
+    }
+}
+else
+{
+    fp->read(destmap->flags, sizeof(Sint32), MAPFLAGS);
+}
 
-    const int mapsize = destmap->width * destmap->height * destmap->numLayers;
-	for ( int c = 0; c < mapsize; ++c )
+// Number of layers stored in the file.
+// Legacy map files always contain 3 layers.
+Uint32 fileNumLayers = 3;
+
+if ( editorVersion >= 40 )
+{
+    fp->read(&fileNumLayers, sizeof(Uint32), 1);
+
+    // Reject corrupted or unsupported files.
+    if ( fileNumLayers == 0 || fileNumLayers > MAPLAYERS )
+    {
+        printlog(
+            "warning: map '%s' has invalid layer count %u; maximum is %d.\n",
+            filename,
+            fileNumLayers,
+            MAPLAYERS
+        );
+
+        FileIO::close(fp);
+        return -1;
+    }
+}
+
+// Allocate the engine's full 32-layer tile buffer.
+const size_t totalTileCount =
+    static_cast<size_t>(destmap->width)
+    * static_cast<size_t>(destmap->height)
+    * MAPLAYERS;
+
+destmap->tiles = static_cast<Sint32*>(
+    malloc(sizeof(Sint32) * totalTileCount)
+);
+
+if ( !destmap->tiles )
+{
+    printlog("warning: failed to allocate tile data for map '%s'.\n", filename);
+    FileIO::close(fp);
+    return -1;
+}
+
+// Layers not present in the file become air.
+memset(
+    destmap->tiles,
+    0,
+    sizeof(Sint32) * totalTileCount
+);
+
+if ( destmap == &map )
+{
+#ifdef EDITOR
+    camera.vismap =
+        static_cast<bool*>(malloc(sizeof(bool)
+            * destmap->width * destmap->height));
+
+    memset(camera.vismap, 0,
+        sizeof(bool) * destmap->height * destmap->width);
+#endif
+
+    menucam.vismap =
+        static_cast<bool*>(malloc(sizeof(bool)
+            * destmap->width * destmap->height));
+
+    memset(menucam.vismap, 0,
+        sizeof(bool) * destmap->height * destmap->width);
+
+    for ( int i = 0; i < MAXPLAYERS; ++i )
+    {
+        cameras[i].vismap =
+            static_cast<bool*>(malloc(sizeof(bool)
+                * destmap->width * destmap->height));
+
+        memset(cameras[i].vismap, 0,
+            sizeof(bool) * destmap->height * destmap->width);
+    }
+}
+
+// Read the file using its original layer stride.
+const size_t fileTileCount =
+    static_cast<size_t>(destmap->width)
+    * static_cast<size_t>(destmap->height)
+    * fileNumLayers;
+
+Sint32* fileTiles = static_cast<Sint32*>(
+    malloc(sizeof(Sint32) * fileTileCount)
+);
+
+if ( !fileTiles )
+{
+    printlog(
+        "warning: failed to allocate temporary tile data for map '%s'.\n",
+        filename
+    );
+
+    free(destmap->tiles);
+    destmap->tiles = nullptr;
+    FileIO::close(fp);
+    return -1;
+}
+
+fp->read(fileTiles, sizeof(Sint32), fileTileCount);
+
+// Convert from the file's stride (3 or 32) into the engine's
+// 32-layer stride.
+for ( Uint32 x = 0; x < destmap->width; ++x )
+{
+    for ( Uint32 y = 0; y < destmap->height; ++y )
+    {
+        for ( Uint32 z = 0; z < fileNumLayers; ++z )
+        {
+            const size_t oldIndex =
+                static_cast<size_t>(z)
+                + static_cast<size_t>(y) * fileNumLayers
+                + static_cast<size_t>(x)
+                    * fileNumLayers
+                    * destmap->height;
+
+            const size_t newIndex =
+                static_cast<size_t>(z)
+                + static_cast<size_t>(y) * MAPLAYERS
+                + static_cast<size_t>(x)
+                    * MAPLAYERS
+                    * destmap->height;
+
+            destmap->tiles[newIndex] = fileTiles[oldIndex];
+        }
+    }
+}
+
+free(fileTiles);
+
+// The loaded map is now fully converted to the engine's 32-layer
+// in-memory format. Saving it will produce a V4.0 32-layer map.
+destmap->numLayers = MAPLAYERS;
+
+fp->read(&numentities, sizeof(Uint32), 1);
+
+    const size_t mapsize =
+    static_cast<size_t>(destmap->width)
+    * static_cast<size_t>(destmap->height)
+    * MAPLAYERS;
+	for ( size_t c = 0; c < mapsize; ++c )
 	{
 		mapHashData += destmap->tiles[c];
 	}
@@ -2622,7 +2730,7 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
     // new as of july 30 2023
     // fix animated tiles so they always start on the correct index
     constexpr int numTileAtlases = sizeof(AnimatedTile::indices) / sizeof(AnimatedTile::indices[0]);
-    for (int c = 0; c < mapsize; ++c) {
+    for ( size_t c = 0; c < mapsize; ++c ) {
         int& tile = destmap->tiles[c];
         if (animatedtiles[tile]) {
             auto find = tileAnimations.find(tile);
@@ -3342,7 +3450,7 @@ int saveMap(const char* filename2)
 		fp->write(&map.numLayers, sizeof(Uint32), 1);
 		fp->write(map.tiles,
           sizeof(Sint32),
-          map.width * map.height * map.numLayers);
+          map.width * map.height * MAPLAYERS);
 		for (node = map.entities->first; node != nullptr; node = node->next)
 		{
 			++numentities;
