@@ -1684,6 +1684,7 @@ int main(int argc, char** argv)
 	// create an empty map
 	map.width = 32;
 	map.height = 24;
+	map.numLayers = MAPLAYERS;
 	map.entities = (list_t*) malloc(sizeof(list_t));
 	map.creatures = nullptr;
 	map.worldUI = nullptr;

@@ -2296,24 +2296,28 @@ std::vector<Chunk> chunks;
 constexpr float sky_size = CLIPFAR * 16.f;
 constexpr float sky_htex_size = sky_size / 64.f;
 constexpr float sky_ltex_size = sky_size / 32.f;
+// Initial position before a map-specific height is calculated.
+// The sky will be moved dynamically when map chunks are built.
+constexpr float default_sky_height_lower =
+    16.f + 32.f * (MAPLAYERS - 2);
 
-constexpr float sky_height_lower = 16.f + 32.f * (MAPLAYERS - 2);
-constexpr float sky_height_upper = sky_height_lower + 1.f;
+constexpr float default_sky_height_upper =
+    default_sky_height_lower + 1.f;
 Mesh skyMesh = {
     {
-        -sky_size, sky_height_upper, -sky_size,
-         sky_size, sky_height_upper, -sky_size,
-         sky_size, sky_height_upper,  sky_size,
-        -sky_size, sky_height_upper, -sky_size,
-         sky_size, sky_height_upper,  sky_size,
-        -sky_size, sky_height_upper,  sky_size,
+        -sky_size, default_sky_height_upper, -sky_size,
+         sky_size, default_sky_height_upper, -sky_size,
+         sky_size, default_sky_height_upper,  sky_size,
+        -sky_size, default_sky_height_upper, -sky_size,
+         sky_size, default_sky_height_upper,  sky_size,
+        -sky_size, default_sky_height_upper,  sky_size,
 
-        -sky_size, sky_height_lower, -sky_size,
-         sky_size, sky_height_lower, -sky_size,
-         sky_size, sky_height_lower,  sky_size,
-        -sky_size, sky_height_lower, -sky_size,
-         sky_size, sky_height_lower,  sky_size,
-        -sky_size, sky_height_lower,  sky_size,
+        -sky_size, default_sky_height_lower, -sky_size,
+         sky_size, default_sky_height_lower, -sky_size,
+         sky_size, default_sky_height_lower,  sky_size,
+        -sky_size, default_sky_height_lower, -sky_size,
+         sky_size, default_sky_height_lower,  sky_size,
+        -sky_size, default_sky_height_lower,  sky_size,
     }, // positions
     {
         0.f, 0.f,
@@ -2346,7 +2350,129 @@ Mesh skyMesh = {
         1.f, 1.f, 1.f, .5f,
     }, // colors
 };
+// Currently uploaded sky layer.
+// Start at -1 so the first map forces a height calculation.
+static int currentSkyLayer = -1;
+static Uint32 currentSkyboxTile = 0;
+static int currentSkyMapWidth = -1;
+static int currentSkyMapHeight = -1;
+// Additional empty layers between the highest structure and the sky plane.
+constexpr int SKY_LAYER_CLEARANCE = 3;
+// you can change the sky clearance to get a more "roomy" sky with higher values. 
+/**
+ * Finds the highest occupied tile layer above the original three layers.
+ *
+ * Layers:
+ *   0 = floor
+ *   1 = obstacle
+ *   2 = original ceiling
+ *   3-31 = additional map layers
+ */
+static int findHighestOccupiedSkyLayer(const map_t& map)
+{
+    // If there are no additional structures, layer 2 is treated as the
+    // highest occupied layer.
+    int highestOccupiedLayer = CEILINGLAYER;
 
+    for (int x = 0; x < map.width; ++x)
+    {
+        for (int y = 0; y < map.height; ++y)
+        {
+            for (int z = FIRST_EXTRA_LAYER; z < MAPLAYERS; ++z)
+            {
+                const int index =
+                    z
+                    + y * MAPLAYERS
+                    + x * map.height * MAPLAYERS;
+
+                const int tile = map.tiles[index];
+
+                if (tile != 0
+                    && tile != TRANSPARENT_TILE)
+                {
+                    highestOccupiedLayer =
+                        std::max(highestOccupiedLayer, z);
+                }
+            }
+        }
+    }
+
+    return highestOccupiedLayer;
+}
+
+/**
+ * Moves the existing sky plane above the highest occupied map layer.
+ *
+ * This updates the mesh's CPU-side positions, then recreates its OpenGL
+ * buffers only when the desired layer has changed.
+ */
+static void updateDynamicSkyHeight(const map_t& map)
+{
+        const bool changedMap =
+        currentSkyboxTile != map.skybox
+        || currentSkyMapWidth != map.width
+        || currentSkyMapHeight != map.height;
+
+    if (changedMap)
+    {
+        currentSkyboxTile = map.skybox;
+        currentSkyMapWidth = map.width;
+        currentSkyMapHeight = map.height;
+        currentSkyLayer = -1;
+    }
+    const int highestOccupiedLayer =
+        findHighestOccupiedSkyLayer(map);
+
+    // Add some open space above the highest structure.
+    // MAPLAYERS represents the virtual layer above real layer 31.
+    const int desiredSkyLayer =
+        std::min(
+            highestOccupiedLayer + SKY_LAYER_CLEARANCE,
+            MAPLAYERS
+        );
+
+    // Avoid destroying and rebuilding the same mesh unnecessarily.
+    if (desiredSkyLayer == currentSkyLayer)
+    {
+        return;
+    }
+
+    currentSkyLayer = desiredSkyLayer;
+
+    const float lowerHeight =
+        16.f
+        + 32.f
+        * std::max(0, desiredSkyLayer - CEILINGLAYER);
+
+    const float upperHeight =
+        lowerHeight + 1.f;
+
+    auto& positions =
+        skyMesh.data[
+            static_cast<int>(Mesh::BufferType::Position)
+        ];
+
+    // The sky mesh contains 12 vertices.
+    // Vertices 0-5 are the fully opaque upper plane.
+    for (int vertex = 0; vertex < 6; ++vertex)
+    {
+        positions[vertex * 3 + 1] = upperHeight;
+    }
+
+    // Vertices 6-11 are the half-transparent lower plane.
+    for (int vertex = 6; vertex < 12; ++vertex)
+    {
+        positions[vertex * 3 + 1] = lowerHeight;
+    }
+
+    // Mesh::init() exits early when the mesh is already initialized,
+    // so destroy the old OpenGL buffers before uploading the new positions.
+    if (skyMesh.isInitialized())
+    {
+        skyMesh.destroy();
+        skyMesh.init();
+    }
+}
 #ifndef EDITOR
 static ConsoleVariable<bool> cvar_allowChunkRebuild("/allow_chunk_rebuild", true);
 #endif
@@ -2464,18 +2590,38 @@ void glDrawWorld(view_t* camera, int mode)
     // determine whether we should draw clouds, and their texture
     int cloudtile;
     const bool clouds = shouldDrawClouds(map, &cloudtile, false);
-
-    // build chunks
-    if (allowChunkRebuild) {
-        if ( chunksToBuild.size() > 0 )
-        {
-            bool rebuildClouds = shouldDrawClouds(map); // force check for clouds regardless of fog so we don't rebuild the map wrong
-            for (auto& pair : chunksToBuild) {
-                auto& chunk = *pair.second;
-                chunk.build(map, !rebuildClouds, chunk.x, chunk.y, chunk.w, chunk.h);
-            }
-        }
+    // Recalculate the plane on the first skybox draw.
+    // Later editor changes are handled when map chunks are rebuilt.
+    if (clouds && currentSkyLayer < 0)
+    {
+        updateDynamicSkyHeight(map);
     }
+                // build chunks
+                if (allowChunkRebuild)
+            {
+                if (chunksToBuild.size() > 0)
+                {
+                    bool rebuildClouds = shouldDrawClouds(map);
+
+                    if (rebuildClouds)
+                    {
+                        updateDynamicSkyHeight(map);
+                    }
+
+                    for (auto& pair : chunksToBuild)
+                    {
+                        auto& chunk = *pair.second;
+                        chunk.build(
+                            map,
+                            !rebuildClouds,
+                            chunk.x,
+                            chunk.y,
+                            chunk.w,
+                            chunk.h
+                        );
+                    }
+                }
+            }
     
     // draw chunks
     for (auto& chunk : chunks) {

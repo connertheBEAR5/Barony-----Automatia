@@ -563,30 +563,44 @@ void buttonNewConfirm(button_t* my)
 	map.tiles = (int*) malloc(sizeof(int) * MAPLAYERS * map.height * map.width);
 	camera.vismap = (bool*) malloc(sizeof(bool) * map.height * map.width);
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
-	for ( z = 0; z < MAPLAYERS; z++ )
-	{
-		for ( y = 0; y < map.height; y++ )
-		{
-			for ( x = 0; x < map.width; x++ )
-			{
-				if ( z == OBSTACLELAYER )
-				{
-					if (x == 0 || y == 0 || x == map.width - 1 || y == map.height - 1)
-					{
-						map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] = 2;
-					}
-					else
-					{
-						map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
-					}
-				}
-				else
-				{
-					map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] = 1;
-				}
-			}
-		}
-	}
+	for (z = 0; z < MAPLAYERS; ++z)
+{
+    for (y = 0; y < map.height; ++y)
+    {
+        for (x = 0; x < map.width; ++x)
+        {
+            const int index =
+                z
+                + y * MAPLAYERS
+                + x * MAPLAYERS * map.height;
+
+            if (z == OBSTACLELAYER)
+            {
+                if (x == 0
+                    || y == 0
+                    || x == map.width - 1
+                    || y == map.height - 1)
+                {
+                    map.tiles[index] = 2;
+                }
+                else
+                {
+                    map.tiles[index] = 0;
+                }
+            }
+            else if (z >= FIRST_EXTRA_LAYER)
+            {
+                // New upper layers start as air.
+                map.tiles[index] = 0;
+            }
+            else
+            {
+                // Preserve the original floor and ceiling defaults.
+                map.tiles[index] = 1;
+            }
+        }
+    }
+}
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
         lightmaps[c].resize(map.width * map.height);
@@ -1376,6 +1390,7 @@ void buttonAttributesConfirm(button_t* my)
 	free(camera.vismap);
 	map.width = atoi(widthtext);
 	map.height = atoi(heighttext);
+	map.numLayers = MAPLAYERS;
 	map.width = std::min(std::max(MINWIDTH, map.width), MAXWIDTH);
 	map.height = std::min(std::max(MINHEIGHT, map.height), MAXHEIGHT);
 	map.skybox = atoi(skyboxtext);
