@@ -2394,7 +2394,12 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	// read map version number
 	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV3.2", strlen("BARONY LMPV2.0")) == 0 )
+	if ( strncmp(valid_data, "BARONY LMPV4.0", strlen("BARONY LMPV4.0")) == 0 )
+	{
+		// 32-layer map format
+		editorVersion = 40;
+	}
+	else if ( strncmp(valid_data, "BARONY LMPV3.2", strlen("BARONY LMPV3.2")) == 0 )
 	{
 		// floor deco walls
 		editorVersion = 32;
@@ -2575,7 +2580,20 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 	{
 		fp->read(destmap->flags, sizeof(Sint32), MAPFLAGS); // map flags
 	}
+	// number of map layers
+	if ( editorVersion >= 40 )
+	{
+		fp->read(&destmap->numLayers, sizeof(Uint32), 1);
+	}
+	else
+	{
+		// All older map formats are 3-layer maps.
+		destmap->numLayers = 3;
+	}
 	destmap->tiles = (Sint32*) malloc(sizeof(Sint32) * destmap->width * destmap->height * MAPLAYERS);
+	memset(destmap->tiles,
+       0,
+       sizeof(Sint32) * destmap->width * destmap->height * MAPLAYERS);
 	if ( destmap == &map )
 	{
 #ifdef EDITOR
@@ -2590,10 +2608,12 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
             memset(cameras[i].vismap, 0, sizeof(bool) * destmap->height * destmap->width);
 		}
 	}
-	fp->read(destmap->tiles, sizeof(Sint32), destmap->width * destmap->height * MAPLAYERS);
+	fp->read(destmap->tiles,
+         sizeof(Sint32),
+         destmap->width * destmap->height * destmap->numLayers);
 	fp->read(&numentities, sizeof(Uint32), 1); // number of entities on the map
 
-    const int mapsize = destmap->width * destmap->height * MAPLAYERS;
+    const int mapsize = destmap->width * destmap->height * destmap->numLayers;
 	for ( int c = 0; c < mapsize; ++c )
 	{
 		mapHashData += destmap->tiles[c];
@@ -3288,7 +3308,7 @@ int saveMap(const char* filename2)
 	char filename[256];
 	Sint32 x, y;
 	Stat* myStats;
-
+	map.numLayers = MAPLAYERS;
 	if ( filename2 != NULL && strcmp(filename2, "") )
 	{
 		if ( !PHYSFS_isInit() )
@@ -3312,14 +3332,17 @@ int saveMap(const char* filename2)
 			return 1;
 		}
 
-		fp->write("BARONY LMPV3.2", sizeof(char), strlen("BARONY LMPV2.0")); // magic code
+		fp->write("BARONY LMPV4.0", sizeof(char), strlen("BARONY LMPV4.0")); // magic code
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
 		fp->write(&map.width, sizeof(Uint32), 1); // map width
 		fp->write(&map.height, sizeof(Uint32), 1); // map height
 		fp->write(&map.skybox, sizeof(Uint32), 1); // map skybox
 		fp->write(map.flags, sizeof(Sint32), MAPFLAGS); // map flags
-		fp->write(map.tiles, sizeof(Sint32), map.width * map.height * MAPLAYERS);
+		fp->write(&map.numLayers, sizeof(Uint32), 1);
+		fp->write(map.tiles,
+          sizeof(Sint32),
+          map.width * map.height * map.numLayers);
 		for (node = map.entities->first; node != nullptr; node = node->next)
 		{
 			++numentities;

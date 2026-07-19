@@ -46,6 +46,7 @@
 #include <future>
 #include <chrono>
 extern bool secretDoorwayHasSpawned;
+extern bool secretDoorwayOnThisFloor;
 /*-------------------------------------------------------------------------------
 
 	initGame
@@ -154,6 +155,7 @@ void initGameDatafilesAsync(bool moddedReload)
 int initGame()
 {
 	secretDoorwayHasSpawned = false;   // Only one secret doorway per entire run
+	secretDoorwayOnThisFloor = false;
 	// setup some lists
 	booksRead.first = NULL;
 	booksRead.last = NULL;

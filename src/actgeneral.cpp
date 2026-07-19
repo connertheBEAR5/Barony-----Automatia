@@ -443,7 +443,80 @@ void Entity::actStalagColumn()
 {
 
 }
+// ==================== CUSTOM PRESSURE PLATE (AUTOMATON / MACHINIST ONLY) ====================
+void actCustomPressurePlate(Entity* my)
+{
+    // my->skill[0] = mode
+    // 0 = Only Automaton can trigger
+    // 1 = Only Machinist can trigger
 
+    bool isPressed = false;
+
+    // Check if any entity is standing on the plate
+    for (node_t* node = map.entities->first; node != nullptr; node = node->next)
+    {
+        Entity* entity = (Entity*)node->element;
+        if (entity->flags[PASSABLE]) continue;
+
+        if (entity->x >= my->x && entity->x < my->x + 16 &&
+            entity->y >= my->y && entity->y < my->y + 16)
+        {
+            isPressed = true;
+            break;
+        }
+    }
+
+    if (!isPressed)
+    {
+        my->skill[3] = 0; // reset pressed state
+        return;
+    }
+
+    // === Party Check ===
+    bool hasRequiredPlayer = false;
+
+    for (int c = 0; c < MAXPLAYERS; c++)
+    {
+        if (client_disconnected[c] || !stats[c]) continue;
+
+        if (my->skill[0] == 0) // Automaton only
+        {
+            if (stats[c]->playerRace == RACE_AUTOMATON)
+            {
+                hasRequiredPlayer = true;
+                break;
+            }
+        }
+        else if (my->skill[0] == 1) // Machinist only
+        {
+            if (client_classes[c] == CLASS_MACHINIST)
+            {
+                hasRequiredPlayer = true;
+                break;
+            }
+        }
+    }
+
+    if (!hasRequiredPlayer)
+        return;
+
+    // === Activate ===
+    if (my->skill[3] == 0) // Just got pressed
+    {
+        my->skill[3] = 1;           // mark as pressed
+        my->skill[28] = 1;          // mark as mechanism
+
+        // Send signal to nearby mechanisms
+        Entity* signal = newEntity(0, 1, map.entities, nullptr);
+        signal->x = my->x + 8;
+        signal->y = my->y + 8;
+        signal->skill[28] = 1;
+        signal->behavior = &actSignalTimer;
+        signal->skill[0] = 1;
+        signal->skill[1] = 1;
+    }
+}
+// ==================== END CUSTOM PRESSURE PLATE ====================
 void actStatue(Entity* my)
 {
 	if ( my->statueInit == 0 && StatueManager.allStatues.size() > 0 )
@@ -5065,7 +5138,52 @@ void Entity::actTextSource()
 		}
 	}
 }
+// ==================== SECRET AUTOMATIA EXIT DOOR (Sprite 2002) ====================
+// Only an Automaton or Machinist can interact with and use this door.
+// Other players cannot activate it.
+void actSecretAutomatiaExit(Entity* my)
+{
+    if (!my) return;
 
+    // Check if any player near the door is an Automaton or Machinist
+    bool validPlayerNearby = false;
+
+    for (int c = 0; c < MAXPLAYERS; c++)
+    {
+        if (client_disconnected[c]) continue;
+
+        // Check if this player is close enough to the door (interacting range)
+        if (players[c] && players[c]->entity)
+        {
+            Entity* player = players[c]->entity;
+
+            // Simple distance check (adjust if needed)
+            double dx = my->x - player->x;
+            double dy = my->y - player->y;
+            double dist = sqrt(dx * dx + dy * dy);
+
+            if (dist < 32) // roughly 1 tile interaction range
+            {
+                // Check if THIS player is Automaton or Machinist
+                if (stats[c]->playerRace == RACE_AUTOMATON || client_classes[c] == CLASS_MACHINIST)
+                {
+                    validPlayerNearby = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!validPlayerNearby)
+    {
+        // No valid player is close enough to interact — block usage
+        return;
+    }
+
+    // A valid Automaton or Machinist is trying to use it — allow normal portal behavior
+    actCustomPortal(my);
+}
+// ==================== END SECRET AUTOMATIA EXIT ====================
 void TextSourceScript::updateClientInformation(int player, bool clearInventory, bool clearStats, ClientInformationType updateType)
 {
 	if ( multiplayer != SERVER )

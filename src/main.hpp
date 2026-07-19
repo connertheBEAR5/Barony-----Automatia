@@ -461,6 +461,7 @@ typedef struct map_t
 	char name[32];   // name of the map
 	char author[32]; // author of the map
 	unsigned int width, height, skybox;  // size of the map + skybox
+	Uint32 numLayers = 3;   // number of layers actually stored in this map
 	Sint32 flags[16];
 	Sint32* tiles = nullptr;
 	std::unordered_map<Sint32, node_t*> entities_map;
@@ -500,11 +501,7 @@ typedef struct map_t
 	}
 } map_t;
 
-#ifdef EDITOR
-    #define MAPLAYERS 32
-#else
-    #define MAPLAYERS 3
-#endif
+#define MAPLAYERS 32
 // number of layers contained in a single map ^
 #define OBSTACLELAYER 1 // obstacle layer in map
 #define MAPFLAGS 16 // map flags for custom properties

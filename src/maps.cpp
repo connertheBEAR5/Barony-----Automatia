@@ -30,6 +30,8 @@
 #include "ui/MainMenu.hpp"
 // ==================== SECRET DOORWAY GLOBALS ====================
 bool secretDoorwayHasSpawned = false;   // Only one per entire run
+bool secretDoorwayOnThisFloor = false;
+void actSecretAutomatiaExit(Entity* my);
 // ==================== END SECRET DOORWAY GLOBALS ====================
 int startfloor = 0;
 BaronyRNG map_rng;
@@ -2128,7 +2130,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					node = ((list_t*)node->element)->first;
 					doorNode = node->next;
 					tempMap = (map_t*)node->element;
-
+					secretDoorwayOnThisFloor = true;
 					secretDoorwayHasSpawned = true;
 				}
 				else
@@ -7159,6 +7161,7 @@ void assignActions(map_t* map)
 		{
 			continue;
 		}
+		void actCustomPressurePlate(Entity* my);
 		switch ( entity->sprite )
 		{
 			// null:
@@ -9675,6 +9678,22 @@ void assignActions(map_t* map)
 				}
 				break;
 			}
+			// Automaton-only pressure plate
+			case 2000:
+				entity->behavior = &actCustomPressurePlate;
+				entity->skill[0] = 0; // Automaton mode
+				entity->flags[PASSABLE] = true;
+				break;
+
+			// Machinist-only pressure plate
+			case 2001:
+				entity->behavior = &actCustomPressurePlate;
+				entity->skill[0] = 1; // Machinist mode
+				entity->flags[PASSABLE] = true;
+				break;
+			case 2002:
+			entity->behavior = &actSecretAutomatiaExit;
+			break;	
 			// arcane chair
 			case 121:
 			{
@@ -11080,6 +11099,59 @@ void assignActions(map_t* map)
 #endif
 
     keepInventoryGlobal = svFlags & SV_FLAG_KEEPINVENTORY;
+// ==================== SECRET DOORWAY MESSAGE ====================
+if (secretDoorwayOnThisFloor)
+{
+    bool hasAutomaton = false;
+    bool hasMechanist = false;
+    bool hasBothOnSamePlayer = false;
+
+    for (int c = 0; c < MAXPLAYERS; c++)
+    {
+        if (client_disconnected[c] || !stats[c])
+            continue;
+
+        bool isAutomaton = (stats[c]->playerRace == RACE_AUTOMATON);
+        bool isMechanist = (client_classes[c] == CLASS_MACHINIST);
+
+        if (isAutomaton) hasAutomaton = true;
+        if (isMechanist) hasMechanist = true;
+
+        // Check if the SAME player is both Automaton + Machinist
+        if (isAutomaton && isMechanist)
+        {
+            hasBothOnSamePlayer = true;
+        }
+    }
+
+    if (hasBothOnSamePlayer)
+    {
+        // One player is both Automaton race AND Machinist class → "The Maker"
+        messageLocalPlayers(MESSAGE_HINT, "The Maker's presence awakens... it calls to you...");
+    }
+    else if (hasAutomaton && hasMechanist)
+    {
+        // Party has both an Automaton and a Mechanist (but not on the same player)
+        messageLocalPlayers(MESSAGE_HINT, "The resonance of machine and maker fills the air... a hidden doorway stirs.");
+    }
+    else if (hasAutomaton)
+    {
+        messageLocalPlayers(MESSAGE_HINT, "Your mechanical senses detect a hidden doorway humming with power.");
+    }
+    else if (hasMechanist)
+    {
+        messageLocalPlayers(MESSAGE_HINT, "As a Mechanist, your specialized knowledge leads you to beleive this floor has something special.");
+    }
+    else
+    {
+        // Normal party
+        messageLocalPlayers(MESSAGE_HINT, "You hear the humming of machinery in the walls.");
+    }
+}
+
+// Reset flag for next floor
+secretDoorwayOnThisFloor = false;
+// ==================== END SECRET DOORWAY MESSAGE ====================
 }
 
 int mapLevel(int player, int radius, int _x, int _y, bool usingSpell)

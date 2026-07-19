@@ -694,6 +694,7 @@ int checkSpriteType(Sint32 sprite)
 	case 133:
 		// signal modifier
 		return 17;
+	case 2002: // Secret Automatia Exit
 	case 161:
 		// custom exit
 		return 18;
@@ -731,9 +732,10 @@ int checkSpriteType(Sint32 sprite)
 		return 28;
 	case 33:
 	case 34:
-		// act trap
-		return 29;
-	case 208:
+	case 2000: // Automaton Pressure Plate
+	case 2001: // Machinist Pressure Plate
+		return 29; // Pressure plate / mechanism type
+		break;
 	case 209:
 	case 210:
 	case 211:
@@ -2029,7 +2031,10 @@ std::vector<const char*> spriteEditorNameStrings =
 	"NOT USED",
 	"NOT USED",
 	"REVENANT_SKULL",
-	"ADORCISED_WEAPON"
+	"ADORCISED_WEAPON",
+	"AUTOMATON PRESSURE PLATE",      // Sprite 2000
+    "MACHINIST PRESSURE PLATE",      // Sprite 2001
+    "SECRET AUTOMATIA EXIT"          // Sprite 2002
 };
 
 char monsterEditorNameStrings[NUMMONSTERS][32] =
@@ -2910,16 +2915,41 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 		else
 		{
 			// set default new entity attributes.
-			entityNew->portalCustomSprite = 161;
-			entityNew->portalCustomSpriteAnimationFrames = 0;
-			entityNew->portalCustomZOffset = 8;
-			entityNew->portalCustomLevelsToJump = 1;
-			entityNew->portalNotSecret = 1;
-			entityNew->portalCustomRequiresPower = 0;
-			for ( int i = 11; i <= 18; ++i )
-			{
-				entityNew->skill[i] = 0;
-			}
+			if (entityNew->sprite == 2002) // Secret Automatia Exit
+				{
+					entityNew->portalCustomSprite = 0;                    // null model
+					entityNew->portalCustomSpriteAnimationFrames = 0;
+					entityNew->portalCustomZOffset = 8;
+					entityNew->portalCustomLevelsToJump = 1;
+					entityNew->portalNotSecret = 1;
+					entityNew->portalCustomRequiresPower = 0;
+
+					// Clear the level name fields first
+					for (int i = 11; i <= 18; ++i)
+						entityNew->skill[i] = 0;
+
+					// Set default level name to "preentrance.lmp"
+					const char* defaultLevel = "preentrance.lmp";
+					int len = strlen(defaultLevel);
+					for (int i = 0; i < len && i < 32; i++)
+					{
+						entityNew->skill[11 + (i / 4)] |= (defaultLevel[i] << ((i % 4) * 8));
+					}
+				}
+			else
+				{
+					// Normal custom exit defaults (sprite 161 etc.)
+					entityNew->portalCustomSprite = 161;
+					entityNew->portalCustomSpriteAnimationFrames = 0;
+					entityNew->portalCustomZOffset = 8;
+					entityNew->portalCustomLevelsToJump = 1;
+					entityNew->portalNotSecret = 1;
+					entityNew->portalCustomRequiresPower = 0;
+					for (int i = 11; i <= 18; ++i)
+					{
+						entityNew->skill[i] = 0;
+					}
+				}
 		}
 	}
 	else if ( spriteType == 19 ) // tables
