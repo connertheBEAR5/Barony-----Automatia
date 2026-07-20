@@ -1,0 +1,198 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sam-framework.dev/schemas/mod.schema.json",
+  "title": "S.A.M Mod Manifest",
+  "description": "Manifest (mod.json) for a Support-All-Mods content pack. Declares the mod's identity, its S.A.M framework requirements, and the class/item/plugin files it ships. S.A.M reads this at launch to load the mod.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "name",
+    "version",
+    "framework_min_version"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional. URL of this JSON Schema, so editors (VS Code, etc.) give autocomplete + validation as you type. Ignored by S.A.M itself."
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Unique lowercase mod namespace. Every class and item id in this mod is prefixed with it (e.g. 'darkblade' -> 'darkblade:assassin')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable mod name shown to players and in the workshop listing."
+    },
+    "author": {
+      "type": "string",
+      "description": "Name or handle of the mod author."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "This mod's version in MAJOR.MINOR.PATCH form (e.g. '1.0.0')."
+    },
+    "framework_min_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Minimum S.A.M framework version this mod needs, in MAJOR.MINOR.PATCH form. If S.A.M is older, the mod is loaded anyway with a warning (it may use features that aren't present yet) — S.A.M never hard-blocks on a version mismatch."
+    },
+    "framework_max_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional. Highest S.A.M version this mod was built for. If S.A.M is newer, the mod is loaded anyway with a warning (a breaking S.A.M change may affect it)."
+    },
+    "barony_min_version": {
+      "type": "string",
+      "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional. Minimum Barony version this mod targets (e.g. \"5.0.0\"). If the running Barony is older, the mod is loaded anyway with a warning."
+    },
+    "barony_max_version": {
+      "type": "string",
+      "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional. Highest Barony version this mod targets (e.g. \"5.9.9\"). If the running Barony is newer, the mod is loaded anyway with a warning."
+    },
+    "incompatible_with_barony_version": {
+      "type": "string",
+      "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Optional, rare. An exact Barony version this mod is KNOWN to be broken on. This is the only version field that hard-blocks: if it matches the running Barony version, the mod is skipped (logged) instead of loaded."
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Other S.A.M mods this one relates to. A bare namespace is REQUIRED (this mod is skipped if it's missing). Prefix with '?' for OPTIONAL (integrate if present, fine if not; it loads first) or '!' for INCOMPATIBLE (this mod is skipped if that one is present). Optionally pin a minimum version with '@1.0.0'.",
+      "items": {
+        "type": "string",
+        "pattern": "^[?!]?[a-z][a-z0-9_]*(@[0-9]+\\.[0-9]+\\.[0-9]+)?$",
+        "description": "e.g. 'darkblade_core' (required), '?enchanting_system' (optional), '!old_mod' (incompatible), 'core@1.2.0' (required, min version)."
+      }
+    },
+    "classes": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to class definition JSON files provided by this mod.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a class JSON file conforming to class.schema.json."
+      }
+    },
+    "items": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to item/weapon definition JSON files provided by this mod.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to an item JSON file conforming to item.schema.json."
+      }
+    },
+    "patches": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to layered-patch JSON files. Patches ADDITIVELY modify existing vanilla data files (e.g. items/items.json) without replacing them, so multiple mods can edit the same file and stack instead of conflicting. Each file conforms to patch.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a patch JSON file conforming to patch.schema.json."
+      }
+    },
+    "monsters": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to monster definition JSON files provided by this mod. Each monster is a variant of an existing Barony creature type (custom stats/gear/name/behaviour) and, via its 'spawn' block, is woven into the world spawn tables. Each file conforms to monster.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a monster JSON file conforming to monster.schema.json."
+      }
+    },
+    "spells": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to custom spell definition JSON files provided by this mod. The spell loader registers each into S.A.M's spell registry at a reserved runtime id (>=2000) so it can be referenced by 'namespace:spell' (e.g. in a class's starting_spells or via sam_grant_spell). Each file conforms to spell.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a spell JSON file conforming to spell.schema.json."
+      }
+    },
+    "effects": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to custom status effect definition JSON files provided by this mod. The effect loader registers each into a reserved engine effect slot (135-159) so it can be applied by 'namespace:effect' (e.g. via sam_apply_effect) and carries real mechanics: flat attribute modifiers, a move-speed multiplier and per-second HP/MP deltas while active, plus a HUD icon. Each file conforms to effect.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to an effect JSON file conforming to effect.schema.json."
+      }
+    },
+    "races": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to custom playable-race definition JSON files provided by this mod. The race loader registers each into a reserved race id (200-255); the race then appears in the character-select picker, renders as its chosen existing monster body in both views, and applies flat attribute/HP/MP bonuses at character creation. Each file conforms to race.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a race JSON file conforming to race.schema.json."
+      }
+    },
+    "sounds": {
+      "type": "array",
+      "description": "Relative paths (from the mod folder) to custom sound definition JSON files provided by this mod. The sound loader FMOD-loads each file and appends it onto the engine sound table so it can be played by its 'namespace:sound' id via sam_play_sound. Each file conforms to sound.schema.json.",
+      "items": {
+        "type": "string",
+        "pattern": "\\.json$",
+        "description": "Path to a sound JSON file conforming to sound.schema.json."
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "description": "PLANNED — the S.A.M plugin system is not yet implemented; declared .dll files are counted but NOT loaded. Leave this empty for now. (Relative paths to compiled plugin .dll files.)",
+      "items": {
+        "type": "string",
+        "pattern": "\\.dll$",
+        "description": "Path to a compiled S.A.M plugin DLL."
+      }
+    },
+    "models": {
+      "type": "array",
+      "description": "Standalone custom .vox models NOT tied to any item or class — for sam_spawn_companion (floating 'Stand'/familiar followers) and other decorative entities. Each entry registers one model under a friendly id that scripts pass to sam_spawn_companion. Barony SLAB .vox format only (MagicaVoxel exports are rejected). v1.4.0+.",
+      "items": {
+        "type": "object",
+        "required": ["id", "file"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+:[a-z0-9_./-]+$",
+            "description": "How a script names this model, e.g. \"mymod:star_platinum\". Pass this to sam_spawn_companion."
+          },
+          "file": {
+            "type": "string",
+            "pattern": "\\.vox$",
+            "description": "Mod-relative path to the .vox file (Barony slab format), e.g. \"models/star_platinum/star_platinum.vox\"."
+          }
+        }
+      }
+    },
+    "description": {
+      "type": "string",
+      "description": "Short description of what the mod adds, shown to players."
+    }
+  },
+  "examples": [
+    {
+      "namespace": "darkblade",
+      "name": "Darkblade Pack",
+      "author": "coolmodder",
+      "version": "1.0.0",
+      "framework_min_version": "0.1.0",
+      "dependencies": [],
+      "classes": [
+        "classes/assassin.json"
+      ],
+      "items": [
+        "items/shadowblade.json",
+        "items/smoke_bomb.json"
+      ],
+      "plugins": [],
+      "description": "Adds the Assassin class and a set of shadow-themed weapons."
+    }
+  ]
+}
