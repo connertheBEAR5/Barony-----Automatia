@@ -1,0 +1,395 @@
+SECRET DOORWAY BIOME GROUP LOADING
+==================================
+
+Purpose
+-------
+This code creates separate secret-doorway room groups for:
+
+- Mines
+- Swamp
+- Labyrinth
+
+It searches for numbered map files, loads each valid room, and stores it in the correct biome group.
+
+
+Expected File Naming
+--------------------
+The loader checks numbered secret doorway map names using this pattern:
+
+secret_doorway00
+secret_doorway01
+secret_doorway02
+...
+secret_doorway99
+
+Each room name is then inspected to decide which biome group it belongs to.
+
+The intended biome-specific names appear to be:
+
+mines_secret_doorway00
+mines_secret_doorway01
+...
+
+swamp_secret_doorway00
+swamp_secret_doorway01
+...
+
+labyrinth_secret_doorway00
+labyrinth_secret_doorway01
+...
+
+
+Biome Room Groups
+-----------------
+Three separate room collections are created:
+
+minesSecretDoorways
+    Stores secret doorway rooms used in the Mines biome.
+
+swampSecretDoorways
+    Stores secret doorway rooms used in the Swamp biome.
+
+labyrinthSecretDoorways
+    Stores secret doorway rooms used in the Labyrinth biome.
+
+
+Loading Process
+---------------
+The loader checks room numbers from 00 through 99.
+
+For each number:
+
+1. Generate the numbered room name.
+2. Convert the room name into a complete map path.
+3. Stop searching if no matching map path is found.
+4. Check which biome prefix appears in the name.
+5. Load the room into that biome's list.
+6. Increase that biome's room count when loading succeeds.
+
+
+Readable Code Version
+---------------------
+
+// ============================================================
+// SECRET DOORWAY BIOME GROUPS
+//
+// Secret doorway rooms are kept in separate collections for
+// Mines, Swamp, and Labyrinth.
+// ============================================================
+
+GroupSubRooms_t minesSecretDoorways;
+GroupSubRooms_t swampSecretDoorways;
+GroupSubRooms_t labyrinthSecretDoorways;
+
+// Search for up to 100 numbered secret-doorway rooms.
+for ( int roomNumber = 0; roomNumber < 100; ++roomNumber )
+{
+	char roomName[128];
+
+	// Example:
+	// secret_doorway00
+	// secret_doorway01
+	// secret_doorway02
+	snprintf(
+		roomName,
+		sizeof(roomName),
+		"secret_doorway%02d",
+		roomNumber
+	);
+
+	// Convert the room name into the map's full physical path.
+	std::string fullPath = physfsFormatMapName(roomName);
+
+	// Stop once no further matching room is found.
+	if ( fullPath.empty() )
+	{
+		break;
+	}
+
+	// Add Mines secret-doorway rooms.
+	if ( strstr(roomName, "mines_") )
+	{
+		if ( loadSubRoomData(
+			fullPath,
+			&minesSecretDoorways.list
+		) )
+		{
+			++minesSecretDoorways.count;
+		}
+	}
+
+	// Add Swamp secret-doorway rooms.
+	else if ( strstr(roomName, "swamp_") )
+	{
+		if ( loadSubRoomData(
+			fullPath,
+			&swampSecretDoorways.list
+		) )
+		{
+			++swampSecretDoorways.count;
+		}
+	}
+
+	// Add Labyrinth secret-doorway rooms.
+	else if ( strstr(roomName, "labyrinth_") )
+	{
+		if ( loadSubRoomData(
+			fullPath,
+			&labyrinthSecretDoorways.list
+		) )
+		{
+			++labyrinthSecretDoorways.count;
+		}
+	}
+}
+
+// Mark every successfully loaded room as initially available.
+minesSecretDoorways.possibleRooms.resize(
+	minesSecretDoorways.count,
+	true
+);
+
+swampSecretDoorways.possibleRooms.resize(
+	swampSecretDoorways.count,
+	true
+);
+
+labyrinthSecretDoorways.possibleRooms.resize(
+	labyrinthSecretDoorways.count,
+	true
+);
+
+// ============================================================
+// END SECRET DOORWAY BIOME GROUPS
+// ============================================================
+
+
+Important Logic Warning
+-----------------------
+The shown code generates names using:
+
+secret_doorway00
+secret_doorway01
+...
+
+but then checks whether that same generated name contains:
+
+mines_
+swamp_
+labyrinth_
+
+It never will, because "secret_doorway00" does not contain any biome prefix.
+
+Therefore, as written, none of the three biome-loading branches will run.
+
+
+Likely Intended Naming
+----------------------
+The room names probably need to be generated separately for each biome.
+
+For example:
+
+mines_secret_doorway00
+swamp_secret_doorway00
+labyrinth_secret_doorway00
+
+
+Corrected Concept
+-----------------
+
+For every room number from 00 through 99:
+
+1. Try loading mines_secret_doorwayXX.
+2. Try loading swamp_secret_doorwayXX.
+3. Try loading labyrinth_secret_doorwayXX.
+4. Add each room to its matching biome group when found.
+
+
+Cleaner Corrected Code
+----------------------
+
+GroupSubRooms_t minesSecretDoorways;
+GroupSubRooms_t swampSecretDoorways;
+GroupSubRooms_t labyrinthSecretDoorways;
+
+for ( int roomNumber = 0; roomNumber < 100; ++roomNumber )
+{
+	char roomName[128];
+
+	// Mines
+	snprintf(
+		roomName,
+		sizeof(roomName),
+		"mines_secret_doorway%02d",
+		roomNumber
+	);
+
+	std::string minesPath = physfsFormatMapName(roomName);
+
+	if ( !minesPath.empty()
+		&& loadSubRoomData(
+			minesPath,
+			&minesSecretDoorways.list
+		) )
+	{
+		++minesSecretDoorways.count;
+	}
+
+	// Swamp
+	snprintf(
+		roomName,
+		sizeof(roomName),
+		"swamp_secret_doorway%02d",
+		roomNumber
+	);
+
+	std::string swampPath = physfsFormatMapName(roomName);
+
+	if ( !swampPath.empty()
+		&& loadSubRoomData(
+			swampPath,
+			&swampSecretDoorways.list
+		) )
+	{
+		++swampSecretDoorways.count;
+	}
+
+	// Labyrinth
+	snprintf(
+		roomName,
+		sizeof(roomName),
+		"labyrinth_secret_doorway%02d",
+		roomNumber
+	);
+
+	std::string labyrinthPath = physfsFormatMapName(roomName);
+
+	if ( !labyrinthPath.empty()
+		&& loadSubRoomData(
+			labyrinthPath,
+			&labyrinthSecretDoorways.list
+		) )
+	{
+		++labyrinthSecretDoorways.count;
+	}
+}
+
+minesSecretDoorways.possibleRooms.resize(
+	minesSecretDoorways.count,
+	true
+);
+
+swampSecretDoorways.possibleRooms.resize(
+	swampSecretDoorways.count,
+	true
+);
+
+labyrinthSecretDoorways.possibleRooms.resize(
+	labyrinthSecretDoorways.count,
+	true
+);
+
+
+What possibleRooms Means
+------------------------
+The possibleRooms vector contains one Boolean value for every loaded room.
+
+A value of:
+
+true
+    The room may currently be selected.
+
+false
+    The room is temporarily unavailable or has already been used.
+
+For example, if three Mines rooms load successfully:
+
+minesSecretDoorways.count = 3
+
+then:
+
+minesSecretDoorways.possibleRooms =
+{
+    true,
+    true,
+    true
+}
+
+
+Summary
+-------
+The system is intended to maintain three independent secret-doorway pools:
+
+- mines_secret_doorwayXX
+- swamp_secret_doorwayXX
+- labyrinth_secret_doorwayXX
+
+Each successfully loaded room:
+
+- is added to its biome's room list,
+- increases that biome's count,
+- receives an available entry in possibleRooms.
+				if (!numlevels) break;
+
+				// ==================== SECRET DOORWAY (MINES / SWAMP / LABYRINTH ONLY) ====================
+				bool useSecretDoorway = false;
+				GroupSubRooms_t* chosenPool = nullptr;
+
+				if (!secretDoorwayHasSpawned)
+				{
+					if (!strncmp(map.name, "The Mines", 9))
+					{
+						if (minesSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
+						{
+							chosenPool = &minesSecretDoorways;
+							useSecretDoorway = true;
+						}
+					}
+					else if (!strncmp(map.name, "The Swamp", 9))
+					{
+						if (swampSecretDoorways.count > 0 && map_rng.rand() % 100 < 5)   // 5%
+						{
+							chosenPool = &swampSecretDoorways;
+							useSecretDoorway = true;
+						}
+					}
+					else if (!strncmp(map.name, "The Labyrinth", 13))
+					{
+						if (labyrinthSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
+						{
+							chosenPool = &labyrinthSecretDoorways;
+							useSecretDoorway = true;
+						}
+					}
+					// No else → 0% in all other biomes
+				}
+
+				if (useSecretDoorway && chosenPool)
+				{
+					// Pick random variant from the chosen biome pool
+					int pick = map_rng.rand() % chosenPool->count;
+
+					node = chosenPool->list.first;
+					int j = -1;
+					int i = 0;
+					while (1)
+					{
+						if (chosenPool->possibleRooms[i])
+						{
+							++j;
+							if (j == pick) break;
+						}
+						node = node->next;
+						++i;
+					}
+
+					levelnum2 = i;
+					node = ((list_t*)node->element)->first;
+					doorNode = node->next;
+					tempMap = (map_t*)node->element;
+
+					secretDoorwayHasSpawned = true;
+				}
+				else
+				{
+					// Normal room selection
