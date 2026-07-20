@@ -26,11 +26,16 @@
 #include "colors.hpp"
 #include "ui/Text.hpp"
 #include "ui/GameUI.hpp"
-
+#include <cmath>
 #include <cassert>
-
-#include "ui/Image.hpp"
-
+#include <algorithm>
+#ifdef EDITOR
+static int entityZToEditorLayer(real_t z)
+{
+	const int layer = static_cast<int>(std::lround(-z / 16.0));
+	return std::max(0, std::min(layer, MAPLAYERS - 1));
+}
+#endif
 const std::unordered_map<Mesh::BufferType, int> Mesh::ElementsPerVBO = {
 	{Mesh::BufferType::Position, 3},
 	{Mesh::BufferType::TexCoord, 2},
@@ -2589,6 +2594,10 @@ void drawEntities2D(long camx, long camy)
 	for ( node = map.entities->first; node != nullptr; node = node->next )
 	{
 		entity = (Entity*)node->element;
+			if ( entityZToEditorLayer(entity->z) != drawlayer )
+	{
+		continue;
+	}
 		if ( entity->flags[INVISIBLE] )
 		{
 			continue;
@@ -2770,6 +2779,10 @@ void drawEntities2D(long camx, long camy)
 		)
 	{
 		entity = (Entity*)node->element;
+		if ( entityZToEditorLayer(entity->z) != drawlayer )
+		{
+			continue;
+		}
 		if ( entity->flags[INVISIBLE] )
 		{
 			continue;

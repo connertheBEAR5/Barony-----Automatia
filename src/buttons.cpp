@@ -2581,20 +2581,6 @@ void buttonSpriteProperties(button_t* my)
 				messagetime = 60;
 			break;
 		}
-				// ==================== CUSTOM SPRITE NAME OVERRIDE ====================
-		if (selectedEntity[0]->sprite == 2000)
-		{
-			strcpy(subtext, "Sprite properties: AUTOMATON PRESSURE PLATE");
-		}
-		else if (selectedEntity[0]->sprite == 2001)
-		{
-			strcpy(subtext, "Sprite properties: MACHINIST PRESSURE PLATE");
-		}
-		else if (selectedEntity[0]->sprite == 2002)
-		{
-			strcpy(subtext, "Sprite properties: SECRET AUTOMATIA EXIT");
-		}
-		// ==================== END CUSTOM SPRITE NAME OVERRIDE ====================
 		//remaining buttons
 		switch ( spriteType )
 		{

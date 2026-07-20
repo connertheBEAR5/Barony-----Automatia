@@ -587,9 +587,15 @@ void mainLogic(void)
 			}
 		}
 		else if ( keystatus[SDLK_LSHIFT] || keystatus[SDLK_RSHIFT] )
-		{
-			drawlayer = std::min(drawlayer + 1, MAPLAYERS - 1);
-		}
+			{
+				drawlayer = std::min(drawlayer + 1, MAPLAYERS - 1);
+
+				if ( selectedEntity[0]
+					&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+				{
+					selectedEntity[0] = nullptr;
+				}
+			}
 		else
 		{
 			lastPaletteTileSelected++; //scroll through tiles 1-9
@@ -2284,6 +2290,10 @@ int main(int argc, char** argv)
 					{
 						nextnode = node->next;
 						entity = (Entity*)node->element;
+							if ( entityZToSpriteLayer(entity->z) != drawlayer )
+							{
+								continue;
+							}
 						if ( entity == selectedEntity[0] )
 						{
 							if ( mousestatus[SDL_BUTTON_LEFT] )
@@ -2323,8 +2333,7 @@ int main(int argc, char** argv)
 							}
 							entity->x = (long)(drawx << 4);
 							entity->y = (long)(drawy << 4);
-							// Moving a selected sprite also places it on the current editor layer.
-							entity->z = spriteLayerToEntityZ(drawlayer);
+							
 						}
 						else
 						{
@@ -9592,17 +9601,47 @@ int main(int argc, char** argv)
 						keystatus[SDLK_m] = 0;
 						buttonAttributes(NULL);
 					}
-					//Cycle layer up.
+					// Cycle layer up.
 					if ( keystatus[SDLK_u] )
 					{
 						keystatus[SDLK_u] = 0;
+
+						const int oldLayer = drawlayer;
 						drawlayer = std::min(drawlayer + 1, MAPLAYERS - 1);
+
+						if ( drawlayer != oldLayer )
+						{
+							// Do not keep a single sprite selected after leaving its layer.
+							if ( selectedEntity[0]
+								&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+							{
+								selectedEntity[0] = nullptr;
+							}
+
+							// Rebuild group selection so it only contains sprites
+							// on the newly viewed layer.
+							reselectEntityGroup();
+						}
 					}
-					//Cycle layer down.
+
+					// Cycle layer down.
 					if ( keystatus[SDLK_p] )
 					{
 						keystatus[SDLK_p] = 0;
+
+						const int oldLayer = drawlayer;
 						drawlayer = std::max(drawlayer - 1, 0);
+
+						if ( drawlayer != oldLayer )
+						{
+							if ( selectedEntity[0]
+								&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+							{
+								selectedEntity[0] = nullptr;
+							}
+
+							reselectEntityGroup();
+						}
 					}
 					if ( keystatus[SDLK_LSHIFT] || keystatus[SDLK_RSHIFT] )
 					{
@@ -10423,14 +10462,30 @@ void propertyPageCursorFlash(int rowSpacing)
 void reselectEntityGroup()
 {
 	groupedEntities.clear();
+
 	node_t* nextnode = nullptr;
-	Entity* entity = nullptr;
+
 	for ( node_t* node = map.entities->first; node != nullptr; node = nextnode )
 	{
 		nextnode = node->next;
-		entity = (Entity*)node->element;
-		if ( entity->x / 16 >= selectedarea_x1 && entity->x / 16 <= selectedarea_x2
-			&& entity->y / 16 >= selectedarea_y1 && entity->y / 16 <= selectedarea_y2 )
+		Entity* entity = static_cast<Entity*>(node->element);
+
+		if ( entity == nullptr )
+		{
+			continue;
+		}
+
+		// Hidden sprites on other Z layers must not be included
+		// in the editor's group selection.
+		if ( entityZToSpriteLayer(entity->z) != drawlayer )
+		{
+			continue;
+		}
+
+		if ( entity->x / 16 >= selectedarea_x1
+			&& entity->x / 16 <= selectedarea_x2
+			&& entity->y / 16 >= selectedarea_y1
+			&& entity->y / 16 <= selectedarea_y2 )
 		{
 			groupedEntities.push_back(entity);
 		}

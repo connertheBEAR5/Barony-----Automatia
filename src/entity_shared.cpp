@@ -694,7 +694,6 @@ int checkSpriteType(Sint32 sprite)
 	case 133:
 		// signal modifier
 		return 17;
-	case 2002: // Secret Automatia Exit
 	case 161:
 		// custom exit
 		return 18;
@@ -732,10 +731,6 @@ int checkSpriteType(Sint32 sprite)
 		return 28;
 	case 33:
 	case 34:
-	case 2000: // Automaton Pressure Plate
-	case 2001: // Machinist Pressure Plate
-		return 29; // Pressure plate / mechanism type
-		break;
 	case 209:
 	case 210:
 	case 211:
@@ -2031,10 +2026,7 @@ std::vector<const char*> spriteEditorNameStrings =
 	"NOT USED",
 	"NOT USED",
 	"REVENANT_SKULL",
-	"ADORCISED_WEAPON",
-	"AUTOMATON PRESSURE PLATE",      // Sprite 2000
-    "MACHINIST PRESSURE PLATE",      // Sprite 2001
-    "SECRET AUTOMATIA EXIT"          // Sprite 2002
+	"ADORCISED_WEAPON"
 };
 
 char monsterEditorNameStrings[NUMMONSTERS][32] =
