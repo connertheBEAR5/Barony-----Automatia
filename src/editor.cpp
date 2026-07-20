@@ -326,7 +326,7 @@ char textSourcePropertyNames[10][45] =
 	"Send message once only (0 - 1)"
 };
 
-char customPortalPropertyNames[7][54] =
+char customPortalPropertyNames[10][59] =
 {
 	"Model texture to use (0-9999)",
 	"Animation frames (0-9)",
@@ -334,7 +334,10 @@ char customPortalPropertyNames[7][54] =
 	"Levels to advance (-99 - 99)",
 	"Level name to jump to (Can be used with above option)",
 	"Requires power to be visible (0-1)",
-	"Exit toggle between secret levels file (0-1)"
+	"Exit toggle between secret levels file (0-1)",
+	"Requirement Mode: (0-4)",
+	"Required Race: (-1 = Any)",
+	"Required Class: (-1 = Any)"
 };
 
 char signalTimerPropertyNames[6][55] =
@@ -357,9 +360,12 @@ char ANDGatePropertyNames[6][55] =
 	"Invert Output (0 - 1)"
 };
 
-char pressurePlatePropertyNames[1][34] =
+char pressurePlatePropertyNames[4][48] =
 {
-	"Trigger Type: (0-7)"
+	"Trigger Type: (0-7)",
+	"Requirement Mode: (0-4)",
+	"Required Race: (-1 = Any)",
+	"Required Class: (-1 = Any)"
 };
 
 char tablePropertyNames[3][34] =
@@ -443,7 +449,86 @@ const char* playerClassLangEntry(int classnum, int playernum)
 		return "undefined classname";
 	}
 }
+static const char* requirementRaceName(int race)
+{
+	switch ( race )
+	{
+		case -1:
+			return "Any Race";
 
+		case RACE_HUMAN:
+			return "Human";
+
+		case RACE_SKELETON:
+			return "Skeleton";
+
+		case RACE_VAMPIRE:
+			return "Vampire";
+
+		case RACE_SUCCUBUS:
+			return "Succubus";
+
+		case RACE_GOATMAN:
+			return "Goatman";
+
+		case RACE_AUTOMATON:
+			return "Automaton";
+
+		case RACE_INCUBUS:
+			return "Incubus";
+
+		case RACE_GOBLIN:
+			return "Goblin";
+
+		case RACE_INSECTOID:
+			return "Insectoid";
+
+		case RACE_RAT:
+			return "Rat";
+
+		case RACE_TROLL:
+			return "Troll";
+
+		case RACE_SPIDER:
+			return "Spider";
+
+		case RACE_IMP:
+			return "Imp";
+
+		case RACE_DRYAD:
+			return "Dryad";
+
+		case RACE_MYCONID:
+			return "Myconid";
+
+		case RACE_GREMLIN:
+			return "Gremlin";
+
+		case RACE_SALAMANDER:
+			return "Salamander";
+
+		case RACE_GNOME:
+			return "Gnome";
+
+		default:
+			return nullptr;
+	}
+}
+
+static const char* requirementClassName(int classnum)
+{
+	if ( classnum == -1 )
+	{
+		return "Any Class";
+	}
+
+	if ( classnum < 0 || classnum >= NUMCLASSES )
+	{
+		return nullptr;
+	}
+
+	return playerClassLangEntry(classnum, 0);
+}
 /*-------------------------------------------------------------------------------
 
 mouseInBounds
@@ -7380,6 +7465,106 @@ int main(int argc, char** argv)
 										}
 									}
 								}
+								else if ( i == 7 )
+								{
+									if ( propertyInt < 0 || propertyInt > 4 )
+									{
+										propertyPageError(i, 0);
+									}
+									else
+									{
+										switch ( propertyInt )
+										{
+											case 0:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"No restriction"
+												);
+												break;
+
+											case 1:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race must match"
+												);
+												break;
+
+											case 2:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Class must match"
+												);
+												break;
+
+											case 3:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race AND class"
+												);
+												break;
+
+											case 4:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race OR class"
+												);
+												break;
+										}
+									}
+								}
+								else if ( i == 8 )
+								{
+									const char* raceName = requirementRaceName(propertyInt);
+
+									if ( raceName == nullptr )
+									{
+										propertyPageError(i, -1);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											raceName
+										);
+									}
+								}
+								else if ( i == 9 )
+								{
+									const char* className = requirementClassName(propertyInt);
+
+									if ( className == nullptr )
+									{
+										propertyPageError(i, -1);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											className
+										);
+									}
+								}
 								else
 								{
 									// enter other row entries here
@@ -8880,11 +9065,114 @@ int main(int argc, char** argv)
 										}
 										printTextFormattedColor(font8x8_bmp, inputFieldFeedback_x, inputField_y, color, tmpStr);
 									}
-								}
-								else
+																}
+								else if ( i == 1 )
 								{
-									// enter other row entries here
+									if ( propertyInt < 0 || propertyInt > 4 )
+									{
+										propertyPageError(i, 0);
+									}
+									else
+									{
+										switch ( propertyInt )
+										{
+											case 0:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"No restriction"
+												);
+												break;
+
+											case 1:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race must match"
+												);
+												break;
+
+											case 2:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Class must match"
+												);
+												break;
+
+											case 3:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race AND class"
+												);
+												break;
+
+											case 4:
+												printTextFormattedColor(
+													font8x8_bmp,
+													inputFieldFeedback_x,
+													inputField_y,
+													color,
+													"Race OR class"
+												);
+												break;
+
+											default:
+												break;
+										}
+									}
 								}
+									else if ( i == 2 )
+									{
+										const char* raceName = requirementRaceName(propertyInt);
+
+										if ( raceName == nullptr )
+										{
+											propertyPageError(i, -1);
+										}
+										else
+										{
+											printTextFormattedColor(
+												font8x8_bmp,
+												inputFieldFeedback_x,
+												inputField_y,
+												color,
+												raceName
+											);
+										}
+									}
+									else if ( i == 3 )
+									{
+										const char* className = requirementClassName(propertyInt);
+
+										if ( className == nullptr )
+										{
+											propertyPageError(i, -1);
+										}
+										else
+										{
+											printTextFormattedColor(
+												font8x8_bmp,
+												inputFieldFeedback_x,
+												inputField_y,
+												color,
+												className
+											);
+										}
+									}
+									else
+									{
+										// enter other row entries here
+									}
 							}
 
 							if ( errorMessage )
@@ -8907,7 +9195,7 @@ int main(int argc, char** argv)
 							}
 
 							// set the maximum length allowed for user input
-							inputlen = 2;
+							inputlen = 4;
 							propertyPageCursorFlash(spacing);
 						}
 					}

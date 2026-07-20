@@ -442,7 +442,9 @@ public:
 	Sint32& portalCustomLevelText6; //skill[16]
 	Sint32& portalCustomLevelText7; //skill[17]
 	Sint32& portalCustomLevelText8; //skill[18]
-
+	Sint32& portalCustomRequirementMode; // skill[19]
+	Sint32& portalCustomRequiredRace;    // skill[20]
+	Sint32& portalCustomRequiredClass;   // skill[21]
 	//--PUBLIC TELEPORTER SKILLS--
 	Sint32& teleporterX; //skill[0]
 	Sint32& teleporterY; //skill[1]
@@ -711,8 +713,10 @@ public:
 	Sint32& playerStartDir; //skill[1]
 
 	//--ACTTRAP/PERMANENT
-	Sint32& pressurePlateTriggerType; //skill[3]
-
+	Sint32& pressurePlateTriggerType;       // skill[3]
+	Sint32& pressurePlateRequirementMode;   // skill[4]
+	Sint32& pressurePlateRequiredRace;      // skill[5]
+	Sint32& pressurePlateRequiredClass;     // skill[6]
 	enum PressurePlateTriggerTypes : int
 	{
 		PRESSURE_PLATE_DEFAULT_ALL,

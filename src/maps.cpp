@@ -7161,7 +7161,6 @@ void assignActions(map_t* map)
 		{
 			continue;
 		}
-		void actCustomPressurePlate(Entity* my);
 		switch ( entity->sprite )
 		{
 			// null:
@@ -9678,22 +9677,6 @@ void assignActions(map_t* map)
 				}
 				break;
 			}
-			// Automaton-only pressure plate
-			case 2000:
-				entity->behavior = &actCustomPressurePlate;
-				entity->skill[0] = 0; // Automaton mode
-				entity->flags[PASSABLE] = true;
-				break;
-
-			// Machinist-only pressure plate
-			case 2001:
-				entity->behavior = &actCustomPressurePlate;
-				entity->skill[0] = 1; // Machinist mode
-				entity->flags[PASSABLE] = true;
-				break;
-			case 2002:
-			entity->behavior = &actSecretAutomatiaExit;
-			break;	
 			// arcane chair
 			case 121:
 			{

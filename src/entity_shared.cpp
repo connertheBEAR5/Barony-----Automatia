@@ -209,6 +209,9 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	portalCustomLevelText6(skill[16]),
 	portalCustomLevelText7(skill[17]),
 	portalCustomLevelText8(skill[18]),
+	portalCustomRequirementMode(skill[19]),
+	portalCustomRequiredRace(skill[20]),
+	portalCustomRequiredClass(skill[21]),
 	teleporterX(skill[0]),
 	teleporterY(skill[1]),
 	teleporterType(skill[3]),
@@ -384,6 +387,9 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	thrownProjectileCharge(skill[20]),
 	playerStartDir(skill[1]),
 	pressurePlateTriggerType(skill[3]),
+	pressurePlateRequirementMode(skill[4]),
+	pressurePlateRequiredRace(skill[5]),
+	pressurePlateRequiredClass(skill[6]),
 	worldTooltipAlpha(fskill[0]),
 	worldTooltipZ(fskill[1]),
 	worldTooltipActive(skill[0]),
@@ -731,6 +737,9 @@ int checkSpriteType(Sint32 sprite)
 		return 28;
 	case 33:
 	case 34:
+		// pressure plates
+		return 29;
+
 	case 209:
 	case 210:
 	case 211:
@@ -2909,6 +2918,9 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 			entityNew->portalCustomLevelsToJump = entityToCopy->portalCustomLevelsToJump;
 			entityNew->portalNotSecret = entityToCopy->portalNotSecret;
 			entityNew->portalCustomRequiresPower = entityToCopy->portalCustomRequiresPower;
+			entityNew->portalCustomRequirementMode = entityToCopy->portalCustomRequirementMode;
+			entityNew->portalCustomRequiredRace = entityToCopy->portalCustomRequiredRace;
+			entityNew->portalCustomRequiredClass = entityToCopy->portalCustomRequiredClass;
 			for ( int i = 11; i <= 18; ++i )
 			{
 				entityNew->skill[i] = entityToCopy->skill[i];
@@ -2916,42 +2928,22 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 		}
 		else
 		{
-			// set default new entity attributes.
-			if (entityNew->sprite == 2002) // Secret Automatia Exit
-				{
-					entityNew->portalCustomSprite = 0;                    // null model
-					entityNew->portalCustomSpriteAnimationFrames = 0;
-					entityNew->portalCustomZOffset = 8;
-					entityNew->portalCustomLevelsToJump = 1;
-					entityNew->portalNotSecret = 1;
-					entityNew->portalCustomRequiresPower = 0;
+			// Normal custom exit defaults.
+			entityNew->portalCustomSprite = 161;
+			entityNew->portalCustomSpriteAnimationFrames = 0;
+			entityNew->portalCustomZOffset = 8;
+			entityNew->portalCustomLevelsToJump = 1;
+			entityNew->portalNotSecret = 1;
+			entityNew->portalCustomRequiresPower = 0;
 
-					// Clear the level name fields first
-					for (int i = 11; i <= 18; ++i)
-						entityNew->skill[i] = 0;
+			entityNew->portalCustomRequirementMode = 0;
+			entityNew->portalCustomRequiredRace = -1;
+			entityNew->portalCustomRequiredClass = -1;
 
-					// Set default level name to "preentrance.lmp"
-					const char* defaultLevel = "preentrance.lmp";
-					int len = strlen(defaultLevel);
-					for (int i = 0; i < len && i < 32; i++)
-					{
-						entityNew->skill[11 + (i / 4)] |= (defaultLevel[i] << ((i % 4) * 8));
-					}
-				}
-			else
-				{
-					// Normal custom exit defaults (sprite 161 etc.)
-					entityNew->portalCustomSprite = 161;
-					entityNew->portalCustomSpriteAnimationFrames = 0;
-					entityNew->portalCustomZOffset = 8;
-					entityNew->portalCustomLevelsToJump = 1;
-					entityNew->portalNotSecret = 1;
-					entityNew->portalCustomRequiresPower = 0;
-					for (int i = 11; i <= 18; ++i)
-					{
-						entityNew->skill[i] = 0;
-					}
-				}
+			for ( int i = 11; i <= 18; ++i )
+			{
+				entityNew->skill[i] = 0;
+			}
 		}
 	}
 	else if ( spriteType == 19 ) // tables
@@ -3148,13 +3140,26 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 	{
 		if ( entityToCopy != nullptr )
 		{
-			// copy old entity attributes to newly created.
-			entityNew->pressurePlateTriggerType = entityToCopy->pressurePlateTriggerType;
+			// Copy old entity attributes to newly created entity.
+			entityNew->pressurePlateTriggerType =
+				entityToCopy->pressurePlateTriggerType;
+
+			entityNew->pressurePlateRequirementMode =
+				entityToCopy->pressurePlateRequirementMode;
+
+			entityNew->pressurePlateRequiredRace =
+				entityToCopy->pressurePlateRequiredRace;
+
+			entityNew->pressurePlateRequiredClass =
+				entityToCopy->pressurePlateRequiredClass;
 		}
 		else
 		{
-			// set default new entity attributes.
+			// Defaults preserve normal original pressure-plate behavior.
 			entityNew->pressurePlateTriggerType = 0;
+			entityNew->pressurePlateRequirementMode = 0;
+			entityNew->pressurePlateRequiredRace = -1;
+			entityNew->pressurePlateRequiredClass = -1;
 		}
 	}
 	else if ( spriteType == 30 ) // wall locks

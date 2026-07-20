@@ -2267,7 +2267,32 @@ void buttonSpriteProperties(button_t* my)
 				snprintf(spriteProperties[3], 3, "%d", static_cast<int>(selectedEntity[0]->portalCustomLevelsToJump));
 				snprintf(spriteProperties[5], 2, "%d", static_cast<int>(selectedEntity[0]->portalCustomRequiresPower));
 				snprintf(spriteProperties[6], 2, "%d", static_cast<int>((selectedEntity[0]->portalNotSecret ? 0 : 1)));
+				snprintf(
+					spriteProperties[7],
+					4,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomRequirementMode
+					)
+				);
 
+				snprintf(
+					spriteProperties[8],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomRequiredRace
+					)
+				);
+
+				snprintf(
+					spriteProperties[9],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomRequiredClass
+					)
+				);
 				char buf[64] = "";
 				int totalChars = 0;
 				for ( int i = 11; i <= 18; ++i )
@@ -2302,8 +2327,8 @@ void buttonSpriteProperties(button_t* my)
 				newwindow = 22;
 				subx1 = xres / 2 - 220;
 				subx2 = xres / 2 + 220;
-				suby1 = yres / 2 - 140;
-				suby2 = yres / 2 + 140;
+				suby1 = yres / 2 - 210;
+				suby2 = yres / 2 + 210;
 				strcpy(subtext, "Custom Exit Properties:");
 				break;
 			}
@@ -2518,17 +2543,55 @@ void buttonSpriteProperties(button_t* my)
 				suby2 = yres / 2 + 120;
 				strcpy(subtext, "AND Gate Properties:");
 				break;
-			case 29:
-				snprintf(spriteProperties[0], 2, "%d", static_cast<int>(selectedEntity[0]->pressurePlateTriggerType));
+		
+			case 29: // pressure plate
+				snprintf(
+					spriteProperties[0],
+					4,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->pressurePlateTriggerType
+					)
+				);
+
+				snprintf(
+					spriteProperties[1],
+					4,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->pressurePlateRequirementMode
+					)
+				);
+
+				snprintf(
+					spriteProperties[2],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->pressurePlateRequiredRace
+					)
+				);
+
+				snprintf(
+					spriteProperties[3],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->pressurePlateRequiredClass
+					)
+				);
+
 				inputstr = spriteProperties[0];
 				cursorflash = ticks;
 				menuVisible = 0;
 				subwindow = 1;
 				newwindow = 33;
-				subx1 = xres / 2 - 170;
-				subx2 = xres / 2 + 170;
-				suby1 = yres / 2 - 60;
-				suby2 = yres / 2 + 60;
+
+				subx1 = xres / 2 - 190;
+				subx2 = xres / 2 + 190;
+				suby1 = yres / 2 - 100;
+				suby2 = yres / 2 + 100;
+
 				strcpy(subtext, "Pressure Plate Properties:");
 				break;
 			case 30:
@@ -3609,8 +3672,23 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						++totalChars;
 					}
 				}
+				selectedEntity[0]->portalCustomRequirementMode =
+					std::max(
+						0,
+						std::min(
+							4,
+							atoi(spriteProperties[7])
+						)
+					);
+
+				selectedEntity[0]->portalCustomRequiredRace =
+					atoi(spriteProperties[8]);
+
+				selectedEntity[0]->portalCustomRequiredClass =
+					atoi(spriteProperties[9]);
+					break;
 			}
-				break;
+				
 			case 19: // tables
 				selectedEntity[0]->furnitureDir = (Sint32)atoi(spriteProperties[0]);
 				selectedEntity[0]->furnitureTableSpawnChairs = (Sint32)atoi(spriteProperties[1]);
@@ -3703,7 +3781,32 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				selectedEntity[0]->signalInvertOutput = (Sint32)atoi(spriteProperties[5]);
 				break;
 			case 29: // pressure plate
-				selectedEntity[0]->pressurePlateTriggerType = (Sint32)atoi(spriteProperties[0]);
+				selectedEntity[0]->pressurePlateTriggerType =
+					std::max(
+						0,
+						std::min(
+							static_cast<int>(
+								Entity::PRESSURE_PLATE_MONSTERS_NON_ALLY
+							),
+							atoi(spriteProperties[0])
+						)
+					);
+
+				selectedEntity[0]->pressurePlateRequirementMode =
+					std::max(
+						0,
+						std::min(
+							4,
+							atoi(spriteProperties[1])
+						)
+					);
+
+				selectedEntity[0]->pressurePlateRequiredRace =
+					atoi(spriteProperties[2]);
+
+				selectedEntity[0]->pressurePlateRequiredClass =
+					atoi(spriteProperties[3]);
+
 				break;
 			case 30:
 				selectedEntity[0]->wallLockMaterial = (Sint32)atoi(spriteProperties[0]);

@@ -2394,7 +2394,13 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	// read map version number
 	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV4.1", strlen("BARONY LMPV4.1")) == 0 )
+	if ( strncmp(valid_data, "BARONY LMPV4.2", strlen("BARONY LMPV4.2")) == 0 )
+	{
+		// 32-layer map format with vertical entity positions
+		// and race/class requirements for pressure plates and custom exits.
+		editorVersion = 42;
+	}
+	else if ( strncmp(valid_data, "BARONY LMPV4.1", strlen("BARONY LMPV4.1")) == 0 )
 	{
 		// 32-layer map format with vertical entity positions.
 		editorVersion = 41;
@@ -3073,10 +3079,40 @@ fp->read(&numentities, sizeof(Uint32), 1);
 					fp->read(&entity->portalCustomLevelsToJump, sizeof(Sint32), 1);
 					fp->read(&entity->portalNotSecret, sizeof(Sint32), 1);
 					fp->read(&entity->portalCustomRequiresPower, sizeof(Sint32), 1);
+
 					for ( int i = 11; i <= 18; ++i )
 					{
 						fp->read(&entity->skill[i], sizeof(Sint32), 1);
 					}
+
+					if ( editorVersion >= 42 )
+					{
+						fp->read(
+							&entity->portalCustomRequirementMode,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->portalCustomRequiredRace,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->portalCustomRequiredClass,
+							sizeof(Sint32),
+							1
+						);
+					}
+					else
+					{
+						// Older maps have no race/class restrictions.
+						entity->portalCustomRequirementMode = 0;
+						entity->portalCustomRequiredRace = -1;
+						entity->portalCustomRequiredClass = -1;
+					}
+
 					break;
 				case 19:
 					if ( editorVersion >= 25 )
@@ -3167,13 +3203,46 @@ fp->read(&numentities, sizeof(Uint32), 1);
 				case 29:
 					if ( editorVersion >= 29 )
 					{
-						fp->read(&entity->pressurePlateTriggerType, sizeof(Sint32), 1);
+						fp->read(
+							&entity->pressurePlateTriggerType,
+							sizeof(Sint32),
+							1
+						);
 					}
 					else
 					{
-						// don't read data, set default.
+						// Don't read data; use original defaults.
 						setSpriteAttributes(entity, nullptr, nullptr);
 					}
+
+					if ( editorVersion >= 42 )
+					{
+						fp->read(
+							&entity->pressurePlateRequirementMode,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->pressurePlateRequiredRace,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->pressurePlateRequiredClass,
+							sizeof(Sint32),
+							1
+						);
+					}
+					else
+					{
+						// Older maps have no race/class restrictions.
+						entity->pressurePlateRequirementMode = 0;
+						entity->pressurePlateRequiredRace = -1;
+						entity->pressurePlateRequiredClass = -1;
+					}
+
 					break;
 				case 30:
 					if ( editorVersion < 31 )
@@ -3457,8 +3526,8 @@ int saveMap(const char* filename2)
 			printlog("warning: failed to open file '%s' for map saving!\n", filename);
 			return 1;
 		}
-		//Saving it will produce a V4.1 32-layer map.
-		fp->write("BARONY LMPV4.1", sizeof(char), strlen("BARONY LMPV4.1")); // magic code
+		// Saving produces a V4.2 32-layer map.
+		fp->write("BARONY LMPV4.2", sizeof(char), strlen("BARONY LMPV4.2")); // magic code
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
 		fp->write(&map.width, sizeof(Uint32), 1); // map width
@@ -3640,10 +3709,30 @@ int saveMap(const char* filename2)
 					fp->write(&entity->portalCustomLevelsToJump, sizeof(Sint32), 1);
 					fp->write(&entity->portalNotSecret, sizeof(Sint32), 1);
 					fp->write(&entity->portalCustomRequiresPower, sizeof(Sint32), 1);
+
 					for ( int i = 11; i <= 18; ++i )
 					{
 						fp->write(&entity->skill[i], sizeof(Sint32), 1);
 					}
+
+					fp->write(
+						&entity->portalCustomRequirementMode,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->portalCustomRequiredRace,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->portalCustomRequiredClass,
+						sizeof(Sint32),
+						1
+					);
+
 					break;
 				case 19:
 					fp->write(&entity->furnitureDir, sizeof(Sint32), 1);
@@ -3712,7 +3801,30 @@ int saveMap(const char* filename2)
 					fp->write(&entity->signalInvertOutput, sizeof(Sint32), 1);
 					break;
 				case 29:
-					fp->write(&entity->pressurePlateTriggerType, sizeof(Sint32), 1);
+					fp->write(
+						&entity->pressurePlateTriggerType,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->pressurePlateRequirementMode,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->pressurePlateRequiredRace,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->pressurePlateRequiredClass,
+						sizeof(Sint32),
+						1
+					);
+
 					break;
 				case 30:
 					fp->write(&entity->wallLockMaterial, sizeof(Sint32), 1);
