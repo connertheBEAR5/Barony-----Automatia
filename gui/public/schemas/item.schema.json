@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sam-framework.dev/schemas/item.schema.json",
+  "title": "S.A.M Item / Weapon",
+  "description": "Defines a custom item or weapon. S.A.M registers it into the items[] table at a reserved runtime slot (>=5000) and wires up its names, category, slot, weight, value, level, attributes and 2D inventory icon. Custom 3D models and on-hit effects are PLANNED and not yet loaded — see each field's note.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name_identified",
+    "category"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional. URL of this JSON Schema, so editors give autocomplete + validation as you type. Ignored by S.A.M itself."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$",
+      "description": "Unique item id in 'namespace:item' form (e.g. 'darkblade:shadowblade'). S.A.M assigns the runtime numeric item slot (>=5000) automatically."
+    },
+    "name_identified": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Item name shown once identified (e.g. 'Shadowblade')."
+    },
+    "name_unidentified": {
+      "type": "string",
+      "description": "Item name shown before identification (e.g. 'black sword')."
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional. Hover-tooltip body text shown in-game (use \\n for line breaks). If omitted, the tooltip falls back to the item's name. Replaces the 'this item does not have a tooltip yet' placeholder."
+    },
+    "category": {
+      "enum": [
+        "WEAPON",
+        "ARMOR",
+        "AMULET",
+        "POTION",
+        "SCROLL",
+        "MAGICSTAFF",
+        "RING",
+        "SPELLBOOK",
+        "GEM",
+        "THROWN",
+        "TOOL",
+        "FOOD",
+        "BOOK",
+        "SPELL_CAT",
+        "TOME_SPELL"
+      ],
+      "description": "Item category (Barony Category enum, from items.hpp). Governs how the game classifies the item."
+    },
+    "slot": {
+      "enum": [
+        "EQUIPPABLE_IN_SLOT_WEAPON",
+        "EQUIPPABLE_IN_SLOT_SHIELD",
+        "EQUIPPABLE_IN_SLOT_MASK",
+        "EQUIPPABLE_IN_SLOT_HELM",
+        "EQUIPPABLE_IN_SLOT_GLOVES",
+        "EQUIPPABLE_IN_SLOT_BOOTS",
+        "EQUIPPABLE_IN_SLOT_BREASTPLATE",
+        "EQUIPPABLE_IN_SLOT_CLOAK",
+        "EQUIPPABLE_IN_SLOT_AMULET",
+        "EQUIPPABLE_IN_SLOT_RING",
+        "NO_EQUIP"
+      ],
+      "default": "NO_EQUIP",
+      "description": "Equipment slot the item occupies (Barony ItemEquippableSlot enum). Use NO_EQUIP for non-equippable items."
+    },
+    "weight": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Item weight in Barony weight units."
+    },
+    "gold_value": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Base gold value of the item."
+    },
+    "level": {
+      "type": "integer",
+      "minimum": -1,
+      "description": "Item level for random-generation curves. -1 excludes the item from random generation."
+    },
+    "model": {
+      "type": "string",
+      "description": "Ship your OWN 3D model: a mod-relative path to a .vox, e.g. \"models/mymod/sword.vox\". SAM loads it at runtime and uses it as this item's world (and inventory) model, overriding 'model_from_item'. The path is also the model's id, so namespace your folder (models/<yourmod>/...) to avoid clashing with vanilla or another mod. IMPORTANT: the .vox must be Barony's slab format — MagicaVoxel exports are rejected (export/convert to slab .vox). An unknown/failed path is skipped with a warning and the item falls back to 'model_from_item' or a placeholder."
+    },
+    "model_fp": {
+      "type": "string",
+      "description": "Optional separate .vox for the FIRST-PERSON / held view (same rules as 'model'). If omitted, the held view reuses 'model'."
+    },
+    "model_from_item": {
+      "type": "string",
+      "description": "Reuse an existing vanilla item's 3D model (world + first-person + inventory icon) for this custom item, by vanilla ItemType name — e.g. \"SILVER_SHIELD\", \"STEEL_SWORD\", \"IRON_HELM\". This is the supported way to give a custom item a real model. If omitted, the item clones a placeholder that matches its equip slot (a shield looks like a wooden shield, boots like boots, etc.). If the name is unknown, the placeholder is used and a warning is logged. A per-item 'icon' PNG still overrides the 2D inventory icon."
+    },
+    "icon": {
+      "type": "string",
+      "description": "Path (relative to the mod folder) to a PNG used as the item's 2D inventory/hotbar icon, e.g. 'items/shadowblade.png'. Loaded at runtime and drawn like the class-select portrait. If the file is missing, a placeholder icon cloned from a similar vanilla item is used. (Only the 2D icon is loaded — the 3D 'model'/'model_fp' are still planned.)"
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Numeric bonuses the engine applies to this item. ONLY these keys are read: ATK (added by attackGetAttack for weapons) and AC (added by armorGetAC for armor/shields). Any other key would load and then be silently ignored, so they are rejected here instead. Item behaviour (effects, procs, abilities) comes from a companion script next to this JSON, not from a key.",
+      "additionalProperties": false,
+      "properties": {
+        "ATK": {
+          "type": "integer",
+          "description": "Attack bonus. Read for weapons; ignored on non-weapons."
+        },
+        "AC": {
+          "type": "integer",
+          "description": "Armor Class bonus. Read for armor and shields; ignored on other categories."
+        }
+      }
+    },
+    "on_hit_effect": {
+      "type": "string",
+      "description": "PLANNED — requires the S.A.M effect/plugin system, which is not yet implemented. Parsed but has no runtime effect. Status effect to apply on a successful hit (e.g. an EFF_ effect name from stat.hpp)."
+    },
+    "on_hit_chance": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "PLANNED — no runtime effect yet (see 'on_hit_effect'). Probability (0.0-1.0) that on_hit_effect triggers on a hit."
+    },
+    "stackable": {
+      "type": "boolean",
+      "default": false,
+      "description": "PLANNED — parsed but not yet applied at runtime. Whether multiple copies stack into one inventory slot."
+    },
+    "magic_level": {
+      "type": "integer",
+      "description": "PLANNED — parsed but not yet applied at runtime. Magic/enchantment level of the item."
+    }
+  },
+  "examples": [
+    {
+      "id": "darkblade:shadowblade",
+      "name_identified": "Shadowblade",
+      "name_unidentified": "black sword",
+      "category": "WEAPON",
+      "slot": "EQUIPPABLE_IN_SLOT_WEAPON",
+      "weight": 3,
+      "gold_value": 400,
+      "level": 6,
+      "model": "models/shadowblade.vox",
+      "model_fp": "models/shadowblade_fp.vox",
+      "icon": "icons/shadowblade.png",
+      "attributes": {
+        "ATK": 4,
+        "shadow_damage": 5
+      },
+      "on_hit_effect": "EFF_BLIND",
+      "on_hit_chance": 0.25,
+      "stackable": false,
+      "magic_level": 2
+    }
+  ]
+}

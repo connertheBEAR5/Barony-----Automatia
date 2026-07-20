@@ -1,0 +1,361 @@
+/*
+ * Visual script builder — "lego bricks" that generate Lua.
+ *
+ * A class can have MANY abilities. Each is one rule: WHEN (a trigger) -> IF (0..n
+ * conditions) -> DO (1..n actions). They all compile into a single on_event / on_tick
+ * pair, because a script may only define each handler once — pasting two generated
+ * scripts together is a syntax error, and a syntax error stops the whole file loading,
+ * so even the ability that worked alone dies. Building them here removes that trap.
+ *
+ * Generation is ONE-WAY on purpose: blocks -> Lua. Reading edited Lua back into blocks
+ * would need a Lua parser and would quietly lose anything it couldn't represent, so you
+ * build a skeleton here and fine-tune it in Advanced. The UI says so rather than
+ * pretending to round-trip.
+ *
+ * Everything offered is derived from the real API manifest (see data/blocks.js), so the
+ * builder cannot produce a hook, function, or event field that doesn't exist.
+ */
+import { useMemo, useState, useEffect, useRef } from 'react';
+import { Panel, Field, Select, TextInput, NumberInput, GoldButton } from '@/components/ui.jsx';
+import {
+  TRIGGERS, allConditions, untilCandidates, findTrigger, findCondition, findAction, actionsFor, conditionsFor,
+  EVERY_SECONDS, registerCustom,
+} from '@/data/blocks.js';
+import { generateLua, describeRule } from '@/lib/codegen.js';
+import CustomBlockEditor from '@/components/CustomBlockEditor.jsx';
+import { loadBlocks, saveBlocks, toCatalogEntry } from '@/lib/customBlocks.js';
+
+const defaults = (def) => {
+  const out = {};
+  for (const p of def?.params || []) out[p.name] = p.default;
+  return out;
+};
+
+const newRule = () => ({
+  key: Math.random().toString(36).slice(2, 9),
+  trigger: { id: 'player.on_hit', params: {} },
+  conditions: [],
+  actions: [{ id: 'message', params: defaults(findAction('message')) }],
+});
+
+function Param({ p, value, onChange }) {
+  const common = { value: value ?? p.default, onChange };
+  const options = p.labels
+    ? p.values.map((v) => ({ value: v, label: p.labels[v] || v }))
+    : p.values;
+  return (
+    <Field label={p.label || p.name} className="min-w-[8rem]">
+      {p.type === 'select' ? <Select {...common} options={options} />
+        : p.type === 'number' ? <NumberInput {...common} min={p.min} max={p.max} />
+        : <TextInput {...common} placeholder={p.default} />}
+    </Field>
+  );
+}
+
+/**
+ * The condition inside a "lasts: until…" — a whole condition block nested in an action.
+ *
+ * It reuses the same catalog the ② IF list uses, so "until" can express anything a guard
+ * can, and a custom brick someone wrote shows up here too without any extra plumbing.
+ * Writes three flat keys (until_id / until_params / until_negate) rather than a nested
+ * object, because the params blob is what gets serialized and flat survives round-trips.
+ */
+function UntilPicker({ params, onChange }) {
+  // Only conditions safe to poll on a timer — see untilCandidates(). "random chance" and
+  // anything reading event.* are filtered out at the source, so they can't be picked here.
+  const list = untilCandidates();
+  const id = params.until_id || list[0]?.id;
+  const def = findCondition(id);
+  const set = (patch) => onChange({ ...params, ...patch });
+
+  return (
+    <div className="sam-well p-2 w-full mt-1">
+      <div className="flex items-end gap-2 flex-wrap">
+        <Field label="until" className="flex-1 min-w-[11rem]">
+          <Select
+            value={id}
+            onChange={(v) => set({ until_id: v, until_params: defaults(findCondition(v)), until_negate: false })}
+            options={list.map((c) => ({ value: c.id, label: c.label }))}
+          />
+        </Field>
+        {def?.negatable && (
+          <Field label="Invert" className="w-24">
+            <Select
+              value={params.until_negate ? 'not' : 'is'}
+              onChange={(v) => set({ until_negate: v === 'not' })}
+              options={[{ value: 'is', label: 'is' }, { value: 'not', label: 'is NOT' }]}
+            />
+          </Field>
+        )}
+        {(def?.params || []).map((cp) => (
+          <Param key={cp.name} p={cp} value={params.until_params?.[cp.name]}
+            onChange={(v) => set({ until_params: { ...params.until_params, [cp.name]: v } })} />
+        ))}
+      </div>
+      <div className="text-xs mt-2" style={{ color: '#6b5a35' }}>
+        Checked 5× a second while the change is active. It undoes itself the moment this
+        becomes true — and if it never does, the change lasts the rest of the run.
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One condition/action row. The </> peek shows the exact line THIS brick becomes, with
+ * your values in it — the bridge from blocks to writing Lua yourself.
+ */
+function Row({ kind, row, options, onChange, onRemove }) {
+  const [peek, setPeek] = useState(false);
+  const def = kind === 'if' ? findCondition(row.id) : findAction(row.id);
+  const pick = (id) => {
+    const d = kind === 'if' ? findCondition(id) : findAction(id);
+    onChange({ ...row, id, params: defaults(d), negate: false });
+  };
+  let code = '';
+  try {
+    const out = def?.lua(row.params || {});
+    const expr = Array.isArray(out) ? out.join('\n') : out;   // "for a while" is multi-line
+    code = kind === 'if' && row.negate ? `not (${expr})` : expr;
+  } catch { code = '(pick options above)'; }
+
+  return (
+    <div className="sam-well p-3 mb-2">
+      <div className="flex items-end gap-2 flex-wrap">
+        <Field label={kind === 'if' ? 'Condition' : 'Action'} className="flex-1 min-w-[12rem]">
+          <Select value={row.id} onChange={pick} options={options.map((o) => ({ value: o.id, label: o.label }))} />
+        </Field>
+        {def?.negatable && (
+          <Field label="Invert" className="w-24">
+            <Select
+              value={row.negate ? 'not' : 'is'}
+              onChange={(v) => onChange({ ...row, negate: v === 'not' })}
+              options={[{ value: 'is', label: 'is' }, { value: 'not', label: 'is NOT' }]}
+            />
+          </Field>
+        )}
+        {/* showIf keeps "seconds" hidden until it means something — a seconds box next to
+            "permanently" is a question with no answer. */}
+        {(def?.params || [])
+          .filter((p) => p.type !== 'condition' && (!p.showIf || p.showIf(row.params || {})))
+          .map((p) => (
+            <Param key={p.name} p={p} value={row.params?.[p.name]}
+              onChange={(v) => onChange({ ...row, params: { ...row.params, [p.name]: v } })} />
+          ))}
+        <GoldButton onClick={() => setPeek((v) => !v)} className="mb-[2px]" title="Show the Lua this block becomes"
+          style={{ borderColor: peek ? 'var(--color-gold)' : undefined, color: peek ? 'var(--color-gold-bright)' : undefined }}
+        >{'</>'}</GoldButton>
+        <GoldButton tone="red" onClick={onRemove} className="mb-[2px]">✕</GoldButton>
+      </div>
+      {(def?.params || []).some((p) => p.type === 'condition' && (!p.showIf || p.showIf(row.params || {}))) && (
+        <UntilPicker params={row.params || {}} onChange={(params) => onChange({ ...row, params })} />
+      )}
+      {peek && (
+        <pre className="mt-2 p-2 text-xs overflow-x-auto"
+          style={{ background: '#150f06', border: '1px solid #4a3617', color: '#e8d5a3', whiteSpace: 'pre' }}>{code}</pre>
+      )}
+      {def?.note && <div className="text-xs mt-2" style={{ color: '#6b5a35' }}>{def.note}</div>}
+      {/* A warning that depends on the CURRENT values — e.g. a timed change to HP, which the
+          engine also writes. Distinct from the static note: it only shows when it applies. */}
+      {typeof def?.warn === 'function' && def.warn(row.params || {}) && (
+        <div className="text-xs mt-2 sam-error">⚠ {def.warn(row.params || {})}</div>
+      )}
+    </div>
+  );
+}
+
+/** One ability: trigger + conditions + actions. */
+function RuleEditor({ rule, index, total, conditions, onChange, onRemove }) {
+  const trigger = findTrigger(rule.trigger.id);
+  const availableActions = useMemo(() => actionsFor(trigger), [trigger, conditions]);
+  // Event-field conditions (e.g. "gold just picked up") only make sense under a trigger that
+  // carries that field, so filter them the same way actions are filtered.
+  const availableConditions = useMemo(() => conditionsFor(trigger), [trigger]);
+
+  // Changing the trigger can strip actions/conditions needing an event field the new one lacks
+  // (e.g. "damage the target" needs target_uid). Drop them rather than emit a nil read.
+  const setTrigger = (id) => {
+    const t = findTrigger(id);
+    const okA = actionsFor(t).map((a) => a.id);
+    const okC = conditionsFor(t).map((c) => c.id);
+    onChange({
+      ...rule,
+      trigger: { id, params: defaults(t) },
+      actions: rule.actions.filter((a) => okA.includes(a.id)),
+      conditions: rule.conditions.filter((c) => okC.includes(c.id)),
+    });
+  };
+  const addRow = (kind) => {
+    const list = kind === 'if' ? availableConditions : availableActions;
+    const first = list[0];
+    if (!first) return;
+    const row = { id: first.id, params: defaults(first), negate: false };
+    onChange(kind === 'if'
+      ? { ...rule, conditions: [...rule.conditions, row] }
+      : { ...rule, actions: [...rule.actions, row] });
+  };
+  const patch = (kind, i, row) => {
+    const key = kind === 'if' ? 'conditions' : 'actions';
+    const next = [...rule[key]]; next[i] = row;
+    onChange({ ...rule, [key]: next });
+  };
+  const drop = (kind, i) => {
+    const key = kind === 'if' ? 'conditions' : 'actions';
+    onChange({ ...rule, [key]: rule[key].filter((_, j) => j !== i) });
+  };
+
+  const triggerOptions = TRIGGERS.map((t) => ({ value: t.id, label: t.id === EVERY_SECONDS ? '⏱ Every N seconds' : t.id }));
+
+  return (
+    <Panel title={`Ability ${index + 1}${total > 1 ? ` of ${total}` : ''}`} className="mb-4">
+      <div className="text-sm mb-3" style={{ color: '#e8d5a3' }}>{describeRule(rule)}</div>
+
+      <div className="sam-label mb-1">① WHEN</div>
+      <div className="flex items-end gap-2 flex-wrap mb-1">
+        <Field label="Trigger" className="flex-1 min-w-[14rem]">
+          <Select value={rule.trigger.id} onChange={setTrigger} options={triggerOptions} />
+        </Field>
+        {(trigger?.params || []).map((p) => (
+          <Param key={p.name} p={p} value={rule.trigger.params?.[p.name]}
+            onChange={(v) => onChange({ ...rule, trigger: { ...rule.trigger, params: { ...rule.trigger.params, [p.name]: v } } })} />
+        ))}
+      </div>
+      {trigger?.gotcha && <div className="text-xs mb-2 sam-error">⚠ {trigger.gotcha}</div>}
+
+      <div className="sam-label mt-3 mb-1">② IF (optional)</div>
+      {rule.conditions.length === 0 && (
+        <div className="text-xs mb-2" style={{ color: '#6b5a35' }}>No conditions — it fires every time.</div>
+      )}
+      {rule.conditions.map((row, i) => (
+        <Row key={i} kind="if" row={row} options={availableConditions}
+          onChange={(r) => patch('if', i, r)} onRemove={() => drop('if', i)} />
+      ))}
+      <GoldButton onClick={() => addRow('if')}>+ Add condition</GoldButton>
+
+      <div className="sam-label mt-3 mb-1">③ DO</div>
+      {rule.actions.map((row, i) => (
+        <Row key={i} kind="do" row={row} options={availableActions}
+          onChange={(r) => patch('do', i, r)} onRemove={() => drop('do', i)} />
+      ))}
+      <GoldButton onClick={() => addRow('do')}>+ Add action</GoldButton>
+
+      {total > 1 && (
+        <div className="mt-3 pt-3" style={{ borderTop: '1px solid #4a3617' }}>
+          <GoldButton tone="red" onClick={onRemove}>✕ Remove this ability</GoldButton>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+export default function BlockBuilder({ onUseScript, onLiveCode, hasExistingCode, initialRules, onRules }) {
+  // Restore the exact bricks the user built last time (solidius: "the builder doesn't
+  // save"). The generated Lua was already persisted, but the visual rules were ephemeral,
+  // so reopening lost the blocks and dropped you into Advanced staring at raw Lua. The
+  // parent now hands the saved rule list back in via initialRules.
+  const [rules, setRules] = useState(() => (initialRules && initialRules.length ? initialRules : [newRule()]));
+  const [custom, setCustom] = useState(() => loadBlocks());
+  const [editing, setEditing] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    registerCustom(custom.map((b) => ({ kind: b.kind, entry: toCatalogEntry(b) })));
+    saveBlocks(custom);
+  }, [custom]);
+
+  const conditions = useMemo(() => allConditions(), [custom]);
+  const lua = useMemo(() => generateLua({ rules }), [rules, custom]);
+
+  // Keep the script in sync with the blocks WITHOUT the user having to click "Use this
+  // script" (a tester built an ability, never clicked it, and saved a class with no Lua).
+  // The first render is skipped so merely opening this tab doesn't overwrite existing
+  // Advanced code with the starter block; the first real edit commits the blocks.
+  const firstSync = useRef(true);
+  useEffect(() => {
+    if (firstSync.current) { firstSync.current = false; return; }
+    onLiveCode?.(lua);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lua]);
+
+  // Report the rule list up so it persists alongside the generated code — this is what lets
+  // reopening restore the blocks. Same first-render skip as the code sync: just opening the
+  // tab shouldn't commit the starter block over a restored/empty state.
+  const firstRules = useRef(true);
+  useEffect(() => {
+    if (firstRules.current) { firstRules.current = false; return; }
+    onRules?.(rules);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rules]);
+
+  return (
+    <div className="grid gap-4" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,22rem)' }}>
+      <div>
+        {rules.map((rule, i) => (
+          <RuleEditor
+            key={rule.key}
+            rule={rule}
+            index={i}
+            total={rules.length}
+            conditions={conditions}
+            onChange={(r) => setRules((rs) => rs.map((x, j) => (j === i ? r : x)))}
+            onRemove={() => setRules((rs) => rs.filter((_, j) => j !== i))}
+          />
+        ))}
+
+        <div className="flex items-center gap-2">
+          <GoldButton onClick={() => setRules((rs) => [...rs, newRule()])}>+ Add another ability</GoldButton>
+          <span className="text-xs" style={{ color: '#6b5a35' }}>
+            Add as many as you like; they all go into one script.
+          </span>
+        </div>
+
+        {editing
+          ? <div className="mt-4"><CustomBlockEditor blocks={custom} onChange={setCustom} onClose={() => setEditing(false)} /></div>
+          : (
+            <div className="mt-4 flex items-center gap-2">
+              <GoldButton onClick={() => setEditing(true)}>🧱 Make your own blocks…</GoldButton>
+              <span className="text-xs" style={{ color: '#6b5a35' }}>
+                {custom.length
+                  ? `${custom.length} custom block${custom.length === 1 ? '' : 's'} loaded — they show up in the lists above.`
+                  : 'Build a brick once and reuse it, or import a pack from a friend.'}
+              </span>
+            </div>
+          )}
+      </div>
+
+      <div>
+        <Panel title="Generated Lua">
+          <pre className="sam-well p-3 text-xs overflow-x-auto" style={{ color: '#e8d5a3', whiteSpace: 'pre' }}>{lua}</pre>
+          <div className="mt-3 flex flex-col gap-2">
+            <div className="flex gap-2">
+              <GoldButton onClick={() => onUseScript(lua)} className="flex-1">▶ Use this script</GoldButton>
+              {/*
+                Copy the whole thing, because hand-selecting it off the screen loses lines.
+                Someone deleted the comment block and took `function on_event(event)` with
+                it — leaving a bare `if` and an orphan `end`, which is a SYNTAX error, so
+                the file doesn't load at all and even the ability that worked alone dies.
+              */}
+              <GoldButton onClick={() => { navigator.clipboard?.writeText(lua); setCopied(true); setTimeout(() => setCopied(false), 1200); }}>
+                {copied ? '✓ Copied' : '⎘ Copy'}
+              </GoldButton>
+            </div>
+            <div className="text-xs" style={{ color: '#6b5a35' }}>
+              {hasExistingCode
+                ? '⚠ This REPLACES the script you already have. Copy it first if you want to keep it.'
+                : 'Writes this into the editor.'}
+            </div>
+            <div className="text-xs" style={{ color: '#6b5a35' }}>
+              Copy the whole thing. The comments are safe to delete, but keep
+              <span className="sam-mono"> function on_event(event) </span> and its final
+              <span className="sam-mono"> end </span> — without them the file won’t parse, and a file
+              that won’t parse loads nothing at all.
+            </div>
+            <div className="text-xs" style={{ color: '#6b5a35' }}>
+              Blocks generate Lua one way. Tweak it in <b>Advanced</b> afterwards — those edits
+              won’t come back into the blocks.
+            </div>
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}

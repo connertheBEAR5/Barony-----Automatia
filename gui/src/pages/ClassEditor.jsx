@@ -1,0 +1,807 @@
+/*
+ * Class Editor — mirrors the S.A.M design reference:
+ * portrait + name up top; CORE ATTRIBUTES / SKILL LEVELS / STARTING ITEMS
+ * panels side by side; spells, stat growth and gold below; SAVE CLASS bottom.
+ * Every list here comes from the schemas at runtime (see data/schemas.js).
+ */
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  CORE_ATTRIBUTES, OFFSET_STATS, SKILLS, ITEM_TYPES, ROLL_STATS, CATEGORIES,
+  CLASS_SPELL_REF_PATTERN, skillLabel, skillBaseAttr,
+} from '@/data/schemas.js';
+import { ITEM_ICONS } from '@/data/itemIcons.js';
+import { SPELLS } from '@/data/samApi.js';
+import { ALL_HEADS, APPEARANCE_RACES, headLabel } from '@/data/characterHeads.js';
+import CharacterBox from '@/components/CharacterBox.jsx';
+import { validate } from '@/lib/validate.js';
+import { checkBalance } from '@/lib/balance.js';
+import { useMod } from '@/state/ModContext.jsx';
+import ScriptEditor from '@/components/ScriptEditor.jsx';
+import {
+  Panel, Field, TextInput, NumberInput, Stepper, GoldButton,
+  ItemIcon, ErrorList, SavedNote, BalanceHints, SearchSelect,
+} from '@/components/ui.jsx';
+import LoadoutBoard from '@/components/LoadoutBoard.jsx';
+import { entryFromJson, entryToJson, newEntry } from '@/data/equipment.js';
+
+const MAX_PORTRAIT_BYTES = 256 * 1024; // portraits are 54x54 — anything big is a mistake
+
+// Per-level HP/MP growth row (Barony's ClassBaseGrowths). Vanilla rows run ~1-5 per
+// field; 3 is the engine's "default" row. Distinct from `stat_growth`, which is about
+// which ATTRIBUTES roll high/low on level-up.
+const HPMP_GROWTH_KEYS = ['HP', 'MP', 'HP_REGEN', 'MP_REGEN'];
+const HPMP_GROWTH_LABELS = {
+  HP: 'HP / level', MP: 'MP / level',
+  HP_REGEN: 'HP regen speed', MP_REGEN: 'MP regen speed',
+};
+// solidius asked "what do HP/MP regen mean?" — they are not amounts, they set how fast HP/MP
+// come back ON THEIR OWN. Engine: regen_per_minute += value × (level − 1) × factor, so a
+// bigger number = faster passive recovery, and it ramps up with level (nothing at level 1).
+const HPMP_GROWTH_HINTS = {
+  HP: 'Max HP gained on each level-up.',
+  MP: 'Max MP gained on each level-up.',
+  HP_REGEN: 'How fast HP refills on its own. Higher = faster passive healing; it ramps up with level (no effect at level 1). 3 is vanilla.',
+  MP_REGEN: 'How fast MP refills on its own. Higher = faster passive mana recovery; it ramps up with level. 3 is vanilla.',
+};
+
+const ATTR_ICONS = { STR: '💪', DEX: '🪶', CON: '❤️', INT: '📖', PER: '👁️', CHR: '🎭' };
+
+const SKILL_ICONS = {
+  PRO_SWORD: '⚔️', PRO_AXE: '🪓', PRO_MACE: '🔨', PRO_POLEARM: '🔱',
+  PRO_RANGED: '🏹', PRO_SHIELD: '🛡️', PRO_UNARMED: '👊', PRO_STEALTH: '🌑',
+  PRO_LOCKPICKING: '🗝️', PRO_APPRAISAL: '🔍', PRO_TRADING: '💰',
+  PRO_LEADERSHIP: '👑', PRO_SORCERY: '🔮', PRO_MYSTICISM: '✨',
+  PRO_THAUMATURGY: '📿', PRO_ALCHEMY: '⚗️',
+};
+
+function itemEmoji(type) {
+  if (/SWORD|DAGGER|RAPIER|CLAYMORE|ANELACE|FALSHION/.test(type)) return '🗡️';
+  if (/SHIELD|SCUTUM/.test(type)) return '🛡️';
+  if (/BOW|CROSSBOW|SLING|QUIVER/.test(type)) return '🏹';
+  if (/AXE|TOMAHAWK/.test(type)) return '🪓';
+  if (/MACE|FLAIL|SHILLELAGH|KNUCKLES/.test(type)) return '🔨';
+  if (/SPEAR|HALBERD|TRIDENT|LANCE|POLEARM|GLAIVE/.test(type)) return '🔱';
+  if (/POTION/.test(type)) return '🧪';
+  if (/SCROLL/.test(type)) return '📜';
+  if (/SPELLBOOK|TOME|BOOK/.test(type)) return '📖';
+  if (/FOOD|BREAD|CHEESE|APPLE|MEAT|FISH|RATION/.test(type)) return '🍞';
+  if (/TORCH|LANTERN/.test(type)) return '🔥';
+  if (/RING/.test(type)) return '💍';
+  if (/AMULET/.test(type)) return '📿';
+  if (/GEM/.test(type)) return '💎';
+  if (/HAT|HELM|HOOD|MASK|CROWN|CIRCLET/.test(type)) return '🪖';
+  if (/BOOTS|LOAFERS|CLEAT/.test(type)) return '🥾';
+  if (/GLOVES|GAUNTLETS|BRACERS/.test(type)) return '🧤';
+  if (/CLOAK|ROBE|DOUBLET|BREASTPIECE|TUNIC|GAMBESON|HAUBERK|SHAWL|APRON/.test(type)) return '🥋';
+  if (/STAFF|SCEPTER/.test(type)) return '🪄';
+  if (/KEY/.test(type)) return '🗝️';
+  return '⚔️';
+}
+
+/* Real in-game icon URL for an ItemType, or null if we don't have one.
+ * import.meta.env.BASE_URL is '/' in dev and '/SAM-Framework/' in the Pages build. */
+function iconSrc(type) {
+  const file = ITEM_ICONS[type];
+  return file ? `${import.meta.env.BASE_URL}item-icons/${file}` : null;
+}
+
+/* What the grid + picker render for an item: the real Barony PNG when it's
+ * available locally, otherwise the emoji (so the public build still works). */
+function itemIcon(type) {
+  return <ItemIcon src={iconSrc(type)} emoji={itemEmoji(type)} />;
+}
+
+/* Group an ItemType into one of the schema's categories for the picker.
+ * Barony names items by category prefix (POTION_, SCROLL_, TOOL_, …); the rest
+ * (weapons/armor named by material+type) fall to keyword matching. Heuristic —
+ * only drives grouping in the picker, so the odd edge case is harmless. */
+function itemCategory(t) {
+  if (/^POTION_/.test(t)) return 'POTION';
+  if (/^SCROLL_/.test(t)) return 'SCROLL';
+  if (/^SPELLBOOK_/.test(t)) return 'SPELLBOOK';
+  if (/^TOME_/.test(t)) return 'TOME_SPELL';
+  if (/^MAGICSTAFF_/.test(t)) return 'MAGICSTAFF';
+  if (/^RING_/.test(t)) return 'RING';
+  if (/^AMULET_/.test(t)) return 'AMULET';
+  if (/^GEM_/.test(t)) return 'GEM';
+  if (/^FOOD_/.test(t)) return 'FOOD';
+  if (/^TOOL_|^KEY_|^INSTRUMENT_/.test(t)) return 'TOOL';
+  if (t === 'SPELL_ITEM') return 'SPELL_CAT';
+  if (t === 'READABLE_BOOK') return 'BOOK';
+  if (/TOMAHAWK|CHAKRAM|SHURIKEN|BOOMERANG|BOLAS|PLUMBATA|DART|GREASE_BALL|DUST_BALL|SLOP_BALL|THROWING/.test(t)) return 'THROWN';
+  if (/SWORD|DAGGER|RAPIER|CLAYMORE|ANELACE|FALSHION|AXE|MACE|FLAIL|SHILLELAGH|KNUCKLES|SPEAR|HALBERD|TRIDENT|LANCE|GLAIVE|POLEARM|BOW|CROSSBOW|SLING|QUIVER|KNIFE|SCEPTER/.test(t)) return 'WEAPON';
+  if (/SHIELD|SCUTUM|BREASTPIECE|DOUBLET|TUNIC|GAMBESON|HAUBERK|ROBE|SHAWL|HELM|HAT|HOOD|MASK|CAP|COIF|CROWN|CIRCLET|LAURELS|TURBAN|HEADDRESS|MITER|BOOTS|LOAFERS|CLEAT|GLOVES|GAUNTLETS|BRACERS|CLOAK|PAULDRONS|APRON|VISOR/.test(t)) return 'ARMOR';
+  return 'TOOL';
+}
+
+// A custom item declares a `category` (WEAPON/ARMOR/POTION/…); pick a matching emoji so it
+// reads in the loadout picker even though it has no vanilla item-icon PNG.
+const CUSTOM_CATEGORY_EMOJI = {
+  WEAPON: '🗡️', ARMOR: '🛡️', POTION: '🧪', SCROLL: '📜', SPELLBOOK: '📖', TOME_SPELL: '📖',
+  MAGICSTAFF: '🪄', RING: '💍', AMULET: '📿', GEM: '💎', FOOD: '🍞', TOOL: '🧰', THROWN: '🌀',
+  BOOK: '📖', SPELL_CAT: '✨',
+};
+const customEmoji = (it) => (it && CUSTOM_CATEGORY_EMOJI[it.category]) || '📦';
+
+// A custom item's `slot` (EQUIPPABLE_IN_SLOT_*) → the loadout paperdoll slot id, so a
+// one-click add can EQUIP a weapon/armour custom item, not just stash it in the backpack.
+const CUSTOM_SLOT_TO_PAPERDOLL = {
+  EQUIPPABLE_IN_SLOT_WEAPON: 'weapon', EQUIPPABLE_IN_SLOT_SHIELD: 'shield',
+  EQUIPPABLE_IN_SLOT_MASK: 'mask', EQUIPPABLE_IN_SLOT_HELM: 'helmet',
+  EQUIPPABLE_IN_SLOT_GLOVES: 'gloves', EQUIPPABLE_IN_SLOT_BOOTS: 'boots',
+  EQUIPPABLE_IN_SLOT_BREASTPLATE: 'breastplate', EQUIPPABLE_IN_SLOT_CLOAK: 'cloak',
+  EQUIPPABLE_IN_SLOT_AMULET: 'amulet', EQUIPPABLE_IN_SLOT_RING: 'ring',
+};
+
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'unnamed';
+}
+
+export default function ClassEditor() {
+  const { meta, classes, items: modItems, spells: modSpells, scripts, editing, dispatch } = useMod();
+
+  // Custom items from THIS mod become pickable starting gear alongside the vanilla list.
+  // The engine already grants a "namespace:item" in starting_items (sam_classes.cpp) — the
+  // Class Editor just never offered them, which is the gap Absidian hit.
+  const customItemMap = useMemo(
+    () => Object.fromEntries((modItems || []).map((it) => [it.id, it])),
+    [modItems],
+  );
+  const allItemTypes = useMemo(
+    () => [...ITEM_TYPES, ...(modItems || []).map((it) => it.id)],
+    [modItems],
+  );
+  // Icon + category resolvers that fall back to the custom item's own declared category.
+  const iconForType = (type) =>
+    customItemMap[type] ? <ItemIcon src={null} emoji={customEmoji(customItemMap[type])} /> : itemIcon(type);
+  const categoryForType = (type) =>
+    customItemMap[type] ? (customItemMap[type].category || 'TOOL') : itemCategory(type);
+
+  // "Edit" handoff from the Mod Builder: seed the form from a saved class.
+  const editDef = editing?.kind === 'class' ? classes.find((c) => c.id === editing.id) : null;
+  const existingScript = editDef ? scripts[editDef.id] : null;
+
+  // Draft autosave: an in-progress class lives only in this component's state and used to
+  // vanish on a refresh (a tester lost a whole class, script and all, that way). We now
+  // mirror it to localStorage in FORM shape and restore it on mount. An explicit "Edit this
+  // class" handoff (editDef) stays authoritative — a draft only restores a fresh/new class.
+  const DRAFT_KEY = useMemo(
+    () => `sam-draft:class:${editing?.kind === 'class' ? editing.id : 'new'}`,
+    [], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  const draft = useMemo(() => {
+    if (editDef) return null;
+    try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null'); } catch { return null; }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const [name, setName] = useState(draft?.name ?? editDef?.name ?? '');
+  const [description, setDescription] = useState(draft?.description ?? editDef?.description ?? '');
+  // Attributes are MODIFIERS on the race base (schema: "stat->STR += n"), so 0 = no change —
+  // NOT absolute values. Default a new class to 0 (was 10, which silently made every class
+  // +60 to all attributes, far above vanilla's ~0-5 net). Editing keeps the class's stored deltas.
+  const [attrs, setAttrs] = useState(() =>
+    draft?.attrs ?? Object.fromEntries(CORE_ATTRIBUTES.map((a) => [a, editDef?.stats?.[a] ?? 0]))
+  );
+  const [offsets, setOffsets] = useState(() =>
+    draft?.offsets ?? Object.fromEntries(OFFSET_STATS.map((s) => [s, editDef?.stats?.[s] ?? 0]))
+  );
+  const [skills, setSkills] = useState(() =>
+    draft?.skills ?? Object.fromEntries(SKILLS.map((s) => [s, editDef?.skills?.[s] ?? 0]))
+  );
+  const [items, setItems] = useState(() =>
+    draft?.items ?? (editDef?.starting_items ?? []).map(entryFromJson)
+  );
+  const [spells, setSpells] = useState(draft?.spells ?? editDef?.starting_spells ?? []);
+  const [spellError, setSpellError] = useState('');
+  // Per-attribute level-up growth WEIGHT (number). 2 = neutral; higher = raised more often;
+  // 0 = never. Loads explicit weights, else derives from the old strong(6)/weak(1) shorthand.
+  const [growth, setGrowth] = useState(() => {
+    if (draft?.growth) return draft.growth;
+    const g = {};
+    const w = editDef?.stat_growth?.weights;
+    if (w && typeof w === 'object') {
+      for (const a of ROLL_STATS) if (typeof w[a] === 'number') g[a] = w[a];
+    } else {
+      for (const a of editDef?.stat_growth?.strong_rolls ?? []) g[a] = 6;
+      for (const a of editDef?.stat_growth?.weak_rolls ?? []) g[a] = 1;
+    }
+    return g;
+  });
+  // Per-level HP/MP growth + regen. 3 is the engine's "default" row — which is exactly
+  // what every custom class silently used before the growth lookup was fixed — so the
+  // form starts there and only emits JSON once you change something.
+  const [hpMpGrowth, setHpMpGrowth] = useState(() => draft?.hpMpGrowth ?? ({
+    HP: editDef?.hp_mp_growth?.HP ?? 3,
+    MP: editDef?.hp_mp_growth?.MP ?? 3,
+    HP_REGEN: editDef?.hp_mp_growth?.HP_REGEN ?? 3,
+    MP_REGEN: editDef?.hp_mp_growth?.MP_REGEN ?? 3,
+  }));
+  const [mpRegenBase, setMpRegenBase] = useState(draft?.mpRegenBase ?? editDef?.mp_regen?.base ?? 0);
+  const [mpRegenMult, setMpRegenMult] = useState(draft?.mpRegenMult ?? editDef?.mp_regen?.multiplier ?? 1);
+  const [mpRegenScaling, setMpRegenScaling] = useState(() => {
+    if (draft?.mpRegenScaling) return draft.mpRegenScaling;
+    const s = {};
+    for (const a of ROLL_STATS) s[a] = editDef?.mp_regen?.stat_scaling?.[a] ?? '';
+    return s;
+  });
+  // Per-race forced look. [{ race, head }] — kept as a list so the form can hold a
+  // half-typed row without it becoming a JSON key.
+  const [looks, setLooks] = useState(() =>
+    draft?.looks ?? Object.entries(editDef?.appearance?.races ?? {}).map(([race, v]) => ({ race, head: v?.head ?? '' }))
+  );
+  const [surviveShift, setSurviveShift] = useState(draft?.surviveShift ?? editDef?.appearance?.survive_shapeshift ?? false);
+  // Whole-body custom model (v1.3.3): a mod-relative .vox that replaces the ENTIRE body on
+  // ANY race, over equipped armour (e.g. a vehicle/creature class). Distinct from the
+  // per-race head look above.
+  const [bodyModel, setBodyModel] = useState(draft?.bodyModel ?? editDef?.appearance?.body_model ?? '');
+  // Preview-only: which body the rig draws. Not part of the class JSON — sex is the
+  // player's own choice at character creation, and a class can't (and shouldn't) force it.
+  const [previewSex, setPreviewSex] = useState('male');
+  const [gold, setGold] = useState(draft?.gold ?? editDef?.gold ?? 0);
+  const [portrait, setPortrait] = useState(draft?.portrait ?? { path: editDef?.portrait ?? '', dataUrl: '' });
+  const [portraitError, setPortraitError] = useState('');
+  const [scriptLang, setScriptLang] = useState(draft?.scriptLang ?? existingScript?.lang ?? 'lua');
+  const [scriptCode, setScriptCode] = useState(draft?.scriptCode ?? existingScript?.code ?? '');
+  // The visual block-builder's rule list, so reopening restores the bricks (not just the
+  // generated Lua). Editor-only — stripped from the exported mod. See ScriptEditor/BlockBuilder.
+  const [scriptBlocks, setScriptBlocks] = useState(draft?.scriptBlocks ?? existingScript?.blocks ?? null);
+  const [errors, setErrors] = useState([]);
+  const [savedAs, setSavedAs] = useState('');
+  const portraitRef = useRef(null);
+
+  // Consume the edit handoff so a later fresh visit starts blank.
+  useEffect(() => {
+    if (editing?.kind === 'class') dispatch({ type: 'clearEditing' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Mirror the whole in-progress form to localStorage on every change, so a refresh or a
+  // closed tab never loses unsaved work. portrait.dataUrl and scriptCode have no other
+  // durable home until "Save Class", so they must be in here.
+  useEffect(() => {
+    const d = { name, description, attrs, offsets, skills, items, spells, growth, hpMpGrowth,
+      mpRegenBase, mpRegenMult, mpRegenScaling, looks, surviveShift, bodyModel, gold, portrait, scriptLang, scriptCode, scriptBlocks };
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); }
+    catch { // a very large portrait can blow the quota — keep the rest, drop the image bytes
+      try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...d, portrait: { path: portrait.path, dataUrl: '' } })); } catch { /* give up quietly */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, description, attrs, offsets, skills, items, spells, growth, hpMpGrowth,
+    mpRegenBase, mpRegenMult, mpRegenScaling, looks, surviveShift, bodyModel, gold, portrait, scriptLang, scriptCode, scriptBlocks]);
+
+  const namespace = meta.namespace || 'mymod';
+  const classId = `${namespace}:${slugify(name)}`;
+  const defaultPortraitPath = `portraits/${slugify(name)}.png`;
+
+  const onPortraitFile = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > MAX_PORTRAIT_BYTES) {
+      setPortraitError(`That PNG is ${Math.round(file.size / 1024)} KB — portraits are 54×54; keep it under 256 KB.`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setPortraitError('');
+      setPortrait((p) => ({ path: p.path || defaultPortraitPath, dataUrl: String(reader.result ?? '') }));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Called by the spell picker, and by the custom-spell shortcuts below it. The pattern
+  // check still matters: the picker's allowCustom lets you type a "namespace:spell" id,
+  // which is the one path where a typo can still get in.
+  const addSpell = (raw) => {
+    const input = String(raw ?? '').trim();
+    if (!input) return;
+    const s = input.includes(':') ? input.toLowerCase() : input.toUpperCase();
+    if (!CLASS_SPELL_REF_PATTERN.test(s)) {
+      setSpellError('Use a SPELL_X constant or a custom "namespace:spell" id.');
+      return;
+    }
+    setSpellError('');
+    setSpells((prev) => (prev.includes(s) ? prev : [...prev, s]));
+  };
+
+  // Quick-add a custom item to the starting loadout. If the item declares an equip slot we
+  // place it EQUIPPED in that paperdoll slot (a weapon starts wielded); otherwise it goes to
+  // the backpack. Either way it also shows up in the slot pickers on the board above.
+  const addCustomItem = (it) => {
+    const slotId = CUSTOM_SLOT_TO_PAPERDOLL[it.slot];
+    setItems((prev) => [...prev, newEntry(it.id, !!slotId, slotId)]);
+  };
+
+  // Set one attribute's growth weight (blank → 2 neutral; clamp 0..99).
+  const setGrowthWeight = (attr, v) => {
+    setGrowth((prev) => ({ ...prev, [attr]: v === '' ? 2 : Math.max(0, Math.min(99, Number(v) || 0)) }));
+  };
+
+  const buildDef = () => {
+    // Coerce '' (a value box the user cleared mid-edit) to 0 — a delta of 0 is "no change",
+    // and it keeps a non-numeric out of the exported JSON.
+    const num = (v) => (v === '' || v === undefined ? 0 : Number(v));
+    // These are MODIFIERS on the race base (schema), so 0 = "no change" — omit zeros so a
+    // neutral class exports a clean stats block instead of a wall of +0s (matches vanilla).
+    const stats = {};
+    for (const a of CORE_ATTRIBUTES) { const v = num(attrs[a]); if (v !== 0) stats[a] = v; }
+    for (const s of OFFSET_STATS) { const v = num(offsets[s]); if (v !== 0) stats[s] = v; }
+
+    const nonzeroSkills = Object.fromEntries(
+      Object.entries(skills).map(([k, v]) => [k, num(v)]).filter(([, v]) => v > 0)
+    );
+
+    const def = {
+      id: classId,
+      name: name.trim(),
+      stats,
+    };
+    if (description.trim()) def.description = description.trim();
+    if (Object.keys(nonzeroSkills).length) def.skills = nonzeroSkills;
+    if (items.length) {
+      def.starting_items = items.map(entryToJson);
+    }
+    if (spells.length) def.starting_spells = spells;
+    // Per-attribute growth weights. 2 = neutral (the engine default) so those are omitted —
+    // an untouched class emits no stat_growth at all. Only non-neutral weights are written.
+    const weights = {};
+    for (const a of ROLL_STATS) {
+      const w = growth[a];
+      if (w != null && Number(w) !== 2) weights[a] = Math.max(0, Math.min(99, Number(w)));
+    }
+    if (Object.keys(weights).length) {
+      def.stat_growth = { weights };
+    }
+    // Only emit hp_mp_growth once it differs from the engine default row, so an
+    // untouched class keeps producing byte-identical JSON to before.
+    const growthNum = (k) => (hpMpGrowth[k] === '' ? 3 : Number(hpMpGrowth[k]));
+    if (HPMP_GROWTH_KEYS.some((k) => growthNum(k) !== 3)) {
+      def.hp_mp_growth = Object.fromEntries(HPMP_GROWTH_KEYS.map((k) => [k, growthNum(k)]));
+    }
+    // Same for mp_regen: omit entirely unless the modder actually tuned something.
+    const scaling = Object.fromEntries(
+      Object.entries(mpRegenScaling)
+        .filter(([, v]) => v !== '' && Number(v) !== 0)
+        .map(([k, v]) => [k, Number(v)])
+    );
+    const regenBase = mpRegenBase === '' ? 0 : Number(mpRegenBase);
+    const regenMult = mpRegenMult === '' ? 1 : Number(mpRegenMult);
+    if (regenBase !== 0 || regenMult !== 1 || Object.keys(scaling).length) {
+      def.mp_regen = {};
+      if (regenBase !== 0) def.mp_regen.base = regenBase;
+      if (Object.keys(scaling).length) def.mp_regen.stat_scaling = scaling;
+      if (regenMult !== 1) def.mp_regen.multiplier = regenMult;
+    }
+    // Only emit rows that actually name a head; a blank row is someone mid-edit.
+    const races = {};
+    for (const l of looks) {
+      if (!l.race || !String(l.head).trim()) continue;
+      races[l.race] = { head: String(l.head).trim() };
+    }
+    const body = bodyModel.trim();
+    if (Object.keys(races).length || body) {
+      def.appearance = {};
+      if (Object.keys(races).length) def.appearance.races = races;
+      if (body) def.appearance.body_model = body;
+      if (surviveShift) def.appearance.survive_shapeshift = true;
+    }
+    if (gold > 0) def.gold = gold;
+    if (portrait.path.trim()) def.portrait = portrait.path.trim();
+    return def;
+  };
+
+  const save = () => {
+    setSavedAs('');
+    const def = buildDef();
+    const result = validate('class', def);
+    if (!result.valid) {
+      setErrors(result.errors);
+      return;
+    }
+    setErrors([]);
+    // Ship the uploaded PNG as a mod asset at the portrait path.
+    if (portrait.path.trim() && portrait.dataUrl) {
+      dispatch({ type: 'setAsset', path: portrait.path.trim(), dataUrl: portrait.dataUrl });
+    }
+    dispatch({ type: 'saveClass', def });
+    dispatch({ type: 'saveScript', classId: def.id, lang: scriptLang, code: scriptCode, blocks: scriptBlocks });
+    // Committed to the mod (which is itself persisted) — the local draft is redundant now.
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+    setSavedAs(def.id);
+  };
+
+  const def = useMemo(buildDef,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [name, description, attrs, offsets, skills, items, spells, growth, gold, portrait, namespace,
+      hpMpGrowth, mpRegenBase, mpRegenMult, mpRegenScaling, looks, surviveShift, bodyModel]);
+  const preview = useMemo(() => JSON.stringify(def, null, 2), [def]);
+  const hints = useMemo(() => checkBalance('class', def), [def]);
+
+  // The head the box rig should describe: prefer "default", else the first row that
+  // names one. Only a vanilla head resolves to a catalog entry — a custom "ns:model"
+  // has no dimensions we can know here, so the rig falls back to a male body and the
+  // label just shows the id.
+  const previewHeadId = useMemo(() => {
+    const row = looks.find((l) => l.race === 'default' && l.head) ?? looks.find((l) => l.head);
+    return row ? String(row.head).trim() : '';
+  }, [looks]);
+  const previewHead = useMemo(
+    () => ALL_HEADS.find((h) => h.id === previewHeadId) ?? null,
+    [previewHeadId]
+  );
+
+  return (
+    <div className="space-y-4 max-w-7xl mx-auto">
+      {/* ------------------------------------------------ name + portrait */}
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          className="sam-panel flex items-center justify-center shrink-0 overflow-hidden"
+          style={{ width: 84, height: 84, fontSize: '2.2rem', padding: 0, cursor: 'var(--sam-cursor)' }}
+          title="Upload class portrait (PNG, 54×54)"
+          onClick={() => portraitRef.current?.click()}
+        >
+          {portrait.dataUrl
+            ? <img src={portrait.dataUrl} alt="Class portrait" style={{ width: 54, height: 54, imageRendering: 'pixelated' }} />
+            : <span aria-hidden>🛡</span>}
+        </button>
+        <input ref={portraitRef} type="file" accept="image/png" className="hidden" onChange={onPortraitFile} />
+        <div className="flex-1">
+          <TextInput
+            value={name}
+            onChange={setName}
+            placeholder="Class name — e.g. Warden"
+            style={{ fontSize: '1.5rem', padding: '0.7rem 1rem' }}
+            aria-label="Class name"
+          />
+          <div className="mt-1 text-xs" style={{ color: '#6b5a35' }}>
+            id: <span className="sam-mono">{classId}</span>
+            {' '}(namespace comes from the Mod Builder)
+          </div>
+        </div>
+      </div>
+
+      {/* ------------------------------------------------------- portrait */}
+      <Panel title="Portrait">
+        <div className="grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-4 items-end">
+          <GoldButton onClick={() => portraitRef.current?.click()}>🖼 Upload PNG</GoldButton>
+          <Field label="Portrait path (mod-relative)" hint="Shipped in the zip; shown as the class-select icon in-game.">
+            <TextInput
+              value={portrait.path}
+              onChange={(v) => setPortrait((p) => ({ ...p, path: v }))}
+              placeholder={defaultPortraitPath}
+            />
+          </Field>
+        </div>
+        {portrait.dataUrl && (
+          <div className="mt-2 text-xs" style={{ color: '#6b5a35' }}>
+            PNG loaded — it will export at <span className="sam-mono">{portrait.path || defaultPortraitPath}</span>.
+            <button type="button" className="ml-2 underline" style={{ color: '#a03327' }} onClick={() => setPortrait((p) => ({ ...p, dataUrl: '' }))}>clear image</button>
+          </div>
+        )}
+        {portraitError && <div className="sam-error text-sm mt-1">{portraitError}</div>}
+      </Panel>
+
+      {/* ------------------------------------------- attributes + skills */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+        <div className="space-y-4">
+          <Panel title="Core Attributes">
+            <div className="text-xs mb-2" style={{ color: '#8a7749' }}>
+              Modifiers added to the race base (may be negative) — not final values. 0 = no change.
+              Vanilla classes net about 0 to +5 across all six, trading strengths for weaknesses.
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              {CORE_ATTRIBUTES.map((a) => (
+                <Field key={a} label={`${ATTR_ICONS[a]} ${a}`}>
+                  <NumberInput
+                    value={attrs[a]}
+                    onChange={(v) => setAttrs((prev) => ({ ...prev, [a]: v }))}
+                  />
+                </Field>
+              ))}
+            </div>
+            <div className="sam-divider" />
+            <div className="grid grid-cols-2 gap-3">
+              {OFFSET_STATS.map((s) => (
+                <Field key={s} label={`${s} offset`} hint={`Flat ${s} added to this class's starting pool (before the per-level growth above).`}>
+                  <NumberInput
+                    value={offsets[s]}
+                    onChange={(v) => setOffsets((prev) => ({ ...prev, [s]: v }))}
+                  />
+                </Field>
+              ))}
+            </div>
+          </Panel>
+
+          {/* Stat growth lives with the attributes — it's the same idea: which of the six
+              roll high or low as you level. (solidius: put it in the space the sliders freed.) */}
+          <Panel title="Stat Growth">
+            <div className="text-xs mb-2" style={{ color: '#6b5a35' }}>
+              Each level-up raises <b>3</b> attributes, picked by <b>weight</b> — higher grows more
+              often. <span className="sam-ok">2 = neutral</span>,{' '}
+              <span className="sam-error">0 = never</span>. Vanilla classes run 1–6, so this is the
+              full curve, not just weak/strong.
+            </div>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+              {ROLL_STATS.map((a) => {
+                const w = growth[a];
+                const val = (w == null ? 2 : w);
+                const tone = val >= 4 ? '#9dc76a' : val <= 1 ? '#e07a6a' : undefined;
+                return (
+                  <div key={a} className="flex items-center gap-2">
+                    <span className="sam-label shrink-0" style={{ width: '3.6rem', fontSize: '0.9rem', color: tone }}>
+                      {ATTR_ICONS[a]} {a}
+                    </span>
+                    <NumberInput value={val} min={0} max={99} onChange={(v) => setGrowthWeight(a, v)} />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-xs mt-2" style={{ color: '#8a7749' }}>
+              Presets: weak = 1 · neutral = 2 · strong = 6. (Old <span className="sam-mono">strong_rolls</span>/
+              <span className="sam-mono">weak_rolls</span> mods still load — strong→6, weak→1.)
+            </div>
+          </Panel>
+        </div>
+
+        <Panel title="Skill Levels" bodyClassName="max-h-[460px] overflow-y-auto">
+          {SKILLS.map((s) => (
+            <Stepper
+              key={s}
+              label={`${SKILL_ICONS[s] ?? '◆'} ${skillLabel(s)}`}
+              sub={`${s} — base ${skillBaseAttr(s)}`}
+              value={skills[s]}
+              min={0}
+              max={100}
+              step={1}
+              onChange={(v) => setSkills((prev) => ({ ...prev, [s]: v }))}
+            />
+          ))}
+        </Panel>
+      </div>
+
+      {/* --------------------------------------- starting loadout (full width) */}
+      <LoadoutBoard
+        items={items}
+        onChange={setItems}
+        allTypes={allItemTypes}
+        iconFor={iconForType}
+        categoryFor={categoryForType}
+        categories={CATEGORIES}
+        portraitUrl={portrait.dataUrl}
+        gold={gold}
+        onGold={setGold}
+      />
+
+      {/* Custom items from this mod — the one-click way to put YOUR gear on a class. They also
+          appear in every slot/backpack picker on the board above. */}
+      {modItems.length > 0 && (
+        <div className="sam-well px-4 py-3">
+          <div className="sam-label mb-1" style={{ color: '#8a6d2e' }}>Your custom items — click to add to the starting kit</div>
+          <div className="flex flex-wrap gap-1">
+            {modItems.map((it) => (
+              <button
+                key={it.id}
+                type="button"
+                className="sam-btn"
+                style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                onClick={() => addCustomItem(it)}
+                title={CUSTOM_SLOT_TO_PAPERDOLL[it.slot] ? `equip ${it.id}` : `add ${it.id} to backpack`}
+              >
+                {customEmoji(it)} {it.name_identified || it.name || it.id}
+              </button>
+            ))}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#6b5a35' }}>
+            Equippable items (weapon, armour…) start <b>worn</b>; everything else goes in the
+            backpack. The engine already grants these at spawn.
+          </div>
+        </div>
+      )}
+
+      {/* --------------------------------------- spells + growth + gold */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <Panel title="Starting Spells">
+          <div className="flex flex-wrap gap-2 mb-3 min-h-8">
+            {spells.map((s) => (
+              <span key={s} className="sam-well px-2 py-1 text-sm inline-flex items-center gap-2"
+                style={{ color: 'var(--color-parchment)' }}>
+                ✨ {s}
+                <button
+                  type="button"
+                  className="sam-step sam-remove"
+                  style={{ width: 18, height: 18, fontSize: '0.7rem' }}
+                  onClick={() => setSpells((prev) => prev.filter((x) => x !== s))}
+                  aria-label={`remove ${s}`}
+                >✕</button>
+              </span>
+            ))}
+          </div>
+          {/*
+            Pick from the real castable spells rather than typing the name. Typing was a
+            silent-failure trap: the schema only checks the SPELL_[A-Z_]+ shape, so
+            "SPELL_FORCBOLT" validated, exported, loaded — and then resolved to nothing
+            in game. allowCustom keeps "mymod:spell" working for your own spells.
+          */}
+          <SearchSelect
+            options={SPELLS.filter((s) => !spells.includes(s))}
+            onPick={(s) => addSpell(s)}
+            placeholder="Search spells… (or type mymod:spell)"
+            allowCustom
+          />
+          {spellError && <div className="sam-error text-sm mt-1">{spellError}</div>}
+          {modSpells.length > 0 && (
+            <div className="mt-3">
+              <div className="sam-label mb-1" style={{ color: '#8a6d2e' }}>Your custom spells</div>
+              <div className="flex flex-wrap gap-1">
+                {modSpells.map((sp) => (
+                  <button key={sp.id} type="button" className="sam-btn" style={{ padding: '0.2rem 0.5rem', fontSize: '0.75rem' }}
+                    onClick={() => addSpell(sp.id)} title={`add ${sp.id}`}>✨ {sp.name}</button>
+                ))}
+              </div>
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Character Look">
+          <div className="text-xs mb-3" style={{ color: '#9dc76a' }}>
+            ✓ Works in-game (v1.3.x) — and shows on the character-select preview.
+          </div>
+
+          {/* Whole-body custom model — the v1.3.3 unlock: one .vox becomes the entire body. */}
+          <Field
+            label="Whole-body model — your own .vox"
+            hint="A mod-relative .vox that becomes the ENTIRE body on ANY race, even with armour equipped — a vehicle, construct, creature, anything. Barony SLAB .vox format only (MagicaVoxel is rejected). If set, it replaces the whole body (overriding the per-race head below)."
+          >
+            <TextInput value={bodyModel} onChange={setBodyModel} placeholder="models/mymod/mech.vox" />
+          </Field>
+
+          <div className="sam-divider" />
+
+          <div className="sam-label mb-1">Per-race head</div>
+          <div className="text-xs mb-2" style={{ color: '#6b5a35' }}>
+            Force a head on everyone who plays this class. Pick a race, pick a head — or
+            type a <span className="sam-mono">namespace:model</span> for your own
+            <span className="sam-mono"> .vox</span> head.
+            <span className="sam-ok"> default</span> covers any race you don't list.
+          </div>
+          <div className="text-xs mb-3" style={{ color: '#8a7749' }}>
+            ⚠ Head only. Equipped armour re-assigns torso/arms/legs, so a per-race <b>body</b> look
+            can't stick here — use the <b>whole-body model</b> above to force a full body.
+          </div>
+          <div className="space-y-2">
+            {looks.map((l, i) => (
+              <div key={i} className="grid grid-cols-[9rem_1fr_auto] gap-2 items-center">
+                <select
+                  className="sam-input"
+                  value={l.race}
+                  onChange={(e) => setLooks((p) => p.map((x, j) => (j === i ? { ...x, race: e.target.value } : x)))}
+                >
+                  {APPEARANCE_RACES.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <input
+                  className="sam-input"
+                  list="sam-head-list"
+                  value={l.head}
+                  onChange={(e) => setLooks((p) => p.map((x, j) => (j === i ? { ...x, head: e.target.value } : x)))}
+                  placeholder="pick a head, or mymod:witch_head"
+                />
+                <button
+                  type="button" className="sam-step sam-remove" style={{ width: 26, height: 26 }}
+                  onClick={() => setLooks((p) => p.filter((_, j) => j !== i))} aria-label="remove look"
+                >✕</button>
+              </div>
+            ))}
+            <datalist id="sam-head-list">
+              {ALL_HEADS.map((h) => <option key={h.id} value={h.id}>{h.label}</option>)}
+            </datalist>
+          </div>
+          <div className="sam-divider" />
+          {/* Preview the look being edited. The rig is a body diagram at real model
+              proportions; the head can't be drawn as a box, so its name is labelled. */}
+          <CharacterBox
+            sex={previewSex}
+            onSexChange={setPreviewSex}
+            headId={previewHeadId}
+            headLabel={previewHead ? previewHead.label : previewHeadId}
+          />
+          {looks.filter((l) => l.head).length > 0 && (
+            <div className="text-xs mt-2" style={{ color: '#6b5a35' }}>
+              {looks.filter((l) => l.head).map((l, i) => (
+                <div key={i}>
+                  <span className="sam-mono">{l.race}</span> → {headLabel(l.head)}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-3 flex items-center gap-3">
+            <GoldButton onClick={() => setLooks((p) => [...p, { race: p.length ? 'HUMAN' : 'default', head: '' }])}>
+              + Add race look
+            </GoldButton>
+            {looks.length > 0 && (
+              <GoldButton
+                tone={surviveShift ? 'green' : 'gold'}
+                onClick={() => setSurviveShift((s) => !s)}
+              >
+                {surviveShift ? '✓ Survives polymorph' : '✗ Drops on polymorph'}
+              </GoldButton>
+            )}
+          </div>
+        </Panel>
+
+        <Panel title="HP / MP Growth">
+          <div className="text-xs mb-2" style={{ color: '#6b5a35' }}>
+            <b>HP/MP per level</b> is how much max HP/MP a level-up grants. <b>Regen speed</b> is
+            how fast HP/MP come back on their own (not an amount). Vanilla runs 1–5; 3 is the
+            engine default — leave all four at 3 and nothing is written to your JSON.
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {HPMP_GROWTH_KEYS.map((k) => (
+              <Field key={k} label={HPMP_GROWTH_LABELS[k]} hint={HPMP_GROWTH_HINTS[k]}>
+                <NumberInput
+                  value={hpMpGrowth[k]}
+                  min={0}
+                  onChange={(v) => setHpMpGrowth((p) => ({ ...p, [k]: v }))}
+                />
+              </Field>
+            ))}
+          </div>
+          <div className="sam-divider" />
+          <div className="text-xs mb-2" style={{ color: '#6b5a35' }}>
+            <span className="sam-ok">Mana regen tuning</span> (optional). Heads up: vanilla
+            scales mana regen off <b>PER</b> and <b>CHR</b> only — <b>INT does nothing</b>.
+            Add an INT scaling below to make it matter.
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Flat MP/min" hint="added before the multiplier">
+              <NumberInput value={mpRegenBase} onChange={setMpRegenBase} />
+            </Field>
+            <Field label="Multiplier" hint="applied last; 1 = unchanged">
+              <NumberInput value={mpRegenMult} min={0} onChange={setMpRegenMult} />
+            </Field>
+          </div>
+          <div className="grid grid-cols-3 gap-2 mt-2">
+            {ROLL_STATS.map((a) => (
+              <Field key={a} label={`${ATTR_ICONS[a]} ${a}`} hint="MP/min per point">
+                <NumberInput
+                  value={mpRegenScaling[a]}
+                  onChange={(v) => setMpRegenScaling((p) => ({ ...p, [a]: v }))}
+                />
+              </Field>
+            ))}
+          </div>
+        </Panel>
+
+      </div>
+
+      {/* ------------------------------------------------- behavior script */}
+      <Panel title="Behavior Script">
+        <div className="text-xs mb-3" style={{ color: '#6b5a35' }}>
+          Optional — this is what makes the class actually DO things. Ships as{' '}
+          <span className="sam-mono">classes/{slugify(name)}.{scriptLang}</span> next to the class JSON and auto-loads in-game.
+          Click a function, event, or snippet on the right to insert it; the{' '}
+          <span className="sam-mono">API Reference</span> page has the full surface.
+        </div>
+        <ScriptEditor code={scriptCode} onCode={setScriptCode} lang={scriptLang} onLang={setScriptLang}
+          blocks={scriptBlocks} onBlocks={setScriptBlocks} />
+      </Panel>
+
+      {/* ------------------------------------------------------- save row */}
+      <BalanceHints hints={hints} />
+      <ErrorList errors={errors} />
+      <div className="flex items-center justify-end gap-3">
+        {savedAs && <SavedNote>Saved <span className="sam-mono">{savedAs}</span> to this session's mod — see Mod Builder.</SavedNote>}
+        <GoldButton tone="red" onClick={save} disabled={!name.trim()}>
+          🛡 Save Class
+        </GoldButton>
+      </div>
+
+      {/* ------------------------------------------------------ live JSON */}
+      <Panel title="Live JSON Preview" bodyClassName="p-0">
+        <pre className="sam-mono m-0 p-4 overflow-x-auto text-xs" style={{ color: '#9b8a5a' }}>
+          {preview}
+        </pre>
+      </Panel>
+    </div>
+  );
+}
