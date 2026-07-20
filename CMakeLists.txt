@@ -363,10 +363,14 @@ find_package(RapidJson REQUIRED)
 INCLUDE_DIRECTORIES(${RAPID_JSON_INCLUDE_DIR})
 
 if (STEAMWORKS_ENABLED)
-  find_package(NFD REQUIRED)
-  INCLUDE_DIRECTORIES(${NFD_INCLUDE_DIR})
-  LINK_DIRECTORIES(${NFD_LIBRARY})
-ENDIF (STEAMWORKS_ENABLED)
+	find_package(NFD REQUIRED)
+	INCLUDE_DIRECTORIES(${NFD_INCLUDE_DIR})
+
+	if (UNIX AND NOT APPLE)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
+	endif()
+endif()
 
 INCLUDE_DIRECTORIES(${SDL2_INCLUDE_DIRS} ${SDL2_INCLUDE_DIR} ${SDL2IMAGE_INCLUDE_DIRS} ${SDL2_IMAGE_INCLUDE_DIR} ${SDL2NET_INCLUDE_DIR} ${SDL2_NET_INCLUDE_DIRS} ${SDL2TTF_INCLUDE_DIR}  ${SDL2_TTF_INCLUDE_DIRS} ${PHYSFS_INCLUDE_DIR})
 LINK_DIRECTORIES(${SDL2_LINK_DIRS} ${SDL2_LINK_DIR} ${SDL2IMAGE_LINK_DIRS} ${SDL2_IMAGE_LINK_DIR} ${SDL2NET_LINK_DIR} ${SDL2_NET_LINK_DIRS} ${SDL2TTF_LINK_DIR}  ${SDL2_TTF_LINK_DIRS} ${PHYSFS_LINK_DIR})
@@ -555,10 +559,23 @@ if (GAME_ENABLED)
 	if (DEFINED BARONY_DATADIR)
 		set_target_properties(barony PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "\$(BARONY_DATADIR)/")
 	endif()
-	target_link_libraries(barony ${SDL2_LIBRARIES} ${SDL2_LIBRARY} ${SDL2IMAGE_LIBRARIES} ${SDL2_IMAGE_LIBRARIES} ${SDL2_NET_LIBRARIES} ${SDL2_TTF_LIBRARIES} ${SDL2TTF_LIBRARY})
+	target_link_libraries(barony
+		${SDL2_LIBRARIES}
+		${SDL2_LIBRARY}
+		${SDL2IMAGE_LIBRARIES}
+		${SDL2_IMAGE_LIBRARIES}
+		${SDL2_NET_LIBRARIES}
+		${SDL2_TTF_LIBRARIES}
+		${SDL2TTF_LIBRARY}
+	)
+
 	if (STEAMWORKS_ENABLED)
 		target_link_libraries(barony ${STEAMWORKS_LIBRARY})
 		target_link_libraries(barony ${NFD_LIBRARY})
+
+		if (UNIX AND NOT APPLE)
+			target_link_libraries(barony PkgConfig::GTK3)
+		endif()
 	endif()
 	if (EOS_ENABLED)
 		target_link_libraries(barony ${EOS_LIBRARIES})
@@ -602,8 +619,14 @@ if (GAME_ENABLED)
 	endif()
 	target_link_libraries(barony ${SDL2_LIBRARIES} ${SDL2_LIBRARY} ${SDL2IMAGE_LIBRARIES} ${SDL2_IMAGE_LIBRARIES} ${SDL2_NET_LIBRARIES} ${SDL2_TTF_LIBRARIES} ${SDL2TTF_LIBRARY})
 	if (STEAMWORKS_ENABLED)
-	  target_link_libraries(barony ${STEAMWORKS_LIBRARY})
-	  target_link_libraries(barony ${NFD_LIBRARY})
+	target_link_libraries(barony
+			${STEAMWORKS_LIBRARY}
+			${NFD_LIBRARY}
+		)
+
+		if (UNIX AND NOT APPLE)
+			target_link_libraries(barony PkgConfig::GTK3)
+		endif()
 	endif()
 	if (EOS_ENABLED)
 	  target_link_libraries(barony ${EOS_LIBRARIES})
@@ -716,10 +739,14 @@ if (EDITOR_ENABLED)
 	#target_link_libraries(${EDITOR_EXE_NAME} OpenSSL::Crypto)
   endif()
   target_link_libraries(${EDITOR_EXE_NAME} ${SDL2_LIBRARIES} ${SDL2_LIBRARY} ${SDL2IMAGE_LIBRARIES} ${SDL2_IMAGE_LIBRARIES} ${SDL2_NET_LIBRARIES} ${SDL2_TTF_LIBRARIES} ${SDL2TTF_LIBRARY})
-  if(STEAMWORKS_ENABLED)
-	target_link_libraries(${EDITOR_EXE_NAME} ${STEAMWORKS_LIBRARY})
-    target_link_libraries(${EDITOR_EXE_NAME} ${NFD_LIBRARY})
-  endif()
+	if (STEAMWORKS_ENABLED)
+		target_link_libraries(${EDITOR_EXE_NAME} ${STEAMWORKS_LIBRARY})
+		target_link_libraries(${EDITOR_EXE_NAME} ${NFD_LIBRARY})
+
+		if (UNIX AND NOT APPLE)
+			target_link_libraries(${EDITOR_EXE_NAME} PkgConfig::GTK3)
+		endif()
+	endif()
   if(WIN32)
 	if (EOS_ENABLED)
 	  target_link_libraries(${EDITOR_EXE_NAME} ${EOS_LIBRARY}) #TODO: Fix for Windows.

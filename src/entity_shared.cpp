@@ -2478,7 +2478,17 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 	{
 		return;
 	}
-
+	if (entityToCopy != nullptr)
+	{
+		// Preserve vertical placement when duplicating, copying,
+		// undoing, redoing, or assembling submaps.
+		entityNew->z = entityToCopy->z;
+	}
+	else
+	{
+		// Default legacy placement for newly created entities.
+		entityNew->z = 0.0;
+	}
 	if ( entityStatToCopy != nullptr )
 	{
 		tmpStats = entityStatToCopy->getStats();

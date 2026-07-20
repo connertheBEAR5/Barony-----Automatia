@@ -211,7 +211,14 @@ bool CSteamStatistics::RequestStats()
 		return false;
 	}
 	// Request user stats.
-	return SteamUserStats()->RequestCurrentStats();
+	// Newer Steamworks SDKs removed RequestCurrentStats().
+	// Request stats for the currently logged-in user instead.
+	const SteamAPICall_t call =
+		SteamUserStats()->RequestUserStats(
+			SteamUser()->GetSteamID()
+		);
+
+	return call != k_uAPICallInvalid;
 }
 
 bool CSteamStatistics::RequestGlobalStats()

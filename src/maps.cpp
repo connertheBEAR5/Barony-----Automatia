@@ -9881,7 +9881,9 @@ void assignActions(map_t* map)
 				entity->sprite = entity->floorDecorationModel;
 				entity->sizex = 0;
 				entity->sizey = 0;
-				entity->z = 7.5 - entity->floorDecorationHeightOffset * 0.25;
+				// Preserve the map-defined vertical layer, then apply the decoration's
+				// existing local height offset.
+				entity->z += 7.5 - entity->floorDecorationHeightOffset * 0.25;
 				entity->x += entity->floorDecorationXOffset * 0.25;
 				entity->y += entity->floorDecorationYOffset * 0.25;
 				int rotation = entity->floorDecorationRotation;

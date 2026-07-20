@@ -20,6 +20,7 @@
 #include "init.hpp"
 #include "mod_tools.hpp"
 #include <sys/stat.h>
+#include <cmath>
 #ifndef EDITOR
 #define EDITOR
 #endif
@@ -66,7 +67,24 @@ std::vector<std::pair<SDL_Surface**, std::string>> systemResourceImages; // dumm
 void initMenuOptions() {} // dummy
 int textInsertCaratPosition = -1;
 GenericGUIMenu GenericGUI[MAXPLAYERS];
+// Convert an editor map layer into Barony's entity Z coordinate.
+// Layer 0 is ground level. Higher layers use increasingly negative Z.
+static real_t spriteLayerToEntityZ(int layer)
+{
+	layer = std::max(0, std::min(layer, MAPLAYERS - 1));
 
+	// One complete map layer equals 16 entity-Z units.
+	return -16.0 * static_cast<real_t>(layer);
+}
+
+// Convert an entity Z coordinate back into its nearest editor layer.
+static int entityZToSpriteLayer(real_t z)
+{
+	const int layer =
+		static_cast<int>(std::round(-z / 16.0));
+
+	return std::max(0, std::min(layer, MAPLAYERS - 1));
+}
 void actGib(Entity* my) {} // dummy for draw.cpp
 void actHudArm(Entity* my) {} // dummy for draw.cpp
 void actHudWeapon(Entity* my) {} // dummy for draw.cpp
@@ -2305,6 +2323,8 @@ int main(int argc, char** argv)
 							}
 							entity->x = (long)(drawx << 4);
 							entity->y = (long)(drawy << 4);
+							// Moving a selected sprite also places it on the current editor layer.
+							entity->z = spriteLayerToEntityZ(drawlayer);
 						}
 						else
 						{
@@ -10124,10 +10144,20 @@ int main(int argc, char** argv)
 				// create a new object
 				if (palette[mousey + mousex * yres] >= 0)
 				{
-					entity = newEntity(palette[mousey + mousex * yres], 0, map.entities, nullptr);
-					selectedEntity[0] = entity;
-					lastSelectedEntity[0] = selectedEntity[0];
-					setSpriteAttributes(selectedEntity[0], nullptr, nullptr);
+				entity = newEntity(
+					palette[mousey + mousex * yres],
+					0,
+					map.entities,
+					nullptr
+				);
+
+				selectedEntity[0] = entity;
+				lastSelectedEntity[0] = selectedEntity[0];
+
+				setSpriteAttributes(selectedEntity[0], nullptr, nullptr);
+
+				// Place new sprites at the currently selected editor layer.
+				selectedEntity[0]->z = spriteLayerToEntityZ(drawlayer);
 				}
 
 				mclick = 0;

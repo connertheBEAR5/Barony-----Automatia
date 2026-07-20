@@ -1845,7 +1845,9 @@ void Entity::colliderAssignProperties(Entity* entity, bool mapGeneration, map_t*
 	{
 		entity->x += entity->colliderDecorationXOffset * 0.25;
 		entity->y += entity->colliderDecorationYOffset * 0.25;
-		entity->z = 7.5 - entity->colliderDecorationHeightOffset * 0.25;
+		// Preserve the map-defined vertical layer, then apply the collider
+		// decoration's existing local height offset.
+		entity->z += 7.5 - entity->colliderDecorationHeightOffset * 0.25;
 		bool modifiedFocal = false;
 		if ( entity->x < 0.0 )
 		{

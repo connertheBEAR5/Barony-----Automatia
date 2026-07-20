@@ -2394,9 +2394,14 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	// read map version number
 	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV4.0", strlen("BARONY LMPV4.0")) == 0 )
+	if ( strncmp(valid_data, "BARONY LMPV4.1", strlen("BARONY LMPV4.1")) == 0 )
 	{
-		// 32-layer map format
+		// 32-layer map format with vertical entity positions.
+		editorVersion = 41;
+	}
+	else if ( strncmp(valid_data, "BARONY LMPV4.0", strlen("BARONY LMPV4.0")) == 0 )
+	{
+		// Original 32-layer map format.
 		editorVersion = 40;
 	}
 	else if ( strncmp(valid_data, "BARONY LMPV3.2", strlen("BARONY LMPV3.2")) == 0 )
@@ -3203,8 +3208,21 @@ fp->read(&numentities, sizeof(Uint32), 1);
 
 		fp->read(&x, sizeof(Sint32), 1);
 		fp->read(&y, sizeof(Sint32), 1);
+
 		entity->x = x;
 		entity->y = y;
+
+		if (editorVersion >= 41)
+		{
+			// V4.1 and newer maps store entity vertical position.
+			fp->read(&entity->z, sizeof(real_t), 1);
+		}
+		else
+		{
+			// Legacy maps keep every placed entity at its original ground height.
+			entity->z = 0.0;
+		}
+
 		mapHashData += (sprite * c);
 	}
 
@@ -3439,8 +3457,8 @@ int saveMap(const char* filename2)
 			printlog("warning: failed to open file '%s' for map saving!\n", filename);
 			return 1;
 		}
-
-		fp->write("BARONY LMPV4.0", sizeof(char), strlen("BARONY LMPV4.0")); // magic code
+		//Saving it will produce a V4.1 32-layer map.
+		fp->write("BARONY LMPV4.1", sizeof(char), strlen("BARONY LMPV4.1")); // magic code
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
 		fp->write(&map.width, sizeof(Uint32), 1); // map width
@@ -3717,8 +3735,12 @@ int saveMap(const char* filename2)
 
 			x = entity->x;
 			y = entity->y;
+
 			fp->write(&x, sizeof(Sint32), 1);
 			fp->write(&y, sizeof(Sint32), 1);
+
+			// V4.1 stores the entity's true vertical world position.
+			fp->write(&entity->z, sizeof(real_t), 1);
 		}
 		FileIO::close(fp);
 		return 0;
