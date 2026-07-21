@@ -465,52 +465,63 @@ void createCommonDrawResources() {
 		"void main() {"
 "float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
 
+// Horizontal surfaces keep their exact structural layer.
+// Vertical walls interpolate between the layer below and this layer.
+"float VerticalChange ="
+"abs(dFdx(WorldPos.y))"
+"+ abs(dFdy(WorldPos.y));"
+
+"float IsVerticalWall ="
+"step(0.0001, VerticalChange);"
+
+"float WallLayer = clamp("
+"(WorldPos.y + 16.0) / 32.0,"
+"max(ClampedLayer - 1.0, 0.0),"
+"ClampedLayer"
+");"
+
+"float ContinuousLayer = mix("
+"ClampedLayer,"
+"WallLayer,"
+"IsVerticalWall"
+");"
+"float BaseLayer = floor(ContinuousLayer);"
+
 "vec2 LightCoord;"
-"LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
+"LightCoord.x ="
+"WorldPos.x / (uMapDims.x * 32.0);"
+
+"vec4 Lightmap = vec4(0.0);"
+
+"for (int LayerOffset = -5;"
+"LayerOffset <= 5;"
+"++LayerOffset)"
+"{"
+"float SampleLayer = clamp("
+"BaseLayer + float(LayerOffset),"
+"0.0,"
+"31.0"
+");"
+
 "LightCoord.y = ("
 "WorldPos.z / 32.0"
-"+ ClampedLayer * uMapDims.y"
+"+ SampleLayer * uMapDims.y"
 ") / (uMapDims.y * 32.0);"
 
-"vec4 Lightmap = texture(uLightmap, LightCoord);"
+"float LayerDistance ="
+"abs(ContinuousLayer - SampleLayer);"
 
-// One layer above and below: 45% spill.
-"if (ClampedLayer > 0.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y -= 1.0 / 32.0;"
+"float LayerWeight = exp("
+"-0.125 * LayerDistance * LayerDistance"
+");"
+
 "Lightmap = max("
 "Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.45"
+"texture(uLightmap, LightCoord)"
+"* LayerWeight"
 ");"
 "}"
 
-"if (ClampedLayer < 31.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y += 1.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.45"
-");"
-"}"
-
-// Two layers above and below: 15% spill.
-"if (ClampedLayer > 1.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y -= 2.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.15"
-");"
-"}"
-
-"if (ClampedLayer < 30.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y += 2.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.15"
-");"
-"}"
 		"FragColor = texture(uTextures, TexCoord) * vec4(Color, 1.f) * uLightFactor * Lightmap;"
 
 		"if (uFogDistance > 0.0) {"
@@ -556,50 +567,60 @@ void createCommonDrawResources() {
 		"dither(ivec2(gl_FragCoord), uDitherAmount);"
 "float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
 
+// Horizontal surfaces keep their exact structural layer.
+// Vertical walls interpolate between the layer below and this layer.
+"float VerticalChange ="
+"abs(dFdx(WorldPos.y))"
+"+ abs(dFdy(WorldPos.y));"
+
+"float IsVerticalWall ="
+"step(0.0001, VerticalChange);"
+
+"float WallLayer = clamp("
+"(WorldPos.y + 16.0) / 32.0,"
+"max(ClampedLayer - 1.0, 0.0),"
+"ClampedLayer"
+");"
+
+"float ContinuousLayer = mix("
+"ClampedLayer,"
+"WallLayer,"
+"IsVerticalWall"
+");"
+"float BaseLayer = floor(ContinuousLayer);"
+
 "vec2 LightCoord;"
-"LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
+"LightCoord.x ="
+"WorldPos.x / (uMapDims.x * 32.0);"
+
+"vec4 Lightmap = vec4(0.0);"
+
+"for (int LayerOffset = -5;"
+"LayerOffset <= 5;"
+"++LayerOffset)"
+"{"
+"float SampleLayer = clamp("
+"BaseLayer + float(LayerOffset),"
+"0.0,"
+"31.0"
+");"
+
 "LightCoord.y = ("
 "WorldPos.z / 32.0"
-"+ ClampedLayer * uMapDims.y"
+"+ SampleLayer * uMapDims.y"
 ") / (uMapDims.y * 32.0);"
 
-"vec4 Lightmap = texture(uLightmap, LightCoord);"
+"float LayerDistance ="
+"abs(ContinuousLayer - SampleLayer);"
 
-// One layer above and below: 45% spill.
-"if (ClampedLayer > 0.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y -= 1.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.45"
+"float LayerWeight = exp("
+"-0.125 * LayerDistance * LayerDistance"
 ");"
-"}"
 
-"if (ClampedLayer < 31.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y += 1.0 / 32.0;"
 "Lightmap = max("
 "Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.45"
-");"
-"}"
-
-// Two layers above and below: 15% spill.
-"if (ClampedLayer > 1.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y -= 2.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.15"
-");"
-"}"
-
-"if (ClampedLayer < 30.0) {"
-"vec2 SpillCoord = LightCoord;"
-"SpillCoord.y += 2.0 / 32.0;"
-"Lightmap = max("
-"Lightmap,"
-"texture(uLightmap, SpillCoord) * 0.15"
+"texture(uLightmap, LightCoord)"
+"* LayerWeight"
 ");"
 "}"
 		"FragColor = texture(uTextures, TexCoord) * vec4(Color, 1.f) * uLightFactor * Lightmap;"
