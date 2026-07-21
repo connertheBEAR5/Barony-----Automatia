@@ -393,3 +393,9 @@ Each successfully loaded room:
 				else
 				{
 					// Normal room selection
+
+
+opengl.cpp
+// Additional empty layers between the highest structure and the sky plane.
+constexpr int SKY_LAYER_CLEARANCE = 3;
+// you can change the sky clearance to get a more "roomy" sky with higher values. 

@@ -379,8 +379,9 @@ void actLightSource(Entity* my)
 
 void Entity::actLightSource()
 {
-	const int lightLayer =
-		entityZToLightmapLayer(z);
+	// Temporary rollback until the renderer can select
+// the correct lightmap layer for each surface.
+const int lightLayer = 0;
 	if ( multiplayer != CLIENT )
 	{
 		if ( lightSourceDelay > 0 && lightSourceDelayCounter == 0 )
