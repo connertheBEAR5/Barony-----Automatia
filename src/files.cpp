@@ -20,7 +20,7 @@
 #include <string>
 #include <thread>
 #include <future>
-
+#include "light.hpp"
 #include "files.hpp"
 #include "engine/audio/sound.hpp"
 #include "entity.hpp"
@@ -3344,12 +3344,40 @@ fp->read(&numentities, sizeof(Uint32), 1);
         for (int c = 0; c < MAXPLAYERS + 1; ++c) {
             auto& lightmap = lightmaps[c];
             auto& lightmapSmoothed = lightmapsSmoothed[c];
-            lightmap.resize(destmap->width * destmap->height);
-            lightmapSmoothed.resize((destmap->width + 2) * (destmap->height + 2));
+						lightmap.resize(
+				lightmapSize3D(
+					destmap->width,
+					destmap->height
+				)
+			);
+
+			lightmapSmoothed.resize(
+				lightmapSmoothedSize3D(
+					destmap->width,
+					destmap->height
+				)
+			);
             if ( strncmp(map.name, "Hell", 4) )
             {
-                memset(lightmap.data(), 0, sizeof(vec4_t) * map.width * map.height);
-                memset(lightmapSmoothed.data(), 0, sizeof(vec4_t) * (map.width + 2) * (map.height + 2));
+							memset(
+				lightmap.data(),
+				0,
+				sizeof(vec4_t)
+					* lightmapSize3D(
+						destmap->width,
+						destmap->height
+					)
+			);
+
+			memset(
+				lightmapSmoothed.data(),
+				0,
+				sizeof(vec4_t)
+					* lightmapSmoothedSize3D(
+						destmap->width,
+						destmap->height
+					)
+			);
 
 #ifndef EDITOR
 				if ( !strncmp(map.filename, "fortress", 8) )
@@ -3358,17 +3386,17 @@ fp->read(&numentities, sizeof(Uint32), 1);
 					ambienceColor.x *= ambienceColor.w;
 					ambienceColor.y *= ambienceColor.w;
 					ambienceColor.z *= ambienceColor.w;
-					for ( int c = 0; c < destmap->width * destmap->height; c++ )
+					for ( size_t i = 0; i < lightmapSize3D(destmap->width, destmap->height); ++i )
 					{
-						lightmap[c].x = ambienceColor.x;
-						lightmap[c].y = ambienceColor.y;
-						lightmap[c].z = ambienceColor.z;
+						lightmap[i].x = ambienceColor.x;
+						lightmap[i].y = ambienceColor.y;
+						lightmap[i].z = ambienceColor.z;
 					}
-					for ( int c = 0; c < (destmap->width + 2) * (destmap->height + 2); c++ )
+					for ( size_t i = 0; i < lightmapSmoothedSize3D(destmap->width, destmap->height); ++i )
 					{
-						lightmapSmoothed[c].x = ambienceColor.x;
-						lightmapSmoothed[c].y = ambienceColor.y;
-						lightmapSmoothed[c].z = ambienceColor.z;
+						lightmapSmoothed[i].x = ambienceColor.x;
+						lightmapSmoothed[i].y = ambienceColor.y;
+						lightmapSmoothed[i].z = ambienceColor.z;
 					}
 				}
 				if ( (svFlags & SV_FLAG_CHEATS) && 
@@ -3380,48 +3408,48 @@ fp->read(&numentities, sizeof(Uint32), 1);
 					ambienceColor.x *= ambienceColor.w;
 					ambienceColor.y *= ambienceColor.w;
 					ambienceColor.z *= ambienceColor.w;
-					for ( int c = 0; c < destmap->width * destmap->height; c++ )
+					for ( size_t i = 0; i < lightmapSize3D(destmap->width, destmap->height); ++i )
 					{
-						lightmap[c].x = ambienceColor.x;
-						lightmap[c].y = ambienceColor.y;
-						lightmap[c].z = ambienceColor.z;
+						lightmap[i].x = ambienceColor.x;
+						lightmap[i].y = ambienceColor.y;
+						lightmap[i].z = ambienceColor.z;
 					}
-					for ( int c = 0; c < (destmap->width + 2) * (destmap->height + 2); c++ )
+					for ( size_t i = 0; i < lightmapSmoothedSize3D(destmap->width, destmap->height); ++i )
 					{
-						lightmapSmoothed[c].x = ambienceColor.x;
-						lightmapSmoothed[c].y = ambienceColor.y;
-						lightmapSmoothed[c].z = ambienceColor.z;
+						lightmapSmoothed[i].x = ambienceColor.x;
+						lightmapSmoothed[i].y = ambienceColor.y;
+						lightmapSmoothed[i].z = ambienceColor.z;
 					}
 				}
 #endif
             }
             else
             {
-                for (int c = 0; c < destmap->width * destmap->height; c++ )
+				for ( size_t i = 0; i < lightmapSize3D(destmap->width, destmap->height); ++i )
                 {
-                    lightmap[c].x = hellAmbience;
-                    lightmap[c].y = hellAmbience;
-                    lightmap[c].z = hellAmbience;
+                    lightmap[i].x = hellAmbience;
+                    lightmap[i].y = hellAmbience;
+                    lightmap[i].z = hellAmbience;
 #ifndef EDITOR
                     if ( svFlags & SV_FLAG_CHEATS )
                     {
-                        lightmap[c].x = *cvar_hell_ambience;
-                        lightmap[c].y = *cvar_hell_ambience;
-                        lightmap[c].z = *cvar_hell_ambience;
+                        lightmap[i].x = *cvar_hell_ambience;
+                        lightmap[i].y = *cvar_hell_ambience;
+                        lightmap[i].z = *cvar_hell_ambience;
                     }
 #endif
                 }
-                for (int c = 0; c < (destmap->width + 2) * (destmap->height + 2); c++ )
+				for ( size_t i = 0; i < lightmapSmoothedSize3D(destmap->width, destmap->height); ++i )
                 {
-                    lightmapSmoothed[c].x = hellAmbience;
-                    lightmapSmoothed[c].y = hellAmbience;
-                    lightmapSmoothed[c].z = hellAmbience;
+                    lightmapSmoothed[i].x = hellAmbience;
+                    lightmapSmoothed[i].y = hellAmbience;
+                    lightmapSmoothed[i].z = hellAmbience;
 #ifndef EDITOR
                     if ( svFlags & SV_FLAG_CHEATS )
                     {
-                        lightmapSmoothed[c].x = *cvar_hell_ambience;
-                        lightmapSmoothed[c].y = *cvar_hell_ambience;
-                        lightmapSmoothed[c].z = *cvar_hell_ambience;
+                        lightmapSmoothed[i].x = *cvar_hell_ambience;
+                        lightmapSmoothed[i].y = *cvar_hell_ambience;
+                        lightmapSmoothed[i].z = *cvar_hell_ambience;
                     }
 #endif
                 }

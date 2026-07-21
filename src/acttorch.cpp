@@ -20,7 +20,7 @@
 #include "interface/interface.hpp"
 #include "prng.hpp"
 #include "mod_tools.hpp"
-
+#include "light.hpp"
 /*-------------------------------------------------------------------------------
 
 	act*
@@ -379,6 +379,8 @@ void actLightSource(Entity* my)
 
 void Entity::actLightSource()
 {
+	const int lightLayer =
+		entityZToLightmapLayer(z);
 	if ( multiplayer != CLIENT )
 	{
 		if ( lightSourceDelay > 0 && lightSourceDelayCounter == 0 )
@@ -396,7 +398,18 @@ void Entity::actLightSource()
 			float r = (color / 255.f) * (float)((lightSourceRGB & 0xFF));
 			float g = (color / 255.f) * (float)((lightSourceRGB >> 8) & 0xFF);
 			float b = (color / 255.f) * (float)((lightSourceRGB >> 16) & 0xFF);
-			light = lightSphereShadow(0, x / 16, y / 16, lightSourceRadius, r, g, b, 0.f, 0.5f);
+light = lightSphereShadow(
+	0,
+	x / 16,
+	y / 16,
+	lightLayer,
+	lightSourceRadius,
+	r,
+	g,
+	b,
+	0.f,
+	0.5f
+);
 			LIGHTSOURCE_LIGHT = 1;
 		}
 		if ( lightSourceFlicker && flickerLights )
@@ -412,7 +425,18 @@ void Entity::actLightSource()
 				float r = (color / 255.f) * (float)((lightSourceRGB & 0xFF));
 				float g = (color / 255.f) * (float)((lightSourceRGB >> 8) & 0xFF);
 				float b = (color / 255.f) * (float)((lightSourceRGB >> 16) & 0xFF);
-                light = lightSphereShadow(0, x / 16, y / 16, lightSourceRadius, r, g, b, 0.f, 0.5f);
+                light = lightSphereShadow(
+	0,
+	x / 16,
+	y / 16,
+	lightLayer,
+	lightSourceRadius,
+	r,
+	g,
+	b,
+	0.f,
+	0.5f
+);
 			}
 		}
 
@@ -427,7 +451,18 @@ void Entity::actLightSource()
 				float r = (color / 255.f) * (float)((lightSourceRGB & 0xFF));
 				float g = (color / 255.f) * (float)((lightSourceRGB >> 8) & 0xFF);
 				float b = (color / 255.f) * (float)((lightSourceRGB >> 16) & 0xFF);
-                light = lightSphereShadow(0, x / 16, y / 16, lightSourceRadius, r, g, b, 0.f, 0.5f);
+                light = lightSphereShadow(
+	0,
+	x / 16,
+	y / 16,
+	lightLayer,
+	lightSourceRadius,
+	r,
+	g,
+	b,
+	0.f,
+	0.5f
+);
 			}
 			else
 			{
@@ -437,7 +472,18 @@ void Entity::actLightSource()
 				float r = (color / 255.f) * (float)((lightSourceRGB & 0xFF));
 				float g = (color / 255.f) * (float)((lightSourceRGB >> 8) & 0xFF);
 				float b = (color / 255.f) * (float)((lightSourceRGB >> 16) & 0xFF);
-                light = lightSphereShadow(0, x / 16, y / 16, lightSourceRadius, r, g, b, 0.f, 0.5f);
+light = lightSphereShadow(
+	0,
+	x / 16,
+	y / 16,
+	lightLayer,
+	lightSourceRadius,
+	r,
+	g,
+	b,
+	0.f,
+	0.5f
+);
 			}
 			LIGHTSOURCE_FLICKER = 2 + local_rng.rand() % 7;
 		}

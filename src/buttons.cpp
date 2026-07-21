@@ -14,7 +14,7 @@
 #include "entity.hpp"
 #include "files.hpp"
 #include "player.hpp"
-
+#include "light.hpp"
 button_t* butX;
 button_t* but_;
 button_t* butTilePalette;
@@ -603,9 +603,19 @@ void buttonNewConfirm(button_t* my)
 }
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
-        lightmaps[c].resize(map.width * map.height);
+        lightmaps[c].resize(
+	lightmapSize3D(
+		map.width,
+		map.height
+	)
+);
         lightmapsSmoothed[c].clear();
-        lightmapsSmoothed[c].resize((map.width + 2) * (map.height + 2));
+lightmapsSmoothed[c].resize(
+	lightmapSmoothedSize3D(
+		map.width,
+		map.height
+	)
+);
     }
 	strcpy(message, "                             Created a new map.");
 	filename[0] = 0;
@@ -1508,9 +1518,19 @@ void buttonAttributesConfirm(button_t* my)
 	strcpy(map.author, authortext);
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
-        lightmaps[c].resize(map.width * map.height);
+        lightmaps[c].resize(
+	lightmapSize3D(
+		map.width,
+		map.height
+	)
+);
         lightmapsSmoothed[c].clear();
-        lightmapsSmoothed[c].resize((map.width + 2) * (map.height + 2));
+        lightmapsSmoothed[c].resize(
+	lightmapSmoothedSize3D(
+		map.width,
+		map.height
+	)
+);
     }
 
 	// transfer data from the new map to the old map and fill extra space with empty data

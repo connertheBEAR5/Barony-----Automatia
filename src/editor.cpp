@@ -11,6 +11,7 @@
 
 #include "main.hpp"
 #include "draw.hpp"
+#include "light.hpp"
 #include "editor.hpp"
 #include "entity.hpp"
 #include "items.hpp"
@@ -1840,9 +1841,20 @@ int main(int argc, char** argv)
 	}
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
-        lightmaps[c].resize(map.width * map.height);
+        lightmaps[c].resize(
+			lightmapSize3D(
+				map.width,
+				map.height
+			)
+		);
         lightmapsSmoothed[c].clear();
-        lightmapsSmoothed[c].resize((map.width + 2) * (map.height + 2));
+
+		lightmapsSmoothed[c].resize(
+			lightmapSmoothedSize3D(
+				map.width,
+				map.height
+			)
+		);
     }
 
 	// initialize camera position
