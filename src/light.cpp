@@ -496,18 +496,78 @@ static ConsoleCommand ccmd_reloadLights("/reloadlights", "reload light json",
     });
 #endif
 
-light_t* addLight(Sint32 x, Sint32 y, const char* name, int range_bonus, int index) {
-    if (!name || !name[0]) {
-        return nullptr;
-    }
-    auto find = lightDefs.find(name);
-    if (find == lightDefs.end()) {
-        return nullptr;
-    }
-    const auto& def = find->second;
-    if (def.shadows) {
-        return lightSphereShadow(index, x, y, std::max(def.radius + range_bonus, 1), def.r, def.g, def.b, def.a, def.falloff_exp);
-    } else {
-        return lightSphere(index, x, y, std::max(def.radius + range_bonus, 1), def.r, def.g, def.b, def.a, def.falloff_exp);
-    }
+light_t* addLight(
+	Sint32 x,
+	Sint32 y,
+	const char* name,
+	int range_bonus,
+	int index
+)
+{
+	return addLight(
+		x,
+		y,
+		0,
+		name,
+		range_bonus,
+		index
+	);
+}
+
+light_t* addLight(
+	Sint32 x,
+	Sint32 y,
+	Sint32 layer,
+	const char* name,
+	int range_bonus,
+	int index
+)
+{
+	if ( !name || !name[0] )
+	{
+		return nullptr;
+	}
+
+	auto find = lightDefs.find(name);
+	if ( find == lightDefs.end() )
+	{
+		return nullptr;
+	}
+
+	layer = clampLightmapLayer(layer);
+
+	const auto& def = find->second;
+	const Sint32 radius =
+		std::max(def.radius + range_bonus, 1);
+
+	if ( def.shadows )
+	{
+		return lightSphereShadow(
+			index,
+			x,
+			y,
+			layer,
+			radius,
+			def.r,
+			def.g,
+			def.b,
+			def.a,
+			def.falloff_exp
+		);
+	}
+	else
+	{
+		return lightSphere(
+			index,
+			x,
+			y,
+			layer,
+			radius,
+			def.r,
+			def.g,
+			def.b,
+			def.a,
+			def.falloff_exp
+		);
+	}
 }

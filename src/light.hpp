@@ -184,6 +184,14 @@ light_t* addLight(
 	int range_bonus = 0,
 	int index = 0
 );
+light_t* addLight(
+	Sint32 x,
+	Sint32 y,
+	Sint32 layer,
+	const char* name,
+	int range_bonus = 0,
+	int index = 0
+);
 struct LightDef {
     int radius = 0;
     float r = 0.f;

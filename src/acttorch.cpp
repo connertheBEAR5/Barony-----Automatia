@@ -40,6 +40,14 @@ void actTorch(Entity* my)
 {
 	int i;
 
+	const int lightLayer =
+		entityZToLightmapLayer(my->z);
+
+	const int wallLayer =
+		lightLayer == 0
+			? OBSTACLELAYER
+			: lightLayer;
+
 	if ( my->ticks == 1 )
 	{
 		my->createWorldUITooltip();
@@ -88,8 +96,11 @@ void actTorch(Entity* my)
 	checkx = checkx >> 4;
 	int checky = my->y - sin(my->yaw) * 8;
 	checky = checky >> 4;
-	if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
-	{
+if ( !map.tiles[
+	wallLayer
+	+ checky * MAPLAYERS
+	+ checkx * MAPLAYERS * map.height
+] )	{
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
 		return;
@@ -98,7 +109,12 @@ void actTorch(Entity* my)
 	// lighting
 	if ( !TORCH_LIGHTING )
 	{
-		my->light = addLight(my->x / 16, my->y / 16, "torch_wall");
+		my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"torch_wall"
+);
 		TORCH_LIGHTING = 1;
 	}
 	if ( flickerLights )
@@ -113,12 +129,22 @@ void actTorch(Entity* my)
 		if (TORCH_LIGHTING == 1)
 		{
 			my->removeLightField();
-			my->light = addLight(my->x / 16, my->y / 16, "torch_wall");
+			my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"torch_wall"
+);
 		}
 		else
 		{
 			my->removeLightField();
-			my->light = addLight(my->x / 16, my->y / 16, "torch_wall_flicker");
+			my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"torch_wall_flicker"
+);
 		}
 		TORCH_FLICKER = 2 + local_rng.rand() % 7;
 	}
@@ -213,6 +239,14 @@ void actCrystalShard(Entity* my)
 {
 	int i;
 
+	const int lightLayer =
+		entityZToLightmapLayer(my->z);
+
+	const int wallLayer =
+		lightLayer == 0
+			? OBSTACLELAYER
+			: lightLayer;
+
 	if ( my->ticks == 1 )
 	{
 		my->createWorldUITooltip();
@@ -258,7 +292,7 @@ void actCrystalShard(Entity* my)
 	checkx = checkx >> 4;
 	int checky = my->y - sin(my->yaw) * 8;
 	checky = checky >> 4;
-	if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
+	if ( !map.tiles[wallLayer + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
 	{
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
@@ -268,7 +302,12 @@ void actCrystalShard(Entity* my)
 	// lighting
 	if ( !TORCH_LIGHTING )
 	{
-		my->light = addLight(my->x / 16, my->y / 16, "crystal_shard_wall");
+		my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"crystal_shard_wall"
+);
 		TORCH_LIGHTING = 1;
 	}
 
@@ -284,12 +323,22 @@ void actCrystalShard(Entity* my)
 		if ( TORCH_LIGHTING == 1 )
 		{
 			my->removeLightField();
-			my->light = addLight(my->x / 16, my->y / 16, "crystal_shard_wall");
+			my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"crystal_shard_wall"
+);
 		}
 		else
 		{
 			my->removeLightField();
-			my->light = addLight(my->x / 16, my->y / 16, "crystal_shard_wall_flicker");
+			my->light = addLight(
+	my->x / 16,
+	my->y / 16,
+	lightLayer,
+	"crystal_shard_wall_flicker"
+);
 		}
 		TORCH_FLICKER = 2 + local_rng.rand() % 7;
 	}
