@@ -332,6 +332,7 @@ struct Chunk {
     GLuint vbo_positions = 0;
     GLuint vbo_texcoords = 0;
     GLuint vbo_colors = 0;
+    GLuint vbo_lightlayers = 0;
     GLint indices = 0;
     
     Chunk() = default;
@@ -343,6 +344,7 @@ struct Chunk {
         vbo_positions = rhs.vbo_positions;
         vbo_texcoords = rhs.vbo_texcoords;
         vbo_colors = rhs.vbo_colors;
+        vbo_lightlayers = rhs.vbo_lightlayers;
         indices = rhs.indices;
         x = rhs.x;
         y = rhs.y;
@@ -353,6 +355,7 @@ struct Chunk {
         rhs.vbo_positions = 0;
         rhs.vbo_texcoords = 0;
         rhs.vbo_colors = 0;
+        rhs.vbo_lightlayers = 0;
         rhs.indices = 0;
         rhs.x = 0;
         rhs.y = 0;
@@ -368,6 +371,7 @@ struct Chunk {
         vbo_positions = rhs.vbo_positions;
         vbo_texcoords = rhs.vbo_texcoords;
         vbo_colors = rhs.vbo_colors;
+        vbo_lightlayers = rhs.vbo_lightlayers;
         indices = rhs.indices;
         x = rhs.x;
         y = rhs.y;
@@ -378,6 +382,7 @@ struct Chunk {
         rhs.vbo_positions = 0;
         rhs.vbo_texcoords = 0;
         rhs.vbo_colors = 0;
+        rhs.vbo_lightlayers = 0;
         rhs.indices = 0;
         rhs.x = 0;
         rhs.y = 0;
@@ -394,7 +399,12 @@ struct Chunk {
     }
     
     void build(const map_t& map, bool ceiling, int startX, int startY, int w, int h);
-    void buildBuffers(const std::vector<float>& positions, const std::vector<float>& texcoords, const std::vector<float>& colors);
+    void buildBuffers(
+	const std::vector<float>& positions,
+	const std::vector<float>& texcoords,
+	const std::vector<float>& colors,
+	const std::vector<float>& lightLayers
+);
     void destroyBuffers();
     void draw();
     bool isDirty(const map_t& map);

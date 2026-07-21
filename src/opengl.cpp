@@ -3056,11 +3056,12 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
     std::vector<float> positions;
     std::vector<float> texcoords;
     std::vector<float> colors;
+    std::vector<float> lightLayers;
     
     positions.reserve(1200);
     texcoords.reserve(800);
     colors.reserve(1200);
-    
+    lightLayers.reserve(400);
     // determine ceiling texture
     int mapceilingtile = 50;
     if (map.flags[MAP_FLAG_CEILINGTILE] > 0 && map.flags[MAP_FLAG_CEILINGTILE] < numtiles) {
@@ -3103,6 +3104,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
             }
 
             for (int z = 0; z < MAPLAYERS; ++z) {
+                const size_t firstVertexForLayer =
+	            positions.size() / 3;
                 const int index = z + y * MAPLAYERS + x * map.height * MAPLAYERS;
                 const bool validMapLayer = z >= 0 && z < MAPLAYERS;
 
@@ -3438,7 +3441,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                 }
-}    
+            }    
                 // build floor and ceiling
                 {
                     // select floor/ceiling texture
@@ -3555,15 +3558,45 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                 }
+            const size_t vertexCountAfterLayer =
+	positions.size() / 3;
+
+const size_t verticesAdded =
+	vertexCountAfterLayer
+	- firstVertexForLayer;
+
+lightLayers.insert(
+	lightLayers.end(),
+	verticesAdded,
+	static_cast<float>(z)
+);
             }
         }
     }
-    indices = (int)texcoords.size() / 2;
-    buildBuffers(positions, texcoords, colors);
-    //printlog("built chunk with %d tris", indices);
+const size_t vertexCount =
+	positions.size() / 3;
+
+assert(texcoords.size() / 2 == vertexCount);
+assert(colors.size() / 3 == vertexCount);
+assert(lightLayers.size() == vertexCount);
+
+indices =
+	static_cast<int>(vertexCount);
+
+buildBuffers(
+	positions,
+	texcoords,
+	colors,
+	lightLayers
+);
 }
 
-void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<float>& texcoords, const std::vector<float>& colors) {
+void Chunk::buildBuffers(
+	const std::vector<float>& positions,
+	const std::vector<float>& texcoords,
+	const std::vector<float>& colors,
+	const std::vector<float>& lightLayers
+) {
     // create buffers
 #ifdef VERTEX_ARRAYS_ENABLED
     if (!vao) {
@@ -3580,7 +3613,14 @@ void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<
     if (!vbo_colors) {
         GL_CHECK_ERR(glGenBuffers(1, &vbo_colors));
     }
-    
+    if (!vbo_lightlayers) {
+        GL_CHECK_ERR(
+            glGenBuffers(
+                1,
+                &vbo_lightlayers
+            )
+        );
+    }
     // upload positions
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, vbo_positions));
     GL_CHECK_ERR(glBufferData(GL_ARRAY_BUFFER, positions.size() * sizeof(float), positions.data(), GL_DYNAMIC_DRAW));
@@ -3604,7 +3644,39 @@ void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<
     GL_CHECK_ERR(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
     GL_CHECK_ERR(glEnableVertexAttribArray(2));
 #endif
-    
+// upload exact structural light layers
+GL_CHECK_ERR(
+	glBindBuffer(
+		GL_ARRAY_BUFFER,
+		vbo_lightlayers
+	)
+);
+
+GL_CHECK_ERR(
+	glBufferData(
+		GL_ARRAY_BUFFER,
+		lightLayers.size() * sizeof(float),
+		lightLayers.data(),
+		GL_DYNAMIC_DRAW
+	)
+);
+
+#ifdef VERTEX_ARRAYS_ENABLED
+GL_CHECK_ERR(
+	glVertexAttribPointer(
+		3,
+		1,
+		GL_FLOAT,
+		GL_FALSE,
+		0,
+		nullptr
+	)
+);
+
+GL_CHECK_ERR(
+	glEnableVertexAttribArray(3)
+);
+#endif    
 #ifndef VERTEX_ARRAYS_ENABLED
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, 0));
 #endif
@@ -3626,6 +3698,16 @@ void Chunk::destroyBuffers() {
     if (vbo_colors) {
         GL_CHECK_ERR(glDeleteBuffers(1, &vbo_colors));
         vbo_colors = 0;
+    }
+    if (vbo_lightlayers) {
+	GL_CHECK_ERR(
+		glDeleteBuffers(
+                1,
+                &vbo_lightlayers
+            )
+        );
+
+        vbo_lightlayers = 0;
     }
     indices = 0;
 }
@@ -3649,6 +3731,27 @@ void Chunk::draw() {
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, vbo_colors));
     GL_CHECK_ERR(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
     GL_CHECK_ERR(glEnableVertexAttribArray(2));
+    GL_CHECK_ERR(
+	glBindBuffer(
+		GL_ARRAY_BUFFER,
+		vbo_lightlayers
+	)
+);
+
+GL_CHECK_ERR(
+	glVertexAttribPointer(
+		3,
+		1,
+		GL_FLOAT,
+		GL_FALSE,
+		0,
+		nullptr
+	)
+);
+
+GL_CHECK_ERR(
+	glEnableVertexAttribArray(3)
+);
 #endif
     
     GL_CHECK_ERR(glDrawArrays(GL_TRIANGLES, 0, indices));
@@ -3657,6 +3760,7 @@ void Chunk::draw() {
     GL_CHECK_ERR(glDisableVertexAttribArray(0));
     GL_CHECK_ERR(glDisableVertexAttribArray(1));
     GL_CHECK_ERR(glDisableVertexAttribArray(2));
+    GL_CHECK_ERR(glDisableVertexAttribArray(3));
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, 0));
 #endif
 }
@@ -3680,6 +3784,11 @@ bool Chunk::isDirty(const map_t& map) {
 
 void clearChunks() {
     chunks.clear();
+
+	// A newly loaded map may have the same width, height, and skybox
+	// as the previous map but contain structures on different layers.
+	// Force the next sky draw to recalculate its height.
+	currentSkyLayer = -1;
 }
 
 void createChunks() {

@@ -21,7 +21,38 @@
 	radius and color; casts shadows against walls
 
 -------------------------------------------------------------------------------*/
+static inline bool lightWallBlocksAtLayer(
+	int x,
+	int y,
+	int layer
+)
+{
+	if ( x < 0
+		|| y < 0
+		|| x >= map.width
+		|| y >= map.height )
+	{
+		return true;
+	}
 
+	layer = clampLightmapLayer(layer);
+
+	// Preserve the original ground-floor wall behavior.
+	const int blockingLayer =
+		layer == 0
+			? OBSTACLELAYER
+			: layer;
+
+	const int index =
+		blockingLayer
+		+ y * MAPLAYERS
+		+ x * MAPLAYERS * map.height;
+
+	const Sint32 tile = map.tiles[index];
+
+	return tile != 0
+		&& tile != TRANSPARENT_TILE;
+}
 light_t* lightSphereShadow(
 	int index,
 	Sint32 x,
@@ -102,29 +133,7 @@ light_t* lightSphereShadow(
 			int u2 = u;
 			int v2 = v;
 
-			bool wallhit = true;
-
-			const int mapindex =
-				v * MAPLAYERS
-				+ u * MAPLAYERS * map.height;
-
-			for ( int z = 0;
-				z < MAPLAYERS;
-				++z )
-			{
-				if ( !map.tiles[mapindex + z]
-					|| map.tiles[mapindex + z]
-						== TRANSPARENT_TILE )
-				{
-					wallhit = false;
-					break;
-				}
-			}
-
-			if ( wallhit )
-			{
-				continue;
-			}
+bool wallhit = false;
 
 			if ( dxabs >= dyabs )
 			{
@@ -141,25 +150,15 @@ light_t* lightSphereShadow(
 						v2 -= sgn(dy);
 					}
 
-					if ( u2 >= 0
-						&& u2 < map.width
-						&& v2 >= 0
-						&& v2 < map.height )
-					{
-						const int tileIndex =
-							light->layer
-							+ v2 * MAPLAYERS
-							+ u2 * MAPLAYERS
-								* map.height;
-
-						if ( map.tiles[tileIndex]
-							&& map.tiles[tileIndex]
-								!= TRANSPARENT_TILE )
-						{
-							wallhit = true;
-							break;
-						}
-					}
+if ( lightWallBlocksAtLayer(
+		u2,
+		v2,
+		light->layer
+	) )
+{
+	wallhit = true;
+	break;
+}
 				}
 			}
 			else
@@ -177,25 +176,15 @@ light_t* lightSphereShadow(
 						u2 -= sgn(dx);
 					}
 
-					if ( u2 >= 0
-						&& u2 < map.width
-						&& v2 >= 0
-						&& v2 < map.height )
-					{
-						const int tileIndex =
-							light->layer
-							+ v2 * MAPLAYERS
-							+ u2 * MAPLAYERS
-								* map.height;
-
-						if ( map.tiles[tileIndex]
-							&& map.tiles[tileIndex]
-								!= TRANSPARENT_TILE )
-						{
-							wallhit = true;
-							break;
-						}
-					}
+if ( lightWallBlocksAtLayer(
+		u2,
+		v2,
+		light->layer
+	) )
+{
+	wallhit = true;
+	break;
+}
 				}
 			}
 

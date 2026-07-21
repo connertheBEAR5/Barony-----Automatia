@@ -127,6 +127,7 @@ static void buildWorldShader(
     shader.bindAttribLocation("iPosition", 0);
     shader.bindAttribLocation("iTexCoord", 1);
     shader.bindAttribLocation("iColor", 2);
+	shader.bindAttribLocation("iLightLayer", 3);
     shader.link();
     if (textures) {
         shader.bind();
@@ -428,26 +429,30 @@ void createCommonDrawResources() {
 	// world shader:
 
 	static const char world_vertex_glsl[] =
-		"in vec3 iPosition;"
-		"in vec2 iTexCoord;"
-		"in vec3 iColor;"
-		"uniform mat4 uProj;"
-		"uniform mat4 uView;"
-		"out vec2 TexCoord;"
-		"out vec3 Color;"
-		"out vec4 WorldPos;"
+"in vec3 iPosition;"
+"in vec2 iTexCoord;"
+"in vec3 iColor;"
+"in float iLightLayer;"
+"uniform mat4 uProj;"
+"uniform mat4 uView;"
+"out vec2 TexCoord;"
+"out vec3 Color;"
+"out vec4 WorldPos;"
+"flat out float LightLayer;"
 
 		"void main() {"
 		"WorldPos = vec4(iPosition, 1.0);"
 		"gl_Position = uProj * uView * WorldPos;"
-		"TexCoord = iTexCoord;"
-		"Color = iColor;"
-		"}";
+"TexCoord = iTexCoord;"
+"Color = iColor;"
+"LightLayer = iLightLayer;"
+"}";
 
 	static const char world_fragment_glsl[] =
-		"in vec2 TexCoord;"
-		"in vec3 Color;"
-		"in vec4 WorldPos;"
+"in vec2 TexCoord;"
+"in vec3 Color;"
+"in vec4 WorldPos;"
+"flat in float LightLayer;"
 		"uniform vec4 uLightFactor;"
 		"uniform sampler2D uTextures;"
 		"uniform sampler2D uLightmap;"
@@ -458,11 +463,54 @@ void createCommonDrawResources() {
 		"out vec4 FragColor;"
 
 		"void main() {"
+"float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
+
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
-"/ (uMapDims.y * 32.0);"
-		"vec4 Lightmap = texture(uLightmap, LightCoord);"
+"LightCoord.y = ("
+"WorldPos.z / 32.0"
+"+ ClampedLayer * uMapDims.y"
+") / (uMapDims.y * 32.0);"
+
+"vec4 Lightmap = texture(uLightmap, LightCoord);"
+
+// One layer above and below: 45% spill.
+"if (ClampedLayer > 0.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y -= 1.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.45"
+");"
+"}"
+
+"if (ClampedLayer < 31.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y += 1.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.45"
+");"
+"}"
+
+// Two layers above and below: 15% spill.
+"if (ClampedLayer > 1.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y -= 2.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.15"
+");"
+"}"
+
+"if (ClampedLayer < 30.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y += 2.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.15"
+");"
+"}"
 		"FragColor = texture(uTextures, TexCoord) * vec4(Color, 1.f) * uLightFactor * Lightmap;"
 
 		"if (uFogDistance > 0.0) {"
@@ -481,6 +529,7 @@ void createCommonDrawResources() {
 		"in vec2 TexCoord;"
 		"in vec3 Color;"
 		"in vec4 WorldPos;"
+		"flat in float LightLayer;"
 		"uniform float uDitherAmount;"
 		"uniform vec4 uLightFactor;"
 		"uniform sampler2D uTextures;"
@@ -505,11 +554,54 @@ void createCommonDrawResources() {
 
 		"void main() {"
 		"dither(ivec2(gl_FragCoord), uDitherAmount);"
+"float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
+
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
-"/ (uMapDims.y * 32.0);"
-		"vec4 Lightmap = texture(uLightmap, LightCoord);"
+"LightCoord.y = ("
+"WorldPos.z / 32.0"
+"+ ClampedLayer * uMapDims.y"
+") / (uMapDims.y * 32.0);"
+
+"vec4 Lightmap = texture(uLightmap, LightCoord);"
+
+// One layer above and below: 45% spill.
+"if (ClampedLayer > 0.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y -= 1.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.45"
+");"
+"}"
+
+"if (ClampedLayer < 31.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y += 1.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.45"
+");"
+"}"
+
+// Two layers above and below: 15% spill.
+"if (ClampedLayer > 1.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y -= 2.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.15"
+");"
+"}"
+
+"if (ClampedLayer < 30.0) {"
+"vec2 SpillCoord = LightCoord;"
+"SpillCoord.y += 2.0 / 32.0;"
+"Lightmap = max("
+"Lightmap,"
+"texture(uLightmap, SpillCoord) * 0.15"
+");"
+"}"
 		"FragColor = texture(uTextures, TexCoord) * vec4(Color, 1.f) * uLightFactor * Lightmap;"
 
 		"if (uFogDistance > 0.0) {"
@@ -669,7 +761,7 @@ void createCommonDrawResources() {
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
 "LightCoord.y = (WorldPos.z / 32.0)"
 "/ (uMapDims.y * 32.0);"
-        "vec4 Lightmap = texture(uLightmap, LightCoord);"
+"vec4 Lightmap = texture(uLightmap, LightCoord);"
         "FragColor = Texture * uLightFactor * (Lightmap + uLightColor) + uColorAdd;"
         "if (FragColor.a <= 0) discard;"
         
