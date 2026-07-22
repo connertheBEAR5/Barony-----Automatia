@@ -2417,10 +2417,25 @@ void drawEntities3D(view_t* camera, int mode)
             {
                 const int x = entity->x / 16;
                 const int y = entity->y / 16;
+				const int entityLayer =
+	clampLightmapLayer(
+		static_cast<int>(
+			std::lround(
+				-entity->z / 16.0
+			)
+		)
+	);
                 if (x >= 0 && y >= 0 && x < map.width && y < map.height)
                 {
-                    if ( !camera->vismap[y + x * map.height] 
-						&& entity->monsterEntityRenderAsTelepath == 0
+                    if (
+	!rendererLayerIsVisible(
+		*camera,
+		map,
+		x,
+		y,
+		entityLayer
+	)
+	&& entity->monsterEntityRenderAsTelepath == 0
 #ifndef EDITOR
 						&& !(!intro && entity->goldTelepathy > 0 && entity->behavior == &actGoldBag 
 							&& currentPlayerViewport >= 0 && currentPlayerViewport < MAXPLAYERS
@@ -4630,6 +4645,60 @@ bool rendererColumnHasVisibleGeometry(
 	return (
 		visibleLayers
 			& geometryLayers
+	) != 0;
+}
+bool rendererLayerIsVisible(
+	const view_t& camera,
+	const map_t& map,
+	int x,
+	int y,
+	int layer
+)
+{
+	if ( x < 0
+		|| y < 0
+		|| x >= map.width
+		|| y >= map.height )
+	{
+		// Preserve the original behavior for entities outside the map.
+		return true;
+	}
+
+	const auto stateIterator =
+		rendererVisibilityStates.find(
+			&camera
+		);
+
+	if ( stateIterator
+		== rendererVisibilityStates.end() )
+	{
+		// Conservative fallback: do not hide entities if the
+		// layered visibility map has not been generated.
+		return true;
+	}
+
+	layer =
+		std::max(
+			0,
+			std::min(
+				layer,
+				MAPLAYERS - 1
+			)
+		);
+
+	const size_t visibilityIndex =
+		static_cast<size_t>(y)
+		+ static_cast<size_t>(x)
+			* map.height;
+
+	const Uint32 layerBit =
+		static_cast<Uint32>(1u)
+			<< layer;
+
+	return (
+		stateIterator->second.visibleLayers[
+			visibilityIndex
+		] & layerBit
 	) != 0;
 }
 void occlusionCulling(map_t& map, view_t& camera)
