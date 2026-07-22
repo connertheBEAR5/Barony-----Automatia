@@ -138,13 +138,69 @@ public:
         SDL_UnlockSurface(surf);
     }
     
-    void loadFloat(float* data, int width, int height, bool clamp, bool point) {
-        GL_CHECK_ERR(glBindTexture(GL_TEXTURE_2D, _texid));
-        GL_CHECK_ERR(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_FLOAT, data));
-        setParameters(clamp, point);
-        _w = width;
-        _h = height;
-    }
+void loadFloat(
+	float* data,
+	int width,
+	int height,
+	bool clamp,
+	bool point
+)
+{
+	GL_CHECK_ERR(
+		glBindTexture(
+			GL_TEXTURE_2D,
+			_texid
+		)
+	);
+
+	const bool dimensionsChanged =
+		_w != width
+		|| _h != height;
+
+	if ( dimensionsChanged )
+	{
+		// Allocate texture storage only on the first upload or when
+		// the atlas dimensions change.
+		GL_CHECK_ERR(
+			glTexImage2D(
+				GL_TEXTURE_2D,
+				0,
+				GL_RGBA32F,
+				static_cast<GLsizei>(width),
+				static_cast<GLsizei>(height),
+				0,
+				GL_RGBA,
+				GL_FLOAT,
+				data
+			)
+		);
+
+		_w = width;
+		_h = height;
+	}
+	else
+	{
+		// Reuse the existing GPU allocation and replace only its data.
+		GL_CHECK_ERR(
+			glTexSubImage2D(
+				GL_TEXTURE_2D,
+				0,
+				0,
+				0,
+				static_cast<GLsizei>(width),
+				static_cast<GLsizei>(height),
+				GL_RGBA,
+				GL_FLOAT,
+				data
+			)
+		);
+	}
+
+	setParameters(
+		clamp,
+		point
+	);
+}
 
     void bind() {
         GL_CHECK_ERR(glBindTexture(GL_TEXTURE_2D, _texid));

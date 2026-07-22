@@ -572,7 +572,11 @@ vec4_t unproject(
 
 -------------------------------------------------------------------------------*/
 
-static void fillSmoothLightmap(int which, map_t& map)
+static void fillSmoothLightmap(
+	int which,
+	map_t& map,
+	float updateScale = 1.f
+)
 {
 #ifndef EDITOR
 	if ( &map == &CompendiumEntries.compendiumMap )
@@ -601,8 +605,13 @@ static void fillSmoothLightmap(int which, map_t& map)
 		defaultSmoothRate;
 #endif
 
-	const float rate =
-		smoothingRate * (1.f / fpsLimit);
+const float rate =
+	std::min(
+		1.f,
+		smoothingRate
+			* updateScale
+			* (1.f / fpsLimit)
+	);
 
 	for ( int layer = 0;
 		layer < MAPLAYERS;
@@ -735,15 +744,16 @@ static void loadLightmapTexture(
 	auto* lightmapSmoothed =
 		lightmapsSmoothed[which].data();
 
-	static std::vector<float> pixels;
-	pixels.clear();
+static std::vector<float> pixels;
 
-	pixels.reserve(
-		static_cast<size_t>(map.width)
-		* map.height
-		* MAPLAYERS
-		* 4
-	);
+const size_t pixelCount =
+	static_cast<size_t>(map.width)
+	* static_cast<size_t>(map.height)
+	* static_cast<size_t>(MAPLAYERS);
+
+pixels.resize(
+	pixelCount * 4
+);
 
 #ifdef EDITOR
 	const bool fullbright = false;
@@ -773,7 +783,32 @@ static void loadLightmapTexture(
 #endif
 
 	const float div = 1.f / 255.f;
+        auto writePixel =
+	[&](
+		int x,
+		int y,
+		int layer,
+		float r,
+		float g,
+		float b,
+		float a
+	)
+	{
+		const size_t pixelIndex =
+			(
+				static_cast<size_t>(layer)
+					* static_cast<size_t>(map.height)
+					* static_cast<size_t>(map.width)
+				+ static_cast<size_t>(y)
+					* static_cast<size_t>(map.width)
+				+ static_cast<size_t>(x)
+			) * 4;
 
+		pixels[pixelIndex + 0] = r;
+		pixels[pixelIndex + 1] = g;
+		pixels[pixelIndex + 2] = b;
+		pixels[pixelIndex + 3] = a;
+	};
 	for ( int layer = 0;
 		layer < MAPLAYERS;
 		++layer )
@@ -788,15 +823,15 @@ static void loadLightmapTexture(
 			{
 				if ( fullbright )
 				{
-					pixels.insert(
-						pixels.end(),
-						{
-							1.f,
-							1.f,
-							1.f,
-							1.f
-						}
-					);
+                    writePixel(
+                        x,
+                        y,
+                        layer,
+                        1.f,
+                        1.f,
+                        1.f,
+                        1.f
+                    );
 
 					continue;
 				}
@@ -814,15 +849,15 @@ static void loadLightmapTexture(
 
 				if ( occluded )
 				{
-					pixels.insert(
-						pixels.end(),
-						{
-							0.f,
-							0.f,
-							0.f,
-							1.f
-						}
-					);
+                    writePixel(
+                        x,
+                        y,
+                        layer,
+                        0.f,
+                        0.f,
+                        0.f,
+                        1.f
+                    );
 
 					continue;
 				}
@@ -906,44 +941,48 @@ static void loadLightmapTexture(
 				total.z =
 					(total.z / count) * div;
 
-				if ( total.w > 0.01f )
-				{
-#ifndef EDITOR
-					const float shade =
-						std::min(
-							1.f,
-							(total.w / count)
-								* div
-						);
+				#ifndef EDITOR
+// The original alpha-based shade pass was designed for the legacy
+// ground lightmap. Layered lights already perform wall occlusion in
+// lightSphereShadow(), so applying this alpha shade to upper layers
+// can black out entire structural sections.
+if ( layer == 0 && total.w > 0.01f )
+{
+	const float shade =
+		std::min(
+			1.f,
+			(total.w / count)
+				* div
+		);
 
-					total.x -=
-						total.x
-						* shade
-						* cvar_shade_factor->x;
+	total.x -=
+		total.x
+			* shade
+			* cvar_shade_factor->x;
 
-					total.y -=
-						total.y
-						* shade
-						* cvar_shade_factor->y;
+	total.y -=
+		total.y
+			* shade
+			* cvar_shade_factor->y;
 
-					total.z -=
-						total.z
-						* shade
-						* cvar_shade_factor->z;
+	total.z -=
+		total.z
+			* shade
+			* cvar_shade_factor->z;
+}
 #endif
-				}
 
 				total.w = 1.f;
 
-				pixels.insert(
-					pixels.end(),
-					{
-						total.x,
-						total.y,
-						total.z,
-						total.w
-					}
-				);
+writePixel(
+	x,
+	y,
+	layer,
+	total.x,
+	total.y,
+	total.z,
+	total.w
+);
 			}
 		}
 	}
@@ -966,7 +1005,18 @@ static void loadLightmapTexture(
 		glActiveTexture(GL_TEXTURE0)
 	);
 }
+static void bindExistingLightmapTexture(int which)
+{
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE1)
+	);
 
+	lightmapTexture[which]->bind();
+
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE0)
+	);
+}
 static void updateChunks();
 
 void beginGraphics() {
@@ -1382,9 +1432,44 @@ void glBeginCamera(view_t* camera, bool useHDR, map_t& map)
     mapDims.x = map.width;
     mapDims.y = map.height;
     
-    // upload lightmap
-    fillSmoothLightmap(lightmapIndex, map);
-    loadLightmapTexture(lightmapIndex, map);
+// Updating and uploading all 32 lightmap layers every rendered frame
+// is expensive. Refresh each camera's lightmap every second frame.
+static bool lightmapInitialized[MAXPLAYERS + 1] = {};
+static int lightmapWidth[MAXPLAYERS + 1] = {};
+static int lightmapHeight[MAXPLAYERS + 1] = {};
+
+const bool lightmapDimensionsChanged =
+	lightmapWidth[lightmapIndex] != map.width
+	|| lightmapHeight[lightmapIndex] != map.height;
+
+const bool updateLightmap =
+	!lightmapInitialized[lightmapIndex]
+	|| lightmapDimensionsChanged
+	|| (camera->drawnFrames % 2 == 0);
+
+if ( updateLightmap )
+{
+	fillSmoothLightmap(
+		lightmapIndex,
+		map,
+		2.f
+	);
+
+	loadLightmapTexture(
+		lightmapIndex,
+		map
+	);
+
+	lightmapInitialized[lightmapIndex] = true;
+	lightmapWidth[lightmapIndex] = map.width;
+	lightmapHeight[lightmapIndex] = map.height;
+}
+else
+{
+	bindExistingLightmapTexture(
+		lightmapIndex
+	);
+}
     
 #ifndef EDITOR
     float fogDistance = *cvar_fogDistance;
