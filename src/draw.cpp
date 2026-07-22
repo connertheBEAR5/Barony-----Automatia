@@ -86,7 +86,21 @@ Shader spriteDitheredShader;
 Shader spriteBrightShader;
 Shader spriteUIShader;
 TempTexture* lightmapTexture[MAXPLAYERS + 1];
+struct RendererVisibilityState
+{
+	std::vector<Uint32> visibleLayers;
+	std::vector<Uint8> texturePixels;
 
+	GLuint texture = 0;
+	int width = 0;
+	int height = 0;
+	bool textureAllocated = false;
+};
+
+static std::unordered_map<
+	const view_t*,
+	RendererVisibilityState
+> rendererVisibilityStates;
 static Shader gearShader;
 static Shader lineShader;
 static Mesh lineMesh = {
@@ -4010,7 +4024,274 @@ static inline bool testTileOccludes(const map_t& map, int index) {
 		&& ((t0 & 0x00000000ffffffff) != TRANSPARENT_TILE)  // is obstacle layer != TRANSPARENT_TILE
 		&& (t1 != TRANSPARENT_TILE); // is ceiling != TRANSPARENT_TILE
 }
+static Uint32 rendererColumnOcclusionMask(
+	const map_t& map,
+	int x,
+	int y
+)
+{
+	if ( x < 0
+		|| y < 0
+		|| x >= map.width
+		|| y >= map.height )
+	{
+		return 0xffffffffu;
+	}
 
+	Uint32 mask = 0;
+
+	const int baseIndex =
+		y * MAPLAYERS
+		+ x * MAPLAYERS * map.height;
+
+	// Preserve the legacy floor/obstacle/ceiling test for layer 0.
+	if ( testTileOccludes(map, baseIndex) )
+	{
+		mask |= 1u;
+	}
+
+	for ( int layer = 1;
+		layer < MAPLAYERS;
+		++layer )
+	{
+		const Sint32 tile =
+			map.tiles[
+				baseIndex + layer
+			];
+
+		if ( tile != 0
+			&& tile != TRANSPARENT_TILE )
+		{
+			mask |=
+				static_cast<Uint32>(1u)
+					<< layer;
+		}
+	}
+
+	return mask;
+}
+static Uint32 rendererVisibilityRay(
+	const map_t& map,
+	int startX,
+	int startY,
+	int destinationX,
+	int destinationY
+)
+{
+	int x = startX;
+	int y = startY;
+
+	const int dx =
+		abs(destinationX - startX);
+
+	const int dy =
+		abs(destinationY - startY);
+
+	const int stepX =
+		startX < destinationX
+			? 1
+			: -1;
+
+	const int stepY =
+		startY < destinationY
+			? 1
+			: -1;
+
+	int error = dx - dy;
+
+	Uint32 blockedLayers = 0;
+
+	while ( x != destinationX
+		|| y != destinationY )
+	{
+		const int doubledError =
+			error * 2;
+
+		if ( doubledError > -dy )
+		{
+			error -= dy;
+			x += stepX;
+		}
+
+		if ( doubledError < dx )
+		{
+			error += dx;
+			y += stepY;
+		}
+
+		// The destination geometry must remain drawable.
+		// Only tiles between the camera and destination block it.
+		if ( x == destinationX
+			&& y == destinationY )
+		{
+			break;
+		}
+
+		blockedLayers |=
+			rendererColumnOcclusionMask(
+				map,
+				x,
+				y
+			);
+	}
+
+	return ~blockedLayers;
+}
+static void updateRendererVisibilityMap(
+	const map_t& map,
+	const view_t& camera,
+	bool cullingDisabled
+)
+{
+	auto& state =
+		rendererVisibilityStates[
+			&camera
+		];
+
+	const size_t tileCount =
+		static_cast<size_t>(map.width)
+		* static_cast<size_t>(map.height);
+
+	state.visibleLayers.resize(
+		tileCount
+	);
+
+	if ( cullingDisabled )
+	{
+		std::fill(
+			state.visibleLayers.begin(),
+			state.visibleLayers.end(),
+			0xffffffffu
+		);
+
+		return;
+	}
+
+	const int cameraX =
+		std::min(
+			std::max(
+				0,
+				static_cast<int>(camera.x)
+			),
+			static_cast<int>(map.width) - 1
+		);
+
+	const int cameraY =
+		std::min(
+			std::max(
+				0,
+				static_cast<int>(camera.y)
+			),
+			static_cast<int>(map.height) - 1
+		);
+
+	for ( int x = 0;
+		x < map.width;
+		++x )
+	{
+		for ( int y = 0;
+			y < map.height;
+			++y )
+		{
+			const size_t index =
+				static_cast<size_t>(y)
+				+ static_cast<size_t>(x)
+					* map.height;
+
+			if ( behindCamera(
+				camera,
+				static_cast<real_t>(x) + 0.5,
+				static_cast<real_t>(y) + 0.5
+			) )
+			{
+				state.visibleLayers[index] = 0;
+				continue;
+			}
+
+			state.visibleLayers[index] =
+				rendererVisibilityRay(
+					map,
+					cameraX,
+					cameraY,
+					x,
+					y
+				);
+		}
+	}
+
+	// Conservative one-tile expansion, matching the spirit of
+	// the old 2D visibility expansion.
+	static std::vector<Uint32>
+		expandedVisibility;
+
+	expandedVisibility =
+		state.visibleLayers;
+
+	for ( int x = 0;
+		x < map.width;
+		++x )
+	{
+		for ( int y = 0;
+			y < map.height;
+			++y )
+		{
+			const size_t destinationIndex =
+				static_cast<size_t>(y)
+				+ static_cast<size_t>(x)
+					* map.height;
+
+			Uint32 visibleMask =
+				state.visibleLayers[
+					destinationIndex
+				];
+
+			for ( int offsetX = -1;
+				offsetX <= 1;
+				++offsetX )
+			{
+				for ( int offsetY = -1;
+					offsetY <= 1;
+					++offsetY )
+				{
+					const int neighbourX =
+						x + offsetX;
+
+					const int neighbourY =
+						y + offsetY;
+
+					if ( neighbourX < 0
+						|| neighbourY < 0
+						|| neighbourX >= map.width
+						|| neighbourY >= map.height )
+					{
+						continue;
+					}
+
+					const size_t neighbourIndex =
+						static_cast<size_t>(
+							neighbourY
+						)
+						+ static_cast<size_t>(
+							neighbourX
+						) * map.height;
+
+					visibleMask |=
+						state.visibleLayers[
+							neighbourIndex
+						];
+				}
+			}
+
+			expandedVisibility[
+				destinationIndex
+			] = visibleMask;
+		}
+	}
+
+	state.visibleLayers.swap(
+		expandedVisibility
+	);
+}
 void occlusionCulling(map_t& map, view_t& camera)
 {
 	// cvars
@@ -4025,22 +4306,54 @@ void occlusionCulling(map_t& map, view_t& camera)
 #endif
 
 	const int size = map.width * map.height;
-	
-    if (*disabled) {
-        memset(camera.vismap, 1, sizeof(bool) * size);
-        return;
-    }
+	bool rendererCullingDisabled =
+	*disabled;
+if ( *disabled )
+{
+	memset(
+		camera.vismap,
+		1,
+		sizeof(bool) * size
+	);
+
+	updateRendererVisibilityMap(
+		map,
+		camera,
+		true
+	);
+
+	return;
+}
 
     const int camx = std::min(std::max(0, (int)camera.x), (int)map.width - 1);
     const int camy = std::min(std::max(0, (int)camera.y), (int)map.height - 1);
 
     // don't do culling if camera in wall
-	if (*disableInWalls) {
-		if (map.tiles[OBSTACLELAYER + camy * MAPLAYERS + camx * MAPLAYERS * map.height] != 0) {
-			memset(camera.vismap, 1, sizeof(bool) * size);
-			return;
-		}
+if ( *disableInWalls )
+{
+	if ( map.tiles[
+		OBSTACLELAYER
+			+ camy * MAPLAYERS
+			+ camx
+				* MAPLAYERS
+				* map.height
+	] != 0 )
+	{
+		memset(
+			camera.vismap,
+			1,
+			sizeof(bool) * size
+		);
+
+		updateRendererVisibilityMap(
+			map,
+			camera,
+			true
+		);
+
+		return;
 	}
+}
 
     // clear vismap
     memset(camera.vismap, 0, sizeof(bool) * size);
@@ -4214,6 +4527,11 @@ void occlusionCulling(map_t& map, view_t& camera)
 		}
 	}
 	memcpy(camera.vismap, vmap, size);
+	updateRendererVisibilityMap(
+	map,
+	camera,
+	false
+);
 }
 
 float foverflow() {
