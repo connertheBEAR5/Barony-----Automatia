@@ -2843,7 +2843,13 @@ void glDrawWorld(view_t* camera, int mode)
     GL_CHECK_ERR(glActiveTexture(GL_TEXTURE2));
     bindTextureAtlas(atlasIndex);
     GL_CHECK_ERR(glActiveTexture(GL_TEXTURE0));
-    
+    if ( mode == REALCOLORS )
+    {
+        bindRendererVisibilityMap(
+            *camera,
+            map
+        );
+    }
     // upload uniforms for dither shader
     if (mode == REALCOLORS) {
         worldDitheredShader.bind();
@@ -2875,7 +2881,18 @@ void glDrawWorld(view_t* camera, int mode)
             dither.lastUpdateTick = ticks;
             for (int x = chunk.x; x < chunk.x + chunk.w; ++x) {
                 for (int y = chunk.y; y < chunk.y + chunk.h; ++y) {
-                    if (camera->vismap[y + x * map.height]) {
+                    if (
+                            camera->vismap[
+                                y + x * map.height
+                            ]
+                            || rendererColumnHasVisibleGeometry(
+                                *camera,
+                                map,
+                                x,
+                                y
+                            )
+                        )
+                        {
                         if (ditheringDisabled) {
                             dither.value = Chunk::Dither::MAX;
                         } else {

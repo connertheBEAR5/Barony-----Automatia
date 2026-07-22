@@ -147,6 +147,7 @@ static void buildWorldShader(
         shader.bind();
         GL_CHECK_ERR(glUniform1i(shader.uniform("uTextures"), 2));
         GL_CHECK_ERR(glUniform1i(shader.uniform("uLightmap"), 1));
+		GL_CHECK_ERR(glUniform1i(shader.uniform("uVisibilityMap"), 3));
     }
 }
 
@@ -470,6 +471,7 @@ void createCommonDrawResources() {
 		"uniform vec4 uLightFactor;"
 		"uniform sampler2D uTextures;"
 		"uniform sampler2D uLightmap;"
+		"uniform sampler2D uVisibilityMap;"
 		"uniform vec2 uMapDims;"
 		"uniform vec4 uCameraPos;"
 		"uniform float uFogDistance;"
@@ -478,7 +480,35 @@ void createCommonDrawResources() {
 
 		"void main() {"
 "float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
+"float VisibilityTileX = clamp("
+"floor(WorldPos.x / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
 
+"float VisibilityTileY = clamp("
+"floor(WorldPos.z / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+
+"float VisibilityLayer = floor("
+"ClampedLayer + 0.5"
+");"
+
+"vec2 VisibilityCoord;"
+"VisibilityCoord.x = ("
+"VisibilityTileX + 0.5"
+") / uMapDims.x;"
+
+"VisibilityCoord.y = ("
+"VisibilityTileY + 0.5"
+"+ VisibilityLayer * uMapDims.y"
+") / (uMapDims.y * 32.0);"
+
+"if (texture(uVisibilityMap, VisibilityCoord).r < 0.5) {"
+"discard;"
+"}"
 // Horizontal surfaces keep their exact structural layer.
 // Vertical walls interpolate between the layer below and this layer.
 "float VerticalChange ="
@@ -560,6 +590,7 @@ void createCommonDrawResources() {
 		"uniform vec4 uLightFactor;"
 		"uniform sampler2D uTextures;"
 		"uniform sampler2D uLightmap;"
+		"uniform sampler2D uVisibilityMap;"
 		"uniform vec2 uMapDims;"
 		"uniform vec4 uCameraPos;"
 		"uniform float uFogDistance;"
@@ -581,7 +612,35 @@ void createCommonDrawResources() {
 		"void main() {"
 		"dither(ivec2(gl_FragCoord), uDitherAmount);"
 "float ClampedLayer = clamp(LightLayer, 0.0, 31.0);"
+"float VisibilityTileX = clamp("
+"floor(WorldPos.x / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
 
+"float VisibilityTileY = clamp("
+"floor(WorldPos.z / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+
+"float VisibilityLayer = floor("
+"ClampedLayer + 0.5"
+");"
+
+"vec2 VisibilityCoord;"
+"VisibilityCoord.x = ("
+"VisibilityTileX + 0.5"
+") / uMapDims.x;"
+
+"VisibilityCoord.y = ("
+"VisibilityTileY + 0.5"
+"+ VisibilityLayer * uMapDims.y"
+") / (uMapDims.y * 32.0);"
+
+"if (texture(uVisibilityMap, VisibilityCoord).r < 0.5) {"
+"discard;"
+"}"
 // Horizontal surfaces keep their exact structural layer.
 // Vertical walls interpolate between the layer below and this layer.
 "float VerticalChange ="
@@ -4291,6 +4350,287 @@ static void updateRendererVisibilityMap(
 	state.visibleLayers.swap(
 		expandedVisibility
 	);
+}
+void bindRendererVisibilityMap(
+	const view_t& camera,
+	const map_t& map
+)
+{
+	auto stateIterator =
+		rendererVisibilityStates.find(
+			&camera
+		);
+
+	if ( stateIterator
+		== rendererVisibilityStates.end() )
+	{
+		// Conservative fallback: never hide geometry if the CPU
+		// visibility pass has not run yet.
+		updateRendererVisibilityMap(
+			map,
+			camera,
+			true
+		);
+
+		stateIterator =
+			rendererVisibilityStates.find(
+				&camera
+			);
+	}
+
+	auto& state =
+		stateIterator->second;
+
+	const size_t tileCount =
+		static_cast<size_t>(map.width)
+		* static_cast<size_t>(map.height);
+
+	const size_t atlasPixelCount =
+		tileCount
+		* static_cast<size_t>(MAPLAYERS);
+
+	state.texturePixels.resize(
+		atlasPixelCount
+	);
+
+	for ( int layer = 0;
+		layer < MAPLAYERS;
+		++layer )
+	{
+		const Uint32 layerBit =
+			static_cast<Uint32>(1u)
+				<< layer;
+
+		for ( int y = 0;
+			y < map.height;
+			++y )
+		{
+			for ( int x = 0;
+				x < map.width;
+				++x )
+			{
+				const size_t visibilityIndex =
+					static_cast<size_t>(y)
+					+ static_cast<size_t>(x)
+						* map.height;
+
+				const size_t textureIndex =
+					static_cast<size_t>(x)
+					+ static_cast<size_t>(y)
+						* map.width
+					+ static_cast<size_t>(layer)
+						* map.width
+						* map.height;
+
+				state.texturePixels[
+					textureIndex
+				] =
+					(
+						state.visibleLayers[
+							visibilityIndex
+						] & layerBit
+					)
+					? 255
+					: 0;
+			}
+		}
+	}
+
+	if ( state.texture == 0 )
+	{
+		GL_CHECK_ERR(
+			glGenTextures(
+				1,
+				&state.texture
+			)
+		);
+	}
+
+	GL_CHECK_ERR(
+		glActiveTexture(
+			GL_TEXTURE3
+		)
+	);
+
+	GL_CHECK_ERR(
+		glBindTexture(
+			GL_TEXTURE_2D,
+			state.texture
+		)
+	);
+
+	// GL_R8 has one byte per pixel. Alignment 1 is required for
+	// maps whose width is not divisible by four.
+	GL_CHECK_ERR(
+		glPixelStorei(
+			GL_UNPACK_ALIGNMENT,
+			1
+		)
+	);
+
+	const bool dimensionsChanged =
+		!state.textureAllocated
+		|| state.width != map.width
+		|| state.height != map.height;
+
+	if ( dimensionsChanged )
+	{
+		GL_CHECK_ERR(
+			glTexImage2D(
+				GL_TEXTURE_2D,
+				0,
+				GL_R8,
+				static_cast<GLsizei>(
+					map.width
+				),
+				static_cast<GLsizei>(
+					map.height
+						* MAPLAYERS
+				),
+				0,
+				GL_RED,
+				GL_UNSIGNED_BYTE,
+				state.texturePixels.data()
+			)
+		);
+
+		GL_CHECK_ERR(
+			glTexParameteri(
+				GL_TEXTURE_2D,
+				GL_TEXTURE_WRAP_S,
+				GL_CLAMP_TO_EDGE
+			)
+		);
+
+		GL_CHECK_ERR(
+			glTexParameteri(
+				GL_TEXTURE_2D,
+				GL_TEXTURE_WRAP_T,
+				GL_CLAMP_TO_EDGE
+			)
+		);
+
+		GL_CHECK_ERR(
+			glTexParameteri(
+				GL_TEXTURE_2D,
+				GL_TEXTURE_MIN_FILTER,
+				GL_NEAREST
+			)
+		);
+
+		GL_CHECK_ERR(
+			glTexParameteri(
+				GL_TEXTURE_2D,
+				GL_TEXTURE_MAG_FILTER,
+				GL_NEAREST
+			)
+		);
+
+		state.width = map.width;
+		state.height = map.height;
+		state.textureAllocated = true;
+	}
+	else
+	{
+		GL_CHECK_ERR(
+			glTexSubImage2D(
+				GL_TEXTURE_2D,
+				0,
+				0,
+				0,
+				static_cast<GLsizei>(
+					map.width
+				),
+				static_cast<GLsizei>(
+					map.height
+						* MAPLAYERS
+				),
+				GL_RED,
+				GL_UNSIGNED_BYTE,
+				state.texturePixels.data()
+			)
+		);
+	}
+
+	GL_CHECK_ERR(
+		glPixelStorei(
+			GL_UNPACK_ALIGNMENT,
+			4
+		)
+	);
+
+	GL_CHECK_ERR(
+		glActiveTexture(
+			GL_TEXTURE0
+		)
+	);
+}
+bool rendererColumnHasVisibleGeometry(
+	const view_t& camera,
+	const map_t& map,
+	int x,
+	int y
+)
+{
+	if ( x < 0
+		|| y < 0
+		|| x >= map.width
+		|| y >= map.height )
+	{
+		return false;
+	}
+
+	const auto stateIterator =
+		rendererVisibilityStates.find(
+			&camera
+		);
+
+	if ( stateIterator
+		== rendererVisibilityStates.end() )
+	{
+		// Do not hide a chunk if visibility has not been generated.
+		return true;
+	}
+
+	const size_t visibilityIndex =
+		static_cast<size_t>(y)
+		+ static_cast<size_t>(x)
+			* map.height;
+
+	const Uint32 visibleLayers =
+		stateIterator->second.visibleLayers[
+			visibilityIndex
+		];
+
+	const int baseIndex =
+		y * MAPLAYERS
+		+ x * MAPLAYERS
+			* map.height;
+
+	Uint32 geometryLayers = 0;
+
+	for ( int layer = 0;
+		layer < MAPLAYERS;
+		++layer )
+	{
+		const Sint32 tile =
+			map.tiles[
+				baseIndex + layer
+			];
+
+		if ( tile != 0
+			&& tile != TRANSPARENT_TILE )
+		{
+			geometryLayers |=
+				static_cast<Uint32>(1u)
+					<< layer;
+		}
+	}
+
+	return (
+		visibleLayers
+			& geometryLayers
+	) != 0;
 }
 void occlusionCulling(map_t& map, view_t& camera)
 {

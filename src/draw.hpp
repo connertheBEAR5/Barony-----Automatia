@@ -356,6 +356,12 @@ void bindRendererVisibilityMap(
 	const view_t& camera,
 	const map_t& map
 );
+bool rendererColumnHasVisibleGeometry(
+	const view_t& camera,
+	const map_t& map,
+	int x,
+	int y
+);
 constexpr Uint32 makeColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return ((Uint32)a << 24) | ((Uint32)b << 16) | ((Uint32)g << 8) | ((Uint32)r << 0);
 }
