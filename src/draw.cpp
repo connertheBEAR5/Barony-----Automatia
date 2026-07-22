@@ -2425,17 +2425,24 @@ void drawEntities3D(view_t* camera, int mode)
 			)
 		)
 	);
-                if (x >= 0 && y >= 0 && x < map.width && y < map.height)
-                {
-                    if (
-	!rendererLayerIsVisible(
+if ( x >= 0
+	&& y >= 0
+	&& x < map.width
+	&& y < map.height )
+{
+	const bool spriteVisibleForCulling =
+	entity->behavior == &actFlame
+	|| rendererLayerIsVisible(
 		*camera,
 		map,
 		x,
 		y,
 		entityLayer
-	)
-	&& entity->monsterEntityRenderAsTelepath == 0
+	);
+
+	if (
+		!spriteVisibleForCulling
+		&& entity->monsterEntityRenderAsTelepath == 0
 #ifndef EDITOR
 						&& !(!intro && entity->goldTelepathy > 0 && entity->behavior == &actGoldBag 
 							&& currentPlayerViewport >= 0 && currentPlayerViewport < MAXPLAYERS
