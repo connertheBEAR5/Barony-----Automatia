@@ -435,6 +435,9 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	lastupdate = 0;
 	lastupdateserver = 0;
 	ticks = 0;
+	// New entities have no persistent identity until the map is saved
+	// or an existing V4.5 map restores one.
+	persistentID = 0;
 	x = 0;
 	y = 0;
 	z = 0;
@@ -2477,22 +2480,25 @@ int canWearEquip(Entity* entity, int category)
 
 void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entityStatToCopy)
 {
-	Stat* tmpStats = nullptr;
-	if ( !entityNew )
-	{
-		return;
-	}
-	if (entityToCopy != nullptr)
-	{
-		// Preserve vertical placement when duplicating, copying,
-		// undoing, redoing, or assembling submaps.
-		entityNew->z = entityToCopy->z;
-	}
-	else
-	{
-		// Default legacy placement for newly created entities.
-		entityNew->z = 0.0;
-	}
+    Stat* tmpStats = nullptr;
+    if ( !entityNew )
+    {
+        return;
+    }
+
+    if ( entityToCopy != nullptr )
+    {
+        // Preserve editor-owned data when rebuilding an existing
+        // entity through undo, redo, cycling, or duplication.
+        entityNew->z = entityToCopy->z;
+        entityNew->persistentID = entityToCopy->persistentID;
+    }
+    else
+    {
+        // Newly placed entities receive an ID on their first save.
+        entityNew->z = 0.0;
+        entityNew->persistentID = 0;
+    }
 	if ( entityStatToCopy != nullptr )
 	{
 		tmpStats = entityStatToCopy->getStats();

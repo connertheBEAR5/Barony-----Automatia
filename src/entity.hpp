@@ -95,7 +95,10 @@ class Entity
 public:
 	Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creaturelist);
 	~Entity();
-    
+    // Stable map-file identity used by persistent world state.
+    // This is separate from the temporary runtime/network UID.
+    // 0 means the entity has not received an ID yet.
+    Sint32 persistentID = 0;
     bool ditheringDisabled = false;
 	int ditheringOverride = -1;
     struct Dither {

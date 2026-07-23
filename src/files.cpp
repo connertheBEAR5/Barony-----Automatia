@@ -20,6 +20,8 @@
 #include <string>
 #include <thread>
 #include <future>
+#include <set>
+#include <limits>
 #include "light.hpp"
 #include "files.hpp"
 #include "engine/audio/sound.hpp"
@@ -2394,7 +2396,12 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	// read map version number
 	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV4.4", strlen("BARONY LMPV4.4")) == 0 )
+	if ( strncmp(valid_data, "BARONY LMPV4.5", strlen("BARONY LMPV4.5")) == 0 )
+	{
+		// Adds stable persistent IDs to all map entities.
+		editorVersion = 45;
+	}
+	else if ( strncmp(valid_data, "BARONY LMPV4.4", strlen("BARONY LMPV4.4")) == 0 )
 	{
 		// Adds custom tunnel-end IDs to custom exits.
 		editorVersion = 44;
@@ -2772,7 +2779,36 @@ fp->read(&numentities, sizeof(Uint32), 1);
 	for (c = 0; c < numentities; c++)
 	{
 		fp->read(&sprite, sizeof(Sint32), 1);
-		entity = newEntity(sprite, 0, entlist, nullptr); //TODO: Figure out when we need to assign an entity to the global monster list. And do it!
+		entity = newEntity(sprite, 0, entlist, nullptr);
+
+		if ( editorVersion >= 45 )
+		{
+			// V4.5 stores a stable identity immediately after
+			// each entity's sprite number.
+			fp->read(
+				&entity->persistentID,
+				sizeof(Sint32),
+				1
+			);
+
+			// Invalid saved values are treated as unassigned.
+			if ( entity->persistentID < 0 )
+			{
+				printlog(
+					"[Persistent IDs] Entity %u had invalid ID %d in map '%s'; resetting to 0.",
+					c,
+					entity->persistentID,
+					filename
+				);
+
+				entity->persistentID = 0;
+			}
+		}
+		else
+		{
+			// Older maps receive IDs the next time the editor saves them.
+			entity->persistentID = 0;
+		}
 		if ( editorVersion == 1 )
 		{
 			// V1.0 of editor version
@@ -3595,8 +3631,121 @@ int saveMap(const char* filename2)
 			printlog("warning: failed to open file '%s' for map saving!\n", filename);
 			return 1;
 		}
-		// Saving produces a V4.4 32-layer map.
-		fp->write("BARONY LMPV4.4", sizeof(char), strlen("BARONY LMPV4.4")); // magic code
+
+		/*
+		* Validate all existing IDs first.
+		*
+		* The first entity using a positive ID keeps it.
+		* A later entity using the same ID is reset to 0 and receives
+		* a new number during the second pass.
+		*/
+		std::set<Sint32> usedPersistentIDs;
+		Sint32 highestPersistentID = 0;
+		Uint32 repairedDuplicateIDs = 0;
+		Uint32 assignedPersistentIDs = 0;
+
+		for ( node = map.entities->first;
+			node != nullptr;
+			node = node->next )
+		{
+			entity = static_cast<Entity*>(node->element);
+
+			if ( !entity )
+			{
+				continue;
+			}
+
+			if ( entity->persistentID <= 0 )
+			{
+				entity->persistentID = 0;
+				continue;
+			}
+
+			const auto insertResult =
+				usedPersistentIDs.insert(entity->persistentID);
+
+			if ( !insertResult.second )
+			{
+				printlog(
+					"[Persistent IDs] Duplicate ID %d found on sprite %d; assigning this entity a new ID.",
+					entity->persistentID,
+					entity->sprite
+				);
+
+				entity->persistentID = 0;
+				++repairedDuplicateIDs;
+				continue;
+			}
+
+			highestPersistentID =
+				std::max(
+					highestPersistentID,
+					entity->persistentID
+				);
+		}
+
+		/*
+		* Assign IDs directly to live editor entities before writing.
+		* Repeated saves will therefore preserve the same numbers.
+		*/
+		Sint64 nextPersistentID =
+			static_cast<Sint64>(highestPersistentID) + 1;
+
+		for ( node = map.entities->first;
+			node != nullptr;
+			node = node->next )
+		{
+			entity = static_cast<Entity*>(node->element);
+
+			if ( !entity || entity->persistentID != 0 )
+			{
+				continue;
+			}
+
+			while ( nextPersistentID
+				<= std::numeric_limits<Sint32>::max()
+				&& usedPersistentIDs.find(
+					static_cast<Sint32>(nextPersistentID)
+				) != usedPersistentIDs.end() )
+			{
+				++nextPersistentID;
+			}
+
+			if ( nextPersistentID
+				> std::numeric_limits<Sint32>::max() )
+			{
+				printlog(
+					"[Persistent IDs] Error: map has exhausted all available persistent entity IDs."
+				);
+
+				FileIO::close(fp);
+				return 1;
+			}
+
+			entity->persistentID =
+				static_cast<Sint32>(nextPersistentID);
+
+			usedPersistentIDs.insert(
+				entity->persistentID
+			);
+
+			++assignedPersistentIDs;
+			++nextPersistentID;
+		}
+
+		printlog(
+			"[Persistent IDs] Map save assigned %u new ID(s) and repaired %u duplicate ID(s). Total identified entities: %zu.",
+			assignedPersistentIDs,
+			repairedDuplicateIDs,
+			usedPersistentIDs.size()
+		);
+
+		// Saving produces a V4.5 32-layer map with stable entity IDs.
+		fp->write(
+			"BARONY LMPV4.5",
+			sizeof(char),
+			strlen("BARONY LMPV4.5")
+		);
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
 		fp->write(&map.width, sizeof(Uint32), 1); // map width
@@ -3615,7 +3764,20 @@ int saveMap(const char* filename2)
 		for (node = map.entities->first; node != nullptr; node = node->next)
 		{
 			entity = (Entity*) node->element;
-			fp->write(&entity->sprite, sizeof(Sint32), 1);
+
+			fp->write(
+				&entity->sprite,
+				sizeof(Sint32),
+				1
+			);
+
+			// V4.5 stores the stable entity identity immediately after
+			// the sprite number and before sprite-specific properties.
+			fp->write(
+				&entity->persistentID,
+				sizeof(Sint32),
+				1
+			);
 
 			switch ( checkSpriteType(entity->sprite) )
 			{
