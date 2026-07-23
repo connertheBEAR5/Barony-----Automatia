@@ -213,6 +213,8 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	portalCustomRequiredRace(skill[20]),
 	portalCustomRequiredClass(skill[21]),
 	portalCustomActivateOnPower(skill[22]),
+	portalCustomTunnelID(skill[24]),
+	portalCustomDestinationTunnelID(skill[25]),
 	teleporterX(skill[0]),
 	teleporterY(skill[1]),
 	teleporterType(skill[3]),
@@ -2923,6 +2925,8 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 			entityNew->portalCustomRequiredRace = entityToCopy->portalCustomRequiredRace;
 			entityNew->portalCustomRequiredClass = entityToCopy->portalCustomRequiredClass;
 			entityNew->portalCustomActivateOnPower = entityToCopy->portalCustomActivateOnPower;
+			entityNew->portalCustomTunnelID = entityToCopy->portalCustomTunnelID;
+			entityNew->portalCustomDestinationTunnelID = entityToCopy->portalCustomDestinationTunnelID;
 			for ( int i = 11; i <= 18; ++i )
 			{
 				entityNew->skill[i] = entityToCopy->skill[i];
@@ -2942,6 +2946,8 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 			entityNew->portalCustomRequiredRace = -1;
 			entityNew->portalCustomRequiredClass = -1;
 			entityNew->portalCustomActivateOnPower = 0;
+			entityNew->portalCustomTunnelID = 0;
+			entityNew->portalCustomDestinationTunnelID = 0;
 			for ( int i = 11; i <= 18; ++i )
 			{
 				entityNew->skill[i] = 0;

@@ -106,6 +106,7 @@ extern bool loadnextlevel;
 extern int skipLevelsOnLoad;
 extern bool loadingSameLevelAsCurrent;
 extern std::string loadCustomNextMap;
+extern Sint32 loadCustomNextTunnelID;
 extern Uint32 forceMapSeed;
 extern int currentlevel;
 extern bool secretlevel;

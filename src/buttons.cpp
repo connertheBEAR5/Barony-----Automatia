@@ -2321,6 +2321,24 @@ void buttonSpriteProperties(button_t* my)
 						selectedEntity[0]->portalCustomActivateOnPower
 					)
 				);
+				snprintf(
+					spriteProperties[11],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomTunnelID
+					)
+				);
+
+				snprintf(
+					spriteProperties[12],
+					8,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomDestinationTunnelID
+					)
+				);
+
 				char buf[64] = "";
 				int totalChars = 0;
 				for ( int i = 11; i <= 18; ++i )
@@ -2355,8 +2373,8 @@ void buttonSpriteProperties(button_t* my)
 				newwindow = 22;
 				subx1 = xres / 2 - 220;
 				subx2 = xres / 2 + 220;
-				suby1 = yres / 2 - 210;
-				suby2 = yres / 2 + 210;
+				suby1 = yres / 2 - 250;
+				suby2 = yres / 2 + 250;
 				strcpy(subtext, "Custom Exit Properties:");
 				break;
 			}
@@ -3716,13 +3734,26 @@ void buttonSpritePropertiesConfirm(button_t* my)
 					atoi(spriteProperties[9]);
 					
 				selectedEntity[0]->portalCustomActivateOnPower =
-				std::max(
-					0,
-					std::min(
-						1,
-						atoi(spriteProperties[10])
-					)
-				);
+					std::max(
+						0,
+						std::min(
+							1,
+							atoi(spriteProperties[10])
+						)
+					);
+
+				selectedEntity[0]->portalCustomTunnelID =
+					std::max(
+						0,
+						atoi(spriteProperties[11])
+					);
+
+				selectedEntity[0]->portalCustomDestinationTunnelID =
+					std::max(
+						0,
+						atoi(spriteProperties[12])
+					);
+
 				break;
 			}
 				

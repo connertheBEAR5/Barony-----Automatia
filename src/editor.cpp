@@ -327,7 +327,7 @@ char textSourcePropertyNames[10][45] =
 	"Send message once only (0 - 1)"
 };
 
-char customPortalPropertyNames[11][59] =
+char customPortalPropertyNames[13][59] =
 {
 	"Model texture to use (0-9999)",
 	"Animation frames (0-9)",
@@ -339,7 +339,9 @@ char customPortalPropertyNames[11][59] =
 	"Requirement Mode: (0-4)",
 	"Required Race: (-1 = Any)",
 	"Required Class: (-1 = Any)",
-	"Activate when powered (0-1)"
+	"Activate when powered (0-1)",
+	"Tunnel End ID: (0 = Disabled)",
+    "Destination Tunnel ID: (0 = Player Start)"
 };
 
 char signalTimerPropertyNames[6][55] =
@@ -7605,6 +7607,62 @@ int main(int argc, char** argv)
 										);
 									}
 								}
+								else if ( i == 11 )
+								{
+									if ( propertyInt < 0 || propertyInt > 9999999 )
+									{
+										propertyPageError(i, 0);
+									}
+									else if ( propertyInt == 0 )
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											colorRandom,
+											"Cannot be targeted as a tunnel end"
+										);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											"This tunnel end ID: %d",
+											propertyInt
+										);
+									}
+								}
+								else if ( i == 12 )
+								{
+									if ( propertyInt < 0 || propertyInt > 9999999 )
+									{
+										propertyPageError(i, 0);
+									}
+									else if ( propertyInt == 0 )
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											colorRandom,
+											"Destination uses normal Player Start"
+										);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											"Search destination map for tunnel ID %d",
+											propertyInt
+										);
+									}
+								}
 								else
 								{
 									// enter other row entries here
@@ -7632,14 +7690,18 @@ int main(int argc, char** argv)
 
 							// set the maximum length allowed for user input
 
-							if ( editproperty == 4 )
-							{
-								inputlen = 32;
-							}
-							else
-							{
-								inputlen = 4;
-							}
+						if ( editproperty == 4 )
+						{
+							inputlen = 32;
+						}
+						else if ( editproperty == 11 || editproperty == 12 )
+						{
+							inputlen = 7;
+						}
+						else
+						{
+							inputlen = 4;
+						}
 							propertyPageCursorFlash(spacing);
 						}
 					}

@@ -379,6 +379,12 @@ bool loadnextlevel = false;
 int skipLevelsOnLoad = 0;
 bool loadingSameLevelAsCurrent = false;
 std::string loadCustomNextMap = "";
+
+// Destination tunnel end requested by the custom portal that
+// initiated the current map transition.
+// 0 means use the destination map's normal Player Start.
+Sint32 loadCustomNextTunnelID = 0;
+
 Uint32 forceMapSeed = 0;
 bool loading = false;
 int currentlevel = 0, minotaurlevel = 0;

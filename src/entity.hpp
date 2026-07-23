@@ -446,6 +446,8 @@ public:
 	Sint32& portalCustomRequiredRace;    // skill[20]
 	Sint32& portalCustomRequiredClass;   // skill[21]
 	Sint32& portalCustomActivateOnPower; // skill[22]
+	Sint32& portalCustomTunnelID; // skill[22] ID of the tunnel this portal is linked to.
+	Sint32& portalCustomDestinationTunnelID; // skill[23] ID of the tunnel this portal is linked to.
 	//--PUBLIC TELEPORTER SKILLS--
 	Sint32& teleporterX; //skill[0]
 	Sint32& teleporterY; //skill[1]

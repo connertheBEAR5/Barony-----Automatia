@@ -58,7 +58,136 @@
 #include <atomic>
 #include <future>
 #include <thread>
+static bool placePlayersAtCustomTunnel(
+    const Sint32 destinationTunnelID
+)
+{
+    if ( destinationTunnelID <= 0 )
+    {
+        // ID 0 intentionally means use the normal Player Start.
+        return false;
+    }
 
+    Entity* destinationTunnel = nullptr;
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !entity )
+        {
+            continue;
+        }
+
+        if ( entity->behavior != &actCustomPortal )
+        {
+            continue;
+        }
+
+        if ( entity->portalCustomTunnelID
+            != destinationTunnelID )
+        {
+            continue;
+        }
+
+        destinationTunnel = entity;
+        break;
+    }
+
+    if ( !destinationTunnel )
+    {
+        printlog(
+            "[Custom Tunnel] Destination tunnel ID %d was not found in map '%s'. Using normal Player Start.",
+            destinationTunnelID,
+            map.name
+        );
+        return false;
+    }
+
+    // Place the first player one tile behind the tunnel's facing
+    // direction so they do not immediately overlap/retrigger it.
+    const real_t baseX =
+        destinationTunnel->x
+        - cos(destinationTunnel->yaw) * 16.0;
+
+    const real_t baseY =
+        destinationTunnel->y
+        - sin(destinationTunnel->yaw) * 16.0;
+
+    static const real_t partyOffsetX[MAXPLAYERS] =
+    {
+        0.0,
+        8.0,
+        -8.0,
+        0.0
+    };
+
+    static const real_t partyOffsetY[MAXPLAYERS] =
+    {
+        0.0,
+        0.0,
+        0.0,
+        8.0
+    };
+
+    int placedPlayers = 0;
+
+    for ( int player = 0;
+        player < MAXPLAYERS;
+        ++player )
+    {
+        if ( client_disconnected[player]
+            || players[player] == nullptr
+            || players[player]->entity == nullptr )
+        {
+            continue;
+        }
+
+        Entity* playerEntity =
+            players[player]->entity;
+
+        playerEntity->x =
+            baseX + partyOffsetX[player];
+
+        playerEntity->y =
+            baseY + partyOffsetY[player];
+
+        // Preserve the player's usual standing Z while aligning
+        // with vertically placed custom tunnels.
+        playerEntity->z =
+            destinationTunnel->z;
+
+        playerEntity->yaw =
+            destinationTunnel->yaw;
+
+        playerEntity->vel_x = 0.0;
+        playerEntity->vel_y = 0.0;
+        playerEntity->vel_z = 0.0;
+
+        playerEntity->new_x = playerEntity->x;
+        playerEntity->new_y = playerEntity->y;
+        playerEntity->new_z = playerEntity->z;
+        playerEntity->new_yaw = playerEntity->yaw;
+
+        // Reset interpolation so the camera does not slide from
+        // the normal Player Start to the tunnel destination.
+        playerEntity->bNeedsRenderPositionInit = true;
+
+        ++placedPlayers;
+    }
+
+    printlog(
+        "[Custom Tunnel] Placed %d player(s) at tunnel ID %d in map '%s'.",
+        placedPlayers,
+        destinationTunnelID,
+        map.name
+    );
+
+    return placedPlayers > 0;
+}
 #ifdef LINUX
 //Sigsegv catching stuff.
 #include <signal.h>
@@ -2200,37 +2329,67 @@ void gameLogic(void)
 
                     // load map file
 					loading = true;
-	                createLevelLoadScreen(5);
-	                std::atomic_bool loading_done {false};
-	                auto loading_task = std::async(std::launch::async, [&loading_done](){
-					    gameplayCustomManager.readFromFile();
-						if ( gameplayCustomManager.inUse() )
+					createLevelLoadScreen(5);
+
+					std::atomic_bool loading_done { false };
+
+					const Sint32 requestedTunnelID =
+						loadCustomNextTunnelID;
+
+					auto loading_task = std::async(
+						std::launch::async,
+						[&loading_done, requestedTunnelID]()
 						{
-							conductGameChallenges[CONDUCT_MODDED] = 1;
-							Mods::disableSteamAchievements = true;
+							gameplayCustomManager.readFromFile();
+
+							if ( gameplayCustomManager.inUse() )
+							{
+								conductGameChallenges[CONDUCT_MODDED] = 1;
+								Mods::disableSteamAchievements = true;
+							}
+
+							textSourceScript.scriptVariables.clear();
+							updateLoadingScreen(10);
+
+							int checkMapHash = -1;
+
+							int result = physfsLoadMapFile(
+								currentlevel,
+								mapseed,
+								false,
+								&checkMapHash
+							);
+
+							if ( !verifyMapHash(
+								map.filename,
+								checkMapHash
+							) )
+							{
+								conductGameChallenges[CONDUCT_MODDED] = 1;
+								Mods::disableSteamAchievements = true;
+							}
+
+							updateLoadingScreen(50);
+
+							numplayers = 0;
+							assignActions(&map);
+
+							if ( requestedTunnelID > 0 )
+							{
+								placePlayersAtCustomTunnel(
+									requestedTunnelID
+								);
+							}
+
+							updateLoadingScreen(55);
+
+							generatePathMaps();
+							updateLoadingScreen(99);
+
+							loading_done = true;
+							return result;
 						}
-					    textSourceScript.scriptVariables.clear();
-	                    updateLoadingScreen(10);
-
-					    int checkMapHash = -1;
-					    int result = physfsLoadMapFile(currentlevel, mapseed, false, &checkMapHash);
-					    if (!verifyMapHash(map.filename, checkMapHash))
-					    {
-						    conductGameChallenges[CONDUCT_MODDED] = 1;
-						    Mods::disableSteamAchievements = true;
-					    }
-	                    updateLoadingScreen(50);
-
-					    numplayers = 0;
-					    assignActions(&map);
-                        updateLoadingScreen(55);
-
-					    generatePathMaps();
-	                    updateLoadingScreen(99);
-
-		                loading_done = true;
-		                return result;
-		            });
+					);
 	                while (!loading_done)
 	                {
 		                doLoadingScreen();
@@ -2241,7 +2400,7 @@ void gameLogic(void)
                     createChunks();
 		            loading = false;
 	                int result = loading_task.get();
-
+					loadCustomNextTunnelID = 0;
                     for (int c = 0; c < MAXPLAYERS; ++c) {
                         auto& camera = players[c]->camera();
 					    camera.globalLightModifierActive = GLOBAL_LIGHT_MODIFIER_STOPPED;

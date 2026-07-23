@@ -1602,6 +1602,18 @@ const bool activatedByInteraction =
 					messagePlayer(i, MESSAGE_INTERACTION, Language::get(507));
 				}
 				loadnextlevel = true;
+
+				// Remember which tunnel end should receive the players after
+				// the destination map finishes loading.
+				loadCustomNextTunnelID =
+					my->portalCustomDestinationTunnelID;
+
+				printlog(
+					"[Custom Tunnel] Leaving tunnel ID %d, requesting destination tunnel ID %d.",
+					my->portalCustomTunnelID,
+					loadCustomNextTunnelID
+				);
+
 				Compendium_t::Events_t::previousCurrentLevel = currentlevel;
 				Compendium_t::Events_t::previousSecretlevel = secretlevel;
 				skipLevelsOnLoad = 0;
@@ -1680,7 +1692,8 @@ const bool activatedByInteraction =
 					int levelToJumpTo = customPortalLookForMapWithName(mapName, my->portalNotSecret ? false : true, my->portalCustomLevelsToJump);
 					if ( levelToJumpTo == -1000 )
 					{
-						// error.
+						// Error resolving the requested map.
+						loadCustomNextTunnelID = 0;
 						printlog("Warning: Error in map teleport!");
 						return;
 					}
@@ -1712,10 +1725,16 @@ const bool activatedByInteraction =
 					}
 					else if ( levelToJumpTo == -998 )
 					{
-						// could not find the map name anywhere.
+						// Could not find the map name anywhere.
 						loadnextlevel = false;
+						loadCustomNextTunnelID = 0;
 						skipLevelsOnLoad = 0;
-						messagePlayer(i, MESSAGE_MISC, "Error: Map %s was not found in the maps folder!", mapName);
+						messagePlayer(
+							i,
+							MESSAGE_MISC,
+							"Error: Map %s was not found in the maps folder!",
+							mapName
+						);
 						return;
 					}
 					int levelDifference = currentlevel - levelToJumpTo;

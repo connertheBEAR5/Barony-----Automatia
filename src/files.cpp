@@ -2394,7 +2394,12 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	// read map version number
 	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV4.3", strlen("BARONY LMPV4.3")) == 0 )
+	if ( strncmp(valid_data, "BARONY LMPV4.4", strlen("BARONY LMPV4.4")) == 0 )
+	{
+		// Adds custom tunnel-end IDs to custom exits.
+		editorVersion = 44;
+	}
+	else if ( strncmp(valid_data, "BARONY LMPV4.3", strlen("BARONY LMPV4.3")) == 0 )
 	{
 		// Adds custom-exit activate-on-power property.
 		editorVersion = 43;
@@ -3129,6 +3134,26 @@ fp->read(&numentities, sizeof(Uint32), 1);
 					{
 						entity->portalCustomActivateOnPower = 0;
 					}
+					if ( editorVersion >= 44 )
+					{
+						fp->read(
+							&entity->portalCustomTunnelID,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->portalCustomDestinationTunnelID,
+							sizeof(Sint32),
+							1
+						);
+					}
+					else
+					{
+						// Older maps have no tunnel-link information.
+						entity->portalCustomTunnelID = 0;
+						entity->portalCustomDestinationTunnelID = 0;
+					}
 					break;
 				case 19:
 					if ( editorVersion >= 25 )
@@ -3570,8 +3595,8 @@ int saveMap(const char* filename2)
 			printlog("warning: failed to open file '%s' for map saving!\n", filename);
 			return 1;
 		}
-		// Saving produces a V4.2 32-layer map.
-		fp->write("BARONY LMPV4.3", sizeof(char), strlen("BARONY LMPV4.3")); // magic code
+		// Saving produces a V4.4 32-layer map.
+		fp->write("BARONY LMPV4.4", sizeof(char), strlen("BARONY LMPV4.4")); // magic code
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
 		fp->write(&map.width, sizeof(Uint32), 1); // map width
@@ -3778,6 +3803,17 @@ int saveMap(const char* filename2)
 					);
 					fp->write(
 						&entity->portalCustomActivateOnPower,
+						sizeof(Sint32),
+						1
+					);
+					fp->write(
+						&entity->portalCustomTunnelID,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->portalCustomDestinationTunnelID,
 						sizeof(Sint32),
 						1
 					);
