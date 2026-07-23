@@ -392,6 +392,75 @@ void actSwitchWithTimer(Entity* my)
 	}
 }
 
+static bool pressurePlateEntityMeetsRequirements(
+	const Entity* plate,
+	const Entity* candidate
+)
+{
+	if ( !plate || !candidate )
+	{
+		return false;
+	}
+
+	const int mode = plate->pressurePlateRequirementMode;
+
+	// Mode 0 preserves the original pressure-plate behavior for every
+	// supported trigger type.
+	if ( mode == 0 )
+	{
+		return true;
+	}
+
+	// Race and class are player properties. When a requirement is active,
+	// non-player entities cannot satisfy it.
+	if ( candidate->behavior != &actPlayer )
+	{
+		return false;
+	}
+
+	const int player = candidate->skill[2];
+
+	if ( player < 0
+		|| player >= MAXPLAYERS
+		|| client_disconnected[player]
+		|| players[player] == nullptr
+		|| players[player]->entity == nullptr
+		|| stats[player] == nullptr )
+	{
+		return false;
+	}
+
+	const bool raceMatches =
+		plate->pressurePlateRequiredRace == -1
+		|| stats[player]->playerRace
+			== plate->pressurePlateRequiredRace;
+
+	const bool classMatches =
+		plate->pressurePlateRequiredClass == -1
+		|| client_classes[player]
+			== plate->pressurePlateRequiredClass;
+
+	switch ( mode )
+	{
+		case 1: // Race
+			return raceMatches;
+
+		case 2: // Class
+			return classMatches;
+
+		case 3: // Race AND class
+			return raceMatches && classMatches;
+
+		case 4: // Race OR class
+			return raceMatches || classMatches;
+
+		default:
+			// Invalid values preserve old behavior rather than disabling
+			// an existing map mechanism.
+			return true;
+	}
+}
+
 #define TRAP_ON my->skill[0]
 void actTrap(Entity* my)
 {
@@ -485,13 +554,19 @@ void actTrap(Entity* my)
 						break;
 					}
 
-					if ( entity->behavior == &actMonster && entity->getMonsterTypeFromSprite() == DUCK_SMALL
-						&& entity->monsterSpecialState == DUCK_RETURN )
-					{
-						continue;
-					}
+if ( entity->behavior == &actMonster
+	&& entity->getMonsterTypeFromSprite() == DUCK_SMALL
+	&& entity->monsterSpecialState == DUCK_RETURN )
+{
+	continue;
+}
 
-					somebodyonme = true;
+if ( !pressurePlateEntityMeetsRequirements(my, entity) )
+{
+	continue;
+}
+
+somebodyonme = true;
 					if ( !TRAP_ON )
 					{
 						my->toggleSwitch();

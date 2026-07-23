@@ -3714,7 +3714,7 @@ void buttonSpritePropertiesConfirm(button_t* my)
 
 				selectedEntity[0]->portalCustomRequiredClass =
 					atoi(spriteProperties[9]);
-					break;
+					
 				selectedEntity[0]->portalCustomActivateOnPower =
 				std::max(
 					0,
@@ -3723,6 +3723,7 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						atoi(spriteProperties[10])
 					)
 				);
+				break;
 			}
 				
 			case 19: // tables

@@ -1311,6 +1311,59 @@ int customPortalLookForMapWithName(char* mapToSearch, bool isSecretLevel, int le
 
 	return -1000;
 }
+#define CUSTOM_PORTAL_PREVIOUS_POWER my->skill[23]
+
+static bool customExitPlayerMeetsRequirements(
+	const Entity* portal,
+	int player
+)
+{
+	if ( !portal
+		|| player < 0
+		|| player >= MAXPLAYERS
+		|| client_disconnected[player]
+		|| players[player] == nullptr
+		|| players[player]->entity == nullptr
+		|| stats[player] == nullptr )
+	{
+		return false;
+	}
+
+	const int mode = portal->portalCustomRequirementMode;
+
+	if ( mode == 0 )
+	{
+		return true;
+	}
+
+	const bool raceMatches =
+		portal->portalCustomRequiredRace == -1
+		|| stats[player]->playerRace
+			== portal->portalCustomRequiredRace;
+
+	const bool classMatches =
+		portal->portalCustomRequiredClass == -1
+		|| client_classes[player]
+			== portal->portalCustomRequiredClass;
+
+	switch ( mode )
+	{
+		case 1:
+			return raceMatches;
+
+		case 2:
+			return classMatches;
+
+		case 3:
+			return raceMatches && classMatches;
+
+		case 4:
+			return raceMatches || classMatches;
+
+		default:
+			return true;
+	}
+}
 
 void actCustomPortal(Entity* my)
 {
@@ -1411,17 +1464,106 @@ void actCustomPortal(Entity* my)
 		my->sprite = my->portalCustomSprite;
 	}
 
-	if ( multiplayer == CLIENT )
-	{
-		return;
-	}
+if ( multiplayer == CLIENT )
+{
+	return;
+}
 
-	// step through portal
-	for ( i = 0; i < MAXPLAYERS; i++ )
+bool activatedByPower = false;
+int powerActivator = -1;
+
+if ( my->portalCustomActivateOnPower )
+{
+	printlog(
+		"[CUSTOM EXIT TICK] activateOnPower=%d circuit=%d previous=%d",
+		my->portalCustomActivateOnPower,
+		my->skill[28],
+		CUSTOM_PORTAL_PREVIOUS_POWER
+	);
+	const bool currentlyPowered =
+		my->skill[28] == 2; // CIRCUIT_ON
+
+	activatedByPower =
+		currentlyPowered
+		&& CUSTOM_PORTAL_PREVIOUS_POWER == 0;
+	if ( activatedByPower )
+{
+	printlog("[CUSTOM EXIT] rising power detected");
+}
+	CUSTOM_PORTAL_PREVIOUS_POWER =
+		currentlyPowered ? 1 : 0;
+
+	if ( activatedByPower )
 	{
-		if ( selectedEntity[i] == my || client_selected[i] == my )
+		double nearestDistance = TOUCHRANGE + 1.0;
+
+		for ( int player = 0; player < MAXPLAYERS; ++player )
 		{
-			if ( inrange[i] )
+			if ( client_disconnected[player]
+				|| players[player] == nullptr
+				|| players[player]->entity == nullptr )
+			{
+				continue;
+			}
+
+			const double playerDistance = sqrt(
+				pow(my->x - players[player]->entity->x, 2)
+				+ pow(my->y - players[player]->entity->y, 2)
+			);
+
+			if ( playerDistance <= TOUCHRANGE
+	&& playerDistance < nearestDistance
+	&& customExitPlayerMeetsRequirements(my, player) )
+{
+	nearestDistance = playerDistance;
+	powerActivator = player;
+}
+
+		}
+		printlog(
+	"[CUSTOM EXIT] nearest activator=%d",
+	powerActivator
+);
+		// Power cannot use the exit unless a player is beside it.
+		if ( powerActivator < 0 )
+		{
+			activatedByPower = false;
+		}
+	}
+}
+else
+{
+	CUSTOM_PORTAL_PREVIOUS_POWER = 0;
+}
+
+// step through portal
+for ( i = 0; i < MAXPLAYERS; i++ )
+	{
+const bool playerTriedInteraction =
+	(selectedEntity[i] == my || client_selected[i] == my)
+	&& inrange[i];
+
+const bool playerMeetsRequirements =
+	customExitPlayerMeetsRequirements(my, i);
+
+if ( playerTriedInteraction && !playerMeetsRequirements )
+{
+	messagePlayer(
+		i,
+		MESSAGE_INTERACTION,
+		"You do not meet this exit's requirements."
+	);
+}
+
+const bool activatedByInteraction =
+	playerTriedInteraction
+	&& playerMeetsRequirements;
+
+			const bool activatedForThisPlayer =
+				activatedByPower
+				&& i == powerActivator;
+
+			if ( activatedByInteraction || activatedForThisPlayer )
 			{
 				for ( c = 0; c < MAXPLAYERS; c++ )
 				{
@@ -1617,4 +1759,3 @@ void actCustomPortal(Entity* my)
 			}
 		}
 	}
-}

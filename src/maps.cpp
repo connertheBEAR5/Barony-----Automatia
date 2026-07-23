@@ -10053,10 +10053,17 @@ void assignActions(map_t* map)
 					entity->flags[INVISIBLE] = true;
 				}
 				entity->z = 7.5 - entity->portalCustomZOffset * 0.25;
-				if ( entity->portalCustomRequiresPower == 1 )
+				if ( entity->portalCustomRequiresPower == 1
+					|| entity->portalCustomActivateOnPower == 1 )
 				{
 					entity->skill[28] = 1; // is a mechanism
 				}
+				printlog(
+	"[CUSTOM EXIT INIT] activateOnPower=%d requiresPower=%d circuit=%d",
+	entity->portalCustomActivateOnPower,
+	entity->portalCustomRequiresPower,
+	entity->skill[28]
+);
 				break;
 			case 162:
 			{
