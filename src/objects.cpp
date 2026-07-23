@@ -120,43 +120,110 @@ void statDeconstructor(void* data)
 
 void lightDeconstructor(void* data)
 {
-	if (data != nullptr) {
-        light_t* light = (light_t*)data;
-		if (light->tiles != nullptr) {
-            const auto lightsize = (light->radius * 2 + 1) * (light->radius * 2 + 1);
-            const auto mapsize = map.width * map.height;
-			for (int y = 0; y < light->radius * 2; y++) {
-				for (int x = 0; x < light->radius * 2; x++) {
-                    const auto soff = y + x * (light->radius * 2 + 1);
-                    if (soff < 0 || soff >= lightsize) {
-                        continue;
-                    }
-                    const auto& s = light->tiles[soff];
-                    const auto doff = (y + light->y - light->radius) + (x + light->x - light->radius) * map.height;
-                    if (doff < 0 || doff >= mapsize) {
-                        continue;
-                    }
-                    if (light->index) {
-                        auto& d = lightmaps[light->index][doff];
-                        d.x -= s.x;
-                        d.y -= s.y;
-                        d.z -= s.z;
-                        d.w -= s.w;
-                    } else {
-                        for (int c = 0; c < MAXPLAYERS + 1; ++c) {
-                            auto& d = lightmaps[c][doff];
-                            d.x -= s.x;
-                            d.y -= s.y;
-                            d.z -= s.z;
-                            d.w -= s.w;
-                        }
-                    }
+	if ( data == nullptr )
+	{
+		return;
+	}
+
+	light_t* light = static_cast<light_t*>(data);
+
+	if ( light->tiles != nullptr )
+	{
+		const int diameter = light->radius * 2 + 1;
+		const int lightsize = diameter * diameter;
+
+		const size_t mapsize =
+			lightmapSize3D(
+				map.width,
+				map.height
+			);
+
+		for ( int localY = 0;
+			localY < diameter;
+			++localY )
+		{
+			for ( int localX = 0;
+				localX < diameter;
+				++localX )
+			{
+				const int soff =
+					localY
+					+ localX * diameter;
+
+				if ( soff < 0
+					|| soff >= lightsize )
+				{
+					continue;
+				}
+
+				const int mapX =
+					localX
+					+ light->x
+					- light->radius;
+
+				const int mapY =
+					localY
+					+ light->y
+					- light->radius;
+
+				if ( mapX < 0
+					|| mapY < 0
+					|| mapX >= map.width
+					|| mapY >= map.height )
+				{
+					continue;
+				}
+
+				const size_t doff =
+					lightmapIndex3D(
+						mapX,
+						mapY,
+						light->layer,
+						map.width,
+						map.height
+					);
+
+				if ( doff >= mapsize )
+				{
+					continue;
+				}
+
+				const auto& source =
+					light->tiles[soff];
+
+				if ( light->index )
+				{
+					auto& destination =
+						lightmaps[light->index][doff];
+
+					destination.x -= source.x;
+					destination.y -= source.y;
+					destination.z -= source.z;
+					destination.w -= source.w;
+				}
+				else
+				{
+					for ( int player = 0;
+						player < MAXPLAYERS + 1;
+						++player )
+					{
+						auto& destination =
+							lightmaps[player][doff];
+
+						destination.x -= source.x;
+						destination.y -= source.y;
+						destination.z -= source.z;
+						destination.w -= source.w;
+					}
 				}
 			}
-			free(light->tiles);
 		}
-		free(data);
+
+		free(light->tiles);
+		light->tiles = nullptr;
 	}
+
+	free(light);
 }
 
 /*-------------------------------------------------------------------------------
@@ -309,34 +376,74 @@ button_t* newButton(void)
 
 -------------------------------------------------------------------------------*/
 
-light_t* newLight(int index, Sint32 x, Sint32 y, Sint32 radius)
+light_t* newLight(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	Sint32 radius
+)
+{
+	return newLight(
+		index,
+		x,
+		y,
+		0,
+		radius
+	);
+}
+
+light_t* newLight(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	Sint32 layer,
+	Sint32 radius
+)
 {
 	light_t* light;
 
-	// allocate memory for light
-	if ((light = (light_t*) malloc(sizeof(light_t))) == nullptr) {
-		printlog( "failed to allocate memory for new light!\n" );
+	if ( (light = static_cast<light_t*>(
+		malloc(sizeof(light_t))
+	)) == nullptr )
+	{
+		printlog(
+			"failed to allocate memory for new light!\n"
+		);
 		exit(1);
 	}
 
-	// add the light to the light list
 	light->node = list_AddNodeLast(&light_l);
 	light->node->element = light;
-	light->node->deconstructor = &lightDeconstructor;
+	light->node->deconstructor =
+		&lightDeconstructor;
 	light->node->size = sizeof(light_t);
 
-	// now set all of my data elements to ZERO or NULL
-    light->index = index;
+	light->index = index;
 	light->x = x;
 	light->y = y;
+	light->layer =
+		clampLightmapLayer(layer);
 	light->radius = radius;
-	if (light->radius > 0) {
-        const auto size = sizeof(vec4_t) * (radius * 2 + 1) * (radius * 2 + 1);
-		light->tiles = (vec4_t*)malloc(size);
+
+	if ( light->radius > 0 )
+	{
+		const auto size =
+			sizeof(vec4_t)
+			* (radius * 2 + 1)
+			* (radius * 2 + 1);
+
+		light->tiles =
+			static_cast<vec4_t*>(
+				malloc(size)
+			);
+
 		memset(light->tiles, 0, size);
-	} else {
+	}
+	else
+	{
 		light->tiles = nullptr;
 	}
+
 	return light;
 }
 

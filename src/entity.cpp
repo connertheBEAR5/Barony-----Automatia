@@ -36,7 +36,7 @@ See LICENSE for details.
 #endif
 #include "ui/MainMenu.hpp"
 #include "ui/GameUI.hpp"
-
+#include "light.hpp"
 /*-------------------------------------------------------------------------------
 
 Entity::Entity)
@@ -44,7 +44,6 @@ Entity::Entity)
 Construct an Entity
 
 -------------------------------------------------------------------------------*/
-
 ConsoleVariable<int> cvar_entity_bodypart_sync_tick("/entity_bodypart_sync_tick", TICKS_PER_SECOND / 4);
 void Entity::setUID(Uint32 new_uid)
 {
@@ -530,30 +529,59 @@ Returns the illumination of the given entity
 
 int Entity::entityLight()
 {
-	if ( this->x < 0 || this->y < 0 || this->x >= map.width << 4 || this->y >= map.height << 4 )
+	if ( this->x < 0
+		|| this->y < 0
+		|| this->x >= map.width << 4
+		|| this->y >= map.height << 4 )
 	{
 		return 255;
 	}
-	int light_x = (int)this->x / 16;
-	int light_y = (int)this->y / 16;
-    const auto& light = lightmaps[0][light_y + light_x * map.height];
-    //return (light.x + light.y + light.z) / 3.f;
-	float level = (light.x + light.y + light.z) / 3.f;
+
+	const int light_x =
+		static_cast<int>(this->x) / 16;
+
+	const int light_y =
+		static_cast<int>(this->y) / 16;
+
+	const auto& light =
+		lightmaps[0][
+			lightmapIndex3D(
+				light_x,
+				light_y,
+				0,
+				map.width,
+				map.height
+			)
+		];
+
+	float level =
+		(light.x + light.y + light.z) / 3.f;
+
 	if ( !strncmp(map.filename, "fortress", 8) )
 	{
-		// reduce the ambient light a bit
-		level = (std::max(0.f, light.x - 32.f)
-			+ std::max(0.f, light.y - 32.f) 
-			+ std::max(0.f, light.z - 40.f)) / 3.f;
+		level =
+			(
+				std::max(0.f, light.x - 32.f)
+				+ std::max(0.f, light.y - 32.f)
+				+ std::max(0.f, light.z - 40.f)
+			) / 3.f;
 	}
+
 	if ( light.w > 0.f )
 	{
-		float shade = std::min(std::max(0.f, light.w), 255.f) / 255.f;
-		level -= (level * shade * 0.8);
-		return std::min(std::max(0, (int)(level)), 255);
+		const float shade =
+			std::min(
+				std::max(0.f, light.w),
+				255.f
+			) / 255.f;
+
+		level -= level * shade * 0.8f;
 	}
-	return std::min(std::max(0, (int)(level)), 255);
-	//return std::min(std::max(0, (int)((light.x + light.y + light.z) / 3.f * 255.f)), 255);
+
+	return std::min(
+		std::max(0, static_cast<int>(level)),
+		255
+	);
 }
 
 /*-------------------------------------------------------------------------------

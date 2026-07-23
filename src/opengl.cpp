@@ -572,57 +572,128 @@ vec4_t unproject(
 
 -------------------------------------------------------------------------------*/
 
-static void fillSmoothLightmap(int which, map_t& map) {
+static void fillSmoothLightmap(
+	int which,
+	map_t& map,
+	float updateScale = 1.f
+)
+{
 #ifndef EDITOR
-    if ( &map == &CompendiumEntries.compendiumMap )
-    {
-        return;
-    }
+	if ( &map == &CompendiumEntries.compendiumMap )
+	{
+		return;
+	}
 #endif
 
-    auto lightmap = lightmaps[which].data();
-    auto lightmapSmoothed = lightmapsSmoothed[which].data();
-    
-    constexpr float epsilon = 1.f;
-    constexpr float defaultSmoothRate = 4.f;
+	auto* lightmap = lightmaps[which].data();
+	auto* lightmapSmoothed =
+		lightmapsSmoothed[which].data();
+
+	constexpr float epsilon = 1.f;
+	constexpr float defaultSmoothRate = 4.f;
+
 #ifndef EDITOR
-    static ConsoleVariable<float> cvar_smoothingRate("/lightupdate", defaultSmoothRate);
-    const float smoothingRate = *cvar_smoothingRate;
+	static ConsoleVariable<float> cvar_smoothingRate(
+		"/lightupdate",
+		defaultSmoothRate
+	);
+
+	const float smoothingRate =
+		*cvar_smoothingRate;
 #else
-    const float smoothingRate = defaultSmoothRate;
+	const float smoothingRate =
+		defaultSmoothRate;
 #endif
-    const float rate = smoothingRate * (1.f / fpsLimit);
-    
-    int v = 0;
-    int index = 0;
-    int smoothindex = 2 + map.height + 1;
-    const int size = map.width * map.height;
-    for ( ; index < size; ++index, ++v, ++smoothindex )
-    {
-        if ( v == map.height ) {
-            smoothindex += 2;
-            v = 0;
-        }
-        
-        auto& d = lightmapSmoothed[smoothindex];
-        const auto& s = lightmap[index];
-        for (int c = 0; c < 3; ++c) { // r,g,b of lightmap
-            auto& dc = *(&d.x + c);
-            const auto& sc = *(&s.x + c);
-            const auto diff = sc - dc;
-            if (fabsf(diff) < epsilon) { dc += diff; }
-            else { dc += diff * rate; }
-        }
-        {
-            // alpha/"shade" of lightmap
-            auto& dc = *(&d.x + 3);
-            const auto& sc = *(&s.x + 3);
-            const auto diff = sc - dc;
-            dc += diff * rate;
-        }
-    }
-}
 
+const float rate =
+	std::min(
+		1.f,
+		smoothingRate
+			* updateScale
+			* (1.f / fpsLimit)
+	);
+
+	for ( int layer = 0;
+		layer < MAPLAYERS;
+		++layer )
+	{
+		for ( int x = 0;
+			x < map.width;
+			++x )
+		{
+			for ( int y = 0;
+				y < map.height;
+				++y )
+			{
+				const size_t sourceIndex =
+					lightmapIndex3D(
+						x,
+						y,
+						layer,
+						map.width,
+						map.height
+					);
+
+				const size_t destinationIndex =
+					lightmapSmoothedIndex3D(
+						x + 1,
+						y + 1,
+						layer,
+						map.width,
+						map.height
+					);
+
+				auto& destination =
+					lightmapSmoothed[
+						destinationIndex
+					];
+
+				const auto& source =
+					lightmap[sourceIndex];
+
+				for ( int channel = 0;
+					channel < 3;
+					++channel )
+				{
+					auto& destinationChannel =
+						*(&destination.x + channel);
+
+					const auto& sourceChannel =
+						*(&source.x + channel);
+
+					const float difference =
+						sourceChannel
+						- destinationChannel;
+
+					if ( fabsf(difference)
+						< epsilon )
+					{
+						destinationChannel +=
+							difference;
+					}
+					else
+					{
+						destinationChannel +=
+							difference * rate;
+					}
+				}
+
+				auto& destinationAlpha =
+					destination.w;
+
+				const auto& sourceAlpha =
+					source.w;
+
+				const float alphaDifference =
+					sourceAlpha
+					- destinationAlpha;
+
+				destinationAlpha +=
+					alphaDifference * rate;
+			}
+		}
+	}
+}
 static inline bool testTileOccludes(const map_t& map, int index) {
     if (index < 0 || index > map.width * map.height * MAPLAYERS - MAPLAYERS) {
         return true;
@@ -636,71 +707,316 @@ static inline bool testTileOccludes(const map_t& map, int index) {
         && ((t0 & 0x00000000ffffffff) != TRANSPARENT_TILE)  // is obstacle layer != TRANSPARENT_TILE
         && (t1 != TRANSPARENT_TILE); // is ceiling != TRANSPARENT_TILE
 }
+static inline bool testLightLayerOccludes(
+	const map_t& map,
+	int x,
+	int y,
+	int layer
+)
+{
+	if ( x < 0
+		|| y < 0
+		|| x >= map.width
+		|| y >= map.height )
+	{
+		return true;
+	}
 
-static void loadLightmapTexture(int which, map_t& map) {
-    auto lightmapSmoothed = lightmapsSmoothed[which].data();
-    
-    // allocate lightmap pixel data
-    static std::vector<float> pixels;
-    pixels.clear();
-    pixels.reserve(map.width * map.height * 4);
-    
-#ifdef EDITOR
-    const bool fullbright = false;
-#else
-    const bool fullbright = (&map == &CompendiumEntries.compendiumMap) ? true :// compendium virtual map is always fullbright
-        (conductGameChallenges[CONDUCT_CHEATS_ENABLED] ? *cvar_fullBright : false);
-    static ConsoleVariable<Vector4> cvar_shade_factor("/light_shade_factor", {0.8f, 0.8f, 0.63f, 0.f });
-#endif
-    
-    // build lightmap texture data
-    const float div = 1.f / 255.f;
-    if (fullbright) {
-        for (int y = 0; y < map.height; ++y) {
-            for (int x = 0; x < map.width; ++x) {
-                pixels.insert(pixels.end(), {1.f, 1.f, 1.f, 1.f});
-            }
-        }
-    } else {
-        const int xoff = MAPLAYERS * map.height;
-        const int yoff = MAPLAYERS;
-        for (int y = 0; y < map.height; ++y) {
-            for (int x = 0, index = y * yoff; x < map.width; ++x, index += xoff) {
-                if (!testTileOccludes(map, index)) {
-                    float count = 1.f;
-                    vec4_t t, total = lightmapSmoothed[(y + 1) + (x + 1) * (map.height + 2)];
-                    if (!testTileOccludes(map, index + yoff)) { (void)add_vec4(&t, &total, &lightmapSmoothed[(y + 2) + (x + 1) * (map.height + 2)]); total = t; ++count; }
-                    if (!testTileOccludes(map, index + xoff)) { (void)add_vec4(&t, &total, &lightmapSmoothed[(y + 1) + (x + 2) * (map.height + 2)]); total = t; ++count; }
-                    if (!testTileOccludes(map, index - yoff)) { (void)add_vec4(&t, &total, &lightmapSmoothed[(y + 0) + (x + 1) * (map.height + 2)]); total = t; ++count; }
-                    if (!testTileOccludes(map, index - xoff)) { (void)add_vec4(&t, &total, &lightmapSmoothed[(y + 1) + (x + 0) * (map.height + 2)]); total = t; ++count; }
-                    total.x = (total.x / count) * div;
-                    total.y = (total.y / count) * div;
-                    total.z = (total.z / count) * div;
-                    if ( total.w > 0.01 )
-                    {
-#ifndef EDITOR
-                        float shade = std::min(1.f, (total.w / count) * div);
-                        total.x -= total.x * shade * cvar_shade_factor->x;
-                        total.y -= total.y * shade * cvar_shade_factor->y;
-                        total.z -= total.z * shade * cvar_shade_factor->z;
-#endif
-                    }
-                    total.w = 1.f;
-                    pixels.insert(pixels.end(), {total.x, total.y, total.z, total.w});
-                } else {
-                    pixels.insert(pixels.end(), {0.f, 0.f, 0.f, 1.f});
-                }
-            }
-        }
-    }
-    
-    // load lightmap texture data
-    GL_CHECK_ERR(glActiveTexture(GL_TEXTURE1));
-    lightmapTexture[which]->loadFloat(pixels.data(), map.width, map.height, true, false);
-    lightmapTexture[which]->bind();
-    GL_CHECK_ERR(glActiveTexture(GL_TEXTURE0));
+	layer =
+		clampLightmapLayer(layer);
+
+	const int index =
+		layer
+		+ y * MAPLAYERS
+		+ x * map.height * MAPLAYERS;
+
+	const Sint32 tile =
+		map.tiles[index];
+
+	return tile != 0
+		&& tile != TRANSPARENT_TILE;
 }
+static void loadLightmapTexture(
+	int which,
+	map_t& map
+)
+{
+	auto* lightmapSmoothed =
+		lightmapsSmoothed[which].data();
 
+static std::vector<float> pixels;
+
+const size_t pixelCount =
+	static_cast<size_t>(map.width)
+	* static_cast<size_t>(map.height)
+	* static_cast<size_t>(MAPLAYERS);
+
+pixels.resize(
+	pixelCount * 4
+);
+
+#ifdef EDITOR
+	const bool fullbright = false;
+#else
+	const bool fullbright =
+		(&map
+			== &CompendiumEntries.compendiumMap)
+		? true
+		: (
+			conductGameChallenges[
+				CONDUCT_CHEATS_ENABLED
+			]
+			? *cvar_fullBright
+			: false
+		);
+
+	static ConsoleVariable<Vector4>
+		cvar_shade_factor(
+			"/light_shade_factor",
+			{
+				0.8f,
+				0.8f,
+				0.63f,
+				0.f
+			}
+		);
+#endif
+
+	const float div = 1.f / 255.f;
+        auto writePixel =
+	[&](
+		int x,
+		int y,
+		int layer,
+		float r,
+		float g,
+		float b,
+		float a
+	)
+	{
+		const size_t pixelIndex =
+			(
+				static_cast<size_t>(layer)
+					* static_cast<size_t>(map.height)
+					* static_cast<size_t>(map.width)
+				+ static_cast<size_t>(y)
+					* static_cast<size_t>(map.width)
+				+ static_cast<size_t>(x)
+			) * 4;
+
+		pixels[pixelIndex + 0] = r;
+		pixels[pixelIndex + 1] = g;
+		pixels[pixelIndex + 2] = b;
+		pixels[pixelIndex + 3] = a;
+	};
+	for ( int layer = 0;
+		layer < MAPLAYERS;
+		++layer )
+	{
+		for ( int y = 0;
+			y < map.height;
+			++y )
+		{
+			for ( int x = 0;
+				x < map.width;
+				++x )
+			{
+				if ( fullbright )
+				{
+                    writePixel(
+                        x,
+                        y,
+                        layer,
+                        1.f,
+                        1.f,
+                        1.f,
+                        1.f
+                    );
+
+					continue;
+				}
+
+                const bool occluded =
+                    layer == 0
+                        ? testTileOccludes(
+                            map,
+                            y * MAPLAYERS
+                                + x
+                                    * MAPLAYERS
+                                    * map.height
+                        )
+                        : false;
+
+				if ( occluded )
+				{
+                    writePixel(
+                        x,
+                        y,
+                        layer,
+                        0.f,
+                        0.f,
+                        0.f,
+                        1.f
+                    );
+
+					continue;
+				}
+
+				vec4_t total =
+					lightmapSmoothed[
+						lightmapSmoothedIndex3D(
+							x + 1,
+							y + 1,
+							layer,
+							map.width,
+							map.height
+						)
+					];
+
+				float count = 1.f;
+				vec4_t temporary;
+
+				auto addNeighbour =
+					[&](
+						int neighbourX,
+						int neighbourY
+					)
+				{
+                    	if ( neighbourX < 0
+                        || neighbourY < 0
+                        || neighbourX >= map.width
+                        || neighbourY >= map.height )
+                    {
+                        return;
+                    }
+                    const bool neighbourOccluded =
+                        layer == 0
+                            ? testTileOccludes(
+                                map,
+                                neighbourY
+                                    * MAPLAYERS
+                                    + neighbourX
+                                        * MAPLAYERS
+                                        * map.height
+                            )
+                            : false;
+
+					if ( neighbourOccluded )
+					{
+						return;
+					}
+
+					const auto& neighbour =
+						lightmapSmoothed[
+							lightmapSmoothedIndex3D(
+								neighbourX + 1,
+								neighbourY + 1,
+								layer,
+								map.width,
+								map.height
+							)
+						];
+
+					(void)add_vec4(
+						&temporary,
+						&total,
+						&neighbour
+					);
+
+					total = temporary;
+					count += 1.f;
+				};
+
+				addNeighbour(x, y + 1);
+				addNeighbour(x + 1, y);
+				addNeighbour(x, y - 1);
+				addNeighbour(x - 1, y);
+
+				total.x =
+					(total.x / count) * div;
+
+				total.y =
+					(total.y / count) * div;
+
+				total.z =
+					(total.z / count) * div;
+
+				#ifndef EDITOR
+// The original alpha-based shade pass was designed for the legacy
+// ground lightmap. Layered lights already perform wall occlusion in
+// lightSphereShadow(), so applying this alpha shade to upper layers
+// can black out entire structural sections.
+if ( layer == 0 && total.w > 0.01f )
+{
+	const float shade =
+		std::min(
+			1.f,
+			(total.w / count)
+				* div
+		);
+
+	total.x -=
+		total.x
+			* shade
+			* cvar_shade_factor->x;
+
+	total.y -=
+		total.y
+			* shade
+			* cvar_shade_factor->y;
+
+	total.z -=
+		total.z
+			* shade
+			* cvar_shade_factor->z;
+}
+#endif
+
+				total.w = 1.f;
+
+writePixel(
+	x,
+	y,
+	layer,
+	total.x,
+	total.y,
+	total.z,
+	total.w
+);
+			}
+		}
+	}
+
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE1)
+	);
+
+	lightmapTexture[which]->loadFloat(
+		pixels.data(),
+		map.width,
+		map.height * MAPLAYERS,
+		true,
+		false
+	);
+
+	lightmapTexture[which]->bind();
+
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE0)
+	);
+}
+static void bindExistingLightmapTexture(int which)
+{
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE1)
+	);
+
+	lightmapTexture[which]->bind();
+
+	GL_CHECK_ERR(
+		glActiveTexture(GL_TEXTURE0)
+	);
+}
 static void updateChunks();
 
 void beginGraphics() {
@@ -1116,9 +1432,44 @@ void glBeginCamera(view_t* camera, bool useHDR, map_t& map)
     mapDims.x = map.width;
     mapDims.y = map.height;
     
-    // upload lightmap
-    fillSmoothLightmap(lightmapIndex, map);
-    loadLightmapTexture(lightmapIndex, map);
+// Updating and uploading all 32 lightmap layers every rendered frame
+// is expensive. Refresh each camera's lightmap every second frame.
+static bool lightmapInitialized[MAXPLAYERS + 1] = {};
+static int lightmapWidth[MAXPLAYERS + 1] = {};
+static int lightmapHeight[MAXPLAYERS + 1] = {};
+
+const bool lightmapDimensionsChanged =
+	lightmapWidth[lightmapIndex] != map.width
+	|| lightmapHeight[lightmapIndex] != map.height;
+
+const bool updateLightmap =
+	!lightmapInitialized[lightmapIndex]
+	|| lightmapDimensionsChanged
+	|| (camera->drawnFrames % 2 == 0);
+
+if ( updateLightmap )
+{
+	fillSmoothLightmap(
+		lightmapIndex,
+		map,
+		2.f
+	);
+
+	loadLightmapTexture(
+		lightmapIndex,
+		map
+	);
+
+	lightmapInitialized[lightmapIndex] = true;
+	lightmapWidth[lightmapIndex] = map.width;
+	lightmapHeight[lightmapIndex] = map.height;
+}
+else
+{
+	bindExistingLightmapTexture(
+		lightmapIndex
+	);
+}
     
 #ifndef EDITOR
     float fogDistance = *cvar_fogDistance;
@@ -2492,7 +2843,13 @@ void glDrawWorld(view_t* camera, int mode)
     GL_CHECK_ERR(glActiveTexture(GL_TEXTURE2));
     bindTextureAtlas(atlasIndex);
     GL_CHECK_ERR(glActiveTexture(GL_TEXTURE0));
-    
+    if ( mode == REALCOLORS )
+    {
+        bindRendererVisibilityMap(
+            *camera,
+            map
+        );
+    }
     // upload uniforms for dither shader
     if (mode == REALCOLORS) {
         worldDitheredShader.bind();
@@ -2524,7 +2881,18 @@ void glDrawWorld(view_t* camera, int mode)
             dither.lastUpdateTick = ticks;
             for (int x = chunk.x; x < chunk.x + chunk.w; ++x) {
                 for (int y = chunk.y; y < chunk.y + chunk.h; ++y) {
-                    if (camera->vismap[y + x * map.height]) {
+                    if (
+                            camera->vismap[
+                                y + x * map.height
+                            ]
+                            || rendererColumnHasVisibleGeometry(
+                                *camera,
+                                map,
+                                x,
+                                y
+                            )
+                        )
+                        {
                         if (ditheringDisabled) {
                             dither.value = Chunk::Dither::MAX;
                         } else {
@@ -2790,11 +3158,12 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
     std::vector<float> positions;
     std::vector<float> texcoords;
     std::vector<float> colors;
+    std::vector<float> lightLayers;
     
     positions.reserve(1200);
     texcoords.reserve(800);
     colors.reserve(1200);
-    
+    lightLayers.reserve(400);
     // determine ceiling texture
     int mapceilingtile = 50;
     if (map.flags[MAP_FLAG_CEILINGTILE] > 0 && map.flags[MAP_FLAG_CEILINGTILE] < numtiles) {
@@ -2837,6 +3206,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
             }
 
             for (int z = 0; z < MAPLAYERS; ++z) {
+                const size_t firstVertexForLayer =
+	            positions.size() / 3;
                 const int index = z + y * MAPLAYERS + x * map.height * MAPLAYERS;
                 const bool validMapLayer = z >= 0 && z < MAPLAYERS;
 
@@ -3172,7 +3543,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                 }
-}    
+            }    
                 // build floor and ceiling
                 {
                     // select floor/ceiling texture
@@ -3289,15 +3660,45 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                 }
+            const size_t vertexCountAfterLayer =
+	positions.size() / 3;
+
+const size_t verticesAdded =
+	vertexCountAfterLayer
+	- firstVertexForLayer;
+
+lightLayers.insert(
+	lightLayers.end(),
+	verticesAdded,
+	static_cast<float>(z)
+);
             }
         }
     }
-    indices = (int)texcoords.size() / 2;
-    buildBuffers(positions, texcoords, colors);
-    //printlog("built chunk with %d tris", indices);
+const size_t vertexCount =
+	positions.size() / 3;
+
+assert(texcoords.size() / 2 == vertexCount);
+assert(colors.size() / 3 == vertexCount);
+assert(lightLayers.size() == vertexCount);
+
+indices =
+	static_cast<int>(vertexCount);
+
+buildBuffers(
+	positions,
+	texcoords,
+	colors,
+	lightLayers
+);
 }
 
-void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<float>& texcoords, const std::vector<float>& colors) {
+void Chunk::buildBuffers(
+	const std::vector<float>& positions,
+	const std::vector<float>& texcoords,
+	const std::vector<float>& colors,
+	const std::vector<float>& lightLayers
+) {
     // create buffers
 #ifdef VERTEX_ARRAYS_ENABLED
     if (!vao) {
@@ -3314,7 +3715,14 @@ void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<
     if (!vbo_colors) {
         GL_CHECK_ERR(glGenBuffers(1, &vbo_colors));
     }
-    
+    if (!vbo_lightlayers) {
+        GL_CHECK_ERR(
+            glGenBuffers(
+                1,
+                &vbo_lightlayers
+            )
+        );
+    }
     // upload positions
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, vbo_positions));
     GL_CHECK_ERR(glBufferData(GL_ARRAY_BUFFER, positions.size() * sizeof(float), positions.data(), GL_DYNAMIC_DRAW));
@@ -3338,7 +3746,39 @@ void Chunk::buildBuffers(const std::vector<float>& positions, const std::vector<
     GL_CHECK_ERR(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
     GL_CHECK_ERR(glEnableVertexAttribArray(2));
 #endif
-    
+// upload exact structural light layers
+GL_CHECK_ERR(
+	glBindBuffer(
+		GL_ARRAY_BUFFER,
+		vbo_lightlayers
+	)
+);
+
+GL_CHECK_ERR(
+	glBufferData(
+		GL_ARRAY_BUFFER,
+		lightLayers.size() * sizeof(float),
+		lightLayers.data(),
+		GL_DYNAMIC_DRAW
+	)
+);
+
+#ifdef VERTEX_ARRAYS_ENABLED
+GL_CHECK_ERR(
+	glVertexAttribPointer(
+		3,
+		1,
+		GL_FLOAT,
+		GL_FALSE,
+		0,
+		nullptr
+	)
+);
+
+GL_CHECK_ERR(
+	glEnableVertexAttribArray(3)
+);
+#endif    
 #ifndef VERTEX_ARRAYS_ENABLED
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, 0));
 #endif
@@ -3360,6 +3800,16 @@ void Chunk::destroyBuffers() {
     if (vbo_colors) {
         GL_CHECK_ERR(glDeleteBuffers(1, &vbo_colors));
         vbo_colors = 0;
+    }
+    if (vbo_lightlayers) {
+	GL_CHECK_ERR(
+		glDeleteBuffers(
+                1,
+                &vbo_lightlayers
+            )
+        );
+
+        vbo_lightlayers = 0;
     }
     indices = 0;
 }
@@ -3383,6 +3833,27 @@ void Chunk::draw() {
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, vbo_colors));
     GL_CHECK_ERR(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 0, nullptr));
     GL_CHECK_ERR(glEnableVertexAttribArray(2));
+    GL_CHECK_ERR(
+	glBindBuffer(
+		GL_ARRAY_BUFFER,
+		vbo_lightlayers
+	)
+);
+
+GL_CHECK_ERR(
+	glVertexAttribPointer(
+		3,
+		1,
+		GL_FLOAT,
+		GL_FALSE,
+		0,
+		nullptr
+	)
+);
+
+GL_CHECK_ERR(
+	glEnableVertexAttribArray(3)
+);
 #endif
     
     GL_CHECK_ERR(glDrawArrays(GL_TRIANGLES, 0, indices));
@@ -3391,6 +3862,7 @@ void Chunk::draw() {
     GL_CHECK_ERR(glDisableVertexAttribArray(0));
     GL_CHECK_ERR(glDisableVertexAttribArray(1));
     GL_CHECK_ERR(glDisableVertexAttribArray(2));
+    GL_CHECK_ERR(glDisableVertexAttribArray(3));
     GL_CHECK_ERR(glBindBuffer(GL_ARRAY_BUFFER, 0));
 #endif
 }
@@ -3414,6 +3886,11 @@ bool Chunk::isDirty(const map_t& map) {
 
 void clearChunks() {
     chunks.clear();
+
+	// A newly loaded map may have the same width, height, and skybox
+	// as the previous map but contain structures on different layers.
+	// Force the next sky draw to recalculate its height.
+	currentSkyLayer = -1;
 }
 
 void createChunks() {

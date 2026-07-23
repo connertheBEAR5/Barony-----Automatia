@@ -14,7 +14,7 @@
 #include "entity.hpp"
 #include "files.hpp"
 #include "player.hpp"
-
+#include "light.hpp"
 button_t* butX;
 button_t* but_;
 button_t* butTilePalette;
@@ -603,9 +603,19 @@ void buttonNewConfirm(button_t* my)
 }
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
-        lightmaps[c].resize(map.width * map.height);
+        lightmaps[c].resize(
+	lightmapSize3D(
+		map.width,
+		map.height
+	)
+);
         lightmapsSmoothed[c].clear();
-        lightmapsSmoothed[c].resize((map.width + 2) * (map.height + 2));
+lightmapsSmoothed[c].resize(
+	lightmapSmoothedSize3D(
+		map.width,
+		map.height
+	)
+);
     }
 	strcpy(message, "                             Created a new map.");
 	filename[0] = 0;
@@ -1508,9 +1518,19 @@ void buttonAttributesConfirm(button_t* my)
 	strcpy(map.author, authortext);
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
-        lightmaps[c].resize(map.width * map.height);
+        lightmaps[c].resize(
+	lightmapSize3D(
+		map.width,
+		map.height
+	)
+);
         lightmapsSmoothed[c].clear();
-        lightmapsSmoothed[c].resize((map.width + 2) * (map.height + 2));
+        lightmapsSmoothed[c].resize(
+	lightmapSmoothedSize3D(
+		map.width,
+		map.height
+	)
+);
     }
 
 	// transfer data from the new map to the old map and fill extra space with empty data
@@ -1719,8 +1739,8 @@ void buttonEditorControls(button_t* my)
 	newwindow = 16;
 	subx1 = xres / 2 - 250;
 	subx2 = xres / 2 + 250;
-	suby1 = yres / 2 - 210;
-	suby2 = yres / 2 + 210;
+	suby1 = yres / 2 - 230;
+	suby2 = yres / 2 + 230;
 
 	button = newButton();
 	strcpy(button->label, "OK");
@@ -2291,6 +2311,14 @@ void buttonSpriteProperties(button_t* my)
 					"%d",
 					static_cast<int>(
 						selectedEntity[0]->portalCustomRequiredClass
+					)
+				);
+				snprintf(
+					spriteProperties[10],
+					2,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomActivateOnPower
 					)
 				);
 				char buf[64] = "";
@@ -3687,6 +3715,14 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				selectedEntity[0]->portalCustomRequiredClass =
 					atoi(spriteProperties[9]);
 					break;
+				selectedEntity[0]->portalCustomActivateOnPower =
+				std::max(
+					0,
+					std::min(
+						1,
+						atoi(spriteProperties[10])
+					)
+				);
 			}
 				
 			case 19: // tables

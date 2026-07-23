@@ -138,13 +138,69 @@ public:
         SDL_UnlockSurface(surf);
     }
     
-    void loadFloat(float* data, int width, int height, bool clamp, bool point) {
-        GL_CHECK_ERR(glBindTexture(GL_TEXTURE_2D, _texid));
-        GL_CHECK_ERR(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, (GLsizei)width, (GLsizei)height, 0, GL_RGBA, GL_FLOAT, data));
-        setParameters(clamp, point);
-        _w = width;
-        _h = height;
-    }
+void loadFloat(
+	float* data,
+	int width,
+	int height,
+	bool clamp,
+	bool point
+)
+{
+	GL_CHECK_ERR(
+		glBindTexture(
+			GL_TEXTURE_2D,
+			_texid
+		)
+	);
+
+	const bool dimensionsChanged =
+		_w != width
+		|| _h != height;
+
+	if ( dimensionsChanged )
+	{
+		// Allocate texture storage only on the first upload or when
+		// the atlas dimensions change.
+		GL_CHECK_ERR(
+			glTexImage2D(
+				GL_TEXTURE_2D,
+				0,
+				GL_RGBA32F,
+				static_cast<GLsizei>(width),
+				static_cast<GLsizei>(height),
+				0,
+				GL_RGBA,
+				GL_FLOAT,
+				data
+			)
+		);
+
+		_w = width;
+		_h = height;
+	}
+	else
+	{
+		// Reuse the existing GPU allocation and replace only its data.
+		GL_CHECK_ERR(
+			glTexSubImage2D(
+				GL_TEXTURE_2D,
+				0,
+				0,
+				0,
+				static_cast<GLsizei>(width),
+				static_cast<GLsizei>(height),
+				GL_RGBA,
+				GL_FLOAT,
+				data
+			)
+		);
+	}
+
+	setParameters(
+		clamp,
+		point
+	);
+}
 
     void bind() {
         GL_CHECK_ERR(glBindTexture(GL_TEXTURE_2D, _texid));
@@ -296,7 +352,23 @@ void putPixel(SDL_Surface* surface, int x, int y, Uint32 pixel);
 void getColor(Uint32 color, uint8_t* r, uint8_t* g, uint8_t* b, uint8_t* a);
 bool behindCamera(const view_t& camera, real_t x, real_t y);
 void occlusionCulling(map_t& map, view_t& camera);
-
+void bindRendererVisibilityMap(
+	const view_t& camera,
+	const map_t& map
+);
+bool rendererColumnHasVisibleGeometry(
+	const view_t& camera,
+	const map_t& map,
+	int x,
+	int y
+);
+bool rendererLayerIsVisible(
+	const view_t& camera,
+	const map_t& map,
+	int x,
+	int y,
+	int layer
+);
 constexpr Uint32 makeColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return ((Uint32)a << 24) | ((Uint32)b << 16) | ((Uint32)g << 8) | ((Uint32)r << 0);
 }
@@ -332,6 +404,7 @@ struct Chunk {
     GLuint vbo_positions = 0;
     GLuint vbo_texcoords = 0;
     GLuint vbo_colors = 0;
+    GLuint vbo_lightlayers = 0;
     GLint indices = 0;
     
     Chunk() = default;
@@ -343,6 +416,7 @@ struct Chunk {
         vbo_positions = rhs.vbo_positions;
         vbo_texcoords = rhs.vbo_texcoords;
         vbo_colors = rhs.vbo_colors;
+        vbo_lightlayers = rhs.vbo_lightlayers;
         indices = rhs.indices;
         x = rhs.x;
         y = rhs.y;
@@ -353,6 +427,7 @@ struct Chunk {
         rhs.vbo_positions = 0;
         rhs.vbo_texcoords = 0;
         rhs.vbo_colors = 0;
+        rhs.vbo_lightlayers = 0;
         rhs.indices = 0;
         rhs.x = 0;
         rhs.y = 0;
@@ -368,6 +443,7 @@ struct Chunk {
         vbo_positions = rhs.vbo_positions;
         vbo_texcoords = rhs.vbo_texcoords;
         vbo_colors = rhs.vbo_colors;
+        vbo_lightlayers = rhs.vbo_lightlayers;
         indices = rhs.indices;
         x = rhs.x;
         y = rhs.y;
@@ -378,6 +454,7 @@ struct Chunk {
         rhs.vbo_positions = 0;
         rhs.vbo_texcoords = 0;
         rhs.vbo_colors = 0;
+        rhs.vbo_lightlayers = 0;
         rhs.indices = 0;
         rhs.x = 0;
         rhs.y = 0;
@@ -394,7 +471,12 @@ struct Chunk {
     }
     
     void build(const map_t& map, bool ceiling, int startX, int startY, int w, int h);
-    void buildBuffers(const std::vector<float>& positions, const std::vector<float>& texcoords, const std::vector<float>& colors);
+    void buildBuffers(
+	const std::vector<float>& positions,
+	const std::vector<float>& texcoords,
+	const std::vector<float>& colors,
+	const std::vector<float>& lightLayers
+);
     void destroyBuffers();
     void draw();
     bool isDirty(const map_t& map);
