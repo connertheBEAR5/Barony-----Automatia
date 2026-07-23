@@ -175,7 +175,72 @@ static bool placePlayersAtCustomTunnel(
         // Reset interpolation so the camera does not slide from
         // the normal Player Start to the tunnel destination.
         playerEntity->bNeedsRenderPositionInit = true;
+		// The server owns the final spawn position.
+		// Tell a remote client where its local player must appear after
+		// the destination map finishes loading.
+		if ( multiplayer == SERVER
+			&& player > 0
+			&& !players[player]->isLocalPlayer()
+			&& net_packet
+			&& net_packet->data )
+		{
+			strcpy(
+				reinterpret_cast<char*>(net_packet->data),
+				"TNSP"
+			);
 
+			SDLNet_Write32(
+				static_cast<Sint32>(
+					playerEntity->x * 32.0
+				),
+				&net_packet->data[4]
+			);
+
+			SDLNet_Write32(
+				static_cast<Sint32>(
+					playerEntity->y * 32.0
+				),
+				&net_packet->data[8]
+			);
+
+			SDLNet_Write32(
+				static_cast<Sint32>(
+					playerEntity->z * 32.0
+				),
+				&net_packet->data[12]
+			);
+
+			SDLNet_Write32(
+				static_cast<Sint32>(
+					playerEntity->yaw * 256.0
+				),
+				&net_packet->data[16]
+			);
+
+			net_packet->address.host =
+				net_clients[player - 1].host;
+
+			net_packet->address.port =
+				net_clients[player - 1].port;
+
+			net_packet->len = 20;
+
+			sendPacketSafe(
+				net_sock,
+				-1,
+				net_packet,
+				player - 1
+			);
+
+			printlog(
+				"[Custom Tunnel] Sent tunnel spawn to client %d: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
+				player,
+				playerEntity->x,
+				playerEntity->y,
+				playerEntity->z,
+				playerEntity->yaw
+			);
+		}
         ++placedPlayers;
     }
 
@@ -2292,17 +2357,51 @@ void gameLogic(void)
 							SDLNet_Write32(lastEntityUIDs, &net_packet->data[9]);
 							net_packet->data[13] = currentlevel;
 
-							if ( loadCustomNextMap.compare("") != 0 )
+							// The custom map name begins at byte 14.
+							// An empty string means use the normal level-list destination.
+							const size_t customMapNameLength =
+								loadCustomNextMap.length();
+
+							if ( customMapNameLength > 0 )
 							{
-								strcpy((char*)(&net_packet->data[14]), loadCustomNextMap.c_str());
-								net_packet->data[14 + loadCustomNextMap.length()] = 0;
-								net_packet->len = 14 + loadCustomNextMap.length() + 1;
+								strcpy(
+									reinterpret_cast<char*>(
+										&net_packet->data[14]
+									),
+									loadCustomNextMap.c_str()
+								);
 							}
 							else
 							{
 								net_packet->data[14] = 0;
-								net_packet->len = 15;
 							}
+
+							// Explicit null terminator for both named and unnamed maps.
+							const size_t tunnelIDOffset =
+								14 + customMapNameLength + 1;
+
+							net_packet->data[
+								14 + customMapNameLength
+							] = 0;
+
+							// Append the destination tunnel ID after the map-name terminator.
+							// ID 0 means the destination map's normal Player Start.
+							SDLNet_Write32(
+								static_cast<Uint32>(
+									loadCustomNextTunnelID
+								),
+								&net_packet->data[tunnelIDOffset]
+							);
+
+							net_packet->len =
+								tunnelIDOffset + sizeof(Uint32);
+
+							printlog(
+								"[Custom Tunnel] Sending map '%s' and destination tunnel ID %d to client %d.",
+								loadCustomNextMap.c_str(),
+								loadCustomNextTunnelID,
+								c
+							);
 							net_packet->address.host = net_clients[c - 1].host;
 							net_packet->address.port = net_clients[c - 1].port;
 							sendPacketSafe(net_sock, -1, net_packet, c - 1);
@@ -2380,7 +2479,10 @@ void gameLogic(void)
 									requestedTunnelID
 								);
 							}
-
+							if ( multiplayer == CLIENT )
+							{
+								applyPendingTunnelSpawn();
+							}
 							updateLoadingScreen(55);
 
 							generatePathMaps();

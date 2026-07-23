@@ -49,7 +49,16 @@
 #include <thread>
 
 NetHandler* net_handler = nullptr;
+struct PendingTunnelSpawn
+{
+    bool active = false;
+    real_t x = 0.0;
+    real_t y = 0.0;
+    real_t z = 0.0;
+    real_t yaw = 0.0;
+};
 
+static PendingTunnelSpawn pendingTunnelSpawn;
 char last_ip[64] = "";
 char last_port[64] = "";
 char lobbyChatbox[LOBBY_CHATBOX_LENGTH];
@@ -66,7 +75,73 @@ void packetDeconstructor(void* data)
 	SDLNet_FreePacket(packetsend->packet);
 	free(data);
 }
+bool applyPendingTunnelSpawn()
+{
+    if ( !pendingTunnelSpawn.active )
+    {
+        return false;
+    }
 
+    if ( clientnum < 0
+        || clientnum >= MAXPLAYERS
+        || players[clientnum] == nullptr
+        || players[clientnum]->entity == nullptr )
+    {
+        return false;
+    }
+
+    Entity* playerEntity =
+        players[clientnum]->entity;
+
+    playerEntity->x =
+        pendingTunnelSpawn.x;
+
+    playerEntity->y =
+        pendingTunnelSpawn.y;
+
+    playerEntity->z =
+        pendingTunnelSpawn.z;
+
+    playerEntity->yaw =
+        pendingTunnelSpawn.yaw;
+
+    playerEntity->new_x =
+        playerEntity->x;
+
+    playerEntity->new_y =
+        playerEntity->y;
+
+    playerEntity->new_z =
+        playerEntity->z;
+
+    playerEntity->new_yaw =
+        playerEntity->yaw;
+
+    playerEntity->vel_x = 0.0;
+    playerEntity->vel_y = 0.0;
+    playerEntity->vel_z = 0.0;
+
+    playerEntity->bNeedsRenderPositionInit = true;
+
+    for ( Entity* bodypart : playerEntity->bodyparts )
+    {
+        if ( bodypart )
+        {
+            bodypart->bNeedsRenderPositionInit = true;
+        }
+    }
+
+    printlog(
+        "[Custom Tunnel] Client applied server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
+        playerEntity->x,
+        playerEntity->y,
+        playerEntity->z,
+        playerEntity->yaw
+    );
+
+    pendingTunnelSpawn.active = false;
+    return true;
+}
 void pollNetworkForShutdown() {
 	// handle network messages
 	if ( !(SDL_GetTicks() % 25) && multiplayer )
@@ -2255,14 +2330,80 @@ void clientActions(Entity* entity)
 
 -------------------------------------------------------------------------------*/
 
-static void changeLevel() {
-	if ( net_packet->data[14] != 0 )
-	{
-		// loading a custom map name.
-		char buf[128] = "";
-		strcpy(buf, (char*)&net_packet->data[14]);
-		loadCustomNextMap = buf;
-	}
+static void changeLevel()
+{
+    // A normal or older level-change packet has no tunnel request.
+    // Reset first so an unrelated later transition cannot reuse a
+    // previous custom tunnel ID.
+    loadCustomNextMap = "";
+    loadCustomNextTunnelID = 0;
+
+    constexpr size_t customMapOffset = 14;
+
+    if ( net_packet->len > customMapOffset )
+    {
+        const size_t availableMapBytes =
+            net_packet->len - customMapOffset;
+
+        const char* customMapName =
+            reinterpret_cast<const char*>(
+                &net_packet->data[customMapOffset]
+            );
+
+        // Find the map-name terminator without reading beyond
+        // the received packet.
+        const size_t customMapNameLength =
+            strnlen(
+                customMapName,
+                availableMapBytes
+            );
+
+        if ( customMapNameLength
+            < availableMapBytes )
+        {
+            // A null terminator was found inside the packet.
+            if ( customMapNameLength > 0 )
+            {
+                loadCustomNextMap.assign(
+                    customMapName,
+                    customMapNameLength
+                );
+            }
+
+            const size_t tunnelIDOffset =
+                customMapOffset
+                + customMapNameLength
+                + 1;
+
+            // New tunnel-aware packets contain four bytes after
+            // the map-name terminator. Older packets safely fall
+            // through and retain tunnel ID 0.
+            if ( net_packet->len
+                >= tunnelIDOffset + sizeof(Uint32) )
+            {
+                loadCustomNextTunnelID =
+                    static_cast<Sint32>(
+                        SDLNet_Read32(
+                            &net_packet->data[
+                                tunnelIDOffset
+                            ]
+                        )
+                    );
+            }
+        }
+        else
+        {
+            printlog(
+                "[Custom Tunnel] Warning: level-change packet contained no map-name terminator."
+            );
+        }
+    }
+
+    printlog(
+        "[Custom Tunnel] Client received map '%s' and destination tunnel ID %d.",
+        loadCustomNextMap.c_str(),
+        loadCustomNextTunnelID
+    );
 
 	if ( MainMenu::isCutsceneActive() )
 	{
@@ -5416,7 +5557,57 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 		changeLevel();
 	}},
+	// Server-authoritative spawn position after a custom tunnel load.
+	{'TNSP', [](){
+		if ( net_packet->len < 20 )
+		{
+			printlog(
+				"[Custom Tunnel] Ignored malformed TNSP packet with length %d.",
+				net_packet->len
+			);
+			return;
+		}
 
+		pendingTunnelSpawn.x =
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			) / 32.0;
+
+		pendingTunnelSpawn.y =
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[8]
+				)
+			) / 32.0;
+
+		pendingTunnelSpawn.z =
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[12]
+				)
+			) / 32.0;
+
+		pendingTunnelSpawn.yaw =
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[16]
+				)
+			) / 256.0;
+
+		pendingTunnelSpawn.active = true;
+
+		printlog(
+			"[Custom Tunnel] Client received server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
+			pendingTunnelSpawn.x,
+			pendingTunnelSpawn.y,
+			pendingTunnelSpawn.z,
+			pendingTunnelSpawn.yaw
+		);
+
+		applyPendingTunnelSpawn();
+	}},
 	// level reminder
 	{'LVLR', [](){
 		changeLevel();

@@ -72,7 +72,7 @@ void clientActions(Entity* entity);
 void clientHandleMessages(Uint32 framerateBreakInterval);
 void serverHandleMessages(Uint32 framerateBreakInterval);
 bool handleSafePacket();
-
+bool applyPendingTunnelSpawn();
 void pollNetworkForShutdown();
 void closeNetworkInterfaces();
 
