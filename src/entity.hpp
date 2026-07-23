@@ -445,6 +445,7 @@ public:
 	Sint32& portalCustomRequirementMode; // skill[19]
 	Sint32& portalCustomRequiredRace;    // skill[20]
 	Sint32& portalCustomRequiredClass;   // skill[21]
+	Sint32& portalCustomActivateOnPower; // skill[22]
 	//--PUBLIC TELEPORTER SKILLS--
 	Sint32& teleporterX; //skill[0]
 	Sint32& teleporterY; //skill[1]

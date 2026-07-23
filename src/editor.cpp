@@ -327,7 +327,7 @@ char textSourcePropertyNames[10][45] =
 	"Send message once only (0 - 1)"
 };
 
-char customPortalPropertyNames[10][59] =
+char customPortalPropertyNames[11][59] =
 {
 	"Model texture to use (0-9999)",
 	"Animation frames (0-9)",
@@ -338,7 +338,8 @@ char customPortalPropertyNames[10][59] =
 	"Exit toggle between secret levels file (0-1)",
 	"Requirement Mode: (0-4)",
 	"Required Race: (-1 = Any)",
-	"Required Class: (-1 = Any)"
+	"Required Class: (-1 = Any)",
+	"Activate when powered (0-1)"
 };
 
 char signalTimerPropertyNames[6][55] =
@@ -7574,6 +7575,33 @@ int main(int argc, char** argv)
 											inputField_y,
 											color,
 											className
+										);
+									}
+								}
+								else if ( i == 10 )
+								{
+									if ( propertyInt < 0 || propertyInt > 1 )
+									{
+										propertyPageError(i, 0);
+									}
+									else if ( propertyInt == 0 )
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											"Power will not activate exit"
+										);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											inputFieldFeedback_x,
+											inputField_y,
+											color,
+											"Power activates exit"
 										);
 									}
 								}

@@ -1739,8 +1739,8 @@ void buttonEditorControls(button_t* my)
 	newwindow = 16;
 	subx1 = xres / 2 - 250;
 	subx2 = xres / 2 + 250;
-	suby1 = yres / 2 - 210;
-	suby2 = yres / 2 + 210;
+	suby1 = yres / 2 - 230;
+	suby2 = yres / 2 + 230;
 
 	button = newButton();
 	strcpy(button->label, "OK");
@@ -2311,6 +2311,14 @@ void buttonSpriteProperties(button_t* my)
 					"%d",
 					static_cast<int>(
 						selectedEntity[0]->portalCustomRequiredClass
+					)
+				);
+				snprintf(
+					spriteProperties[10],
+					2,
+					"%d",
+					static_cast<int>(
+						selectedEntity[0]->portalCustomActivateOnPower
 					)
 				);
 				char buf[64] = "";
@@ -3707,6 +3715,14 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				selectedEntity[0]->portalCustomRequiredClass =
 					atoi(spriteProperties[9]);
 					break;
+				selectedEntity[0]->portalCustomActivateOnPower =
+				std::max(
+					0,
+					std::min(
+						1,
+						atoi(spriteProperties[10])
+					)
+				);
 			}
 				
 			case 19: // tables
