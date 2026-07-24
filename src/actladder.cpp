@@ -1689,30 +1689,86 @@ const bool activatedByInteraction =
 					{
 						mapName[totalChars] = '\0';
 					}
-					int levelToJumpTo = customPortalLookForMapWithName(mapName, my->portalNotSecret ? false : true, my->portalCustomLevelsToJump);
+					int levelToJumpTo =
+						customPortalLookForMapWithName(
+							mapName,
+							my->portalNotSecret ? false : true,
+							my->portalCustomLevelsToJump
+						);
+
 					if ( levelToJumpTo == -1000 )
 					{
 						// Error resolving the requested map.
+						loadnextlevel = false;
+						loadCustomNextMap = "";
 						loadCustomNextTunnelID = 0;
-						printlog("Warning: Error in map teleport!");
+						skipLevelsOnLoad = 0;
+
+						printlog(
+							"[Custom Tunnel] Error resolving destination map '%s'.",
+							mapName
+						);
+
 						return;
 					}
-					else if ( levelToJumpTo == -999 )
+					else if ( levelToJumpTo == -998 )
 					{
-						// custom level not in the levels list, but was found in the maps folder.
-						// we've set the next map to warp to.
+						// Could not find the map name anywhere.
+						loadnextlevel = false;
+						loadCustomNextMap = "";
+						loadCustomNextTunnelID = 0;
+						skipLevelsOnLoad = 0;
+
+						messagePlayer(
+							i,
+							MESSAGE_MISC,
+							"Error: Map %s was not found in the maps folder!",
+							mapName
+						);
+
+						return;
+					}
+
+					/*
+					* A custom tunnel always carries its explicit destination map name,
+					* even when that map also exists in levels.txt.
+					*
+					* This makes the server and every client load the exact same .lmp
+					* instead of relying on separate level-list resolution.
+					*/
+					loadCustomNextMap = mapName;
+
+					printlog(
+						"[Custom Tunnel] Resolved destination map '%s' with level result %d.",
+						loadCustomNextMap.c_str(),
+						levelToJumpTo
+					);
+
+					if ( levelToJumpTo == -999 )
+					{
+						/*
+						* Custom map exists in maps/ but is not listed in levels.txt.
+						* customPortalLookForMapWithName() may already have set the same
+						* name, but assigning it above makes the behavior explicit.
+						*/
 						if ( my->portalCustomLevelsToJump - currentlevel > 0 )
 						{
-							skipLevelsOnLoad = my->portalCustomLevelsToJump - currentlevel;
+							skipLevelsOnLoad =
+								my->portalCustomLevelsToJump - currentlevel;
 						}
 						else
 						{
-							skipLevelsOnLoad = my->portalCustomLevelsToJump - currentlevel - 1;
+							skipLevelsOnLoad =
+								my->portalCustomLevelsToJump
+								- currentlevel
+								- 1;
 						}
+
 						if ( skipLevelsOnLoad == -1 )
 						{
 							loadingSameLevelAsCurrent = true;
 						}
+
 						if ( my->portalNotSecret )
 						{
 							secretlevel = false;
@@ -1721,41 +1777,33 @@ const bool activatedByInteraction =
 						{
 							secretlevel = true;
 						}
+
 						return;
 					}
-					else if ( levelToJumpTo == -998 )
+
+					int levelDifference =
+						currentlevel - levelToJumpTo;
+
+					if ( levelDifference == 0
+						&& (
+							(my->portalNotSecret && !secretlevel)
+							|| (!my->portalNotSecret && secretlevel)
+						) )
 					{
-						// Could not find the map name anywhere.
-						loadnextlevel = false;
-						loadCustomNextTunnelID = 0;
-						skipLevelsOnLoad = 0;
-						messagePlayer(
-							i,
-							MESSAGE_MISC,
-							"Error: Map %s was not found in the maps folder!",
-							mapName
-						);
-						return;
-					}
-					int levelDifference = currentlevel - levelToJumpTo;
-					if ( levelDifference == 0 && ((my->portalNotSecret && !secretlevel) || (!my->portalNotSecret && secretlevel)) )
-					{
-						//// error, we're reloading the same position, will glitch out clients.
-						//loadnextlevel = false;
-						//skipLevelsOnLoad = 0;
-						//messagePlayer(i, "Error: Map to teleport to (%s) is the same position as current!", mapName);
-						//return;
-						loadingSameLevelAsCurrent = true; // update - can handle this now.
+						loadingSameLevelAsCurrent = true;
 					}
 
 					if ( levelToJumpTo - currentlevel > 0 )
 					{
-						skipLevelsOnLoad = levelToJumpTo - currentlevel;
+						skipLevelsOnLoad =
+							levelToJumpTo - currentlevel;
 					}
 					else
 					{
-						skipLevelsOnLoad = levelToJumpTo - currentlevel - 1;
+						skipLevelsOnLoad =
+							levelToJumpTo - currentlevel - 1;
 					}
+
 					if ( my->portalNotSecret )
 					{
 						secretlevel = false;

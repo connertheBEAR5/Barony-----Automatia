@@ -123,17 +123,22 @@ static std::unordered_map<
     PersistentMapRemovalState
 > persistentMapRemovalRegistry;
 /*
- * Begin a fresh persistent-world session.
- *
- * Stage 2A state currently exists only in memory, so a new game or
- * loaded save begins with an empty registry.
+ * Clients receive one complete map snapshot before the corresponding
+ * LVLC/LVLR packet.
  */
+static std::string clientPersistentSnapshotMapKey;
+static bool clientPersistentSnapshotReceiving = false;
+static bool clientPersistentSnapshotComplete = false;
 void resetPersistentWorldSession()
 {
     const size_t clearedMaps =
         persistentMapRemovalRegistry.size();
 
     persistentMapRemovalRegistry.clear();
+
+    clientPersistentSnapshotMapKey.clear();
+    clientPersistentSnapshotReceiving = false;
+    clientPersistentSnapshotComplete = false;
 
     printlog(
         "[Persistent World] Reset session registry; cleared %zu map state record(s).",
@@ -207,6 +212,530 @@ static std::string getPersistentMapKey()
     return key;
 }
 /*
+ * Normalize an explicit map name using the same format as
+ * getPersistentMapKey().
+ */
+static std::string normalizePersistentMapKey(
+    std::string key
+)
+{
+    if ( key.empty() )
+    {
+        return "";
+    }
+
+    std::replace(
+        key.begin(),
+        key.end(),
+        '\\',
+        '/'
+    );
+
+    const size_t lastSlash =
+        key.find_last_of('/');
+
+    if ( lastSlash != std::string::npos )
+    {
+        key = key.substr(lastSlash + 1);
+    }
+
+    std::transform(
+        key.begin(),
+        key.end(),
+        key.begin(),
+        [](unsigned char character)
+        {
+            return static_cast<char>(
+                std::tolower(character)
+            );
+        }
+    );
+
+    if ( key.length() < 4
+        || key.substr(key.length() - 4) != ".lmp" )
+    {
+        key += ".lmp";
+    }
+
+    return key;
+}
+void beginClientPersistentWorldSnapshot(
+    const std::string& mapName
+)
+{
+    if ( multiplayer != CLIENT )
+    {
+        return;
+    }
+
+    clientPersistentSnapshotMapKey =
+        normalizePersistentMapKey(mapName);
+
+    clientPersistentSnapshotReceiving =
+        !clientPersistentSnapshotMapKey.empty();
+
+    clientPersistentSnapshotComplete = false;
+
+    if ( !clientPersistentSnapshotReceiving )
+    {
+        printlog(
+            "[Persistent World MP] Client rejected snapshot with an empty map name."
+        );
+        return;
+    }
+
+    /*
+     * Replace the client's old copy with the new authoritative host
+     * snapshot.
+     */
+    PersistentMapRemovalState& state =
+        persistentMapRemovalRegistry[
+            clientPersistentSnapshotMapKey
+        ];
+
+    state.removedEntityIDs.clear();
+    state.mechanismStates.clear();
+
+    printlog(
+        "[Persistent World MP] Client began snapshot for '%s'.",
+        clientPersistentSnapshotMapKey.c_str()
+    );
+}
+void receiveClientPersistentRemoval(
+    Sint32 persistentID
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].removedEntityIDs.insert(
+        persistentID
+    );
+}
+void receiveClientPersistentLeverState(
+    Sint32 persistentID,
+    bool timedLever,
+    Sint32 switchPower,
+    Sint32 leverStatus,
+    Sint32 leverTimerTicks,
+    real_t roll
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        timedLever
+            ? PersistentMechanismState::Kind::TimedLever
+            : PersistentMechanismState::Kind::Lever;
+
+    state.switchPower = switchPower;
+    state.leverStatus = leverStatus;
+    state.leverTimerTicks = leverTimerTicks;
+    state.roll = roll;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
+void receiveClientPersistentGateState(
+    Sint32 persistentID,
+    Sint32 gateStatus,
+    Sint32 gateRattle,
+    Sint32 gateInverted,
+    Sint32 circuitStatus,
+    real_t gateStartHeight,
+    real_t gateZ,
+    real_t gateVelZ,
+    bool passable
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Gate;
+
+    state.gateStatus = gateStatus;
+    state.gateInit = 1;
+    state.gateRattle = gateRattle;
+    state.gateInverted = gateInverted;
+    state.circuitStatus = circuitStatus;
+
+    state.gateStartHeight = gateStartHeight;
+    state.gateZ = gateZ;
+    state.gateVelZ = gateVelZ;
+
+    state.passable = passable;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
+void finishClientPersistentWorldSnapshot()
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving )
+    {
+        return;
+    }
+
+    const PersistentMapRemovalState& state =
+        persistentMapRemovalRegistry[
+            clientPersistentSnapshotMapKey
+        ];
+
+    clientPersistentSnapshotReceiving = false;
+    clientPersistentSnapshotComplete = true;
+
+    printlog(
+        "[Persistent World MP] Client completed snapshot for '%s': %zu removal(s), %zu mechanism state(s).",
+        clientPersistentSnapshotMapKey.c_str(),
+        state.removedEntityIDs.size(),
+        state.mechanismStates.size()
+    );
+}
+void sendPersistentWorldSnapshotToClient(
+    int player,
+    const std::string& destinationMapName
+)
+{
+    if ( multiplayer != SERVER
+        || player <= 0
+        || player >= MAXPLAYERS
+        || client_disconnected[player]
+        || players[player]->isLocalPlayer()
+        || !net_packet
+        || !net_packet->data )
+    {
+        return;
+    }
+
+    const std::string mapKey =
+        normalizePersistentMapKey(
+            destinationMapName
+        );
+
+    if ( mapKey.empty() )
+    {
+        printlog(
+            "[Persistent World MP] Cannot send snapshot to client %d: destination map name is empty.",
+            player
+        );
+        return;
+    }
+
+    /*
+     * It is valid for a destination map to have no prior record.
+     * Send an empty snapshot so the client clears any stale copy.
+     */
+    const auto mapIterator =
+        persistentMapRemovalRegistry.find(mapKey);
+
+    const PersistentMapRemovalState* state =
+        mapIterator
+            == persistentMapRemovalRegistry.end()
+                ? nullptr
+                : &mapIterator->second;
+
+    auto prepareClientAddress =
+        [player]()
+        {
+            net_packet->address.host =
+                net_clients[player - 1].host;
+
+            net_packet->address.port =
+                net_clients[player - 1].port;
+        };
+
+    /*
+     * PWBG:
+     * bytes 0-3  packet name
+     * bytes 4+   null-terminated normalized map key
+     */
+    strcpy(
+        reinterpret_cast<char*>(net_packet->data),
+        "PWBG"
+    );
+
+    strcpy(
+        reinterpret_cast<char*>(&net_packet->data[4]),
+        mapKey.c_str()
+    );
+
+    net_packet->len =
+        4 + mapKey.length() + 1;
+
+    prepareClientAddress();
+
+    sendPacketSafe(
+        net_sock,
+        -1,
+        net_packet,
+        player - 1
+    );
+
+    Uint32 removalsSent = 0;
+    Uint32 leversSent = 0;
+    Uint32 gatesSent = 0;
+
+    if ( state )
+    {
+        /*
+         * PWRM:
+         * 4  persistent ID
+         */
+        for ( const Sint32 persistentID :
+            state->removedEntityIDs )
+        {
+            strcpy(
+                reinterpret_cast<char*>(
+                    net_packet->data
+                ),
+                "PWRM"
+            );
+
+            SDLNet_Write32(
+                static_cast<Uint32>(persistentID),
+                &net_packet->data[4]
+            );
+
+            net_packet->len = 8;
+
+            prepareClientAddress();
+
+            sendPacketSafe(
+                net_sock,
+                -1,
+                net_packet,
+                player - 1
+            );
+
+            ++removalsSent;
+        }
+
+        for ( const auto& mechanismPair :
+            state->mechanismStates )
+        {
+            const Sint32 persistentID =
+                mechanismPair.first;
+
+            const PersistentMechanismState& mechanism =
+                mechanismPair.second;
+
+            if ( mechanism.kind
+                    == PersistentMechanismState::Kind::Lever
+                || mechanism.kind
+                    == PersistentMechanismState::Kind::TimedLever )
+            {
+                /*
+                 * PWLV:
+                 * 4   persistent ID
+                 * 8   kind: 0 ordinary, 1 timed
+                 * 9   switch power
+                 * 13  lever status
+                 * 17  timer ticks
+                 * 21  roll multiplied by 65536
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWLV"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                net_packet->data[8] =
+                    mechanism.kind
+                        == PersistentMechanismState::Kind::TimedLever
+                            ? 1
+                            : 0;
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.switchPower
+                    ),
+                    &net_packet->data[9]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.leverStatus
+                    ),
+                    &net_packet->data[13]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.leverTimerTicks
+                    ),
+                    &net_packet->data[17]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.roll * 65536.0
+                    ),
+                    &net_packet->data[21]
+                );
+
+                net_packet->len = 25;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++leversSent;
+            }
+            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::Gate )
+            {
+                /*
+                 * PWGT:
+                 * 4   persistent ID
+                 * 8   gate status
+                 * 12  gate rattle
+                 * 16  gate inverted
+                 * 20  circuit status
+                 * 24  start height * 65536
+                 * 28  z * 65536
+                 * 32  vel_z * 65536
+                 * 36  passable
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWGT"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.gateStatus
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.gateRattle
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.gateInverted
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.circuitStatus
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.gateStartHeight
+                        * 65536.0
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.gateZ * 65536.0
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.gateVelZ * 65536.0
+                    ),
+                    &net_packet->data[32]
+                );
+
+                net_packet->data[36] =
+                    mechanism.passable ? 1 : 0;
+
+                net_packet->len = 37;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++gatesSent;
+            }
+        }
+    }
+
+    strcpy(
+        reinterpret_cast<char*>(net_packet->data),
+        "PWEN"
+    );
+
+    net_packet->len = 4;
+
+    prepareClientAddress();
+
+    sendPacketSafe(
+        net_sock,
+        -1,
+        net_packet,
+        player - 1
+    );
+
+    printlog(
+        "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s).",
+        mapKey.c_str(),
+        player,
+        removalsSent,
+        leversSent,
+        gatesSent
+    );
+}
+/*
  * Called after physfsLoadMapFile() but before assignActions().
  *
  * On the first visit, this records all persistent IDs found in the
@@ -216,19 +745,38 @@ static std::string getPersistentMapKey()
  */
 void applyPersistentMapRemovals()
 {
-    // Clients do not own persistent state.
-    // The server or single-player game is authoritative.
-    if ( multiplayer == CLIENT )
-    {
-        return;
-    }
-
     const std::string mapKey =
         getPersistentMapKey();
 
     if ( mapKey.empty() )
     {
         return;
+    }
+
+    /*
+     * Clients may only apply a complete snapshot received from the
+     * authoritative host. They still never capture or invent state.
+     */
+    if ( multiplayer == CLIENT )
+    {
+        if ( !clientPersistentSnapshotComplete )
+        {
+            printlog(
+                "[Persistent World MP] Client cannot apply removals for '%s': snapshot is incomplete.",
+                mapKey.c_str()
+            );
+            return;
+        }
+
+        if ( clientPersistentSnapshotMapKey != mapKey )
+        {
+            printlog(
+                "[Persistent World MP] Client cannot apply removals: loaded '%s', snapshot belongs to '%s'.",
+                mapKey.c_str(),
+                clientPersistentSnapshotMapKey.c_str()
+            );
+            return;
+        }
     }
 
     PersistentMapRemovalState& state =
@@ -438,19 +986,44 @@ static void capturePersistentMechanismStates()
  * Restore runtime mechanism state after assignActions() has created
  * the lever handles and moving gate entities.
  */
+/*
+ * Restore runtime mechanism state after assignActions() has created
+ * the lever handles and moving gate entities.
+ */
 void applyPersistentMechanismStates()
 {
-    if ( multiplayer == CLIENT )
-    {
-        return;
-    }
-
     const std::string mapKey =
         getPersistentMapKey();
 
     if ( mapKey.empty() )
     {
         return;
+    }
+
+    /*
+     * Clients may restore only a complete authoritative snapshot
+     * belonging to the map they just loaded.
+     */
+    if ( multiplayer == CLIENT )
+    {
+        if ( !clientPersistentSnapshotComplete )
+        {
+            printlog(
+                "[Persistent World MP] Client cannot restore mechanisms for '%s': snapshot is incomplete.",
+                mapKey.c_str()
+            );
+            return;
+        }
+
+        if ( clientPersistentSnapshotMapKey != mapKey )
+        {
+            printlog(
+                "[Persistent World MP] Client cannot restore mechanisms: loaded '%s', snapshot belongs to '%s'.",
+                mapKey.c_str(),
+                clientPersistentSnapshotMapKey.c_str()
+            );
+            return;
+        }
     }
 
     const auto mapIterator =
@@ -509,10 +1082,12 @@ void applyPersistentMechanismStates()
                 }
 
                 entity->skill[0] =
-    			savedState.switchPower;
+                    savedState.switchPower;
 
                 entity->roll =
                     savedState.roll;
+
+                entity->bNeedsRenderPositionInit = true;
 
                 ++restoredLevers;
                 break;
@@ -531,7 +1106,7 @@ void applyPersistentMechanismStates()
                 }
 
                 entity->skill[0] =
-    			savedState.switchPower;
+                    savedState.switchPower;
 
                 entity->leverStatus =
                     savedState.leverStatus;
@@ -544,6 +1119,8 @@ void applyPersistentMechanismStates()
 
                 entity->roll =
                     savedState.roll;
+
+                entity->bNeedsRenderPositionInit = true;
 
                 ++restoredTimedLevers;
                 break;
@@ -570,7 +1147,7 @@ void applyPersistentMechanismStates()
                     savedState.gateInverted;
 
                 entity->skill[28] =
-    			savedState.circuitStatus;
+                    savedState.circuitStatus;
 
                 entity->gateStartHeight =
                     savedState.gateStartHeight;
@@ -582,8 +1159,8 @@ void applyPersistentMechanismStates()
                     savedState.gateVelZ;
 
                 /*
-                 * Prevent actGate() from replacing gateStartHeight with
-                 * the restored moving position on its first tick.
+                 * Prevent actGate() from treating the restored gate
+                 * position as its original starting height.
                  */
                 entity->gateInit = 1;
 
@@ -593,6 +1170,9 @@ void applyPersistentMechanismStates()
 
                 entity->flags[PASSABLE] =
                     savedState.passable;
+
+                entity->new_z =
+                    entity->z;
 
                 entity->bNeedsRenderPositionInit = true;
 
@@ -3023,6 +3603,10 @@ void gameLogic(void)
 							{
 								continue;
 							}
+							sendPersistentWorldSnapshotToClient(
+								c,
+								loadCustomNextMap
+							);
 							if ( loadingSameLevelAsCurrent )
 							{
 								strcpy((char*)net_packet->data, "LVLR");

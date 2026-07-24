@@ -13,7 +13,7 @@
 
 #include <vector>
 #include <chrono>
-
+#include <string>
 #ifdef STEAMWORKS
 #include <steam/steam_api.h>
 #include "steam.hpp"
@@ -46,6 +46,47 @@ void startMessages();
 void resetPersistentWorldSession();
 void applyPersistentMapRemovals();
 void applyPersistentMechanismStates();
+/*
+ * Multiplayer persistent-world synchronization.
+ *
+ * The server owns the authoritative registry.
+ * Clients only receive and apply snapshots.
+ */
+void sendPersistentWorldSnapshotToClient(
+    int player,
+    const std::string& destinationMapName
+);
+
+void beginClientPersistentWorldSnapshot(
+    const std::string& mapName
+);
+
+void receiveClientPersistentRemoval(
+    Sint32 persistentID
+);
+
+void receiveClientPersistentLeverState(
+    Sint32 persistentID,
+    bool timedLever,
+    Sint32 switchPower,
+    Sint32 leverStatus,
+    Sint32 leverTimerTicks,
+    real_t roll
+);
+
+void receiveClientPersistentGateState(
+    Sint32 persistentID,
+    Sint32 gateStatus,
+    Sint32 gateRattle,
+    Sint32 gateInverted,
+    Sint32 circuitStatus,
+    real_t gateStartHeight,
+    real_t gateZ,
+    real_t gateVelZ,
+    bool passable
+);
+
+void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
 {

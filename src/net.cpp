@@ -2573,21 +2573,48 @@ static void changeLevel()
 			Mods::disableSteamAchievements = true;
 		}
         updateLoadingScreen(10);
+		int checkMapHash = -1;
 
-	    int checkMapHash = -1;
-	    int result = physfsLoadMapFile(currentlevel, mapseed, false, &checkMapHash);
-	    if (!verifyMapHash(map.filename, checkMapHash))
-	    {
-		    conductGameChallenges[CONDUCT_MODDED] = 1;
+		int result = physfsLoadMapFile(
+			currentlevel,
+			mapseed,
+			false,
+			&checkMapHash
+		);
+
+		/*
+		* Multiplayer sync is a pain :(
+		* Multiplayer clients receive the destination map's authoritative
+		* persistence snapshot before LVLC/LVLR.
+		*
+		* Apply removals while the raw editor entities still exist and before
+		* assignActions() creates runtime entities.
+		*/
+		applyPersistentMapRemovals();
+
+		if ( !verifyMapHash(
+			map.filename,
+			checkMapHash
+		) )
+		{
+			conductGameChallenges[CONDUCT_MODDED] = 1;
 			Mods::disableSteamAchievements = true;
-	    }
-        updateLoadingScreen(50);
+		}
 
-	    numplayers = 0;
-	    assignActions(&map);
-        updateLoadingScreen(55);
+		updateLoadingScreen(50);
 
-	    generatePathMaps();
+		numplayers = 0;
+		assignActions(&map);
+
+		/*
+		* Lever handles and runtime gate entities now exist. Restore their
+		* authoritative host-supplied state by persistent ID.
+		*/
+		applyPersistentMechanismStates();
+
+		updateLoadingScreen(55);
+
+		generatePathMaps();
         updateLoadingScreen(80);
 
         node_t *node, *nextnode;
@@ -5543,18 +5570,189 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			stats[i]->LVL = static_cast<Sint32>((buffer >> (i * 8) ) & 0xFF);
 		}
 	}},
-
-	// level change
-	{'LVLC', [](){
-		if ( currentlevel == net_packet->data[13] && secretlevel == net_packet->data[4] )
+	// Authoritative persistent gate state.
+	{'PWGT', []()
+	{
+		if ( net_packet->len < 37 )
 		{
-			// the server's just doing a routine check
 			return;
 		}
-		if ( net_packet->data[13] == 0 )
+
+		receiveClientPersistentGateState(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[8]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[12]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[16]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[20]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[24]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[28]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[32]
+				)
+			) / 65536.0,
+			net_packet->data[36] != 0
+		);
+	}},
+	// Authoritative persistent lever state.
+	{'PWLV', []()
+	{
+		if ( net_packet->len < 25 )
 		{
-			return; // dont warp back to start level
+			return;
 		}
+
+		receiveClientPersistentLeverState(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			),
+			net_packet->data[8] != 0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[9]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[13]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[17]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[21]
+				)
+			) / 65536.0
+		);
+	}},
+	// Authoritative persistent removal.
+	{'PWRM', []()
+	{
+		if ( net_packet->len < 8 )
+		{
+			return;
+		}
+
+		receiveClientPersistentRemoval(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			)
+		);
+	}},
+	// Begin authoritative persistent-world snapshot.
+	{'PWBG', []()
+	{
+		if ( net_packet->len < 6 )
+		{
+			printlog(
+				"[Persistent World MP] Ignored malformed PWBG packet."
+			);
+			return;
+		}
+
+		const char* mapName =
+			reinterpret_cast<const char*>(
+				&net_packet->data[4]
+			);
+
+		const size_t availableLength =
+			net_packet->len - 4;
+
+		if ( memchr(
+			mapName,
+			'\0',
+			availableLength
+		) == nullptr )
+		{
+			printlog(
+				"[Persistent World MP] Ignored unterminated PWBG map name."
+			);
+			return;
+		}
+
+		beginClientPersistentWorldSnapshot(
+			mapName
+		);
+	}},
+	// Finish authoritative persistent-world snapshot.
+	{'PWEN', []()
+	{
+		finishClientPersistentWorldSnapshot();
+	}},
+	// level change
+	{'LVLC', []()
+	{
+		/*
+		* An LVLC packet that reports our existing level and secret-floor
+		* status is normally only the server's routine consistency check.
+		*
+		* A custom named-map transition is different: it may intentionally
+		* load another map using the same numeric level, so do not discard it
+		* when a map name is present.
+		*/
+		const bool hasExplicitCustomMap =
+			net_packet->len > 14
+			&& net_packet->data[14] != 0;
+
+		if ( currentlevel
+				== static_cast<Sint8>(net_packet->data[13])
+			&& secretlevel == net_packet->data[4]
+			&& !hasExplicitCustomMap )
+		{
+			return;
+		}
+
+		/*
+		* Original Barony blocks ordinary LVLC packets from warping clients
+		* back to level zero. Preserve that protection for legacy packets,
+		* but allow an explicit custom tunnel destination such as "start".
+		*/
+		if ( static_cast<Sint8>(net_packet->data[13]) == 0
+			&& !hasExplicitCustomMap )
+		{
+			return;
+		}
+		printlog(
+    "[Custom Tunnel] Accepting LVLC destination level %d with explicit map=%d.",
+    static_cast<Sint8>(net_packet->data[13]),
+    hasExplicitCustomMap ? 1 : 0
+);
 		changeLevel();
 	}},
 	// Server-authoritative spawn position after a custom tunnel load.
