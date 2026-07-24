@@ -76,7 +76,8 @@ enum class Kind : Uint8
     Lever,
     TimedLever,
     Gate,
-    Door
+    Door,
+	Furniture
 };
 
     Kind kind = Kind::None;
@@ -127,9 +128,17 @@ enum class Kind : Uint8
 
     bool doorBurning = false;
     bool doorBurnable = false;
+	    // Furniture: tables, chairs, beds, bunk beds and podiums.
+    Sint32 furnitureType = 0;
+    Sint32 furnitureHealth = 0;
+    Sint32 furnitureMaxHealth = 0;
 
+    bool furnitureBurning = false;
+    bool furnitureBurnable = false;
 
+// PLACE STUFF ABOVE THIS
     bool passable = false;
+	//This is a shared field dont change ^
 };
 struct PersistentMapRemovalState
 {
@@ -532,6 +541,46 @@ void receiveClientPersistentDoorState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentFurnitureState(
+    Sint32 persistentID,
+    Sint32 furnitureType,
+    Sint32 furnitureHealth,
+    Sint32 furnitureMaxHealth,
+    bool burning,
+    bool burnable
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Furniture;
+
+    state.furnitureType =
+        furnitureType;
+
+    state.furnitureHealth =
+        furnitureHealth;
+
+    state.furnitureMaxHealth =
+        furnitureMaxHealth;
+
+    state.furnitureBurning =
+        burning;
+
+    state.furnitureBurnable =
+        burnable;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -639,6 +688,7 @@ void sendPersistentWorldSnapshotToClient(
     Uint32 leversSent = 0;
     Uint32 gatesSent = 0;
 	Uint32 doorsSent = 0;
+	Uint32 furnitureSent = 0;
     if ( state )
     {
         /*
@@ -1055,6 +1105,72 @@ void sendPersistentWorldSnapshotToClient(
 
 				++doorsSent;
 			}
+			else if ( mechanism.kind
+				== PersistentMechanismState::Kind::Furniture )
+			{
+				/*
+				* PWFU:
+				*
+				* bytes 0-3   packet name
+				* bytes 4-7   persistent ID
+				* bytes 8-11  furniture type
+				* bytes 12-15 current health
+				* bytes 16-19 maximum health
+				* byte  20    burning
+				* byte  21    burnable
+				*/
+				strcpy(
+					reinterpret_cast<char*>(
+						net_packet->data
+					),
+					"PWFU"
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(persistentID),
+					&net_packet->data[4]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.furnitureType
+					),
+					&net_packet->data[8]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.furnitureHealth
+					),
+					&net_packet->data[12]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.furnitureMaxHealth
+					),
+					&net_packet->data[16]
+				);
+
+				net_packet->data[20] =
+					mechanism.furnitureBurning ? 1 : 0;
+
+				net_packet->data[21] =
+					mechanism.furnitureBurnable ? 1 : 0;
+
+				net_packet->len = 22;
+
+				prepareClientAddress();
+
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					player - 1
+				);
+
+				++furnitureSent;
+			}
         }
     }
 
@@ -1075,13 +1191,14 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
     leversSent,
     gatesSent,
-    doorsSent
+    doorsSent,
+    furnitureSent
 );
 }
 /*
@@ -1228,6 +1345,7 @@ static void capturePersistentMechanismStates()
     Uint32 capturedTimedLevers = 0;
     Uint32 capturedGates = 0;
 	Uint32 capturedDoors = 0;
+	Uint32 capturedFurniture = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1406,16 +1524,43 @@ static void capturePersistentMechanismStates()
 
 			++capturedDoors;
 		}
+		else if ( entity->behavior == &actFurniture )
+		{
+			mechanismState.kind =
+				PersistentMechanismState::Kind::Furniture;
+
+			mechanismState.furnitureType =
+				entity->furnitureType;
+
+			mechanismState.furnitureHealth =
+				entity->furnitureHealth;
+
+			mechanismState.furnitureMaxHealth =
+				entity->furnitureMaxHealth;
+
+			mechanismState.furnitureBurning =
+				entity->flags[BURNING];
+
+			mechanismState.furnitureBurnable =
+				entity->flags[BURNABLE];
+
+			mapState.mechanismStates[
+				entity->persistentID
+			] = mechanismState;
+
+			++capturedFurniture;
+		}
     }
 
-	printlog(
-		"[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s).",
-		mapKey.c_str(),
-		capturedLevers,
-		capturedTimedLevers,
-		capturedGates,
-		capturedDoors
-	);
+printlog(
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s).",
+    mapKey.c_str(),
+    capturedLevers,
+    capturedTimedLevers,
+    capturedGates,
+    capturedDoors,
+    capturedFurniture
+);
 }
 /*
  * Restore runtime mechanism state after assignActions() has created
@@ -1477,6 +1622,7 @@ void applyPersistentMechanismStates()
     Uint32 restoredTimedLevers = 0;
     Uint32 restoredGates = 0;
 	Uint32 restoredDoors = 0;
+	Uint32 restoredFurniture = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1745,21 +1891,81 @@ void applyPersistentMechanismStates()
 				++restoredDoors;
 				break;
 			}
+			case PersistentMechanismState::Kind::Furniture:
+			{
+				if ( entity->behavior != &actFurniture )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d was saved as furniture but loaded with another behavior.",
+						entity->persistentID
+					);
+					break;
+				}
 
+				if ( entity->furnitureType
+					!= savedState.furnitureType )
+				{
+					printlog(
+						"[Persistent World] Warning: furniture ID %d changed type from %d to %d.",
+						entity->persistentID,
+						savedState.furnitureType,
+						entity->furnitureType
+					);
+
+					break;
+				}
+
+				entity->furnitureHealth =
+					savedState.furnitureHealth;
+
+				entity->furnitureMaxHealth =
+					savedState.furnitureMaxHealth;
+
+				entity->furnitureOldHealth =
+					savedState.furnitureHealth;
+
+				entity->flags[BURNING] =
+					savedState.furnitureBurning;
+
+				entity->flags[BURNABLE] =
+					savedState.furnitureBurnable;
+
+				/*
+				* Prevent actFurniture() from rerolling the restored health on its
+				* first behavior tick.
+				*/
+				entity->furnitureInit = 1;
+
+				/*
+				* Bunk beds normally create their tooltip during initialization.
+				* Since initialization is skipped after restoration, recreate it.
+				*/
+				if ( entity->furnitureType
+					== FURNITURE_BUNKBED )
+				{
+					entity->createWorldUITooltip();
+				}
+
+				entity->bNeedsRenderPositionInit = true;
+
+				++restoredFurniture;
+				break;
+			}
             case PersistentMechanismState::Kind::None:
             default:
                 break;
         }
     }
 
-    printlog(
-        "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s).",
-        mapKey.c_str(),
-        restoredLevers,
-        restoredTimedLevers,
-        restoredGates,
-        restoredDoors
-    );
+printlog(
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s).",
+    mapKey.c_str(),
+    restoredLevers,
+    restoredTimedLevers,
+    restoredGates,
+    restoredDoors,
+    restoredFurniture
+);
 }
 static void capturePersistentMapRemovals()
 {

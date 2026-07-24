@@ -5829,6 +5829,43 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			net_packet->data[87] != 0
 		);
 	}},
+	// Authoritative persistent furniture state.
+	{'PWFU', []()
+	{
+		if ( net_packet->len < 22 )
+		{
+			printlog(
+				"[Persistent World MP] Ignored malformed PWFU packet with length %d.",
+				net_packet->len
+			);
+			return;
+		}
+
+		receiveClientPersistentFurnitureState(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[8]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[12]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[16]
+				)
+			),
+			net_packet->data[20] != 0,
+			net_packet->data[21] != 0
+		);
+	}},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{

@@ -111,6 +111,14 @@ void receiveClientPersistentDoorState(
     bool burning,
     bool burnable
 );
+void receiveClientPersistentFurnitureState(
+    Sint32 persistentID,
+    Sint32 furnitureType,
+    Sint32 furnitureHealth,
+    Sint32 furnitureMaxHealth,
+    bool burning,
+    bool burnable
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
