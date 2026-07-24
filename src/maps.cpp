@@ -7345,7 +7345,17 @@ void assignActions(map_t* map)
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(2, 0, map->entities, nullptr); //Door frame entity.
+				auto childEntity = newEntity(2, 0, map->entities, nullptr); // Door entity.
+
+				/*
+				* Transfer the editor sprite's stable persistence ID to the actual
+				* moving runtime door. The visible frame must not retain the ID.
+				*/
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
+
 				childEntity->x = entity->x;
 				childEntity->y = entity->y;
 				TileEntityList.addEntity(*childEntity);
@@ -7394,7 +7404,13 @@ void assignActions(map_t* map)
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(2, 0, map->entities, nullptr); //Door frame entity.
+				auto childEntity = newEntity(2, 0, map->entities, nullptr); // Door entity.
+
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
+
 				childEntity->x = entity->x;
 				childEntity->y = entity->y;
 				TileEntityList.addEntity(*childEntity);
@@ -10585,7 +10601,13 @@ void assignActions(map_t* map)
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(1162, 0, map->entities, nullptr); //Door frame entity.
+				auto childEntity = newEntity(1162, 0, map->entities, nullptr); // Iron door entity.
+
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
+
 				childEntity->x = entity->x;
 				childEntity->y = entity->y;
 				TileEntityList.addEntity(*childEntity);
@@ -10640,7 +10662,13 @@ void assignActions(map_t* map)
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(1162, 0, map->entities, nullptr); //Door frame entity.
+				auto childEntity = newEntity(1162, 0, map->entities, nullptr); // Iron door entity.
+
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
+
 				childEntity->x = entity->x;
 				childEntity->y = entity->y;
 				TileEntityList.addEntity(*childEntity);

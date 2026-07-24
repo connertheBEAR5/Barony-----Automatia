@@ -70,13 +70,14 @@
  */
 struct PersistentMechanismState
 {
-    enum class Kind : Uint8
-    {
-        None,
-        Lever,
-        TimedLever,
-        Gate
-    };
+enum class Kind : Uint8
+{
+    None,
+    Lever,
+    TimedLever,
+    Gate,
+    Door
+};
 
     Kind kind = Kind::None;
 
@@ -98,6 +99,35 @@ struct PersistentMechanismState
     real_t gateStartHeight = 0.0;
     real_t gateZ = 0.0;
     real_t gateVelZ = 0.0;
+
+	    // Wooden and iron doors.
+    bool doorIsIron = false;
+
+    Sint32 doorDir = 0;
+    Sint32 doorStatus = 0;
+    Sint32 doorHealth = 0;
+    Sint32 doorMaxHealth = 0;
+    Sint32 doorLocked = 0;
+    Sint32 doorSmacked = 0;
+    Sint32 doorTimer = 0;
+
+    Sint32 doorPreventLockpickExploit = 0;
+    Sint32 doorForceLockedUnlocked = 0;
+    Sint32 doorDisableLockpicks = 0;
+    Sint32 doorDisableOpening = 0;
+    Sint32 doorLockpickHealth = 0;
+    Sint32 doorUnlockWhenPowered = 0;
+    Sint32 doorCircuitStatus = 0;
+
+    real_t doorStartAng = 0.0;
+    real_t doorYaw = 0.0;
+    real_t doorX = 0.0;
+    real_t doorY = 0.0;
+    real_t doorFocalY = 0.0;
+
+    bool doorBurning = false;
+    bool doorBurnable = false;
+
 
     bool passable = false;
 };
@@ -390,6 +420,118 @@ void receiveClientPersistentGateState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentDoorState(
+    Sint32 persistentID,
+    bool isIronDoor,
+    Sint32 doorDir,
+    Sint32 doorStatus,
+    Sint32 doorHealth,
+    Sint32 doorMaxHealth,
+    Sint32 doorLocked,
+    Sint32 doorSmacked,
+    Sint32 doorTimer,
+    Sint32 doorPreventLockpickExploit,
+    Sint32 doorForceLockedUnlocked,
+    Sint32 doorDisableLockpicks,
+    Sint32 doorDisableOpening,
+    Sint32 doorLockpickHealth,
+    Sint32 doorUnlockWhenPowered,
+    Sint32 doorCircuitStatus,
+    real_t doorStartAng,
+    real_t doorYaw,
+    real_t doorX,
+    real_t doorY,
+    real_t doorFocalY,
+    bool passable,
+    bool burning,
+    bool burnable
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Door;
+
+    state.doorIsIron =
+        isIronDoor;
+
+    state.doorDir =
+        doorDir;
+
+    state.doorStatus =
+        doorStatus;
+
+    state.doorHealth =
+        doorHealth;
+
+    state.doorMaxHealth =
+        doorMaxHealth;
+
+    state.doorLocked =
+        doorLocked;
+
+    state.doorSmacked =
+        doorSmacked;
+
+    state.doorTimer =
+        doorTimer;
+
+    state.doorPreventLockpickExploit =
+        doorPreventLockpickExploit;
+
+    state.doorForceLockedUnlocked =
+        doorForceLockedUnlocked;
+
+    state.doorDisableLockpicks =
+        doorDisableLockpicks;
+
+    state.doorDisableOpening =
+        doorDisableOpening;
+
+    state.doorLockpickHealth =
+        doorLockpickHealth;
+
+    state.doorUnlockWhenPowered =
+        doorUnlockWhenPowered;
+
+    state.doorCircuitStatus =
+        doorCircuitStatus;
+
+    state.doorStartAng =
+        doorStartAng;
+
+    state.doorYaw =
+        doorYaw;
+
+    state.doorX =
+        doorX;
+
+    state.doorY =
+        doorY;
+
+    state.doorFocalY =
+        doorFocalY;
+
+    state.passable =
+        passable;
+
+    state.doorBurning =
+        burning;
+
+    state.doorBurnable =
+        burnable;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -496,7 +638,7 @@ void sendPersistentWorldSnapshotToClient(
     Uint32 removalsSent = 0;
     Uint32 leversSent = 0;
     Uint32 gatesSent = 0;
-
+	Uint32 doorsSent = 0;
     if ( state )
     {
         /*
@@ -707,6 +849,212 @@ void sendPersistentWorldSnapshotToClient(
 
                 ++gatesSent;
             }
+			else if ( mechanism.kind
+				== PersistentMechanismState::Kind::Door )
+			{
+				/*
+				* PWDR packet:
+				*
+				*  4  persistent ID
+				*  8  iron-door flag
+				*  9  door direction
+				* 13  door status
+				* 17  health
+				* 21  max health
+				* 25  locked
+				* 29  smacked direction
+				* 33  timer
+				* 37  anti-lockpick-exploit state
+				* 41  forced lock/unlock option
+				* 45  disable lockpicks
+				* 49  disable opening
+				* 53  lockpick health
+				* 57  unlock when powered
+				* 61  circuit status
+				* 65  start angle * 65536
+				* 69  yaw * 65536
+				* 73  x * 65536
+				* 77  y * 65536
+				* 81  focal-y * 65536
+				* 85  passable
+				* 86  burning
+				* 87  burnable
+				*/
+				strcpy(
+					reinterpret_cast<char*>(
+						net_packet->data
+					),
+					"PWDR"
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(persistentID),
+					&net_packet->data[4]
+				);
+
+				net_packet->data[8] =
+					mechanism.doorIsIron ? 1 : 0;
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorDir
+					),
+					&net_packet->data[9]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorStatus
+					),
+					&net_packet->data[13]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorHealth
+					),
+					&net_packet->data[17]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorMaxHealth
+					),
+					&net_packet->data[21]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorLocked
+					),
+					&net_packet->data[25]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorSmacked
+					),
+					&net_packet->data[29]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorTimer
+					),
+					&net_packet->data[33]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorPreventLockpickExploit
+					),
+					&net_packet->data[37]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorForceLockedUnlocked
+					),
+					&net_packet->data[41]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorDisableLockpicks
+					),
+					&net_packet->data[45]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorDisableOpening
+					),
+					&net_packet->data[49]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorLockpickHealth
+					),
+					&net_packet->data[53]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorUnlockWhenPowered
+					),
+					&net_packet->data[57]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.doorCircuitStatus
+					),
+					&net_packet->data[61]
+				);
+
+				SDLNet_Write32(
+					static_cast<Sint32>(
+						mechanism.doorStartAng
+						* 65536.0
+					),
+					&net_packet->data[65]
+				);
+
+				SDLNet_Write32(
+					static_cast<Sint32>(
+						mechanism.doorYaw
+						* 65536.0
+					),
+					&net_packet->data[69]
+				);
+
+				SDLNet_Write32(
+					static_cast<Sint32>(
+						mechanism.doorX
+						* 65536.0
+					),
+					&net_packet->data[73]
+				);
+
+				SDLNet_Write32(
+					static_cast<Sint32>(
+						mechanism.doorY
+						* 65536.0
+					),
+					&net_packet->data[77]
+				);
+
+				SDLNet_Write32(
+					static_cast<Sint32>(
+						mechanism.doorFocalY
+						* 65536.0
+					),
+					&net_packet->data[81]
+				);
+
+				net_packet->data[85] =
+					mechanism.passable ? 1 : 0;
+
+				net_packet->data[86] =
+					mechanism.doorBurning ? 1 : 0;
+
+				net_packet->data[87] =
+					mechanism.doorBurnable ? 1 : 0;
+
+				net_packet->len = 88;
+
+				prepareClientAddress();
+
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					player - 1
+				);
+
+				++doorsSent;
+			}
         }
     }
 
@@ -726,14 +1074,15 @@ void sendPersistentWorldSnapshotToClient(
         player - 1
     );
 
-    printlog(
-        "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s).",
-        mapKey.c_str(),
-        player,
-        removalsSent,
-        leversSent,
-        gatesSent
-    );
+printlog(
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s).",
+    mapKey.c_str(),
+    player,
+    removalsSent,
+    leversSent,
+    gatesSent,
+    doorsSent
+);
 }
 /*
  * Called after physfsLoadMapFile() but before assignActions().
@@ -878,7 +1227,7 @@ static void capturePersistentMechanismStates()
     Uint32 capturedLevers = 0;
     Uint32 capturedTimedLevers = 0;
     Uint32 capturedGates = 0;
-
+	Uint32 capturedDoors = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -972,15 +1321,101 @@ static void capturePersistentMechanismStates()
 
             ++capturedGates;
         }
+		else if ( entity->behavior == &actDoor
+			|| entity->behavior == &actIronDoor )
+		{
+			mechanismState.kind =
+				PersistentMechanismState::Kind::Door;
+
+			mechanismState.doorIsIron =
+				entity->behavior == &actIronDoor;
+
+			mechanismState.doorDir =
+				entity->doorDir;
+
+			mechanismState.doorStatus =
+				entity->doorStatus;
+
+			mechanismState.doorHealth =
+				entity->doorHealth;
+
+			mechanismState.doorMaxHealth =
+				entity->doorMaxHealth;
+
+			mechanismState.doorLocked =
+				entity->doorLocked;
+
+			mechanismState.doorSmacked =
+				entity->doorSmacked;
+
+			mechanismState.doorTimer =
+				entity->doorTimer;
+
+			mechanismState.doorPreventLockpickExploit =
+				entity->doorPreventLockpickExploit;
+
+			mechanismState.doorForceLockedUnlocked =
+				entity->doorForceLockedUnlocked;
+
+			mechanismState.doorDisableLockpicks =
+				entity->doorDisableLockpicks;
+
+			mechanismState.doorDisableOpening =
+				entity->doorDisableOpening;
+
+			mechanismState.doorLockpickHealth =
+				entity->doorLockpickHealth;
+
+			mechanismState.doorUnlockWhenPowered =
+				entity->doorUnlockWhenPowered;
+
+			mechanismState.doorCircuitStatus =
+				entity->skill[28];
+
+			mechanismState.doorStartAng =
+				entity->doorStartAng;
+
+			mechanismState.doorYaw =
+				entity->yaw;
+
+			/*
+			* Open doors shift their runtime x/y collision position by five
+			* units, so exact coordinates must be saved.
+			*/
+			mechanismState.doorX =
+				entity->x;
+
+			mechanismState.doorY =
+				entity->y;
+
+			mechanismState.doorFocalY =
+				entity->focaly;
+
+			mechanismState.passable =
+				entity->flags[PASSABLE];
+
+			mechanismState.doorBurning =
+				entity->flags[BURNING];
+
+			mechanismState.doorBurnable =
+				entity->flags[BURNABLE];
+
+			mapState.mechanismStates[
+				entity->persistentID
+			] = mechanismState;
+
+			++capturedDoors;
+		}
     }
 
-    printlog(
-        "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s).",
-        mapKey.c_str(),
-        capturedLevers,
-        capturedTimedLevers,
-        capturedGates
-    );
+	printlog(
+		"[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s).",
+		mapKey.c_str(),
+		capturedLevers,
+		capturedTimedLevers,
+		capturedGates,
+		capturedDoors
+	);
 }
 /*
  * Restore runtime mechanism state after assignActions() has created
@@ -1041,7 +1476,7 @@ void applyPersistentMechanismStates()
     Uint32 restoredLevers = 0;
     Uint32 restoredTimedLevers = 0;
     Uint32 restoredGates = 0;
-
+	Uint32 restoredDoors = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1179,6 +1614,137 @@ void applyPersistentMechanismStates()
                 ++restoredGates;
                 break;
             }
+			case PersistentMechanismState::Kind::Door:
+			{
+				const bool loadedAsWoodenDoor =
+					entity->behavior == &actDoor;
+
+				const bool loadedAsIronDoor =
+					entity->behavior == &actIronDoor;
+
+				if ( !loadedAsWoodenDoor
+					&& !loadedAsIronDoor )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d was saved as a door but loaded with another behavior.",
+						entity->persistentID
+					);
+					break;
+				}
+
+				if ( savedState.doorIsIron
+					!= loadedAsIronDoor )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d changed between wooden and iron door types.",
+						entity->persistentID
+					);
+					break;
+				}
+
+				/*
+				* The fresh runtime door has not received its first behavior tick.
+				* Create its interaction tooltip here because setting doorInit to
+				* one prevents the normal initialization block from doing so.
+				*/
+				entity->createWorldUITooltip();
+
+				entity->doorDir =
+					savedState.doorDir;
+
+				entity->doorStatus =
+					savedState.doorStatus;
+
+				entity->doorOldStatus =
+					savedState.doorStatus;
+
+				entity->doorHealth =
+					savedState.doorHealth;
+
+				entity->doorMaxHealth =
+					savedState.doorMaxHealth;
+
+				entity->doorOldHealth =
+					savedState.doorHealth;
+
+				entity->doorLocked =
+					savedState.doorLocked;
+
+				entity->doorSmacked =
+					savedState.doorSmacked;
+
+				entity->doorTimer =
+					savedState.doorTimer;
+
+				entity->doorPreventLockpickExploit =
+					savedState.doorPreventLockpickExploit;
+
+				entity->doorForceLockedUnlocked =
+					savedState.doorForceLockedUnlocked;
+
+				entity->doorDisableLockpicks =
+					savedState.doorDisableLockpicks;
+
+				entity->doorDisableOpening =
+					savedState.doorDisableOpening;
+
+				entity->doorLockpickHealth =
+					savedState.doorLockpickHealth;
+
+				entity->doorUnlockWhenPowered =
+					savedState.doorUnlockWhenPowered;
+
+				entity->skill[28] =
+					savedState.doorCircuitStatus;
+
+				entity->doorStartAng =
+					savedState.doorStartAng;
+
+				entity->yaw =
+					savedState.doorYaw;
+
+				entity->x =
+					savedState.doorX;
+
+				entity->y =
+					savedState.doorY;
+
+				entity->focaly =
+					savedState.doorFocalY;
+
+				entity->flags[PASSABLE] =
+					savedState.passable;
+
+				entity->flags[BURNING] =
+					savedState.doorBurning;
+
+				entity->flags[BURNABLE] =
+					savedState.doorBurnable;
+
+				entity->scalex = 1.01;
+				entity->scaley = 1.01;
+				entity->scalez = 1.01;
+
+				/*
+				* Prevent actDoor()/actIronDoor() from regenerating health,
+				* lock state, starting angle, and lockpick state.
+				*/
+				entity->doorInit = 1;
+
+				entity->new_x =
+					entity->x;
+
+				entity->new_y =
+					entity->y;
+
+				entity->new_yaw =
+					entity->yaw;
+
+				entity->bNeedsRenderPositionInit = true;
+
+				++restoredDoors;
+				break;
+			}
 
             case PersistentMechanismState::Kind::None:
             default:
@@ -1187,11 +1753,12 @@ void applyPersistentMechanismStates()
     }
 
     printlog(
-        "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s).",
+        "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s).",
         mapKey.c_str(),
         restoredLevers,
         restoredTimedLevers,
-        restoredGates
+        restoredGates,
+        restoredDoors
     );
 }
 static void capturePersistentMapRemovals()

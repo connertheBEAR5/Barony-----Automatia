@@ -85,7 +85,32 @@ void receiveClientPersistentGateState(
     real_t gateVelZ,
     bool passable
 );
-
+void receiveClientPersistentDoorState(
+    Sint32 persistentID,
+    bool isIronDoor,
+    Sint32 doorDir,
+    Sint32 doorStatus,
+    Sint32 doorHealth,
+    Sint32 doorMaxHealth,
+    Sint32 doorLocked,
+    Sint32 doorSmacked,
+    Sint32 doorTimer,
+    Sint32 doorPreventLockpickExploit,
+    Sint32 doorForceLockedUnlocked,
+    Sint32 doorDisableLockpicks,
+    Sint32 doorDisableOpening,
+    Sint32 doorLockpickHealth,
+    Sint32 doorUnlockWhenPowered,
+    Sint32 doorCircuitStatus,
+    real_t doorStartAng,
+    real_t doorYaw,
+    real_t doorX,
+    real_t doorY,
+    real_t doorFocalY,
+    bool passable,
+    bool burning,
+    bool burnable
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

@@ -2583,7 +2583,7 @@ static void changeLevel()
 		);
 
 		/*
-		* Multiplayer sync is a pain :(
+		* Multiplayer sync is a pain :( but cool!
 		* Multiplayer clients receive the destination map's authoritative
 		* persistence snapshot before LVLC/LVLR.
 		*
@@ -5708,6 +5708,125 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 		beginClientPersistentWorldSnapshot(
 			mapName
+		);
+	}},
+	// Authoritative persistent wooden/iron door state.
+	{'PWDR', []()
+	{
+		if ( net_packet->len < 88 )
+		{
+			printlog(
+				"[Persistent World MP] Ignored malformed PWDR packet with length %d.",
+				net_packet->len
+			);
+			return;
+		}
+
+		receiveClientPersistentDoorState(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			),
+			net_packet->data[8] != 0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[9]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[13]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[17]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[21]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[25]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[29]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[33]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[37]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[41]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[45]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[49]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[53]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[57]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[61]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[65]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[69]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[73]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[77]
+				)
+			) / 65536.0,
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[81]
+				)
+			) / 65536.0,
+			net_packet->data[85] != 0,
+			net_packet->data[86] != 0,
+			net_packet->data[87] != 0
 		);
 	}},
 	// Finish authoritative persistent-world snapshot.
