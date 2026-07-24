@@ -43,7 +43,9 @@ extern Uint32 joyimpulses[NUM_JOY_IMPULSES]; //Joystick/gamepad only impulses.
 
 bool handleEvents(void);
 void startMessages();
-
+// Session-only persistent map-state system.
+void resetPersistentWorldSession();
+void applyPersistentMapRemovals();
 // net packet send
 typedef struct packetsend_t
 {

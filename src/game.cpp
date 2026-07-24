@@ -58,6 +58,338 @@
 #include <atomic>
 #include <future>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <algorithm>
+#include <cctype>
+/*
+ * Session-only persistent world state.
+ *
+ * Stage 2A tracks only whether editor-placed entities were removed.
+ * It does not yet preserve surviving entity properties such as health,
+ * position, chest contents, door state, or mechanism state.
+ */
+struct PersistentMapRemovalState
+{
+    // Every editor entity originally stored in the map file.
+    std::unordered_set<Sint32> originalEntityIDs;
+
+    // Original map entities no longer present when the party left.
+    std::unordered_set<Sint32> removedEntityIDs;
+
+    bool originalIDsRegistered = false;
+};
+
+static std::unordered_map<
+    std::string,
+    PersistentMapRemovalState
+> persistentMapRemovalRegistry;
+/*
+ * Begin a fresh persistent-world session.
+ *
+ * Stage 2A state currently exists only in memory, so a new game or
+ * loaded save begins with an empty registry.
+ */
+void resetPersistentWorldSession()
+{
+    const size_t clearedMaps =
+        persistentMapRemovalRegistry.size();
+
+    persistentMapRemovalRegistry.clear();
+
+    printlog(
+        "[Persistent World] Reset session registry; cleared %zu map state record(s).",
+        clearedMaps
+    );
+}
+/*
+ * Produce a consistent key for the currently loaded map.
+ *
+ * map.filename is preferred because map.name can be blank or can be a
+ * display name rather than the actual .lmp filename.
+ */
+static std::string getPersistentMapKey()
+{
+    std::string key;
+
+    if ( map.filename[0] != '\0' )
+    {
+        key = map.filename;
+    }
+    else if ( map.name[0] != '\0' )
+    {
+        key = map.name;
+    }
+    else
+    {
+        printlog(
+            "[Persistent World] Warning: current map has no filename or map name."
+        );
+
+        return "";
+    }
+
+    // Normalize path separators.
+    std::replace(
+        key.begin(),
+        key.end(),
+        '\\',
+        '/'
+    );
+
+    // Keep only the filename, not an absolute or data-directory path.
+    const size_t lastSlash =
+        key.find_last_of('/');
+
+    if ( lastSlash != std::string::npos )
+    {
+        key = key.substr(lastSlash + 1);
+    }
+
+    // Make case differences irrelevant.
+    std::transform(
+        key.begin(),
+        key.end(),
+        key.begin(),
+        [](unsigned char character)
+        {
+            return static_cast<char>(
+                std::tolower(character)
+            );
+        }
+    );
+
+    // Ensure manually loaded names use the same extension form.
+    if ( key.length() < 4
+        || key.substr(key.length() - 4) != ".lmp" )
+    {
+        key += ".lmp";
+    }
+
+    return key;
+}
+/*
+ * Called after physfsLoadMapFile() but before assignActions().
+ *
+ * On the first visit, this records all persistent IDs found in the
+ * original .lmp entity list.
+ *
+ * On later visits, it removes entities previously recorded as gone.
+ */
+void applyPersistentMapRemovals()
+{
+    // Clients do not own persistent state.
+    // The server or single-player game is authoritative.
+    if ( multiplayer == CLIENT )
+    {
+        return;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return;
+    }
+
+    PersistentMapRemovalState& state =
+        persistentMapRemovalRegistry[mapKey];
+
+    Uint32 registeredIDs = 0;
+
+    /*
+     * Always scan the newly loaded unmodified map before removing
+     * anything. This also lets maps gain newly added editor entities
+     * during development without losing their IDs.
+     */
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !entity || entity->persistentID <= 0 )
+        {
+            continue;
+        }
+
+        const auto result =
+            state.originalEntityIDs.insert(
+                entity->persistentID
+            );
+
+        if ( result.second )
+        {
+            ++registeredIDs;
+        }
+    }
+
+    state.originalIDsRegistered = true;
+
+    Uint32 removedEntities = 0;
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr; )
+    {
+        node_t* nextNode = node->next;
+
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( entity
+            && entity->persistentID > 0
+            && state.removedEntityIDs.find(
+                entity->persistentID
+            ) != state.removedEntityIDs.end() )
+        {
+            printlog(
+                "[Persistent World] Removing previously deleted entity ID %d, sprite %d, from '%s'.",
+                entity->persistentID,
+                entity->sprite,
+                mapKey.c_str()
+            );
+
+            list_RemoveNode(entity->mynode);
+            ++removedEntities;
+        }
+
+        node = nextNode;
+    }
+
+    printlog(
+        "[Persistent World] Loaded '%s': %zu original ID(s), %zu persistent removal(s), %u newly registered ID(s), %u entity removal(s) applied.",
+        mapKey.c_str(),
+        state.originalEntityIDs.size(),
+        state.removedEntityIDs.size(),
+        registeredIDs,
+        removedEntities
+    );
+}
+/*
+ * Called immediately before leaving the current map.
+ *
+ * Any persistent ID that was originally present but is no longer found
+ * in map.entities is recorded as removed.
+ */
+static void capturePersistentMapRemovals()
+{
+    // Multiplayer clients do not own world persistence.
+    if ( multiplayer == CLIENT )
+    {
+        return;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return;
+    }
+
+    auto stateIterator =
+        persistentMapRemovalRegistry.find(mapKey);
+
+    if ( stateIterator
+        == persistentMapRemovalRegistry.end()
+        || !stateIterator->second.originalIDsRegistered )
+    {
+        /*
+         * This can happen when loading into an already-running session
+         * from a path that has not passed through our restore helper yet.
+         * Register the currently existing IDs as the baseline rather than
+         * incorrectly declaring every entity removed.
+         */
+        PersistentMapRemovalState& state =
+            persistentMapRemovalRegistry[mapKey];
+
+        for ( node_t* node = map.entities->first;
+            node != nullptr;
+            node = node->next )
+        {
+            Entity* entity =
+                static_cast<Entity*>(node->element);
+
+            if ( entity && entity->persistentID > 0 )
+            {
+                state.originalEntityIDs.insert(
+                    entity->persistentID
+                );
+            }
+        }
+
+        state.originalIDsRegistered = true;
+
+        printlog(
+            "[Persistent World] Registered fallback baseline for '%s' with %zu currently present ID(s).",
+            mapKey.c_str(),
+            state.originalEntityIDs.size()
+        );
+
+        return;
+    }
+
+    PersistentMapRemovalState& state =
+        stateIterator->second;
+
+    std::unordered_set<Sint32> currentlyPresentIDs;
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !entity || entity->persistentID <= 0 )
+        {
+            continue;
+        }
+
+        currentlyPresentIDs.insert(
+            entity->persistentID
+        );
+    }
+
+    Uint32 newlyRemovedEntities = 0;
+
+    for ( const Sint32 originalID :
+        state.originalEntityIDs )
+    {
+        if ( currentlyPresentIDs.find(originalID)
+            != currentlyPresentIDs.end() )
+        {
+            continue;
+        }
+
+        const auto result =
+            state.removedEntityIDs.insert(
+                originalID
+            );
+
+        if ( result.second )
+        {
+            ++newlyRemovedEntities;
+
+            printlog(
+                "[Persistent World] Entity ID %d is missing from '%s'; recording it as removed.",
+                originalID,
+                mapKey.c_str()
+            );
+        }
+    }
+
+    printlog(
+        "[Persistent World] Captured '%s': %zu entity ID(s) currently present, %u newly removed, %zu total removals.",
+        mapKey.c_str(),
+        currentlyPresentIDs.size(),
+        newlyRemovedEntities,
+        state.removedEntityIDs.size()
+    );
+}
+
 static bool placePlayersAtCustomTunnel(
     const Sint32 destinationTunnelID
 )
@@ -2022,9 +2354,15 @@ void gameLogic(void)
 
 				if ( loadnextlevel == true )
 				{
-				    // when this flag is set, it's time to load the next level.
+					// When this flag is set, it is time to load the next level.
 					loadnextlevel = false;
 					loadedNextLevel = true;
+
+					/*
+					* Record removed editor entities before the current map is destroyed
+					* or replaced by physfsLoadMapFile().
+					*/
+					capturePersistentMapRemovals();
 
 					int totalFloorGold = 0;
 					int totalFloorItems = 0;
@@ -2458,6 +2796,12 @@ void gameLogic(void)
 								false,
 								&checkMapHash
 							);
+
+							/*
+							* The raw editor entities now exist, but runtime behaviors have not
+							* been assigned yet.
+							*/
+							applyPersistentMapRemovals();
 
 							if ( !verifyMapHash(
 								map.filename,

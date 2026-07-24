@@ -9012,6 +9012,14 @@ void doNewGame(bool makeHighscore) {
 		}
 		lastEntityUIDs = entity_uids;
 		numplayers = 0;
+		/*
+		* This block begins the initial playable map for a new or loaded
+		* session. Persistent removal data is currently session-only, so
+		* begin with a fresh registry.
+		*
+		* This does not run during ordinary custom-exit map transitions.
+		*/
+		resetPersistentWorldSession();
 		int checkMapHash = -1;
 		if ( loadingmap == false )
 		{
@@ -9059,9 +9067,43 @@ void doNewGame(bool makeHighscore) {
 			}
 			else
 			{
-				generateDungeon(maptoload, mapseed);
+				if ( genmap == false )
+				{
+					std::string fullMapName =
+						physfsFormatMapName(maptoload);
+
+					loadMap(
+						fullMapName.c_str(),
+						&map,
+						map.entities,
+						map.creatures,
+						&checkMapHash
+					);
+
+					if ( !verifyMapHash(
+						fullMapName.c_str(),
+						checkMapHash
+					) )
+					{
+						conductGameChallenges[CONDUCT_MODDED] = 1;
+						Mods::disableSteamAchievements = true;
+					}
+				}
+				else
+				{
+					generateDungeon(maptoload, mapseed);
+				}
 			}
+
+			/*
+			* The first playable map has now been loaded, but its editor
+			* entities have not yet been converted into runtime entities.
+			*
+			* Register the complete persistent-ID baseline now so removals made
+			* during the player's first visit can be detected when leaving.
+			*/
 		}
+		applyPersistentMapRemovals();
 		assignActions(&map);
 
 		if ( !loadingsavegame && challengeRunCustomStartLevel == "minetown" )
