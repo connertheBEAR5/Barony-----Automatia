@@ -77,7 +77,8 @@ enum class Kind : Uint8
     TimedLever,
     Gate,
     Door,
-	Furniture
+	Furniture,
+	ColliderDecoration
 };
 
     Kind kind = Kind::None;
@@ -132,10 +133,17 @@ enum class Kind : Uint8
     Sint32 furnitureType = 0;
     Sint32 furnitureHealth = 0;
     Sint32 furnitureMaxHealth = 0;
-
+	
     bool furnitureBurning = false;
     bool furnitureBurnable = false;
+    // Damageable collider decorations.
+    Sint32 colliderCurrentHP = 0;
+    Sint32 colliderMaxHP = 0;
+    Sint32 colliderDamageTypes = 0;
+    Sint32 colliderHasCollision = 0;
 
+    bool colliderBurning = false;
+    bool colliderBurnable = false;
 // PLACE STUFF ABOVE THIS
     bool passable = false;
 	//This is a shared field dont change ^
@@ -581,6 +589,50 @@ void receiveClientPersistentFurnitureState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentColliderState(
+    Sint32 persistentID,
+    Sint32 colliderCurrentHP,
+    Sint32 colliderMaxHP,
+    Sint32 colliderDamageTypes,
+    Sint32 colliderHasCollision,
+    bool burning,
+    bool burnable
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::ColliderDecoration;
+
+    state.colliderCurrentHP =
+        colliderCurrentHP;
+
+    state.colliderMaxHP =
+        colliderMaxHP;
+
+    state.colliderDamageTypes =
+        colliderDamageTypes;
+
+    state.colliderHasCollision =
+        colliderHasCollision;
+
+    state.colliderBurning =
+        burning;
+
+    state.colliderBurnable =
+        burnable;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -689,6 +741,7 @@ void sendPersistentWorldSnapshotToClient(
     Uint32 gatesSent = 0;
 	Uint32 doorsSent = 0;
 	Uint32 furnitureSent = 0;
+	Uint32 collidersSent = 0;
     if ( state )
     {
         /*
@@ -1171,6 +1224,80 @@ void sendPersistentWorldSnapshotToClient(
 
 				++furnitureSent;
 			}
+			else if ( mechanism.kind
+				== PersistentMechanismState::Kind::ColliderDecoration )
+			{
+				/*
+				* PWCD:
+				*
+				* bytes 0-3   packet name
+				* bytes 4-7   persistent ID
+				* bytes 8-11  current HP
+				* bytes 12-15 maximum HP
+				* bytes 16-19 damage type
+				* bytes 20-23 collision flags
+				* byte  24    burning
+				* byte  25    burnable
+				*/
+				strcpy(
+					reinterpret_cast<char*>(
+						net_packet->data
+					),
+					"PWCD"
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(persistentID),
+					&net_packet->data[4]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.colliderCurrentHP
+					),
+					&net_packet->data[8]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.colliderMaxHP
+					),
+					&net_packet->data[12]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.colliderDamageTypes
+					),
+					&net_packet->data[16]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.colliderHasCollision
+					),
+					&net_packet->data[20]
+				);
+
+				net_packet->data[24] =
+					mechanism.colliderBurning ? 1 : 0;
+
+				net_packet->data[25] =
+					mechanism.colliderBurnable ? 1 : 0;
+
+				net_packet->len = 26;
+
+				prepareClientAddress();
+
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					player - 1
+				);
+
+				++collidersSent;
+			}
         }
     }
 
@@ -1191,14 +1318,15 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
     leversSent,
     gatesSent,
     doorsSent,
-    furnitureSent
+    furnitureSent,
+    collidersSent
 );
 }
 /*
@@ -1346,6 +1474,7 @@ static void capturePersistentMechanismStates()
     Uint32 capturedGates = 0;
 	Uint32 capturedDoors = 0;
 	Uint32 capturedFurniture = 0;
+	Uint32 capturedColliders = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1550,16 +1679,47 @@ static void capturePersistentMechanismStates()
 
 			++capturedFurniture;
 		}
+		else if ( entity->behavior == &actColliderDecoration
+			&& entity->isDamageableCollider() )
+		{
+			mechanismState.kind =
+				PersistentMechanismState::Kind::ColliderDecoration;
+
+			mechanismState.colliderCurrentHP =
+				entity->colliderCurrentHP;
+
+			mechanismState.colliderMaxHP =
+				entity->colliderMaxHP;
+
+			mechanismState.colliderDamageTypes =
+				entity->colliderDamageTypes;
+
+			mechanismState.colliderHasCollision =
+				entity->colliderHasCollision;
+
+			mechanismState.colliderBurning =
+				entity->flags[BURNING];
+
+			mechanismState.colliderBurnable =
+				entity->flags[BURNABLE];
+
+			mapState.mechanismStates[
+				entity->persistentID
+			] = mechanismState;
+
+			++capturedColliders;
+		}
     }
 
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
     capturedGates,
     capturedDoors,
-    capturedFurniture
+    capturedFurniture,
+    capturedColliders
 );
 }
 /*
@@ -1623,6 +1783,7 @@ void applyPersistentMechanismStates()
     Uint32 restoredGates = 0;
 	Uint32 restoredDoors = 0;
 	Uint32 restoredFurniture = 0;
+	Uint32 restoredColliders = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1951,6 +2112,69 @@ void applyPersistentMechanismStates()
 				++restoredFurniture;
 				break;
 			}
+			case PersistentMechanismState::Kind::ColliderDecoration:
+			{
+				if ( entity->behavior
+					!= &actColliderDecoration )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d was saved as collider decoration but loaded with another behavior.",
+						entity->persistentID
+					);
+
+					break;
+				}
+
+				if ( !entity->isDamageableCollider() )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d was saved as a damageable collider but loaded as an indestructible collider.",
+						entity->persistentID
+					);
+
+					break;
+				}
+
+				if ( entity->colliderDamageTypes
+					!= savedState.colliderDamageTypes )
+				{
+					printlog(
+						"[Persistent World] Warning: collider ID %d changed damage type from %d to %d.",
+						entity->persistentID,
+						savedState.colliderDamageTypes,
+						entity->colliderDamageTypes
+					);
+
+					break;
+				}
+
+				entity->colliderCurrentHP =
+					savedState.colliderCurrentHP;
+
+				entity->colliderMaxHP =
+					savedState.colliderMaxHP;
+
+				entity->colliderOldHP =
+					savedState.colliderCurrentHP;
+
+				entity->colliderHasCollision =
+					savedState.colliderHasCollision;
+
+				entity->flags[BURNING] =
+					savedState.colliderBurning;
+
+				entity->flags[BURNABLE] =
+					savedState.colliderBurnable;
+
+				/*
+				* Do not force colliderInit to 1. The first behavior tick still
+				* needs to perform normal collider-specific setup.
+				*/
+				entity->bNeedsRenderPositionInit = true;
+
+				++restoredColliders;
+				break;
+			}
             case PersistentMechanismState::Kind::None:
             default:
                 break;
@@ -1958,13 +2182,14 @@ void applyPersistentMechanismStates()
     }
 
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
     restoredGates,
     restoredDoors,
-    restoredFurniture
+    restoredFurniture,
+    restoredColliders
 );
 }
 static void capturePersistentMapRemovals()

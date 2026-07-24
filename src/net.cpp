@@ -5866,6 +5866,49 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			net_packet->data[21] != 0
 		);
 	}},
+	// Authoritative persistent collider-decoration state.
+	{'PWCD', []()
+	{
+		if ( net_packet->len < 26 )
+		{
+			printlog(
+				"[Persistent World MP] Ignored malformed PWCD packet with length %d.",
+				net_packet->len
+			);
+
+			return;
+		}
+
+		receiveClientPersistentColliderState(
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[4]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[8]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[12]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[16]
+				)
+			),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[20]
+				)
+			),
+			net_packet->data[24] != 0,
+			net_packet->data[25] != 0
+		);
+	}},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{

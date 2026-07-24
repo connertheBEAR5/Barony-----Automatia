@@ -119,6 +119,15 @@ void receiveClientPersistentFurnitureState(
     bool burning,
     bool burnable
 );
+void receiveClientPersistentColliderState(
+    Sint32 persistentID,
+    Sint32 colliderCurrentHP,
+    Sint32 colliderMaxHP,
+    Sint32 colliderDamageTypes,
+    Sint32 colliderHasCollision,
+    bool burning,
+    bool burnable
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
