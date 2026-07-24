@@ -9270,6 +9270,16 @@ void assignActions(map_t* map)
 				childEntity->sizey = 4;
 				childEntity->behavior = &actPowerCrystal;
 				childEntity->flags[PASSABLE] = true;
+
+				/*
+				* The floating crystal owns the changing orientation and circuit
+				* state. Transfer the stable map-file ID from the static base.
+				*/
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
+
 				TileEntityList.addEntity(*childEntity);
 
 				node_t* tempNode = list_AddNodeLast(&entity->children);

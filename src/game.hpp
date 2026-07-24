@@ -128,6 +128,15 @@ void receiveClientPersistentColliderState(
     bool burning,
     bool burnable
 );
+void receiveClientPersistentPowerCrystalState(
+    Sint32 persistentID,
+    Sint32 crystalInitialised,
+    Sint32 crystalDirection,
+    Sint32 crystalNumElectricityNodes,
+    Sint32 crystalTurnReverse,
+    Sint32 crystalSpellToActivate,
+    Sint32 crystalCircuitStatus
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

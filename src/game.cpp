@@ -78,7 +78,8 @@ enum class Kind : Uint8
     Gate,
     Door,
 	Furniture,
-	ColliderDecoration
+	ColliderDecoration,
+	PowerCrystal
 };
 
     Kind kind = Kind::None;
@@ -144,6 +145,14 @@ enum class Kind : Uint8
 
     bool colliderBurning = false;
     bool colliderBurnable = false;
+	    // Power crystal.
+    Sint32 crystalInitialised = 0;
+    Sint32 crystalDirection = 0;
+    Sint32 crystalNumElectricityNodes = 0;
+    Sint32 crystalTurnReverse = 0;
+    Sint32 crystalSpellToActivate = 0;
+    Sint32 crystalCircuitStatus = 0;
+
 // PLACE STUFF ABOVE THIS
     bool passable = false;
 	//This is a shared field dont change ^
@@ -633,6 +642,50 @@ void receiveClientPersistentColliderState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentPowerCrystalState(
+    Sint32 persistentID,
+    Sint32 crystalInitialised,
+    Sint32 crystalDirection,
+    Sint32 crystalNumElectricityNodes,
+    Sint32 crystalTurnReverse,
+    Sint32 crystalSpellToActivate,
+    Sint32 crystalCircuitStatus
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::PowerCrystal;
+
+    state.crystalInitialised =
+        crystalInitialised;
+
+    state.crystalDirection =
+        crystalDirection;
+
+    state.crystalNumElectricityNodes =
+        crystalNumElectricityNodes;
+
+    state.crystalTurnReverse =
+        crystalTurnReverse;
+
+    state.crystalSpellToActivate =
+        crystalSpellToActivate;
+
+    state.crystalCircuitStatus =
+        crystalCircuitStatus;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -742,6 +795,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 doorsSent = 0;
 	Uint32 furnitureSent = 0;
 	Uint32 collidersSent = 0;
+	Uint32 powerCrystalsSent = 0;
     if ( state )
     {
         /*
@@ -1298,6 +1352,88 @@ void sendPersistentWorldSnapshotToClient(
 
 				++collidersSent;
 			}
+			else if ( mechanism.kind
+				== PersistentMechanismState::Kind::PowerCrystal )
+			{
+				/*
+				* PWPC:
+				*
+				* bytes 0-3   packet name
+				* bytes 4-7   persistent ID
+				* bytes 8-11  initialized
+				* bytes 12-15 cardinal direction, 0-3
+				* bytes 16-19 electricity-node count
+				* bytes 20-23 reverse-turn setting
+				* bytes 24-27 spell-to-activate state
+				* bytes 28-31 circuit status
+				*/
+				strcpy(
+					reinterpret_cast<char*>(
+						net_packet->data
+					),
+					"PWPC"
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(persistentID),
+					&net_packet->data[4]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalInitialised
+					),
+					&net_packet->data[8]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalDirection
+					),
+					&net_packet->data[12]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalNumElectricityNodes
+					),
+					&net_packet->data[16]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalTurnReverse
+					),
+					&net_packet->data[20]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalSpellToActivate
+					),
+					&net_packet->data[24]
+				);
+
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalCircuitStatus
+					),
+					&net_packet->data[28]
+				);
+
+				net_packet->len = 32;
+
+				prepareClientAddress();
+
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					player - 1
+				);
+
+				++powerCrystalsSent;
+			}
         }
     }
 
@@ -1318,7 +1454,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -1326,7 +1462,8 @@ printlog(
     gatesSent,
     doorsSent,
     furnitureSent,
-    collidersSent
+    collidersSent,
+    powerCrystalsSent
 );
 }
 /*
@@ -1475,6 +1612,7 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedDoors = 0;
 	Uint32 capturedFurniture = 0;
 	Uint32 capturedColliders = 0;
+	Uint32 capturedPowerCrystals = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1709,17 +1847,80 @@ static void capturePersistentMechanismStates()
 
 			++capturedColliders;
 		}
+		else if ( entity->behavior == &actPowerCrystal )
+		{
+			mechanismState.kind =
+				PersistentMechanismState::Kind::PowerCrystal;
+
+			/*
+			* Power-crystal private aliases map to these public skill slots:
+			*
+			* skill[1]  = crystalInitialised
+			* skill[3]  = crystalTurning
+			* skill[4]  = crystalTurnStartDir
+			* skill[28] = circuit_status
+			*/
+			mechanismState.crystalInitialised =
+				entity->skill[1];
+
+			Sint32 crystalDirection = 0;
+
+			if ( entity->skill[3] )
+			{
+				crystalDirection =
+					entity->skill[4]
+					+ (entity->crystalTurnReverse ? -1 : 1);
+			}
+			else
+			{
+				crystalDirection =
+					static_cast<Sint32>(
+						std::round(
+							entity->yaw / (PI / 2.0)
+						)
+					);
+			}
+
+			crystalDirection %= 4;
+
+			if ( crystalDirection < 0 )
+			{
+				crystalDirection += 4;
+			}
+
+			mechanismState.crystalDirection =
+				crystalDirection;
+
+			mechanismState.crystalNumElectricityNodes =
+				entity->crystalNumElectricityNodes;
+
+			mechanismState.crystalTurnReverse =
+				entity->crystalTurnReverse;
+
+			mechanismState.crystalSpellToActivate =
+				entity->crystalSpellToActivate;
+
+			mechanismState.crystalCircuitStatus =
+				entity->skill[28];
+
+			mapState.mechanismStates[
+				entity->persistentID
+			] = mechanismState;
+
+			++capturedPowerCrystals;
+		}
     }
 
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
     capturedGates,
     capturedDoors,
     capturedFurniture,
-    capturedColliders
+    capturedColliders,
+    capturedPowerCrystals
 );
 }
 /*
@@ -1784,6 +1985,7 @@ void applyPersistentMechanismStates()
 	Uint32 restoredDoors = 0;
 	Uint32 restoredFurniture = 0;
 	Uint32 restoredColliders = 0;
+	Uint32 restoredPowerCrystals = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -2175,6 +2377,96 @@ void applyPersistentMechanismStates()
 				++restoredColliders;
 				break;
 			}
+			case PersistentMechanismState::Kind::PowerCrystal:
+			{
+				if ( entity->behavior != &actPowerCrystal )
+				{
+					printlog(
+						"[Persistent World] Warning: ID %d was saved as a power crystal but loaded with another behavior.",
+						entity->persistentID
+					);
+
+					break;
+				}
+
+				Sint32 crystalDirection =
+					savedState.crystalDirection % 4;
+
+				if ( crystalDirection < 0 )
+				{
+					crystalDirection += 4;
+				}
+
+				/*
+				* Restore a completed cardinal direction. The generated
+				* electricity-node layout relies on an exact cardinal yaw.
+				*/
+				entity->yaw =
+					crystalDirection * (PI / 2.0);
+
+				entity->new_yaw =
+					entity->yaw;
+
+				/*
+				* Private Entity aliases use these public skill slots:
+				*
+				* skill[1]  = crystalInitialised
+				* skill[3]  = crystalTurning
+				* skill[4]  = crystalTurnStartDir
+				* skill[5]  = crystalGeneratedElectricityNodes
+				* skill[7]  = crystalHoverDirection
+				* skill[8]  = crystalHoverWaitTimer
+				* skill[28] = circuit_status
+				*/
+				entity->skill[1] =
+					savedState.crystalInitialised;
+
+				entity->skill[3] = 0;
+
+				entity->skill[4] =
+					crystalDirection;
+
+				entity->crystalNumElectricityNodes =
+					savedState.crystalNumElectricityNodes;
+
+				entity->crystalTurnReverse =
+					savedState.crystalTurnReverse;
+
+				entity->crystalSpellToActivate =
+					savedState.crystalSpellToActivate;
+
+				entity->skill[28] =
+					savedState.crystalCircuitStatus;
+
+				/*
+				* The generated electricity nodes are runtime children. Mark
+				* them as not generated so they can be rebuilt for this load.
+				*/
+				entity->skill[5] = 0;
+
+				/*
+				* Hover state zero is CRYSTAL_HOVER_UP. The enum itself is not
+				* visible in game.cpp, so use its stored skill value directly.
+				*/
+				entity->skill[7] = 0;
+				entity->skill[8] = 0;
+
+				if ( entity->skill[1] )
+				{
+					entity->z =
+						entity->crystalStartZ;
+
+					entity->new_z =
+						entity->z;
+
+					entity->powerCrystalCreateElectricityNodes();
+				}
+
+				entity->bNeedsRenderPositionInit = true;
+
+				++restoredPowerCrystals;
+				break;
+			}
             case PersistentMechanismState::Kind::None:
             default:
                 break;
@@ -2182,14 +2474,15 @@ void applyPersistentMechanismStates()
     }
 
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
     restoredGates,
     restoredDoors,
     restoredFurniture,
-    restoredColliders
+    restoredColliders,
+    restoredPowerCrystals
 );
 }
 static void capturePersistentMapRemovals()
