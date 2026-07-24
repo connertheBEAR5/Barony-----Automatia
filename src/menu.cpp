@@ -9104,8 +9104,13 @@ void doNewGame(bool makeHighscore) {
 			*/
 		}
 		applyPersistentMapRemovals();
+
 		assignActions(&map);
 
+		/*
+		* Lever handles and moving gates now exist.
+		*/
+		applyPersistentMechanismStates();
 		if ( !loadingsavegame && challengeRunCustomStartLevel == "minetown" )
 		{
 			std::vector<Entity*> shopkeepersToInsert;

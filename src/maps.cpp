@@ -8227,6 +8227,14 @@ void assignActions(map_t* map)
                 entity->sprite = 184; // this is the switch base.
                 entity->flags[PASSABLE] = true;
                 auto childEntity = newEntity(186, 0, map->entities, nullptr); //Switch entity.
+				/*
+				* The editor sprite becomes only the lever base. Transfer the
+				* stable map identity to the interactive runtime handle.
+				*/
+				childEntity->persistentID =
+					entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -8268,6 +8276,10 @@ void assignActions(map_t* map)
                 
                 //entity->skill[28] = 1; //It's a mechanism.
                 auto childEntity = newEntity(186, 0, map->entities, nullptr); //Gate entity.
+				childEntity->persistentID =
+    			entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -8319,6 +8331,10 @@ void assignActions(map_t* map)
                 entity->behavior = &actDoorFrame;
                 
                 auto childEntity = newEntity(186, 0, map->entities, nullptr); //Gate entity.
+				childEntity->persistentID =
+    			entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -9363,6 +9379,10 @@ void assignActions(map_t* map)
                 
                 //entity->skill[28] = 1; //It's a mechanism.
                 auto childEntity = newEntity(186, 0, map->entities, nullptr);
+				childEntity->persistentID =
+   				entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -9414,6 +9434,10 @@ void assignActions(map_t* map)
                 entity->behavior = &actDoorFrame;
                 
                 auto childEntity = newEntity(186, 0, map->entities, nullptr);
+				childEntity->persistentID =
+    			entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -9463,6 +9487,10 @@ void assignActions(map_t* map)
                 entity->sprite = 585; // this is the switch base.
                 entity->flags[PASSABLE] = true;
                 auto childEntity = newEntity(586, 0, map->entities, nullptr);
+				childEntity->persistentID =
+				entity->persistentID;
+
+				entity->persistentID = 0;
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);

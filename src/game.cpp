@@ -63,19 +63,57 @@
 #include <algorithm>
 #include <cctype>
 /*
- * Session-only persistent world state.
+ * Stage 2B.1 state for persistent levers and gates.
  *
- * Stage 2A tracks only whether editor-placed entities were removed.
- * It does not yet preserve surviving entity properties such as health,
- * position, chest contents, door state, or mechanism state.
+ * A record exists only for entities whose behavior is recognized
+ * during capture.
  */
+struct PersistentMechanismState
+{
+    enum class Kind : Uint8
+    {
+        None,
+        Lever,
+        TimedLever,
+        Gate
+    };
+
+    Kind kind = Kind::None;
+
+    // Ordinary lever.
+    Sint32 switchPower = 0;
+    real_t roll = 0.0;
+
+    // Timed lever.
+    Sint32 leverStatus = 0;
+    Sint32 leverTimerTicks = 0;
+
+    // Gate.
+    Sint32 gateStatus = 0;
+    Sint32 gateInit = 0;
+    Sint32 gateRattle = 0;
+    Sint32 gateInverted = 0;
+    Sint32 circuitStatus = 0;
+
+    real_t gateStartHeight = 0.0;
+    real_t gateZ = 0.0;
+    real_t gateVelZ = 0.0;
+
+    bool passable = false;
+};
 struct PersistentMapRemovalState
 {
-    // Every editor entity originally stored in the map file.
     std::unordered_set<Sint32> originalEntityIDs;
-
-    // Original map entities no longer present when the party left.
     std::unordered_set<Sint32> removedEntityIDs;
+
+    /*
+     * Runtime state indexed by the stable ID inherited from the
+     * original editor sprite.
+     */
+    std::unordered_map<
+        Sint32,
+        PersistentMechanismState
+    > mechanismStates;
 
     bool originalIDsRegistered = false;
 };
@@ -268,11 +306,314 @@ void applyPersistentMapRemovals()
     );
 }
 /*
- * Called immediately before leaving the current map.
- *
- * Any persistent ID that was originally present but is no longer found
- * in map.entities is recorded as removed.
+ * Capture the current state of surviving persistent levers and gates
+ * before the current map is replaced.
  */
+static void capturePersistentMechanismStates()
+{
+    if ( multiplayer == CLIENT )
+    {
+        return;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return;
+    }
+
+    PersistentMapRemovalState& mapState =
+        persistentMapRemovalRegistry[mapKey];
+
+    Uint32 capturedLevers = 0;
+    Uint32 capturedTimedLevers = 0;
+    Uint32 capturedGates = 0;
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !entity || entity->persistentID <= 0 )
+        {
+            continue;
+        }
+
+        PersistentMechanismState mechanismState;
+
+        if ( entity->behavior == &actSwitch )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Lever;
+
+			mechanismState.switchPower =
+				entity->skill[0];
+
+            mechanismState.roll =
+                entity->roll;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedLevers;
+        }
+        else if ( entity->behavior
+            == &actSwitchWithTimer )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::TimedLever;
+
+			mechanismState.switchPower =
+				entity->skill[0];
+
+            mechanismState.leverStatus =
+                entity->leverStatus;
+
+            mechanismState.leverTimerTicks =
+                entity->leverTimerTicks;
+
+            mechanismState.roll =
+                entity->roll;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedTimedLevers;
+        }
+        else if ( entity->behavior == &actGate )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Gate;
+
+            mechanismState.gateStatus =
+                entity->gateStatus;
+
+            mechanismState.gateInit =
+                entity->gateInit;
+
+            mechanismState.gateRattle =
+                entity->gateRattle;
+
+            mechanismState.gateInverted =
+                entity->gateInverted;
+
+            mechanismState.circuitStatus =
+    		entity->skill[28];
+
+            mechanismState.gateStartHeight =
+                entity->gateStartHeight;
+
+            mechanismState.gateZ =
+                entity->z;
+
+            mechanismState.gateVelZ =
+                entity->gateVelZ;
+
+            mechanismState.passable =
+                entity->flags[PASSABLE];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedGates;
+        }
+    }
+
+    printlog(
+        "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s).",
+        mapKey.c_str(),
+        capturedLevers,
+        capturedTimedLevers,
+        capturedGates
+    );
+}
+/*
+ * Restore runtime mechanism state after assignActions() has created
+ * the lever handles and moving gate entities.
+ */
+void applyPersistentMechanismStates()
+{
+    if ( multiplayer == CLIENT )
+    {
+        return;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return;
+    }
+
+    const auto mapIterator =
+        persistentMapRemovalRegistry.find(mapKey);
+
+    if ( mapIterator
+        == persistentMapRemovalRegistry.end() )
+    {
+        return;
+    }
+
+    const PersistentMapRemovalState& mapState =
+        mapIterator->second;
+
+    Uint32 restoredLevers = 0;
+    Uint32 restoredTimedLevers = 0;
+    Uint32 restoredGates = 0;
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !entity || entity->persistentID <= 0 )
+        {
+            continue;
+        }
+
+        const auto stateIterator =
+            mapState.mechanismStates.find(
+                entity->persistentID
+            );
+
+        if ( stateIterator
+            == mapState.mechanismStates.end() )
+        {
+            continue;
+        }
+
+        const PersistentMechanismState& savedState =
+            stateIterator->second;
+
+        switch ( savedState.kind )
+        {
+            case PersistentMechanismState::Kind::Lever:
+            {
+                if ( entity->behavior != &actSwitch )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a lever but loaded with another behavior.",
+                        entity->persistentID
+                    );
+                    break;
+                }
+
+                entity->skill[0] =
+    			savedState.switchPower;
+
+                entity->roll =
+                    savedState.roll;
+
+                ++restoredLevers;
+                break;
+            }
+
+            case PersistentMechanismState::Kind::TimedLever:
+            {
+                if ( entity->behavior
+                    != &actSwitchWithTimer )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a timed lever but loaded with another behavior.",
+                        entity->persistentID
+                    );
+                    break;
+                }
+
+                entity->skill[0] =
+    			savedState.switchPower;
+
+                entity->leverStatus =
+                    savedState.leverStatus;
+
+                entity->leverTimerTicks =
+                    std::max(
+                        savedState.leverTimerTicks,
+                        1
+                    );
+
+                entity->roll =
+                    savedState.roll;
+
+                ++restoredTimedLevers;
+                break;
+            }
+
+            case PersistentMechanismState::Kind::Gate:
+            {
+                if ( entity->behavior != &actGate )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a gate but loaded with another behavior.",
+                        entity->persistentID
+                    );
+                    break;
+                }
+
+                entity->gateStatus =
+                    savedState.gateStatus;
+
+                entity->gateRattle =
+                    savedState.gateRattle;
+
+                entity->gateInverted =
+                    savedState.gateInverted;
+
+                entity->skill[28] =
+    			savedState.circuitStatus;
+
+                entity->gateStartHeight =
+                    savedState.gateStartHeight;
+
+                entity->z =
+                    savedState.gateZ;
+
+                entity->gateVelZ =
+                    savedState.gateVelZ;
+
+                /*
+                 * Prevent actGate() from replacing gateStartHeight with
+                 * the restored moving position on its first tick.
+                 */
+                entity->gateInit = 1;
+
+                entity->scalex = 1.01;
+                entity->scaley = 1.01;
+                entity->scalez = 1.01;
+
+                entity->flags[PASSABLE] =
+                    savedState.passable;
+
+                entity->bNeedsRenderPositionInit = true;
+
+                ++restoredGates;
+                break;
+            }
+
+            case PersistentMechanismState::Kind::None:
+            default:
+                break;
+        }
+    }
+
+    printlog(
+        "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s).",
+        mapKey.c_str(),
+        restoredLevers,
+        restoredTimedLevers,
+        restoredGates
+    );
+}
 static void capturePersistentMapRemovals()
 {
     // Multiplayer clients do not own world persistence.
@@ -2359,11 +2700,11 @@ void gameLogic(void)
 					loadedNextLevel = true;
 
 					/*
-					* Record removed editor entities before the current map is destroyed
-					* or replaced by physfsLoadMapFile().
+					* Capture surviving mechanism properties before checking which
+					* original entities disappeared.
 					*/
+					capturePersistentMechanismStates();
 					capturePersistentMapRemovals();
-
 					int totalFloorGold = 0;
 					int totalFloorItems = 0;
 					int totalFloorItemValue[MAXPLAYERS];
@@ -2816,7 +3157,7 @@ void gameLogic(void)
 
 							numplayers = 0;
 							assignActions(&map);
-
+							applyPersistentMechanismStates();
 							if ( requestedTunnelID > 0 )
 							{
 								placePlayersAtCustomTunnel(
