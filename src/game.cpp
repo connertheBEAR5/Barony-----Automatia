@@ -379,7 +379,7 @@ enum class Kind : Uint8
      */
     Sint32 shopkeeperSavedStoreType = 0;
     Sint32 shopkeeperSavedGold = 0;
-
+	Sint32 shopkeeperLoadsSinceRestock = 0;
     std::string shopkeeperSavedName;
 
     std::vector<PersistentChestItemState>
@@ -3642,9 +3642,28 @@ static void capturePersistentMechanismStates()
             {
                 continue;
             }
+			Sint32 previousLoadsSinceRestock = 0;
 
+			const auto previousStateIterator =
+				mapState.mechanismStates.find(
+					entity->persistentID
+				);
+
+			if ( previousStateIterator
+				!= mapState.mechanismStates.end()
+				&& previousStateIterator->second.kind
+					== PersistentMechanismState::Kind::ShopkeeperInventory )
+			{
+				previousLoadsSinceRestock =
+					previousStateIterator
+						->second
+						.shopkeeperLoadsSinceRestock;
+			}
             mechanismState.kind =
                 PersistentMechanismState::Kind::ShopkeeperInventory;
+
+			mechanismState.shopkeeperLoadsSinceRestock =
+    			previousLoadsSinceRestock;
 
             mechanismState.shopkeeperSavedStoreType =
                 entity->monsterStoreType;
@@ -4599,8 +4618,8 @@ void applyPersistentMechanismStates()
         return;
     }
 
-    const PersistentMapRemovalState& mapState =
-        mapIterator->second;
+PersistentMapRemovalState& mapState =
+    mapIterator->second;
 
     Uint32 restoredLevers = 0;
     Uint32 restoredTimedLevers = 0;
@@ -4648,7 +4667,7 @@ void applyPersistentMechanismStates()
             continue;
         }
 
-        const PersistentMechanismState& savedState =
+		const PersistentMechanismState& savedState =
             stateIterator->second;
 
         switch ( savedState.kind )
@@ -6032,15 +6051,119 @@ bool applyPersistentShopkeeperInventory(
         return false;
     }
 
-    const PersistentMechanismState& savedState =
-        stateIterator->second;
+PersistentMechanismState& savedState =
+    stateIterator->second;
 
     if ( savedState.kind
         != PersistentMechanismState::Kind::ShopkeeperInventory )
     {
         return false;
     }
+	/*
+	* Restock every second return to this shopkeeper's map.
+	*
+	* First return:
+	* restore saved stock.
+	*
+	* Second return:
+	* keep the newly generated stock from initShopkeeper().
+	*/
+	++savedState.shopkeeperLoadsSinceRestock;
 
+	constexpr Sint32 SHOPKEEPER_RESTOCK_LOADS = 2; //restock after how many map revisits
+
+	if ( savedState.shopkeeperLoadsSinceRestock
+		>= SHOPKEEPER_RESTOCK_LOADS )
+	{
+		savedState.shopkeeperLoadsSinceRestock = 0;
+
+		/*
+		* initShopkeeper() already generated a fresh inventory.
+		* Keep that inventory and copy it into persistent storage.
+		*/
+		savedState.shopkeeperSavedStoreType =
+			shopkeeperEntity->monsterStoreType;
+
+		savedState.shopkeeperSavedGold =
+			shopStats->GOLD;
+
+		savedState.shopkeeperSavedName =
+			shopStats->name;
+
+		savedState.shopkeeperSavedInventory.clear();
+
+		for ( node_t* itemNode =
+				shopStats->inventory.first;
+			itemNode != nullptr;
+			itemNode = itemNode->next )
+		{
+			Item* item =
+				static_cast<Item*>(
+					itemNode->element
+				);
+
+			if ( !item
+				|| item->count <= 0 )
+			{
+				continue;
+			}
+
+			PersistentChestItemState itemState;
+
+			itemState.type =
+				static_cast<Sint32>(
+					item->type
+				);
+
+			itemState.status =
+				static_cast<Sint32>(
+					item->status
+				);
+
+			itemState.beatitude =
+				item->beatitude;
+
+			itemState.count =
+				item->count;
+
+			itemState.appearance =
+				item->appearance;
+
+			itemState.identified =
+				item->identified;
+
+			itemState.x =
+				item->x;
+
+			itemState.y =
+				item->y;
+
+			itemState.isDroppable =
+				item->isDroppable;
+
+			itemState.playerSoldItemToShop =
+				item->playerSoldItemToShop;
+
+			itemState.itemSpecialShopConsumable =
+				item->itemSpecialShopConsumable;
+
+			itemState.itemRequireTradingSkillInShop =
+				item->itemRequireTradingSkillInShop;
+
+			savedState
+				.shopkeeperSavedInventory
+				.push_back(itemState);
+		}
+
+		printlog(
+			"[Persistent World] Restocked shopkeeper ID %d in '%s' with %zu item stack(s).",
+			shopkeeperEntity->persistentID,
+			mapKey.c_str(),
+			savedState.shopkeeperSavedInventory.size()
+		);
+
+		return true;
+	}
     /*
      * initShopkeeper() has now generated a fresh random inventory.
      * Delete it before restoring the saved authoritative inventory.
