@@ -33,6 +33,7 @@
 	take a pointer to the entities that use them as an argument.
 
 -------------------------------------------------------------------------------*/
+#define BELL_SCRAP_CREATED my->skill[14]
 
 void actAnimator(Entity* my)
 {
@@ -6203,15 +6204,52 @@ void actBell(Entity* my)
 						{
 							if ( multiplayer != CLIENT )
 							{
-								for ( int i = 0; i < 6; ++i )
+								/*
+								* The bell may rebuild and replay its falling child after a
+								* persistent map reload. Create scrap only on the first crash.
+								*/
+								if ( !BELL_SCRAP_CREATED )
 								{
-									Entity* dropped = dropItemMonster(newItem(TOOL_METAL_SCRAP, DECREPIT, 0, 2 + rng.rand() % 3, 0, true, nullptr), child, nullptr, 1);
-									if ( dropped )
+									for ( int i = 0; i < 6; ++i )
 									{
-										dropped->z = child->z + child->focalz;
+										Entity* dropped = dropItemMonster(
+											newItem(
+												TOOL_METAL_SCRAP,
+												DECREPIT,
+												0,
+												2 + rng.rand() % 3,
+												0,
+												true,
+												nullptr
+											),
+											child,
+											nullptr,
+											1
+										);
+
+										if ( dropped )
+										{
+											dropped->z =
+												child->z + child->focalz;
+										}
+									}
+
+									BELL_SCRAP_CREATED = 1;
+
+									if ( multiplayer == SERVER )
+									{
+										serverUpdateEntitySkill(
+											my,
+											14
+										);
 									}
 								}
-								playSoundEntity(my, *cvar_bell_crash_sfx, 128);
+
+								playSoundEntity(
+									my,
+									*cvar_bell_crash_sfx,
+									128
+								);
 								playSoundPlayer(clientnum, *cvar_bell_crash_sfx, 32);
 								if ( multiplayer == SERVER )
 								{

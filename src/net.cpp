@@ -6085,6 +6085,80 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
             )
         );
     }},
+	    // Authoritative persistent bell state.
+    {'PWBL', []()
+    {
+        if ( net_packet->len < 51 )
+        {
+            printlog(
+                "[Persistent World MP] Ignored malformed PWBL packet with length %d.",
+                net_packet->len
+            );
+
+            return;
+        }
+
+        receiveClientPersistentBellState(
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[4]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[8]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[12]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[16]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[20]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[24]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[28]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[32]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[36]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[40]
+                )
+            ),
+			static_cast<Sint32>(
+				SDLNet_Read32(
+					&net_packet->data[44]
+				)
+			),
+			net_packet->data[48] != 0,
+			net_packet->data[49] != 0,
+			net_packet->data[50] != 0
+        );
+    }},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{

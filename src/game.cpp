@@ -82,7 +82,8 @@ enum class Kind : Uint8
 	ColliderDecoration,
 	PowerCrystal,
 	BoulderTrap,
-	SignalController
+	SignalController,
+	Bell
 };
 
     Kind kind = Kind::None;
@@ -192,6 +193,27 @@ enum class Kind : Uint8
     Sint32 signalANDPowerMask = 0;
     Sint32 signalCircuitStatus = 0;
     Sint32 signalInitialized = 0;
+
+	/*
+     * Bell runtime state.
+     *
+     * The generated bell children are rebuilt by actBell() after loading,
+     * so bellInit/skill[8] is intentionally not restored here.
+     */
+    Sint32 bellActiveTimer = 0;
+    Sint32 bellHasItem = 0;
+    Sint32 bellUses = 0;
+    Sint32 bellCurrentEvent = 0;
+    Sint32 bellUseDelay = 0;
+    Sint32 bellClapperBroken = 0;
+    Sint32 bellBulbBroken = 0;
+    Sint32 bellBuffType = 0;
+    Sint32 bellBurningTimer = 0;
+	Sint32 bellScrapCreated = 0;
+    bool bellBurning = false;
+    bool bellBurnable = false;
+    bool bellInvisible = false;
+
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -878,6 +900,78 @@ void receiveClientPersistentSignalControllerState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentBellState(
+    Sint32 persistentID,
+    Sint32 activeTimer,
+    Sint32 hasItem,
+    Sint32 uses,
+    Sint32 currentEvent,
+    Sint32 useDelay,
+    Sint32 clapperBroken,
+    Sint32 bulbBroken,
+    Sint32 buffType,
+    Sint32 burningTimer,
+    Sint32 scrapCreated,
+    bool burning,
+    bool burnable,
+    bool invisible
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Bell;
+
+    state.bellActiveTimer =
+        activeTimer;
+
+    state.bellHasItem =
+        hasItem;
+
+    state.bellUses =
+        uses;
+
+    state.bellCurrentEvent =
+        currentEvent;
+
+    state.bellUseDelay =
+        useDelay;
+
+    state.bellClapperBroken =
+        clapperBroken;
+
+    state.bellBulbBroken =
+        bulbBroken;
+
+    state.bellBuffType =
+        buffType;
+
+    state.bellBurningTimer =
+        burningTimer;
+
+    state.bellBurning =
+        burning;
+
+    state.bellBurnable =
+        burnable;
+
+    state.bellInvisible =
+        invisible;
+
+	state.bellScrapCreated =
+    	scrapCreated;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -990,6 +1084,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 powerCrystalsSent = 0;
 	Uint32 boulderTrapsSent = 0;
 	Uint32 signalControllersSent = 0;
+	Uint32 bellsSent = 0;
     if ( state )
     {
         /*
@@ -1742,6 +1837,124 @@ void sendPersistentWorldSnapshotToClient(
 
                 ++signalControllersSent;
             }
+			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::Bell )
+            {
+                /*
+                 * PWBL:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   active timer
+                 * bytes 12-15  item availability
+                 * bytes 16-19  remaining uses
+                 * bytes 20-23  current event
+                 * bytes 24-27  interaction delay
+                 * bytes 28-31  clapper broken
+                 * bytes 32-35  bulb broken
+                 * bytes 36-39  buff type
+                 * bytes 40-43  burning timer
+                 * byte  44     burning
+                 * byte  45     burnable
+                 * byte  46     invisible
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWBL"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellActiveTimer
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellHasItem
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellUses
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellCurrentEvent
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellUseDelay
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellClapperBroken
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellBulbBroken
+                    ),
+                    &net_packet->data[32]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellBuffType
+                    ),
+                    &net_packet->data[36]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.bellBurningTimer
+                    ),
+                    &net_packet->data[40]
+                );
+
+				net_packet->data[48] =
+					mechanism.bellBurning ? 1 : 0;
+
+				net_packet->data[49] =
+					mechanism.bellBurnable ? 1 : 0;
+
+				net_packet->data[50] =
+					mechanism.bellInvisible ? 1 : 0;
+
+				net_packet->len = 51;
+				
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++bellsSent;
+            }
 			else if ( mechanism.kind == PersistentMechanismState::Kind::BoulderTrap )
             {
                 /*
@@ -1851,7 +2064,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -1862,7 +2075,8 @@ printlog(
     collidersSent,
     powerCrystalsSent,
     boulderTrapsSent,
-    signalControllersSent
+    signalControllersSent,
+    bellsSent
 );
 }
 /*
@@ -2056,7 +2270,7 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedSignalTimers = 0;
 	Uint32 capturedANDGates = 0;
 	Uint32 capturedDynamicBoulders = 0;
-
+	Uint32 capturedBells = 0;
 
 
 	/*
@@ -2300,6 +2514,69 @@ static void capturePersistentMechanismStates()
 
 			++capturedColliders;
 		}
+		        else if ( entity->behavior == &actBell )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Bell;
+
+            /*
+             * Bell runtime aliases from actgeneral.cpp:
+             *
+             * skill[0]  active timer
+             * skill[1]  hidden item availability
+             * skill[4]  remaining uses
+             * skill[5]  current event
+             * skill[7]  interaction delay
+             * skill[9]  broken clapper
+             * skill[10] broken bulb
+             * skill[11] selected buff
+             * skill[12] burning timer
+             */
+            mechanismState.bellActiveTimer =
+                entity->skill[0];
+
+            mechanismState.bellHasItem =
+                entity->skill[1];
+
+            mechanismState.bellUses =
+                entity->skill[4];
+
+            mechanismState.bellCurrentEvent =
+                entity->skill[5];
+
+            mechanismState.bellUseDelay =
+                entity->skill[7];
+
+            mechanismState.bellClapperBroken =
+                entity->skill[9];
+
+            mechanismState.bellBulbBroken =
+                entity->skill[10];
+
+            mechanismState.bellBuffType =
+                entity->skill[11];
+
+            mechanismState.bellBurningTimer =
+                entity->skill[12];
+
+			mechanismState.bellScrapCreated =
+    			entity->skill[14];
+
+            mechanismState.bellBurning =
+                entity->flags[BURNING];
+
+            mechanismState.bellBurnable =
+                entity->flags[BURNABLE];
+
+            mechanismState.bellInvisible =
+                entity->flags[INVISIBLE];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedBells;
+        }
 		else if (
             entity->behavior == &::actSignalTimer
             || entity->behavior == &::actSignalGateAND
@@ -2583,7 +2860,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -2595,6 +2872,7 @@ printlog(
     capturedBoulderTraps,
     capturedSignalTimers,
     capturedANDGates,
+    capturedBells,
     capturedDynamicBoulders
 );
 }
@@ -2665,6 +2943,7 @@ void applyPersistentMechanismStates()
 	Uint32 restoredSignalTimers = 0;
 	Uint32 restoredANDGates = 0;
 	Uint32 restoredDynamicBoulders = 0;
+	Uint32 restoredBells = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -3056,6 +3335,72 @@ void applyPersistentMechanismStates()
 				++restoredColliders;
 				break;
 			}
+			            case PersistentMechanismState::Kind::Bell:
+            {
+                if ( entity->behavior != &actBell )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a bell but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.bellActiveTimer;
+
+                entity->skill[1] =
+                    savedState.bellHasItem;
+
+                entity->skill[4] =
+                    savedState.bellUses;
+
+                entity->skill[5] =
+                    savedState.bellCurrentEvent;
+
+                entity->skill[7] =
+                    savedState.bellUseDelay;
+
+                /*
+                 * Leave skill[8] at zero. actBell() must run its normal
+                 * initialization and recreate its generated children.
+                 */
+                entity->skill[8] = 0;
+
+                entity->skill[9] =
+                    savedState.bellClapperBroken;
+
+                entity->skill[10] =
+                    savedState.bellBulbBroken;
+
+                entity->skill[11] =
+                    savedState.bellBuffType;
+
+                entity->skill[12] =
+                    savedState.bellBurningTimer;
+
+				entity->skill[14] =
+    				savedState.bellScrapCreated;
+
+                /*
+                 * Do not restore player/entity runtime references.
+                 */
+                entity->skill[6] = -1;
+                entity->skill[13] = 0;
+
+                entity->flags[BURNING] =
+                    savedState.bellBurning;
+
+                entity->flags[BURNABLE] =
+                    savedState.bellBurnable;
+
+                entity->flags[INVISIBLE] =
+                    savedState.bellInvisible;
+
+                ++restoredBells;
+                break;
+            }
 			case PersistentMechanismState::Kind::SignalController:
             {
                 const bool loadedAsTimer =
@@ -3458,7 +3803,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -3470,6 +3815,7 @@ printlog(
     restoredBoulderTraps,
     restoredSignalTimers,
     restoredANDGates,
+    restoredBells,
     restoredDynamicBoulders
 );
 }

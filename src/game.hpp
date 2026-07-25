@@ -160,6 +160,22 @@ void receiveClientPersistentSignalControllerState(
     Sint32 circuitStatus,
     Sint32 initialized
 );
+void receiveClientPersistentBellState(
+    Sint32 persistentID,
+    Sint32 activeTimer,
+    Sint32 hasItem,
+    Sint32 uses,
+    Sint32 currentEvent,
+    Sint32 useDelay,
+    Sint32 clapperBroken,
+    Sint32 bulbBroken,
+    Sint32 buffType,
+    Sint32 burningTimer,
+    Sint32 scrapCreated,
+    bool burning,
+    bool burnable,
+    bool invisible
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
