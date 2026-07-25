@@ -2870,6 +2870,11 @@ void actMonster(Entity* my)
 					* Shop stock is generated inside initShopkeeper(), so persistent
 					* inventory must replace it only after that initialization has
 					* completed.
+					* Species initialization has now completed.
+					*
+					* Shop inventory must be restored after initShopkeeper() generated
+					* its ordinary stock. Living HP/MP/position must also be restored here
+					* so species initialization cannot overwrite it.
 					*/
 					if ( myStats->type == SHOPKEEPER )
 					{
@@ -2877,6 +2882,10 @@ void actMonster(Entity* my)
 							my
 						);
 					}
+
+					applyPersistentMonsterLivingState(
+						my
+					);
 		}
 
 		MONSTER_INIT = 2;

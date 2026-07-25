@@ -174,6 +174,39 @@ struct PersistentGoldBagState
     bool passable = true;
     bool invisible = false;
 };
+/*
+ * One item owned by an ordinary persistent monster.
+ *
+ * slot:
+ * 0  = ordinary inventory item
+ * 1  = weapon
+ * 2  = shield
+ * 3  = helmet
+ * 4  = breastplate
+ * 5  = gloves
+ * 6  = shoes
+ * 7  = cloak
+ * 8  = amulet
+ * 9  = ring
+ * 10 = mask
+ */
+struct PersistentMonsterItemState
+{
+    Sint32 slot = 0;
+
+    Sint32 type = 0;
+    Sint32 status = 0;
+    Sint32 beatitude = 0;
+    Sint32 count = 0;
+
+    Uint32 appearance = 0;
+
+    bool identified = false;
+    bool isDroppable = true;
+
+    Sint32 x = 0;
+    Sint32 y = 0;
+};
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -198,7 +231,8 @@ enum class Kind : Uint8
 	Chest,
 	ShopkeeperInventory,
     WorldItem,
-    GoldBag
+    GoldBag,
+    MonsterLivingState
 };
 
     Kind kind = Kind::None;
@@ -472,6 +506,38 @@ enum class Kind : Uint8
     * Runtime state for an original gold pile from the .lmp.
     */
     PersistentGoldBagState goldBagState;
+    /*
+    * Surviving original monster/NPC state.
+    *
+    * Dead original monsters are handled separately by removedEntityIDs.
+    * Dynamic summons without a persistentID are intentionally excluded.
+    *
+    * Mechanical creatures retain damage but do not receive passive
+    * revisit healing.
+    */
+    Sint32 monsterSavedType = NOTHING;
+
+    Sint32 monsterSavedHP = 0;
+    Sint32 monsterSavedMAXHP = 0;
+    Sint32 monsterSavedMP = 0;
+    Sint32 monsterSavedMAXMP = 0;
+    /*
+    * Complete ordinary-monster inventory and equipped loadout.
+    *
+    * Shopkeepers are intentionally excluded because their inventory is
+    * managed by the separate shop/restock persistence system.
+    */
+    std::vector<PersistentMonsterItemState>
+        monsterSavedItems;
+    real_t monsterSavedX = 0.0;
+    real_t monsterSavedY = 0.0;
+    real_t monsterSavedZ = 0.0;
+
+    real_t monsterSavedYaw = 0.0;
+    real_t monsterSavedPitch = 0.0;
+    real_t monsterSavedRoll = 0.0;
+
+
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -3458,6 +3524,307 @@ printlog(
 );
 }
 /*
+ * Store one monster inventory/equipment item.
+ */
+static bool capturePersistentMonsterItem(
+    const Item* item,
+    Sint32 slot,
+    std::vector<PersistentMonsterItemState>& savedItems
+)
+{
+    if ( !item
+        || item->type < 0
+        || item->type >= NUMITEMS
+        || item->count <= 0 )
+    {
+        return false;
+    }
+
+    PersistentMonsterItemState itemState;
+
+    itemState.slot =
+        slot;
+
+    itemState.type =
+        static_cast<Sint32>(
+            item->type
+        );
+
+    itemState.status =
+        static_cast<Sint32>(
+            item->status
+        );
+
+    itemState.beatitude =
+        item->beatitude;
+
+    itemState.count =
+        item->count;
+
+    itemState.appearance =
+        item->appearance;
+
+    itemState.identified =
+        item->identified;
+
+    itemState.isDroppable =
+        item->isDroppable;
+
+    itemState.x =
+        item->x;
+
+    itemState.y =
+        item->y;
+
+    savedItems.push_back(
+        itemState
+    );
+
+    return true;
+}
+/*
+ * Copy the living state shared by ordinary monsters, NPCs and
+ * shopkeepers.
+ */
+static bool capturePersistentMonsterLivingState(
+    const Entity* entity,
+    PersistentMechanismState& savedState
+)
+{
+    if ( !entity
+        || entity->behavior != &actMonster
+        || entity->persistentID <= 0 )
+    {
+        return false;
+    }
+
+    Stat* monsterStats =
+        entity->getStats();
+
+    if ( !monsterStats
+        || monsterStats->type == NOTHING
+        || monsterStats->HP <= 0 )
+    {
+        return false;
+    }
+
+    savedState.monsterSavedType =
+        static_cast<Sint32>(
+            monsterStats->type
+        );
+
+    savedState.monsterSavedHP =
+        monsterStats->HP;
+
+    savedState.monsterSavedMAXHP =
+        monsterStats->MAXHP;
+
+    savedState.monsterSavedMP =
+        monsterStats->MP;
+
+    savedState.monsterSavedMAXMP =
+        monsterStats->MAXMP;
+    
+    /*
+ * Capture the monster's original randomized loadout on the first map
+ * departure, then capture any later inventory changes on subsequent
+ * departures.
+ *
+ * Shopkeepers use their separate store-inventory persistence logic.
+ */
+savedState.monsterSavedItems.clear();
+
+if ( monsterStats->type != SHOPKEEPER )
+{
+    std::unordered_set<const Item*>
+        capturedItems;
+
+    auto getMonsterItemSlot =
+        [monsterStats](const Item* item) -> Sint32
+        {
+            if ( item == monsterStats->weapon )
+            {
+                return 1;
+            }
+
+            if ( item == monsterStats->shield )
+            {
+                return 2;
+            }
+
+            if ( item == monsterStats->helmet )
+            {
+                return 3;
+            }
+
+            if ( item == monsterStats->breastplate )
+            {
+                return 4;
+            }
+
+            if ( item == monsterStats->gloves )
+            {
+                return 5;
+            }
+
+            if ( item == monsterStats->shoes )
+            {
+                return 6;
+            }
+
+            if ( item == monsterStats->cloak )
+            {
+                return 7;
+            }
+
+            if ( item == monsterStats->amulet )
+            {
+                return 8;
+            }
+
+            if ( item == monsterStats->ring )
+            {
+                return 9;
+            }
+
+            if ( item == monsterStats->mask )
+            {
+                return 10;
+            }
+
+            return 0;
+        };
+
+    /*
+     * Capture every item already linked to the Stat inventory.
+     *
+     * Equipped items may also be nodes in this list, so classify them
+     * by pointer equality instead of saving a second duplicate copy.
+     */
+    for ( node_t* itemNode =
+            monsterStats->inventory.first;
+        itemNode != nullptr;
+        itemNode = itemNode->next )
+    {
+        Item* item =
+            static_cast<Item*>(
+                itemNode->element
+            );
+
+        if ( !item
+            || capturedItems.find(item)
+                != capturedItems.end() )
+        {
+            continue;
+        }
+
+        capturePersistentMonsterItem(
+            item,
+            getMonsterItemSlot(item),
+            savedState.monsterSavedItems
+        );
+
+        capturedItems.insert(item);
+    }
+
+    /*
+     * Some monster equipment is allocated outside the ordinary
+     * inventory list. Capture those detached pointers too.
+     */
+    auto captureDetachedEquipment =
+        [&savedState, &capturedItems](
+            Item* item,
+            Sint32 slot
+        )
+        {
+            if ( !item
+                || capturedItems.find(item)
+                    != capturedItems.end() )
+            {
+                return;
+            }
+
+            capturePersistentMonsterItem(
+                item,
+                slot,
+                savedState.monsterSavedItems
+            );
+
+            capturedItems.insert(item);
+        };
+
+    captureDetachedEquipment(
+        monsterStats->weapon,
+        1
+    );
+
+    captureDetachedEquipment(
+        monsterStats->shield,
+        2
+    );
+
+    captureDetachedEquipment(
+        monsterStats->helmet,
+        3
+    );
+
+    captureDetachedEquipment(
+        monsterStats->breastplate,
+        4
+    );
+
+    captureDetachedEquipment(
+        monsterStats->gloves,
+        5
+    );
+
+    captureDetachedEquipment(
+        monsterStats->shoes,
+        6
+    );
+
+    captureDetachedEquipment(
+        monsterStats->cloak,
+        7
+    );
+
+    captureDetachedEquipment(
+        monsterStats->amulet,
+        8
+    );
+
+    captureDetachedEquipment(
+        monsterStats->ring,
+        9
+    );
+
+    captureDetachedEquipment(
+        monsterStats->mask,
+        10
+    );
+}
+
+    savedState.monsterSavedX =
+        entity->x;
+
+    savedState.monsterSavedY =
+        entity->y;
+
+    savedState.monsterSavedZ =
+        entity->z;
+
+    savedState.monsterSavedYaw =
+        entity->yaw;
+
+    savedState.monsterSavedPitch =
+        entity->pitch;
+
+    savedState.monsterSavedRoll =
+        entity->roll;
+
+    return true;
+}
+/*
  * Copy one visible/world gold pile into persistent storage.
  */
 static bool capturePersistentGoldBagState(
@@ -4188,119 +4555,138 @@ static void capturePersistentMechanismStates()
 
             ++capturedPedestals;
         }
-		        else if ( entity->behavior == &actMonster )
-        {
-            Stat* shopStats =
-                entity->getStats();
-
-            if ( !shopStats
-                || shopStats->type != SHOPKEEPER )
-            {
-                continue;
-            }
-			Sint32 previousLoadsSinceRestock = 0;
-
-			const auto previousStateIterator =
-				mapState.mechanismStates.find(
-					entity->persistentID
-				);
-
-			if ( previousStateIterator
-				!= mapState.mechanismStates.end()
-				&& previousStateIterator->second.kind
-					== PersistentMechanismState::Kind::ShopkeeperInventory )
-			{
-				previousLoadsSinceRestock =
-					previousStateIterator
-						->second
-						.shopkeeperLoadsSinceRestock;
-			}
-            mechanismState.kind =
-                PersistentMechanismState::Kind::ShopkeeperInventory;
-
-			mechanismState.shopkeeperLoadsSinceRestock =
-    			previousLoadsSinceRestock;
-
-            mechanismState.shopkeeperSavedStoreType =
-                entity->monsterStoreType;
-
-            mechanismState.shopkeeperSavedGold =
-                shopStats->GOLD;
-
-            mechanismState.shopkeeperSavedName =
-                shopStats->name;
-
-            for ( node_t* itemNode =
-                    shopStats->inventory.first;
-                itemNode != nullptr;
-                itemNode = itemNode->next )
-            {
-                Item* item =
-                    static_cast<Item*>(
-                        itemNode->element
-                    );
-
-                if ( !item
-                    || item->count <= 0 )
+		else if ( entity->behavior == &actMonster )
                 {
-                    continue;
+                    Stat* monsterStats =
+                        entity->getStats();
+
+                    if ( !monsterStats
+                        || monsterStats->type == NOTHING
+                        || monsterStats->HP <= 0 )
+                    {
+                        continue;
+                    }
+
+                    /*
+                    * Preserve the shopkeeper restock counter before replacing its
+                    * previous mechanism-state record.
+                    */
+                    Sint32 previousLoadsSinceRestock = 0;
+
+                    const auto previousStateIterator =
+                        mapState.mechanismStates.find(
+                            entity->persistentID
+                        );
+
+                    if ( previousStateIterator
+                        != mapState.mechanismStates.end()
+                        && previousStateIterator->second.kind
+                            == PersistentMechanismState::Kind::ShopkeeperInventory )
+                    {
+                        previousLoadsSinceRestock =
+                            previousStateIterator
+                                ->second
+                                .shopkeeperLoadsSinceRestock;
+                    }
+
+                    if ( monsterStats->type == SHOPKEEPER )
+                    {
+                        mechanismState.kind =
+                            PersistentMechanismState::Kind::ShopkeeperInventory;
+
+                        mechanismState.shopkeeperLoadsSinceRestock =
+                            previousLoadsSinceRestock;
+
+                        mechanismState.shopkeeperSavedStoreType =
+                            entity->monsterStoreType;
+
+                        mechanismState.shopkeeperSavedGold =
+                            monsterStats->GOLD;
+
+                        mechanismState.shopkeeperSavedName =
+                            monsterStats->name;
+
+                        for ( node_t* itemNode =
+                                monsterStats->inventory.first;
+                            itemNode != nullptr;
+                            itemNode = itemNode->next )
+                        {
+                            Item* item =
+                                static_cast<Item*>(
+                                    itemNode->element
+                                );
+
+                            if ( !item
+                                || item->count <= 0 )
+                            {
+                                continue;
+                            }
+
+                            PersistentChestItemState itemState;
+
+                            itemState.type =
+                                static_cast<Sint32>(
+                                    item->type
+                                );
+
+                            itemState.status =
+                                static_cast<Sint32>(
+                                    item->status
+                                );
+
+                            itemState.beatitude =
+                                item->beatitude;
+
+                            itemState.count =
+                                item->count;
+
+                            itemState.appearance =
+                                item->appearance;
+
+                            itemState.identified =
+                                item->identified;
+
+                            itemState.x =
+                                item->x;
+
+                            itemState.y =
+                                item->y;
+
+                            itemState.isDroppable =
+                                item->isDroppable;
+
+                            itemState.playerSoldItemToShop =
+                                item->playerSoldItemToShop;
+
+                            itemState.itemSpecialShopConsumable =
+                                item->itemSpecialShopConsumable;
+
+                            itemState.itemRequireTradingSkillInShop =
+                                item->itemRequireTradingSkillInShop;
+
+                            mechanismState
+                                .shopkeeperSavedInventory
+                                .push_back(itemState);
+                        }
+                    }
+                    else
+                    {
+                        mechanismState.kind =
+                            PersistentMechanismState::Kind::MonsterLivingState;
+                    }
+
+                    if ( !capturePersistentMonsterLivingState(
+                        entity,
+                        mechanismState
+                    ) )
+                    {
+                        continue;
+                    }
+
+                    mapState.mechanismStates[
+                        entity->persistentID
+                    ] = mechanismState;
                 }
-
-                PersistentChestItemState itemState;
-
-                itemState.type =
-                    static_cast<Sint32>(
-                        item->type
-                    );
-
-                itemState.status =
-                    static_cast<Sint32>(
-                        item->status
-                    );
-
-                itemState.beatitude =
-                    item->beatitude;
-
-                itemState.count =
-                    item->count;
-
-                itemState.appearance =
-                    item->appearance;
-
-                itemState.identified =
-                    item->identified;
-
-                itemState.x =
-                    item->x;
-
-                itemState.y =
-                    item->y;
-
-                itemState.isDroppable =
-                    item->isDroppable;
-
-                itemState.playerSoldItemToShop =
-                    item->playerSoldItemToShop;
-
-                itemState.itemSpecialShopConsumable =
-                    item->itemSpecialShopConsumable;
-
-                itemState.itemRequireTradingSkillInShop =
-                    item->itemRequireTradingSkillInShop;
-
-                mechanismState
-                    .shopkeeperSavedInventory
-                    .push_back(itemState);
-
-                ++capturedShopItems;
-            }
-
-            mapState.mechanismStates[
-                entity->persistentID
-            ] = std::move(mechanismState);
-
-            ++capturedShopkeepers;
-        }
 		        else if ( entity->behavior == &actChest )
         {
             mechanismState.kind =
@@ -6548,9 +6934,11 @@ PersistentMapRemovalState& mapState =
 
                     break;
                 }
-				case PersistentMechanismState::Kind::None:
-				default:
-					break;
+                case PersistentMechanismState::Kind::ShopkeeperInventory:
+                case PersistentMechanismState::Kind::MonsterLivingState:
+                case PersistentMechanismState::Kind::None:
+                default:
+                    break;
         }
     }
     /*
@@ -6813,6 +7201,427 @@ printlog(
     restoredOriginalGoldBags,
     restoredDynamicGoldBags
 );
+}
+/*
+ * Clear an ordinary monster's freshly initialized randomized inventory
+ * and equipment without double-freeing items that are inventory nodes.
+ */
+static void clearPersistentMonsterGeneratedItems(
+    Stat* monsterStats
+)
+{
+    if ( !monsterStats )
+    {
+        return;
+    }
+
+    /*
+     * Null every equipment pointer before freeing the inventory list.
+     * Equipped items may point to elements owned by that list.
+     */
+    monsterStats->weapon = nullptr;
+    monsterStats->shield = nullptr;
+    monsterStats->helmet = nullptr;
+    monsterStats->breastplate = nullptr;
+    monsterStats->gloves = nullptr;
+    monsterStats->shoes = nullptr;
+    monsterStats->cloak = nullptr;
+    monsterStats->amulet = nullptr;
+    monsterStats->ring = nullptr;
+    monsterStats->mask = nullptr;
+
+    list_FreeAll(
+        &monsterStats->inventory
+    );
+}
+/*
+ * Replace one ordinary monster's newly randomized loadout with the
+ * persistent loadout captured when the map was previously left.
+ */
+static Uint32 restorePersistentMonsterItems(
+    Entity* monsterEntity,
+    Stat* monsterStats,
+    const PersistentMechanismState& savedState
+)
+{
+    if ( !monsterEntity
+        || !monsterStats
+        || monsterStats->type == SHOPKEEPER )
+    {
+        return 0;
+    }
+
+    clearPersistentMonsterGeneratedItems(
+        monsterStats
+    );
+
+    Uint32 restoredItems = 0;
+
+    for ( const PersistentMonsterItemState& itemState :
+        savedState.monsterSavedItems )
+    {
+        if ( itemState.type < 0
+            || itemState.type >= NUMITEMS
+            || itemState.status < BROKEN
+            || itemState.status > EXCELLENT
+            || itemState.count <= 0 )
+        {
+            printlog(
+                "[Persistent World] Ignored invalid monster item for monster ID %d: slot=%d type=%d status=%d count=%d.",
+                monsterEntity->persistentID,
+                itemState.slot,
+                itemState.type,
+                itemState.status,
+                itemState.count
+            );
+
+            continue;
+        }
+
+        Item* restoredItem =
+            newItem(
+                static_cast<ItemType>(
+                    itemState.type
+                ),
+                static_cast<Status>(
+                    itemState.status
+                ),
+                itemState.beatitude,
+                itemState.count,
+                itemState.appearance,
+                itemState.identified,
+                &monsterStats->inventory
+            );
+
+        if ( !restoredItem )
+        {
+            continue;
+        }
+
+        restoredItem->x =
+            itemState.x;
+
+        restoredItem->y =
+            itemState.y;
+
+        restoredItem->isDroppable =
+            itemState.isDroppable;
+
+        switch ( itemState.slot )
+        {
+            case 1:
+                monsterStats->weapon =
+                    restoredItem;
+                break;
+
+            case 2:
+                monsterStats->shield =
+                    restoredItem;
+                break;
+
+            case 3:
+                monsterStats->helmet =
+                    restoredItem;
+                break;
+
+            case 4:
+                monsterStats->breastplate =
+                    restoredItem;
+                break;
+
+            case 5:
+                monsterStats->gloves =
+                    restoredItem;
+                break;
+
+            case 6:
+                monsterStats->shoes =
+                    restoredItem;
+                break;
+
+            case 7:
+                monsterStats->cloak =
+                    restoredItem;
+                break;
+
+            case 8:
+                monsterStats->amulet =
+                    restoredItem;
+                break;
+
+            case 9:
+                monsterStats->ring =
+                    restoredItem;
+                break;
+
+            case 10:
+                monsterStats->mask =
+                    restoredItem;
+                break;
+
+            case 0:
+            default:
+                /*
+                 * Ordinary inventory item. It is already linked to
+                 * monsterStats->inventory by newItem().
+                 */
+                break;
+        }
+
+        ++restoredItems;
+    }
+
+    return restoredItems;
+}
+bool applyPersistentMonsterLivingState(
+    Entity* monsterEntity
+)
+{
+    if ( multiplayer == CLIENT
+        || !monsterEntity
+        || monsterEntity->persistentID <= 0
+        || monsterEntity->behavior != &actMonster )
+    {
+        return false;
+    }
+
+    Stat* monsterStats =
+        monsterEntity->getStats();
+
+    if ( !monsterStats
+        || monsterStats->type == NOTHING )
+    {
+        return false;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return false;
+    }
+
+    const auto mapIterator =
+        persistentMapRemovalRegistry.find(
+            mapKey
+        );
+
+    if ( mapIterator
+        == persistentMapRemovalRegistry.end() )
+    {
+        return false;
+    }
+
+    const auto stateIterator =
+        mapIterator->second.mechanismStates.find(
+            monsterEntity->persistentID
+        );
+
+    if ( stateIterator
+        == mapIterator->second.mechanismStates.end() )
+    {
+        return false;
+    }
+
+    const PersistentMechanismState& savedState =
+        stateIterator->second;
+
+    /*
+     * Shopkeepers retain ShopkeeperInventory as their kind because
+     * that record also owns their stock. All other supported monsters
+     * use MonsterLivingState.
+     */
+    if ( savedState.kind
+            != PersistentMechanismState::Kind::MonsterLivingState
+        && savedState.kind
+            != PersistentMechanismState::Kind::ShopkeeperInventory )
+    {
+        return false;
+    }
+
+    if ( savedState.monsterSavedType == NOTHING
+        || savedState.monsterSavedHP <= 0
+        || savedState.monsterSavedMAXHP <= 0 )
+    {
+        return false;
+    }
+
+    /*
+     * Refuse to apply one species' state to a different authored
+     * monster after a map file is edited.
+     */
+    if ( savedState.monsterSavedType
+        != static_cast<Sint32>(monsterStats->type) )
+    {
+        printlog(
+            "[Persistent World] Warning: monster ID %d changed type from %d to %d; living state was not restored.",
+            monsterEntity->persistentID,
+            savedState.monsterSavedType,
+            static_cast<Sint32>(monsterStats->type)
+        );
+
+        return false;
+    }
+    /*
+    * The normal species initializer has already created a randomized
+    * loadout. Replace it with the inventory captured on the first visit.
+    *
+    * Shopkeeper store inventory remains controlled by
+    * applyPersistentShopkeeperInventory().
+    */
+    const Uint32 restoredMonsterItems =
+        restorePersistentMonsterItems(
+            monsterEntity,
+            monsterStats,
+            savedState
+        );
+
+    const bool mechanicalCreature =
+        monsterStats->type == AUTOMATON
+        || monsterStats->type == SENTRYBOT
+        || monsterStats->type == GYROBOT
+        || monsterStats->type == SPELLBOT
+        || monsterStats->type == DUMMYBOT;
+
+    constexpr Sint32 MONSTER_REVISIT_HEALING = 5;
+
+    Sint32 restoredHP =
+        savedState.monsterSavedHP;
+
+    if ( !mechanicalCreature )
+    {
+        restoredHP +=
+            MONSTER_REVISIT_HEALING;
+    }
+
+    monsterStats->MAXHP =
+        std::max(
+            1,
+            savedState.monsterSavedMAXHP
+        );
+
+    monsterStats->HP =
+        std::min(
+            restoredHP,
+            monsterStats->MAXHP
+        );
+
+    /*
+     * OLDHP should match restored HP so the first behavior tick does
+     * not interpret loading as fresh damage or healing.
+     */
+    monsterStats->OLDHP =
+        monsterStats->HP;
+
+    monsterStats->MAXMP =
+        std::max(
+            0,
+            savedState.monsterSavedMAXMP
+        );
+
+    monsterStats->MP =
+        std::max(
+            0,
+            std::min(
+                savedState.monsterSavedMP,
+                monsterStats->MAXMP
+            )
+        );
+
+    monsterEntity->x =
+        savedState.monsterSavedX;
+
+    const real_t previousX =
+        monsterEntity->x;
+
+    const real_t previousY =
+        monsterEntity->y;
+
+    const real_t previousZ =
+        monsterEntity->z;
+    
+    monsterEntity->y =
+        savedState.monsterSavedY;
+
+    monsterEntity->z =
+        savedState.monsterSavedZ;
+
+    monsterEntity->new_x =
+        monsterEntity->x;
+
+    monsterEntity->new_y =
+        monsterEntity->y;
+
+    monsterEntity->new_z =
+        monsterEntity->z;
+
+    monsterEntity->yaw =
+        savedState.monsterSavedYaw;
+
+    monsterEntity->pitch =
+        savedState.monsterSavedPitch;
+
+    monsterEntity->roll =
+        savedState.monsterSavedRoll;
+
+    monsterEntity->new_yaw =
+        monsterEntity->yaw;
+
+    monsterEntity->new_pitch =
+        monsterEntity->pitch;
+
+    monsterEntity->new_roll =
+        monsterEntity->roll;
+
+    /*
+     * Do not restore a target UID or active path because those runtime
+     * entities may no longer exist after a transition.
+     */
+    monsterEntity->monsterTarget = 0;
+    monsterEntity->monsterTargetX =
+        monsterEntity->x;
+
+    monsterEntity->monsterTargetY =
+        monsterEntity->y;
+
+    if ( monsterEntity->path )
+    {
+        list_FreeAll(
+            monsterEntity->path
+        );
+
+        free(
+            monsterEntity->path
+        );
+
+        monsterEntity->path = nullptr;
+    }
+
+    monsterEntity->vel_x = 0.0;
+    monsterEntity->vel_y = 0.0;
+    monsterEntity->vel_z = 0.0;
+
+    monsterEntity->bNeedsRenderPositionInit =
+        true;
+
+printlog(
+    "[Persistent World] Restored monster ID %d type %d at %.2f/%.2f: HP %d/%d, %u inventory/equipment item(s)%s.",
+    monsterEntity->persistentID,
+    static_cast<Sint32>(
+        monsterStats->type
+    ),
+    monsterEntity->x,
+    monsterEntity->y,
+    monsterStats->HP,
+    monsterStats->MAXHP,
+    restoredMonsterItems,
+    mechanicalCreature
+        ? " without passive healing"
+        : " after +5 revisit healing"
+);
+
+    return true;
 }
 bool applyPersistentShopkeeperInventory(
     Entity* shopkeeperEntity

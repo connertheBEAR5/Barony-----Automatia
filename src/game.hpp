@@ -232,6 +232,14 @@ void receiveClientPersistentChestState(
     Sint32 oldHealth,
     Sint32 voidState
 );
+/*
+ * Restores surviving original monster/NPC HP, MP and world position
+ * after species initialization. Living non-mechanical creatures heal
+ * five HP per revisit.
+ */
+bool applyPersistentMonsterLivingState(
+    Entity* monsterEntity
+);
 bool applyPersistentShopkeeperInventory(
     Entity* shopkeeperEntity
 );
