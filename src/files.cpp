@@ -2976,12 +2976,53 @@ fp->read(&numentities, sizeof(Uint32), 1);
 						fp->read(&entity->skill[9], sizeof(Sint32), 1);
 					}
 					break;
-				case 5:
-					fp->read(&entity->yaw, sizeof(real_t), 1);
-					fp->read(&entity->crystalNumElectricityNodes, sizeof(Sint32), 1);
-					fp->read(&entity->crystalTurnReverse, sizeof(Sint32), 1);
-					fp->read(&entity->crystalSpellToActivate, sizeof(Sint32), 1);
-					break;
+					case 5: // power crystal
+					{
+						fp->read(
+							&entity->yaw,
+							sizeof(real_t),
+							1
+						);
+
+						fp->read(
+							&entity->crystalNumElectricityNodes,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->crystalTurnReverse,
+							sizeof(Sint32),
+							1
+						);
+
+						fp->read(
+							&entity->crystalSpellToActivate,
+							sizeof(Sint32),
+							1
+						);
+
+						/*
+						* Added to this fork's V4.5 format:
+						* Require Circuit Power to Activate.
+						*/
+						fp->read(
+							&entity->crystalPowerToActivate,
+							sizeof(Sint32),
+							1
+						);
+
+						entity->crystalPowerToActivate =
+							std::max<Sint32>(
+								0,
+								std::min<Sint32>(
+									1,
+									entity->crystalPowerToActivate
+								)
+							);
+
+						break;
+					}
 				case 6:
 					fp->read(&entity->leverTimerTicks, sizeof(Sint32), 1);
 					break;
@@ -3842,12 +3883,52 @@ int saveMap(const char* filename2)
 					fp->write(&entity->skill[5], sizeof(Sint32), 1);
 					fp->write(&entity->skill[9], sizeof(Sint32), 1);
 					break;
-				case 5:
-					fp->write(&entity->yaw, sizeof(real_t), 1);
-					fp->write(&entity->crystalNumElectricityNodes, sizeof(Sint32), 1);
-					fp->write(&entity->crystalTurnReverse, sizeof(Sint32), 1);
-					fp->write(&entity->crystalSpellToActivate, sizeof(Sint32), 1);
+				case 5: // power crystal
+				{
+					entity->crystalPowerToActivate =
+						std::max<Sint32>(
+							0,
+							std::min<Sint32>(
+								1,
+								entity->crystalPowerToActivate
+							)
+						);
+
+					fp->write(
+						&entity->yaw,
+						sizeof(real_t),
+						1
+					);
+
+					fp->write(
+						&entity->crystalNumElectricityNodes,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->crystalTurnReverse,
+						sizeof(Sint32),
+						1
+					);
+
+					fp->write(
+						&entity->crystalSpellToActivate,
+						sizeof(Sint32),
+						1
+					);
+
+					/*
+					* Added to this fork's V4.5 format.
+					*/
+					fp->write(
+						&entity->crystalPowerToActivate,
+						sizeof(Sint32),
+						1
+					);
+
 					break;
+				}
 				case 6:
 					fp->write(&entity->leverTimerTicks, sizeof(Sint32), 1);
 					break;

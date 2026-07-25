@@ -2004,6 +2004,7 @@ void buttonSpriteProperties(button_t* my)
 				snprintf(spriteProperties[1], 4, "%d", static_cast<int>(selectedEntity[0]->crystalNumElectricityNodes)); //Powered Distance
 				snprintf(spriteProperties[2], 4, "%d", static_cast<int>(selectedEntity[0]->crystalTurnReverse)); //Rotation direction
 				snprintf(spriteProperties[3], 4, "%d", static_cast<int>(selectedEntity[0]->crystalSpellToActivate)); //Spell to activate
+				snprintf(spriteProperties[4], 4, "%d", static_cast<int>(selectedEntity[0]->crystalPowerToActivate)); // power to power
 				inputstr = spriteProperties[0];
 				cursorflash = ticks;
 				menuVisible = 0;
@@ -2011,8 +2012,8 @@ void buttonSpriteProperties(button_t* my)
 				newwindow = 7;
 				subx1 = xres / 2 - 210;
 				subx2 = xres / 2 + 210;
-				suby1 = yres / 2 - 120;
-				suby2 = yres / 2 + 120;
+				suby1 = yres / 2 - 145;
+				suby2 = yres / 2 + 145;
 				strcpy(subtext, "Power Crystal Properties:");
 				break;
 			case 6:
@@ -3477,11 +3478,32 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				selectedEntity[0]->skill[5] = (Sint32)atoi(spriteProperties[5]); //Chance to Stop Working
 				selectedEntity[0]->skill[9] = (Sint32)atoi(spriteProperties[6]); //Autospawn
 				break;
-			case 5: //power crystal
-				selectedEntity[0]->yaw = (real_t)atoi(spriteProperties[0]);
-				selectedEntity[0]->crystalNumElectricityNodes = (Sint32)atoi(spriteProperties[1]);
-				selectedEntity[0]->crystalTurnReverse = (Sint32)atoi(spriteProperties[2]);
-				selectedEntity[0]->crystalSpellToActivate = (Sint32)atoi(spriteProperties[3]);
+			case 5: // power crystal
+				selectedEntity[0]->yaw =
+					static_cast<real_t>(
+						atoi(spriteProperties[0])
+					);
+
+				selectedEntity[0]->crystalNumElectricityNodes =
+					static_cast<Sint32>(
+						atoi(spriteProperties[1])
+					);
+
+				selectedEntity[0]->crystalTurnReverse =
+					static_cast<Sint32>(
+						atoi(spriteProperties[2])
+					);
+
+				selectedEntity[0]->crystalSpellToActivate =
+					static_cast<Sint32>(
+						atoi(spriteProperties[3])
+					);
+
+				selectedEntity[0]->crystalPowerToActivate =
+					static_cast<Sint32>(
+						atoi(spriteProperties[4])
+					);
+
 				break;
 			case 6: //lever timer
 				if ( (Sint32)atoi(spriteProperties[0]) == 0 )

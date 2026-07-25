@@ -9260,10 +9260,30 @@ void assignActions(map_t* map)
 				childEntity->crystalNumElectricityNodes = entity->crystalNumElectricityNodes; //number of electricity nodes to generate in facing direction.
 				childEntity->crystalTurnReverse = entity->crystalTurnReverse;
 				childEntity->crystalSpellToActivate = entity->crystalSpellToActivate;
-				if ( childEntity->crystalSpellToActivate )
+				childEntity->crystalPowerToActivate =
+					entity->crystalPowerToActivate;
+
+				/*
+				* skill[12] is the crystal's external activation input.
+				* skill[28] registers the entity as a mechanism and stores its
+				* directional output state.
+				*
+				* Value 1 means circuit OFF.
+				*/
+				childEntity->skill[12] = 1;
+				childEntity->skill[28] = 1;
+				if ( childEntity->crystalSpellToActivate
+					|| childEntity->crystalPowerToActivate )
 				{
-					childEntity->z = childEntity->crystalStartZ + 5;
-					childEntity->vel_z = childEntity->crystalMaxZVelocity * 2;
+					/*
+					* Begin below the normal hovering position until the activation
+					* requirement is satisfied.
+					*/
+					childEntity->z =
+						childEntity->crystalStartZ + 5;
+
+					childEntity->vel_z =
+						childEntity->crystalMaxZVelocity * 2;
 				}
 				childEntity->yaw = entity->yaw;
 				childEntity->sizex = 4;

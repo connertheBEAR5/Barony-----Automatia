@@ -64,22 +64,194 @@ void Entity::actPowerCrystal()
 		this->createWorldUITooltip();
 	}
 
-	if ( !crystalInitialised && !crystalSpellToActivate )
+	/*
+ * A circuit-powered crystal requires live power.
+ *
+ * Unlike unlock-spell activation, this is not latched:
+ *
+ * circuit ON  -> activate and generate output
+ * circuit OFF -> deactivate and remove output
+ */
+const bool requiresCircuitPower =
+    crystalPowerToActivate != 0;
+
+/*
+ * External activation input is separate from the crystal's own
+ * directional output state.
+ */
+const bool hasCircuitPower =
+    crystalExternalPower > 1;
+
+/*
+ * Deactivate a circuit-powered crystal when its incoming power is
+ * removed.
+ *
+ * This is host-authoritative. Clients receive the resulting entity
+ * state and circuit changes from the server.
+ */
+if ( multiplayer != CLIENT
+    && requiresCircuitPower
+    && crystalInitialised
+    && !hasCircuitPower )
+{
+	/*
+	* Mark the crystal's output OFF without broadcasting from the
+	* crystal's own tile.
+	*/
+	this->skill[28] = CIRCUIT_OFF;
+
+	if ( multiplayer == SERVER )
 	{
-		if ( this->z > crystalStartZ )
-		{
-			this->z -= this->vel_z * (1 / acceleration); // start levitating upwards.
-		}
-		else
-		{
-			this->z = crystalStartZ;
-			this->powerCrystalCreateElectricityNodes();
-			crystalInitialised = 1;
-		}
+		serverUpdateEntitySkill(
+			this,
+			28
+		);
 	}
 
-	if ( crystalInitialised )
-	{
+	node_t* node = nullptr;
+	node_t* nextnode = nullptr;
+
+    for ( node = this->children.first;
+        node != nullptr;
+        node = nextnode )
+    {
+        nextnode = node->next;
+
+        if ( node->element != nullptr )
+        {
+			Entity* electricityNode =
+				static_cast<Entity*>(node->element);
+
+			/*
+			* Depower the generated output before deleting it. This sends OFF
+			* through only the crystal's directional output network.
+			*/
+			if ( electricityNode->behavior == &actCircuit )
+			{
+				electricityNode->circuitPowerOff();
+			}
+
+			if ( electricityNode->light != nullptr )
+            {
+                list_RemoveNode(
+                    electricityNode->light->node
+                );
+
+                electricityNode->light = nullptr;
+            }
+
+            if ( electricityNode->mynode != nullptr )
+            {
+                list_RemoveNode(
+                    electricityNode->mynode
+                );
+            }
+        }
+
+        list_RemoveNode(node);
+    }
+
+    crystalGeneratedElectricityNodes = 0;
+    crystalInitialised = 0;
+    crystalTurning = 0;
+
+    /*
+     * Return to the lowered inactive position.
+     */
+    this->z =
+        crystalStartZ + 5;
+
+    this->new_z =
+        this->z;
+
+    this->vel_z =
+        crystalMaxZVelocity * 2;
+
+    this->bNeedsRenderPositionInit = true;
+    this->flags[UPDATENEEDED] = true;
+
+    serverUpdateEntitySkill(this, 1);
+    serverUpdateEntitySkill(this, 3);
+    serverUpdateEntitySkill(this, 5);
+}
+
+/*
+ * Normal crystals activate immediately.
+ *
+ * Unlock-spell crystals continue using their existing spell
+ * activation behavior.
+ *
+ * Circuit-powered crystals activate only while receiving power.
+ */
+const bool crystalMayActivate =
+    !crystalSpellToActivate
+    && (
+        !requiresCircuitPower
+        || hasCircuitPower
+    );
+
+/*
+ * Electrically activate immediately when external power arrives.
+ *
+ * The crystal's vertical movement is visual only and must not delay
+ * the circuit output.
+ */
+if ( !crystalInitialised
+    && crystalMayActivate )
+{
+    crystalInitialised = 1;
+    crystalTurning = 0;
+
+    /*
+     * Create and power the directional nodes immediately on the same
+     * lever state change.
+     */
+    this->powerCrystalCreateElectricityNodes();
+
+    if ( multiplayer == SERVER )
+    {
+        serverUpdateEntitySkill(
+            this,
+            1
+        );
+
+        serverUpdateEntitySkill(
+            this,
+            3
+        );
+    }
+}
+
+/*
+ * After activation, visually raise the crystal toward its normal
+ * hovering position.
+ */
+if ( crystalInitialised
+    && this->z > crystalStartZ )
+{
+    this->z -=
+        this->vel_z
+        * (1 / acceleration);
+
+    if ( this->z <= crystalStartZ )
+    {
+        this->z =
+            crystalStartZ;
+
+        this->vel_z =
+            crystalMaxZVelocity;
+    }
+
+    this->new_z =
+        this->z;
+}
+/*
+ * Do not begin normal hovering until the crystal has reached its
+ * normal center position.
+ */
+if ( crystalInitialised
+    && this->z <= crystalStartZ )
+{
 		if ( crystalHoverDirection == CRYSTAL_HOVER_UP ) //rise state
 		{
 			this->z -= this->vel_z;
@@ -247,34 +419,68 @@ void Entity::powerCrystalCreateElectricityNodes()
 	
 	int i = 0;
 
-	if ( crystalGeneratedElectricityNodes )
-	{
-		this->mechanismPowerOff(); // turn off my signal
-		this->updateCircuitNeighbors(); // update the old wires to depower
+if ( crystalGeneratedElectricityNodes )
+{
+    this->skill[28] =
+        CIRCUIT_OFF;
 
-		if ( multiplayer != CLIENT )
-		{
-			for ( node = this->children.first; node != nullptr; node = nextnode )
-			{
-				nextnode = node->next;
-				if ( node->element != nullptr )
-				{
-					entity = (Entity*)node->element;
-					if ( entity->light != nullptr )
-					{
-						list_RemoveNode(entity->light->node);
-					}
-					entity->light = nullptr;
-					list_RemoveNode(entity->mynode);
-				}
-				list_RemoveNode(node); // delete all previously generated electricity nodes.
-			}
-		}
-	}
+    if ( multiplayer == SERVER )
+    {
+        serverUpdateEntitySkill(
+            this,
+            28
+        );
+    }
+
+    if ( multiplayer != CLIENT )
+    {
+        for ( node = this->children.first;
+            node != nullptr;
+            node = nextnode )
+        {
+            nextnode = node->next;
+
+            if ( node->element != nullptr )
+            {
+                entity =
+                    static_cast<Entity*>(node->element);
+
+                if ( entity->behavior == &actCircuit )
+                {
+                    entity->circuitPowerOff();
+                }
+
+                if ( entity->light != nullptr )
+                {
+                    list_RemoveNode(
+                        entity->light->node
+                    );
+                }
+
+                entity->light = nullptr;
+
+                if ( entity->mynode != nullptr )
+                {
+                    list_RemoveNode(
+                        entity->mynode
+                    );
+                }
+            }
+
+            list_RemoveNode(node);
+        }
+    }
+}
 
 	for ( i = 1; i <= crystalNumElectricityNodes; i++ )
 	{
 		entity = newEntity(-1, 0, map.entities, nullptr); // electricity node
+		/*
+		* Identify this as an output node belonging to this crystal.
+		* This prevents the generated output from feeding back into the
+		* crystal's external activation input.
+		*/
+		entity->parent = this->uid;
 		xtest = this->x + i * 16 * ((this->yaw == 0) - (this->yaw == PI)); // add/subtract x depending on direction.
 		ytest = this->y + i * 16 * ((this->yaw == PI / 2) - (this->yaw == 3 * PI / 2)); // add/subtract y depending on direction.
 		
@@ -305,8 +511,46 @@ void Entity::powerCrystalCreateElectricityNodes()
 		this->crystalGeneratedElectricityNodes = 1;
 	}
 	
-	this->mechanismPowerOn();
-	this->updateCircuitNeighbors();
+/*
+ * Record that the crystal's directional output is ON, but do not
+ * broadcast power from the crystal entity itself.
+ *
+ * Broadcasting from the crystal would also power the external input
+ * wire beside it, causing the circuit to latch itself.
+ */
+this->skill[28] = CIRCUIT_ON;
 
-	return;
+/*
+ * Power begins at the generated directional circuit nodes.
+ */
+if ( multiplayer != CLIENT )
+{
+    for ( node = this->children.first;
+        node != nullptr;
+        node = node->next )
+    {
+        if ( !node->element )
+        {
+            continue;
+        }
+
+        Entity* electricityNode =
+            static_cast<Entity*>(node->element);
+
+        if ( electricityNode->behavior == &actCircuit )
+        {
+            electricityNode->circuitPowerOn();
+        }
+    }
+}
+
+if ( multiplayer == SERVER )
+{
+    serverUpdateEntitySkill(
+        this,
+        28
+    );
+}
+
+return;
 }

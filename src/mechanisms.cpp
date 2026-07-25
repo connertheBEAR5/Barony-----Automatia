@@ -19,7 +19,17 @@
 #include "scores.hpp"
 #include "mod_tools.hpp"
 #include "collision.hpp"
+/*
+ * Global power-crystal behavior function.
+ *
+ * Entity also has a member function named actPowerCrystal(), so use
+ * this explicitly typed alias inside Entity member functions to avoid
+ * ambiguous name lookup.
+ */
+extern void actPowerCrystal(Entity* my);
 
+static void (*const powerCrystalBehavior)(Entity*) =
+    &::actPowerCrystal;
 //Circuits do not overlap. They connect to all their neighbors, allowing for circuits to interfere with eachother.
 static ConsoleVariable<bool> cvar_wire_debug("/wire_debug", false);
 void signalGateANDOnReceive(Entity& gate, const bool powered, const int receivex, const int receivey);
@@ -125,9 +135,41 @@ void Entity::updateCircuitNeighbors()
 						//messagePlayer(0, "%d, %d, %d, %d", x1, x2, y1, y2);
 						signalGateANDOnReceive(*powerable, circuit_status > 1, x1, y1);
 					}
+					else if (powerable->behavior == powerCrystalBehavior)
+					{
+						/*
+						* Power crystals use skill[12] as external activation input.
+						*
+						* Their normal circuit_status/skill[28] remains their output
+						* state, so activating their output cannot latch their input.
+						*/
+
+						const bool isThisCrystalsOwnOutput =
+						this == powerable
+						|| (
+							this->behavior == actCircuit
+							&& this->parent == powerable->uid
+						);
+
+						if ( !isThisCrystalsOwnOutput )
+						{
+							powerable->skill[12] =
+								circuit_status > 1 ? 2 : 1;
+
+							if ( multiplayer == SERVER )
+							{
+								serverUpdateEntitySkill(
+									powerable,
+									12
+								);
+							}
+						}
+					}
 					else
 					{
-						(circuit_status > 1) ? powerable->mechanismPowerOn() : powerable->mechanismPowerOff();
+						(circuit_status > 1)
+							? powerable->mechanismPowerOn()
+							: powerable->mechanismPowerOff();
 					}
 				}
 			}
@@ -826,14 +868,41 @@ void Entity::toggleSwitch(int skillIndexForPower)
 					}
 					else if ( powerable->behavior == &::actSignalGateAND )
 					{
-						int x1 = static_cast<int>(this->x / 16);
-						int y1 = static_cast<int>(this->y / 16);
-						//messagePlayer(0, "%d, %d, %d, %d", x1, x2, y1, y2);
-						signalGateANDOnReceive(*powerable, switchPower, x1, y1);
+						int x1 =
+							static_cast<int>(this->x / 16);
+
+						int y1 =
+							static_cast<int>(this->y / 16);
+
+						signalGateANDOnReceive(
+							*powerable,
+							switchPower,
+							x1,
+							y1
+						);
+					}
+					else if ( powerable->behavior == powerCrystalBehavior )
+					{
+						/*
+						* A lever directly neighboring a crystal writes the crystal's
+						* external input instead of its directional output.
+						*/
+						powerable->skill[12] =
+							switchPower ? CIRCUIT_ON : CIRCUIT_OFF;
+
+						if ( multiplayer == SERVER )
+						{
+							serverUpdateEntitySkill(
+								powerable,
+								12
+							);
+						}
 					}
 					else
 					{
-						(switchPower) ? powerable->mechanismPowerOn() : powerable->mechanismPowerOff();
+						(switchPower)
+							? powerable->mechanismPowerOn()
+							: powerable->mechanismPowerOff();
 					}
 				}
 			}
@@ -859,7 +928,12 @@ void Entity::switchUpdateNeighbors()
 
 				if (powerable)
 				{
-					if (powerable->circuit_status != CIRCUIT_ON)
+					const bool neighborNeedsPower =
+						powerable->behavior == powerCrystalBehavior
+							? powerable->skill[12] != CIRCUIT_ON
+							: powerable->circuit_status != CIRCUIT_ON;
+
+					if ( neighborNeedsPower )
 					{
 						if (powerable->behavior == actCircuit)
 						{
@@ -904,10 +978,31 @@ void Entity::switchUpdateNeighbors()
 						}
 						else if ( powerable->behavior == &::actSignalGateAND )
 						{
-							int x1 = static_cast<int>(this->x / 16);
-							int y1 = static_cast<int>(this->y / 16);
-							//messagePlayer(0, "%d, %d, %d, %d", x1, x2, y1, y2);
-							signalGateANDOnReceive(*powerable, true, x1, y1);
+							int x1 =
+								static_cast<int>(this->x / 16);
+
+							int y1 =
+								static_cast<int>(this->y / 16);
+
+							signalGateANDOnReceive(
+								*powerable,
+								true,
+								x1,
+								y1
+							);
+						}
+						else if ( powerable->behavior == powerCrystalBehavior )
+						{
+							powerable->skill[12] =
+								CIRCUIT_ON;
+
+							if ( multiplayer == SERVER )
+							{
+								serverUpdateEntitySkill(
+									powerable,
+									12
+								);
+							}
 						}
 						else
 						{

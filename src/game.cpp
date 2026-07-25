@@ -152,6 +152,7 @@ enum class Kind : Uint8
     Sint32 crystalTurnReverse = 0;
     Sint32 crystalSpellToActivate = 0;
     Sint32 crystalCircuitStatus = 0;
+	Sint32 crystalPowerToActivate = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -649,6 +650,7 @@ void receiveClientPersistentPowerCrystalState(
     Sint32 crystalNumElectricityNodes,
     Sint32 crystalTurnReverse,
     Sint32 crystalSpellToActivate,
+    Sint32 crystalPowerToActivate,
     Sint32 crystalCircuitStatus
 )
 {
@@ -678,6 +680,9 @@ void receiveClientPersistentPowerCrystalState(
 
     state.crystalSpellToActivate =
         crystalSpellToActivate;
+
+    state.crystalPowerToActivate =
+        crystalPowerToActivate;
 
     state.crystalCircuitStatus =
         crystalCircuitStatus;
@@ -1361,11 +1366,12 @@ void sendPersistentWorldSnapshotToClient(
 				* bytes 0-3   packet name
 				* bytes 4-7   persistent ID
 				* bytes 8-11  initialized
-				* bytes 12-15 cardinal direction, 0-3
+				* bytes 12-15 cardinal direction
 				* bytes 16-19 electricity-node count
 				* bytes 20-23 reverse-turn setting
-				* bytes 24-27 spell-to-activate state
-				* bytes 28-31 circuit status
+				* bytes 24-27 spell requirement
+				* bytes 28-31 power requirement
+				* bytes 32-35 circuit status
 				*/
 				strcpy(
 					reinterpret_cast<char*>(
@@ -1416,12 +1422,19 @@ void sendPersistentWorldSnapshotToClient(
 
 				SDLNet_Write32(
 					static_cast<Uint32>(
-						mechanism.crystalCircuitStatus
+						mechanism.crystalPowerToActivate
 					),
 					&net_packet->data[28]
 				);
 
-				net_packet->len = 32;
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.crystalCircuitStatus
+					),
+					&net_packet->data[32]
+				);
+
+				net_packet->len = 36;
 
 				prepareClientAddress();
 
@@ -1902,6 +1915,10 @@ static void capturePersistentMechanismStates()
 
 			mechanismState.crystalCircuitStatus =
 				entity->skill[28];
+			
+
+			mechanismState.crystalPowerToActivate =
+				entity->crystalPowerToActivate;
 
 			mapState.mechanismStates[
 				entity->persistentID
@@ -2435,6 +2452,9 @@ void applyPersistentMechanismStates()
 				entity->crystalSpellToActivate =
 					savedState.crystalSpellToActivate;
 
+				entity->crystalPowerToActivate =
+					savedState.crystalPowerToActivate;
+
 				entity->skill[28] =
 					savedState.crystalCircuitStatus;
 
@@ -2443,15 +2463,39 @@ void applyPersistentMechanismStates()
 				* them as not generated so they can be rebuilt for this load.
 				*/
 				entity->skill[5] = 0;
-
-				/*
-				* Hover state zero is CRYSTAL_HOVER_UP. The enum itself is not
-				* visible in game.cpp, so use its stored skill value directly.
-				*/
 				entity->skill[7] = 0;
 				entity->skill[8] = 0;
 
-				if ( entity->skill[1] )
+				/*
+				* Circuit-powered crystals always reload inactive first.
+				*
+				* Their live lever/wire network will write skill[12] and reactivate
+				* them when the current external circuit is actually ON.
+				*
+				* Normal and spell-activated crystals preserve their saved state.
+				*/
+				if ( entity->crystalPowerToActivate )
+				{
+					entity->skill[1] = 0;  // crystalInitialised
+					entity->skill[3] = 0;  // crystalTurning
+					entity->skill[5] = 0;  // generated nodes
+					entity->skill[12] = 1; // external input OFF
+
+					/*
+					* Its output also begins OFF until external power reactivates it.
+					*/
+					entity->skill[28] = 1;
+
+					entity->z =
+						entity->crystalStartZ + 5;
+
+					entity->new_z =
+						entity->z;
+
+					entity->vel_z =
+						entity->crystalMaxZVelocity * 2;
+				}
+				else if ( entity->skill[1] )
 				{
 					entity->z =
 						entity->crystalStartZ;
@@ -2466,10 +2510,10 @@ void applyPersistentMechanismStates()
 
 				++restoredPowerCrystals;
 				break;
-			}
-            case PersistentMechanismState::Kind::None:
-            default:
-                break;
+				}
+				case PersistentMechanismState::Kind::None:
+				default:
+					break;
         }
     }
 

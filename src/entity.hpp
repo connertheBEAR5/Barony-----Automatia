@@ -343,7 +343,9 @@ public:
 	Sint32& crystalTurnReverse; // skill[9] 0 Clockwise, 1 Anti-Clockwise
 	Sint32& crystalNumElectricityNodes; // skill[6] how many nodes to spawn in the facing dir
 	Sint32& crystalSpellToActivate; // skill[10] If 1, must be hit by unlocking spell to start generating electricity.
-
+	Sint32& crystalPowerToActivate; // skill[11] If 1, must receive circuit power to activate.
+	Sint32& crystalExternalPower; // skill[12] Runtime external circuit input only.
+	
 	real_t& crystalStartZ; // fskill[0] mid point of animation, starting height.
 	real_t& crystalMaxZVelocity; // fskill[1] 
 	real_t& crystalMinZVelocity; // fskill[2] 

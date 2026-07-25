@@ -179,12 +179,13 @@ char itemCategoryNames[17][32] =
 	"magical"
 };
 
-char powerCrystalPropertyNames[4][39] =
+char powerCrystalPropertyNames[5][42] =
 {
-	"Orientation: (0-3)",
-	"Powered Distance (0-99)",
-	"Rotation Direction: (0-1)",
-	"Require Unlock Spell to Activate (0-1)"
+    "Orientation: (0-3)",
+    "Powered Distance (0-99)",
+    "Rotation Direction: (0-1)",
+    "Require Unlock Spell to Activate (0-1)",
+    "Require Circuit Power to Activate (0-1)"
 };
 
 char monsterItemPropertyNames[7][36] =
@@ -5141,6 +5142,41 @@ int main(int argc, char** argv)
 									else if ( propertyInt == 1 )
 									{
 										printTextFormattedColor(font8x8_bmp, pad_x3, pad_y2, color, "Requires spell to activate");
+									}
+								}
+								else if ( i == 4 )
+								{
+									if ( propertyInt > 1 || propertyInt < 0 )
+									{
+										errorMessage = 60;
+										errorArr[i] = 1;
+
+										snprintf(
+											spriteProperties[i],
+											sizeof(spriteProperties[i]),
+											"%d",
+											0
+										);
+									}
+									else if ( propertyInt == 0 )
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											pad_x3,
+											pad_y2,
+											colorRandom,
+											"Does not require circuit power"
+										);
+									}
+									else
+									{
+										printTextFormattedColor(
+											font8x8_bmp,
+											pad_x3,
+											pad_y2,
+											color,
+											"Activates when powered"
+										);
 									}
 								}
 							}

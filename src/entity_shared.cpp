@@ -50,6 +50,8 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	crystalHoverWaitTimer(skill[8]),
 	crystalTurnReverse(skill[9]),
 	crystalSpellToActivate(skill[10]),
+	crystalPowerToActivate(skill[11]),
+	crystalExternalPower(skill[12]),
 	crystalStartZ(fskill[0]),
 	crystalMaxZVelocity(fskill[1]),
 	crystalMinZVelocity(fskill[2]),
@@ -2609,19 +2611,31 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
 	{
 		if ( entityToCopy != nullptr )
 		{
-			// copy old entity attributes to newly created.
-			entityNew->yaw = entityToCopy->yaw;
-			entityNew->crystalNumElectricityNodes = entityToCopy->crystalNumElectricityNodes;
-			entityNew->crystalTurnReverse = entityToCopy->crystalTurnReverse;
-			entityNew->crystalSpellToActivate = entityToCopy->crystalSpellToActivate;
+			// Copy old entity attributes to newly created.
+			entityNew->yaw =
+				entityToCopy->yaw;
+
+			entityNew->crystalNumElectricityNodes =
+				entityToCopy->crystalNumElectricityNodes;
+
+			entityNew->crystalTurnReverse =
+				entityToCopy->crystalTurnReverse;
+
+			entityNew->crystalSpellToActivate =
+				entityToCopy->crystalSpellToActivate;
+
+			entityNew->crystalPowerToActivate =
+				entityToCopy->crystalPowerToActivate;
+
 		}
 		else
 		{
-			// set default new entity attributes.
+			// Set default new entity attributes.
 			entityNew->yaw = 0;
 			entityNew->crystalNumElectricityNodes = 5;
 			entityNew->crystalTurnReverse = 0;
 			entityNew->crystalSpellToActivate = 0;
+			entityNew->crystalPowerToActivate = 0;
 		}
 	}
 	// lever timer

@@ -135,6 +135,7 @@ void receiveClientPersistentPowerCrystalState(
     Sint32 crystalNumElectricityNodes,
     Sint32 crystalTurnReverse,
     Sint32 crystalSpellToActivate,
+    Sint32 crystalPowerToActivate,
     Sint32 crystalCircuitStatus
 );
 void finishClientPersistentWorldSnapshot();
