@@ -69,6 +69,26 @@
 void persistentSignalControllerBroadcastOutput(
     Entity* controller
 );
+/*
+ * One item stored inside a normal persistent chest.
+ *
+ * Void-chest inventory is global player state and is intentionally
+ * excluded from per-map persistence.
+ */
+struct PersistentChestItemState
+{
+    Sint32 type = 0;
+    Sint32 status = 0;
+    Sint32 beatitude = 0;
+    Sint32 count = 0;
+
+    Uint32 appearance = 0;
+
+    bool identified = false;
+
+    Sint32 x = 0;
+    Sint32 y = 0;
+};
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -89,7 +109,8 @@ enum class Kind : Uint8
 	WallLock,
 	WallButton,
 	PressurePlate,
-	Pedestal
+	Pedestal,
+	Chest
 };
 
     Kind kind = Kind::None;
@@ -320,6 +341,23 @@ enum class Kind : Uint8
     real_t pedestalSavedVelZ = 0.0;
 
     bool pedestalSavedPassable = false;
+
+	    /*
+     * Normal chest runtime state.
+     *
+     * Chests are always restored closed because a player/chest GUI
+     * interaction cannot remain active across a map transition.
+     */
+    Sint32 chestSavedHealth = 0;
+    Sint32 chestSavedMaxHealth = 0;
+    Sint32 chestSavedLocked = 0;
+    Sint32 chestSavedLockpickHealth = 0;
+    Sint32 chestSavedPreventExploit = 0;
+    Sint32 chestSavedOldHealth = 0;
+    Sint32 chestSavedVoidState = 0;
+
+    std::vector<PersistentChestItemState>
+        chestSavedInventory;
 
 
 // PLACE STUFF ABOVE THIS
@@ -1356,6 +1394,54 @@ void receiveClientPersistentPedestalState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentChestState(
+    Sint32 persistentID,
+    Sint32 health,
+    Sint32 maxHealth,
+    Sint32 locked,
+    Sint32 lockpickHealth,
+    Sint32 preventExploit,
+    Sint32 oldHealth,
+    Sint32 voidState
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Chest;
+
+    state.chestSavedHealth =
+        health;
+
+    state.chestSavedMaxHealth =
+        maxHealth;
+
+    state.chestSavedLocked =
+        locked;
+
+    state.chestSavedLockpickHealth =
+        lockpickHealth;
+
+    state.chestSavedPreventExploit =
+        preventExploit;
+
+    state.chestSavedOldHealth =
+        oldHealth;
+
+    state.chestSavedVoidState =
+        voidState;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void receiveClientPersistentTileState(
     Sint32 x,
     Sint32 y,
@@ -1511,7 +1597,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 pressurePlatesSent = 0;
 	Uint32 tilesSent = 0;
 	Uint32 pedestalsSent = 0;
-
+	Uint32 chestsSent = 0;
 
 
     if ( state )
@@ -1692,6 +1778,98 @@ void sendPersistentWorldSnapshotToClient(
                 );
 
                 ++leversSent;
+            }
+			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::Chest )
+            {
+                /*
+                 * PWCH:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   current health
+                 * bytes 12-15  maximum health
+                 * bytes 16-19  locked state
+                 * bytes 20-23  lockpick health
+                 * bytes 24-27  anti-exploit state
+                 * bytes 28-31  previous health
+                 * bytes 32-35  void-chest state
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWCH"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        persistentID
+                    ),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedHealth
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedMaxHealth
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedLocked
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedLockpickHealth
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedPreventExploit
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedOldHealth
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.chestSavedVoidState
+                    ),
+                    &net_packet->data[32]
+                );
+
+                net_packet->len = 36;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++chestsSent;
             }
 			            else if ( mechanism.kind
                 == PersistentMechanismState::Kind::WallButton )
@@ -2936,7 +3114,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s), %u tile override(s), %u pedestal state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s), %u tile override(s), %u pedestal state(s), %u chest state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2949,6 +3127,7 @@ printlog(
     boulderTrapsSent,
     signalControllersSent,
     bellsSent,
+	chestsSent,
     waterSourcesSent,
     campfiresSent,
     wallLocksSent,
@@ -3350,6 +3529,11 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedNormalPressurePlates = 0;
 	Uint32 capturedPermanentPressurePlates = 0;
 	Uint32 capturedPedestals = 0;
+	Uint32 capturedChests = 0;
+	Uint32 capturedChestItems = 0;
+
+
+
 
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
@@ -3420,6 +3604,105 @@ static void capturePersistentMechanismStates()
             ] = mechanismState;
 
             ++capturedPedestals;
+        }
+		        else if ( entity->behavior == &actChest )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Chest;
+
+            mechanismState.chestSavedHealth =
+                entity->chestHealth;
+
+            mechanismState.chestSavedMaxHealth =
+                entity->chestMaxHealth;
+
+            mechanismState.chestSavedLocked =
+                entity->chestLocked;
+
+            mechanismState.chestSavedLockpickHealth =
+                entity->chestLockpickHealth;
+
+            mechanismState.chestSavedPreventExploit =
+                entity->chestPreventLockpickCapstoneExploit;
+
+            mechanismState.chestSavedOldHealth =
+                entity->chestOldHealth;
+
+            mechanismState.chestSavedVoidState =
+                entity->chestVoidState;
+
+            /*
+             * Void chests use stats[0]->void_chest_inventory, which is
+             * global state rather than inventory owned by this map
+             * entity. Never copy it into a per-map chest snapshot.
+             */
+            if ( entity->chestVoidState == 0 )
+            {
+                list_t* inventory =
+                    entity->getChestInventoryList();
+
+                if ( inventory )
+                {
+                    for ( node_t* itemNode =
+                            inventory->first;
+                        itemNode != nullptr;
+                        itemNode = itemNode->next )
+                    {
+                        Item* item =
+                            static_cast<Item*>(
+                                itemNode->element
+                            );
+
+                        if ( !item
+                            || item->count <= 0 )
+                        {
+                            continue;
+                        }
+
+                        PersistentChestItemState itemState;
+
+                        itemState.type =
+                            static_cast<Sint32>(
+                                item->type
+                            );
+
+                        itemState.status =
+                            static_cast<Sint32>(
+                                item->status
+                            );
+
+                        itemState.beatitude =
+                            item->beatitude;
+
+                        itemState.count =
+                            item->count;
+
+                        itemState.appearance =
+                            item->appearance;
+
+                        itemState.identified =
+                            item->identified;
+
+                        itemState.x =
+                            item->x;
+
+                        itemState.y =
+                            item->y;
+
+                        mechanismState
+                            .chestSavedInventory
+                            .push_back(itemState);
+
+                        ++capturedChestItems;
+                    }
+                }
+            }
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = std::move(mechanismState);
+
+            ++capturedChests;
         }
         else if ( entity->behavior
             == &actSwitchWithTimer )
@@ -4114,7 +4397,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -4135,6 +4418,8 @@ printlog(
     capturedNormalPressurePlates,
     capturedPermanentPressurePlates,
 	capturedPedestals,
+	capturedChests,
+	capturedChestItems,
     capturedDynamicBoulders
 );
 }
@@ -4214,7 +4499,8 @@ void applyPersistentMechanismStates()
 	Uint32 restoredNormalPressurePlates = 0;
 	Uint32 restoredPermanentPressurePlates = 0;
 	Uint32 restoredPedestals = 0;
-
+	Uint32 restoredChests = 0;
+	Uint32 restoredChestItems = 0;
 
     for ( node_t* node = map.entities->first;
         node != nullptr;
@@ -4299,6 +4585,125 @@ void applyPersistentMechanismStates()
                 entity->wallLockInit = 0;
 
                 ++restoredWallButtons;
+                break;
+            }
+			            case PersistentMechanismState::Kind::Chest:
+            {
+                if ( entity->behavior != &actChest )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a chest but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                /*
+                 * Prevent actChest() from rerolling health, maximum
+                 * health, lock chance and lockpick state.
+                 */
+                entity->chestInit = 1;
+
+                entity->chestHealth =
+                    savedState.chestSavedHealth;
+
+                entity->chestMaxHealth =
+                    savedState.chestSavedMaxHealth;
+
+                entity->chestLocked =
+                    savedState.chestSavedLocked;
+
+                entity->chestLockpickHealth =
+                    savedState.chestSavedLockpickHealth;
+
+                entity->chestPreventLockpickCapstoneExploit =
+                    savedState.chestSavedPreventExploit;
+
+                entity->chestOldHealth =
+                    savedState.chestSavedOldHealth;
+
+                entity->chestVoidState =
+                    savedState.chestSavedVoidState;
+
+                /*
+                 * Never restore a stale player interaction.
+                 */
+                entity->chestStatus = 0;
+                entity->chestOpener = 0;
+                entity->chestLidClicked = 0;
+
+                /*
+                 * Inventory is authoritative on the server. Clients
+                 * receive it through the existing CHST/chest-item
+                 * network flow when someone opens the chest.
+                 */
+                if ( multiplayer != CLIENT
+                    && entity->chestVoidState == 0 )
+                {
+                    list_t* inventory =
+                        entity->getChestInventoryList();
+
+                    if ( inventory )
+                    {
+                        /*
+                         * Delete the newly generated default inventory
+                         * before recreating the persistent inventory.
+                         *
+                         * This is the critical anti-duplication step.
+                         */
+                        list_FreeAll(inventory);
+
+                        for ( const PersistentChestItemState&
+                            itemState :
+                            savedState.chestSavedInventory )
+                        {
+                            if ( itemState.type < 0
+                                || itemState.type >= NUMITEMS
+                                || itemState.count <= 0 )
+                            {
+                                printlog(
+                                    "[Persistent World] Ignored invalid item in chest ID %d: type=%d count=%d.",
+                                    entity->persistentID,
+                                    itemState.type,
+                                    itemState.count
+                                );
+
+                                continue;
+                            }
+
+                            Item* restoredItem =
+                                newItem(
+                                    static_cast<ItemType>(
+                                        itemState.type
+                                    ),
+                                    static_cast<Status>(
+                                        itemState.status
+                                    ),
+                                    itemState.beatitude,
+                                    itemState.count,
+                                    itemState.appearance,
+                                    itemState.identified,
+                                    inventory
+                                );
+
+                            if ( !restoredItem )
+                            {
+                                continue;
+                            }
+
+                            restoredItem->x =
+                                itemState.x;
+
+                            restoredItem->y =
+                                itemState.y;
+
+                            ++restoredChestItems;
+                        }
+                    }
+                }
+
+                ++restoredChests;
                 break;
             }
 			            case PersistentMechanismState::Kind::PressurePlate:
@@ -5427,7 +5832,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s), %u chest(s), %u chest item stack(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -5442,6 +5847,8 @@ printlog(
     restoredBells,
     restoredSinks,
     restoredFountains,
+	restoredChests,
+	restoredChestItems,
     restoredCampfires,
     restoredWallLocks,
 	restoredPedestals,

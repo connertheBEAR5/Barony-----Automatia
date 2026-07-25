@@ -222,6 +222,16 @@ void receiveClientPersistentPedestalState(
     real_t velZ,
     bool passable
 );
+void receiveClientPersistentChestState(
+    Sint32 persistentID,
+    Sint32 health,
+    Sint32 maxHealth,
+    Sint32 locked,
+    Sint32 lockpickHealth,
+    Sint32 preventExploit,
+    Sint32 oldHealth,
+    Sint32 voidState
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
