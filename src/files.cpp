@@ -39,6 +39,13 @@
 
 char datadir[PATH_MAX];
 char outputdir[PATH_MAX];
+/*
+ * Format version of the currently loaded main map.
+ *
+ * Only loadMap() calls targeting the global `map` should update this.
+ * Loading temporary submaps must not replace it.
+ */
+int currentLoadedMapVersion = 0;
 const char* holidayThemeDirs[HolidayTheme::THEME_MAX] = {
     "",
     "themes/scarony/",
@@ -2513,7 +2520,23 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 			return -1;
 		}
 	}
+	/*
+	* Remember the format version only when loading the active world map.
+	*
+	* Temporary room/submap loads use other map_t objects and must not
+	* change the version governing active gameplay behavior.
+	*/
+	if ( destmap == &map )
+	{
+		currentLoadedMapVersion =
+			editorVersion;
 
+		printlog(
+			"[Map Format] Active map '%s' loaded as format version %d.",
+			filename,
+			currentLoadedMapVersion
+		);
+	}
 	list_FreeAll(entlist);
 
 	if ( destmap->trapexcludelocations )

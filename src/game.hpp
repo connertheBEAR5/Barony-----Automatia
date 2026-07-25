@@ -138,6 +138,16 @@ void receiveClientPersistentPowerCrystalState(
     Sint32 crystalPowerToActivate,
     Sint32 crystalCircuitStatus
 );
+void receiveClientPersistentBoulderTrapState(
+    Sint32 persistentID,
+    Sint32 trapBehavior,
+    Sint32 fired,
+    Sint32 refireAmount,
+    Sint32 refireCounter,
+    Sint32 preDelay,
+    Sint32 circuitStatus,
+    Sint32 sabotaged
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

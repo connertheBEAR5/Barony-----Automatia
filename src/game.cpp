@@ -62,12 +62,6 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cctype>
-/*
- * Stage 2B.1 state for persistent levers and gates.
- *
- * A record exists only for entities whose behavior is recognized
- * during capture.
- */
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -79,7 +73,8 @@ enum class Kind : Uint8
     Door,
 	Furniture,
 	ColliderDecoration,
-	PowerCrystal
+	PowerCrystal,
+	BoulderTrap
 };
 
     Kind kind = Kind::None;
@@ -154,9 +149,63 @@ enum class Kind : Uint8
     Sint32 crystalCircuitStatus = 0;
 	Sint32 crystalPowerToActivate = 0;
 
+	    /*
+     * Boulder trap runtime state.
+     *
+     * trapBehavior:
+     * 1 = central
+     * 2 = east
+     * 3 = south
+     * 4 = west
+     * 5 = north
+     */
+    Sint32 boulderTrapBehavior = 0;
+    Sint32 boulderTrapFired = 0;
+    Sint32 boulderTrapRefireAmount = 0;
+    Sint32 boulderTrapRefireCounter = 0;
+    Sint32 boulderTrapPreDelay = 0;
+    Sint32 boulderTrapCircuitStatus = 0;
+    Sint32 boulderTrapSabotaged = 0;
+
+
 // PLACE STUFF ABOVE THIS
     bool passable = false;
 	//This is a shared field dont change ^
+};
+/*
+ * Runtime boulders created by persistent map traps.
+ *
+ * These do not exist in the original .lmp, so they cannot use the
+ * original-entity removal registry. A fresh snapshot of surviving
+ * trap-created boulders is stored whenever the player leaves a map.
+ */
+struct PersistentBoulderState
+{
+    Sint32 sourceTrapPersistentID = 0;
+    Sint32 sprite = 0;
+
+    real_t x = 0.0;
+    real_t y = 0.0;
+    real_t z = 0.0;
+
+    real_t yaw = 0.0;
+    real_t pitch = 0.0;
+    real_t roll = 0.0;
+
+    real_t velX = 0.0;
+    real_t velY = 0.0;
+    real_t velZ = 0.0;
+
+    Sint32 stopped = 0;
+    Sint32 noGround = 0;
+    Sint32 rolling = 0;
+    Sint32 rollDirection = 0;
+    Sint32 destinationX = 0;
+    Sint32 destinationY = 0;
+    Sint32 initialized = 0;
+    Sint32 lavaExplodeTimer = -1;
+
+    bool passable = false;
 };
 struct PersistentMapRemovalState
 {
@@ -171,6 +220,15 @@ struct PersistentMapRemovalState
         Sint32,
         PersistentMechanismState
     > mechanismStates;
+
+	    /*
+     * Current surviving runtime boulders created by map traps.
+     *
+     * This collection is replaced, not appended, whenever map state
+     * is captured.
+     */
+    std::vector<PersistentBoulderState> dynamicBoulders;
+
 
     bool originalIDsRegistered = false;
 };
@@ -691,6 +749,54 @@ void receiveClientPersistentPowerCrystalState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentBoulderTrapState(
+    Sint32 persistentID,
+    Sint32 trapBehavior,
+    Sint32 fired,
+    Sint32 refireAmount,
+    Sint32 refireCounter,
+    Sint32 preDelay,
+    Sint32 circuitStatus,
+    Sint32 sabotaged
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::BoulderTrap;
+
+    state.boulderTrapBehavior =
+        trapBehavior;
+
+    state.boulderTrapFired =
+        fired;
+
+    state.boulderTrapRefireAmount =
+        refireAmount;
+
+    state.boulderTrapRefireCounter =
+        refireCounter;
+
+    state.boulderTrapPreDelay =
+        preDelay;
+
+    state.boulderTrapCircuitStatus =
+        circuitStatus;
+
+    state.boulderTrapSabotaged =
+        sabotaged;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -801,6 +907,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 furnitureSent = 0;
 	Uint32 collidersSent = 0;
 	Uint32 powerCrystalsSent = 0;
+	Uint32 boulderTrapsSent = 0;
     if ( state )
     {
         /*
@@ -1447,6 +1554,95 @@ void sendPersistentWorldSnapshotToClient(
 
 				++powerCrystalsSent;
 			}
+			else if ( mechanism.kind == PersistentMechanismState::Kind::BoulderTrap )
+            {
+                /*
+                 * PWBT:
+                 *
+                 * bytes 0-3   packet name
+                 * bytes 4-7   persistent ID
+                 * bytes 8-11  trap behavior type
+                 * bytes 12-15 fired state
+                 * bytes 16-19 remaining refires
+                 * bytes 20-23 refire counter
+                 * bytes 24-27 remaining pre-delay
+                 * bytes 28-31 circuit status
+                 * bytes 32-35 sabotaged state
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWBT"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapBehavior
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapFired
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapRefireAmount
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapRefireCounter
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapPreDelay
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapCircuitStatus
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.boulderTrapSabotaged
+                    ),
+                    &net_packet->data[32]
+                );
+
+                net_packet->len = 36;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++boulderTrapsSent;
+            }
         }
     }
 
@@ -1467,7 +1663,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -1476,7 +1672,8 @@ printlog(
     doorsSent,
     furnitureSent,
     collidersSent,
-    powerCrystalsSent
+    powerCrystalsSent,
+    boulderTrapsSent
 );
 }
 /*
@@ -1598,6 +1795,46 @@ void applyPersistentMapRemovals()
     );
 }
 /*
+ * Convert a boulder-trap behavior function into a stable persistence
+ * type. Zero means that the entity is not a supported boulder trap.
+ */
+static Sint32 getPersistentBoulderTrapBehavior(
+    const Entity* entity
+)
+{
+    if ( !entity )
+    {
+        return 0;
+    }
+
+    if ( entity->behavior == &actBoulderTrap )
+    {
+        return 1;
+    }
+
+    if ( entity->behavior == &actBoulderTrapEast )
+    {
+        return 2;
+    }
+
+    if ( entity->behavior == &actBoulderTrapSouth )
+    {
+        return 3;
+    }
+
+    if ( entity->behavior == &actBoulderTrapWest )
+    {
+        return 4;
+    }
+
+    if ( entity->behavior == &actBoulderTrapNorth )
+    {
+        return 5;
+    }
+
+    return 0;
+}
+/*
  * Capture the current state of surviving persistent levers and gates
  * before the current map is replaced.
  */
@@ -1626,6 +1863,18 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedFurniture = 0;
 	Uint32 capturedColliders = 0;
 	Uint32 capturedPowerCrystals = 0;
+	Uint32 capturedBoulderTraps = 0;
+	Uint32 capturedDynamicBoulders = 0;
+
+
+
+	/*
+	* Dynamic entities are a current-world snapshot. Replace the previous
+	* snapshot so destroyed boulders do not return later.
+	*/
+	mapState.dynamicBoulders.clear();
+
+
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -1860,6 +2109,48 @@ static void capturePersistentMechanismStates()
 
 			++capturedColliders;
 		}
+		else if (getPersistentBoulderTrapBehavior(entity) != 0)
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::BoulderTrap;
+
+            mechanismState.boulderTrapBehavior =
+                getPersistentBoulderTrapBehavior(entity);
+
+            /*
+             * Public Entity aliases:
+             *
+             * skill[0]  = boulderTrapFired
+             * skill[1]  = boulderTrapRefireAmount
+             * skill[4]  = boulderTrapRefireCounter
+             * skill[5]  = boulderTrapPreDelay
+             * skill[28] = circuit_status
+             * skill[30] = actTrapSabotaged
+             */
+            mechanismState.boulderTrapFired =
+                entity->skill[0];
+
+            mechanismState.boulderTrapRefireAmount =
+                entity->skill[1];
+
+            mechanismState.boulderTrapRefireCounter =
+                entity->skill[4];
+
+            mechanismState.boulderTrapPreDelay =
+                entity->skill[5];
+
+            mechanismState.boulderTrapCircuitStatus =
+                entity->skill[28];
+
+            mechanismState.boulderTrapSabotaged =
+                entity->skill[30];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedBoulderTraps;
+        }
 		else if ( entity->behavior == &actPowerCrystal )
 		{
 			mechanismState.kind =
@@ -1927,9 +2218,119 @@ static void capturePersistentMechanismStates()
 			++capturedPowerCrystals;
 		}
     }
+    /*
+     * Capture surviving runtime boulders that were created by a
+     * persistent boulder trap.
+     *
+     * Authored map boulders with no trap parent are deliberately not
+     * included in this dynamic collection.
+     */
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* boulder =
+            static_cast<Entity*>(node->element);
 
+        if ( !boulder
+            || boulder->behavior != &actBoulder
+            || boulder->parent == 0 )
+        {
+            continue;
+        }
+
+        Entity* sourceTrap =
+            uidToEntity(boulder->parent);
+
+        if ( !sourceTrap
+            || sourceTrap->persistentID <= 0
+            || getPersistentBoulderTrapBehavior(sourceTrap) == 0 )
+        {
+            continue;
+        }
+
+        PersistentBoulderState boulderState;
+
+        boulderState.sourceTrapPersistentID =
+            sourceTrap->persistentID;
+
+        boulderState.sprite =
+            boulder->sprite;
+
+        boulderState.x =
+            boulder->x;
+
+        boulderState.y =
+            boulder->y;
+
+        boulderState.z =
+            boulder->z;
+
+        boulderState.yaw =
+            boulder->yaw;
+
+        boulderState.pitch =
+            boulder->pitch;
+
+        boulderState.roll =
+            boulder->roll;
+
+        boulderState.velX =
+            boulder->vel_x;
+
+        boulderState.velY =
+            boulder->vel_y;
+
+        boulderState.velZ =
+            boulder->vel_z;
+
+        /*
+         * actBoulder runtime slots:
+         *
+         * skill[0]  = stopped
+         * skill[3]  = no ground
+         * skill[4]  = rolling
+         * skill[5]  = roll direction
+         * skill[6]  = destination X
+         * skill[7]  = destination Y
+         * skill[11] = initialized
+         * skill[12] = lava explosion timer
+         */
+        boulderState.stopped =
+            boulder->skill[0];
+
+        boulderState.noGround =
+            boulder->skill[3];
+
+        boulderState.rolling =
+            boulder->skill[4];
+
+        boulderState.rollDirection =
+            boulder->skill[5];
+
+        boulderState.destinationX =
+            boulder->skill[6];
+
+        boulderState.destinationY =
+            boulder->skill[7];
+
+        boulderState.initialized =
+            boulder->skill[11];
+
+        boulderState.lavaExplodeTimer =
+            boulder->skill[12];
+
+        boulderState.passable =
+            boulder->flags[PASSABLE];
+
+        mapState.dynamicBoulders.push_back(
+            boulderState
+        );
+
+        ++capturedDynamicBoulders;
+    }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -1937,7 +2338,9 @@ printlog(
     capturedDoors,
     capturedFurniture,
     capturedColliders,
-    capturedPowerCrystals
+    capturedPowerCrystals,
+    capturedBoulderTraps,
+    capturedDynamicBoulders
 );
 }
 /*
@@ -2003,6 +2406,8 @@ void applyPersistentMechanismStates()
 	Uint32 restoredFurniture = 0;
 	Uint32 restoredColliders = 0;
 	Uint32 restoredPowerCrystals = 0;
+	Uint32 restoredBoulderTraps = 0;
+	Uint32 restoredDynamicBoulders = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -2394,6 +2799,55 @@ void applyPersistentMechanismStates()
 				++restoredColliders;
 				break;
 			}
+			case PersistentMechanismState::Kind::BoulderTrap:
+            {
+                const Sint32 loadedBehavior =
+                    getPersistentBoulderTrapBehavior(entity);
+
+                if ( loadedBehavior == 0 )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a boulder trap but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                if ( loadedBehavior
+                    != savedState.boulderTrapBehavior )
+                {
+                    printlog(
+                        "[Persistent World] Warning: boulder trap ID %d changed behavior type from %d to %d.",
+                        entity->persistentID,
+                        savedState.boulderTrapBehavior,
+                        loadedBehavior
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.boulderTrapFired;
+
+                entity->skill[1] =
+                    savedState.boulderTrapRefireAmount;
+
+                entity->skill[4] =
+                    savedState.boulderTrapRefireCounter;
+
+                entity->skill[5] =
+                    savedState.boulderTrapPreDelay;
+
+                entity->skill[28] =
+                    savedState.boulderTrapCircuitStatus;
+
+                entity->skill[30] =
+                    savedState.boulderTrapSabotaged;
+
+                ++restoredBoulderTraps;
+                break;
+            }
 			case PersistentMechanismState::Kind::PowerCrystal:
 			{
 				if ( entity->behavior != &actPowerCrystal )
@@ -2516,9 +2970,156 @@ void applyPersistentMechanismStates()
 					break;
         }
     }
+    /*
+     * Runtime boulders are host-authoritative.
+     *
+     * The server/single-player instance recreates them. Multiplayer
+     * clients receive the recreated entities through Barony's normal
+     * entity synchronization instead of creating a second local copy.
+     */
+    if ( multiplayer != CLIENT )
+    {
+        for ( const PersistentBoulderState& savedBoulder :
+            mapState.dynamicBoulders )
+        {
+            Entity* sourceTrap = nullptr;
 
+            for ( node_t* node = map.entities->first;
+                node != nullptr;
+                node = node->next )
+            {
+                Entity* candidate =
+                    static_cast<Entity*>(node->element);
+
+                if ( candidate
+                    && candidate->persistentID
+                        == savedBoulder.sourceTrapPersistentID
+                    && getPersistentBoulderTrapBehavior(candidate) != 0 )
+                {
+                    sourceTrap = candidate;
+                    break;
+                }
+            }
+
+            if ( !sourceTrap )
+            {
+                printlog(
+                    "[Persistent World] Warning: could not restore trap boulder because source trap ID %d no longer exists.",
+                    savedBoulder.sourceTrapPersistentID
+                );
+
+                continue;
+            }
+
+            Entity* boulder =
+                newEntity(
+                    savedBoulder.sprite,
+                    1,
+                    map.entities,
+                    nullptr
+                );
+
+            if ( !boulder )
+            {
+                printlog(
+                    "[Persistent World] Warning: failed to allocate persistent trap boulder."
+                );
+
+                continue;
+            }
+
+            boulder->parent =
+                sourceTrap->getUID();
+
+            boulder->x =
+                savedBoulder.x;
+
+            boulder->y =
+                savedBoulder.y;
+
+            boulder->z =
+                savedBoulder.z;
+
+            boulder->yaw =
+                savedBoulder.yaw;
+
+            boulder->pitch =
+                savedBoulder.pitch;
+
+            boulder->roll =
+                savedBoulder.roll;
+
+            boulder->vel_x =
+                savedBoulder.velX;
+
+            boulder->vel_y =
+                savedBoulder.velY;
+
+            boulder->vel_z =
+                savedBoulder.velZ;
+
+            boulder->sizex = 7;
+            boulder->sizey = 7;
+
+            boulder->behavior =
+                &actBoulder;
+
+            boulder->flags[UPDATENEEDED] =
+                true;
+
+            boulder->flags[PASSABLE] =
+                savedBoulder.passable;
+
+            boulder->skill[0] =
+                savedBoulder.stopped;
+
+            boulder->skill[3] =
+                savedBoulder.noGround;
+
+            boulder->skill[4] =
+                savedBoulder.rolling;
+
+            boulder->skill[5] =
+                savedBoulder.rollDirection;
+
+            boulder->skill[6] =
+                savedBoulder.destinationX;
+
+            boulder->skill[7] =
+                savedBoulder.destinationY;
+
+            /*
+             * Mark initialized so actBoulder() does not overwrite restored
+             * state such as the lava explosion timer.
+             */
+            boulder->skill[11] =
+                savedBoulder.initialized
+                    ? savedBoulder.initialized
+                    : 1;
+
+            boulder->skill[12] =
+                savedBoulder.lavaExplodeTimer;
+
+            boulder->new_x =
+                boulder->x;
+
+            boulder->new_y =
+                boulder->y;
+
+            boulder->new_z =
+                boulder->z;
+
+            boulder->new_yaw =
+                boulder->yaw;
+
+            boulder->bNeedsRenderPositionInit =
+                true;
+
+            ++restoredDynamicBoulders;
+        }
+    }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -2526,7 +3127,9 @@ printlog(
     restoredDoors,
     restoredFurniture,
     restoredColliders,
-    restoredPowerCrystals
+    restoredPowerCrystals,
+    restoredBoulderTraps,
+    restoredDynamicBoulders
 );
 }
 static void capturePersistentMapRemovals()

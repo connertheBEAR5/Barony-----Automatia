@@ -23,7 +23,7 @@
 #include "paths.hpp"
 #include "scores.hpp"
 #include "mod_tools.hpp"
-
+#include "files.hpp"
 #define BOULDER_STOPPED my->skill[0]
 #define BOULDER_AMBIENCE my->skill[1]
 #define BOULDER_NOGROUND my->skill[3]
@@ -46,10 +46,24 @@ const int BOULDER_ARCANE_SPRITE = 990;
 static ConsoleVariable<bool> cvar_boulderDisableAutoBreak("/boulder_disable_auto_break", false);
 bool boulderCheckIfBlockedExit(Entity* my)
 {
-	if ( *cvar_boulderDisableAutoBreak )
-	{
-		return true; // skip check if cvar enabled
-	}
+    /*
+     * LMP V4.5 introduced the persistent-world map format.
+     *
+     * On these maps, stopped boulders are intentional persistent
+     * world objects, so do not destroy them through Barony's
+     * anti-softlock path check.
+     *
+     * Older maps retain the original behavior.
+     */
+    if ( currentLoadedMapVersion >= 45 )
+    {
+        return true;
+    }
+
+    if ( *cvar_boulderDisableAutoBreak )
+    {
+        return true; // skip check if cvar enabled
+    }
 	//if ( conductGameChallenges[CONDUCT_MODDED] )
 	//{
 	//	return true; // ignore for custom maps.

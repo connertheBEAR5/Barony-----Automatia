@@ -18,7 +18,15 @@
 #include <dirent.h>
 
 #include "main.hpp"
-
+/*
+ * Format version of the currently loaded main map.
+ *
+ * Examples:
+ * 45 = BARONY LMPV4.5
+ * 44 = BARONY LMPV4.4
+ * 32 = BARONY LMPV3.2
+ */
+extern int currentLoadedMapVersion;
 //This class provides a common platform-independent interface for file accesses. Deriving classes must provide an implementation for all of these methods, but may make use of any common routines or common portions of routines.
 //Don't create a FileBase or derivative class directly, use FileIO::open to get one...
 class FileBase {
