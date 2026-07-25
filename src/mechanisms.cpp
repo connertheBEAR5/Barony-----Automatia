@@ -793,7 +793,10 @@ void actTrapPermanent(Entity* my)
 						{
 							continue;
 						}
-
+						if ( !pressurePlateEntityMeetsRequirements(my, entity) )
+						{
+							continue;
+						}
 						my->toggleSwitch();
 						TRAPPERMANENT_ON = 1;
 					}

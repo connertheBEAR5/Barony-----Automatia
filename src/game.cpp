@@ -86,7 +86,9 @@ enum class Kind : Uint8
 	Bell,
 	SinkOrFountain,
 	Campfire,
-	WallLock
+	WallLock,
+	WallButton,
+	PressurePlate
 };
 
     Kind kind = Kind::None;
@@ -267,6 +269,39 @@ enum class Kind : Uint8
     Sint32 wallLockSavedPower = 0;
     Sint32 wallLockSavedPickHealth = 50;
     Sint32 wallLockSavedPreventExploit = 0;
+
+	    /*
+     * Wall-button runtime state.
+     *
+     * wallButtonState:
+     * 0 = released
+     * 1 = pressed
+     *
+     * wallButtonPower:
+     *  0 = no output
+     * >0 = timed countdown
+     * -1 = permanently active
+     */
+    Sint32 wallButtonState = 0;
+    Sint32 wallButtonPower = 0;
+
+    /*
+     * Pressure-plate runtime state.
+     *
+     * pressurePlatePermanent:
+     * false = ordinary plate, releases when unoccupied
+     * true  = latched plate, remains active after triggering
+     *
+     * pressurePlatePower:
+     * skill[0] current output/latch state
+     *
+     * pressurePlateInteractionLock:
+     * skill[1], used by permanent/scripted plates to disable
+     * additional entity checks.
+     */
+    bool pressurePlatePermanent = false;
+    Sint32 pressurePlatePower = 0;
+    Sint32 pressurePlateInteractionLock = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -1121,6 +1156,66 @@ void receiveClientPersistentWallLockState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentWallButtonState(
+    Sint32 persistentID,
+    Sint32 buttonState,
+    Sint32 buttonPower
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::WallButton;
+
+    state.wallButtonState =
+        buttonState;
+
+    state.wallButtonPower =
+        buttonPower;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
+void receiveClientPersistentPressurePlateState(
+    Sint32 persistentID,
+    bool permanent,
+    Sint32 power,
+    Sint32 interactionLock
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::PressurePlate;
+
+    state.pressurePlatePermanent =
+        permanent;
+
+    state.pressurePlatePower =
+        power;
+
+    state.pressurePlateInteractionLock =
+        interactionLock;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -1237,7 +1332,8 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 waterSourcesSent = 0;
 	Uint32 campfiresSent = 0;
 	Uint32 wallLocksSent = 0;
-
+	Uint32 wallButtonsSent = 0;
+	Uint32 pressurePlatesSent = 0;
 
 
     if ( state )
@@ -1356,6 +1452,114 @@ void sendPersistentWorldSnapshotToClient(
                 );
 
                 ++leversSent;
+            }
+			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::WallButton )
+            {
+                /*
+                 * PWBW:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   pressed/released state
+                 * bytes 12-15  remaining timer or permanent -1
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWBW"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallButtonState
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallButtonPower
+                    ),
+                    &net_packet->data[12]
+                );
+
+                net_packet->len = 16;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++wallButtonsSent;
+            }
+			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::PressurePlate )
+            {
+                /*
+                 * PWPP:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   permanent flag
+                 * bytes 12-15  current power/latch state
+                 * bytes 16-19  scripted interaction lock
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWPP"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    mechanism.pressurePlatePermanent
+                        ? 1
+                        : 0,
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pressurePlatePower
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pressurePlateInteractionLock
+                    ),
+                    &net_packet->data[16]
+                );
+
+                net_packet->len = 20;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++pressurePlatesSent;
             }
             else if ( mechanism.kind
                 == PersistentMechanismState::Kind::Gate )
@@ -2393,7 +2597,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2408,7 +2612,9 @@ printlog(
     bellsSent,
     waterSourcesSent,
     campfiresSent,
-    wallLocksSent
+    wallLocksSent,
+	wallButtonsSent,
+	pressurePlatesSent
 );
 }
 /*
@@ -2607,6 +2813,11 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedFountains = 0;
 	Uint32 capturedCampfires = 0;
 	Uint32 capturedWallLocks = 0;
+	Uint32 capturedWallButtons = 0;
+	Uint32 capturedNormalPressurePlates = 0;
+	Uint32 capturedPermanentPressurePlates = 0;
+
+
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
 	* snapshot so destroyed boulders do not return later.
@@ -2668,6 +2879,23 @@ static void capturePersistentMechanismStates()
             ] = mechanismState;
 
             ++capturedTimedLevers;
+        }
+		        else if ( entity->behavior == &actWallButton )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::WallButton;
+
+            mechanismState.wallButtonState =
+                entity->wallLockState;
+
+            mechanismState.wallButtonPower =
+                entity->wallLockPower;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedWallButtons;
         }
         else if ( entity->behavior == &actGate )
         {
@@ -3106,6 +3334,42 @@ static void capturePersistentMechanismStates()
 
             ++capturedBoulderTraps;
         }
+		        else if (
+            entity->behavior == &actTrap
+            || entity->behavior == &actTrapPermanent
+        )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::PressurePlate;
+
+            mechanismState.pressurePlatePermanent =
+                entity->behavior == &actTrapPermanent;
+
+            mechanismState.pressurePlatePower =
+                entity->skill[0];
+
+            /*
+             * skill[1] has scripted meaning for permanent plates.
+             * It is unused as mutable runtime state by ordinary plates.
+             */
+            mechanismState.pressurePlateInteractionLock =
+                mechanismState.pressurePlatePermanent
+                    ? entity->skill[1]
+                    : 0;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            if ( mechanismState.pressurePlatePermanent )
+            {
+                ++capturedPermanentPressurePlates;
+            }
+            else
+            {
+                ++capturedNormalPressurePlates;
+            }
+        }
 		else if ( entity->behavior == &actPowerCrystal )
 		{
 			mechanismState.kind =
@@ -3285,7 +3549,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -3302,6 +3566,9 @@ printlog(
     capturedFountains,
     capturedCampfires,
     capturedWallLocks,
+    capturedWallButtons,
+    capturedNormalPressurePlates,
+    capturedPermanentPressurePlates,
     capturedDynamicBoulders
 );
 }
@@ -3377,7 +3644,9 @@ void applyPersistentMechanismStates()
 	Uint32 restoredFountains = 0;
 	Uint32 restoredCampfires = 0;
 	Uint32 restoredWallLocks = 0;
-
+	Uint32 restoredWallButtons = 0;
+	Uint32 restoredNormalPressurePlates = 0;
+	Uint32 restoredPermanentPressurePlates = 0;
 
 
 
@@ -3431,7 +3700,102 @@ void applyPersistentMechanismStates()
                 ++restoredLevers;
                 break;
             }
+			            case PersistentMechanismState::Kind::WallButton:
+            {
+                if ( entity->behavior != &actWallButton )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a wall button but loaded with another behavior.",
+                        entity->persistentID
+                    );
 
+                    break;
+                }
+
+                entity->wallLockState =
+                    savedState.wallButtonState;
+
+                entity->wallLockPower =
+                    savedState.wallButtonPower;
+
+                /*
+                 * Do not preserve temporary player or arrow interaction.
+                 */
+                entity->wallLockClientInteractDelay = 0;
+                entity->wallLockPlayerInteracting = 0;
+
+                /*
+                 * Allow the normal initialization pass to position the
+                 * generated button/key child and reapply inverted output.
+                 *
+                 * Initialization does not overwrite state or power.
+                 */
+                entity->wallLockInit = 0;
+
+                ++restoredWallButtons;
+                break;
+            }
+			            case PersistentMechanismState::Kind::PressurePlate:
+            {
+                const bool loadedAsNormal =
+                    entity->behavior == &actTrap;
+
+                const bool loadedAsPermanent =
+                    entity->behavior == &actTrapPermanent;
+
+                if ( !loadedAsNormal
+                    && !loadedAsPermanent )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a pressure plate but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                if ( savedState.pressurePlatePermanent
+                    != loadedAsPermanent )
+                {
+                    printlog(
+                        "[Persistent World] Warning: pressure-plate ID %d changed between ordinary and permanent behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.pressurePlatePower;
+
+                if ( loadedAsPermanent )
+                {
+                    entity->skill[1] =
+                        savedState.pressurePlateInteractionLock;
+
+                    ++restoredPermanentPressurePlates;
+                }
+                else
+                {
+                    ++restoredNormalPressurePlates;
+                }
+
+                /*
+                 * A powered plate must immediately reconstruct its
+                 * output in the freshly loaded circuit network.
+                 *
+                 * An ordinary plate will reevaluate occupants during
+                 * its next behavior tick and release naturally when
+                 * no qualifying entity remains.
+                 */
+                if ( multiplayer != CLIENT
+                    && entity->skill[0] )
+                {
+                    entity->switchUpdateNeighbors();
+                }
+
+                break;
+            }
             case PersistentMechanismState::Kind::TimedLever:
             {
                 if ( entity->behavior
@@ -4389,7 +4753,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -4406,7 +4770,10 @@ printlog(
     restoredFountains,
     restoredCampfires,
     restoredWallLocks,
-    restoredDynamicBoulders
+    restoredDynamicBoulders,
+	restoredWallButtons,
+	restoredNormalPressurePlates,
+	restoredPermanentPressurePlates
 );
 }
 static void capturePersistentMapRemovals()

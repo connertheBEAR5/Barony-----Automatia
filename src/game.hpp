@@ -194,6 +194,18 @@ void receiveClientPersistentWallLockState(
     Sint32 pickHealth,
     Sint32 preventExploit
 );
+void receiveClientPersistentWallButtonState(
+    Sint32 persistentID,
+    Sint32 buttonState,
+    Sint32 buttonPower
+);
+
+void receiveClientPersistentPressurePlateState(
+    Sint32 persistentID,
+    bool permanent,
+    Sint32 power,
+    Sint32 interactionLock
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
