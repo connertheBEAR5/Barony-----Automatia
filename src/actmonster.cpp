@@ -2866,6 +2866,17 @@ void actMonster(Entity* my)
 				case MINIMIMIC: initMiniMimic(my, myStats); break;
 				default: break; //This should never be reached.
 			}
+			        /*
+					* Shop stock is generated inside initShopkeeper(), so persistent
+					* inventory must replace it only after that initialization has
+					* completed.
+					*/
+					if ( myStats->type == SHOPKEEPER )
+					{
+						applyPersistentShopkeeperInventory(
+							my
+						);
+					}
 		}
 
 		MONSTER_INIT = 2;

@@ -88,6 +88,16 @@ struct PersistentChestItemState
 
     Sint32 x = 0;
     Sint32 y = 0;
+	    /*
+     * Additional metadata used by shop inventories.
+     *
+     * These remain at their defaults for ordinary chest items.
+     */
+    bool isDroppable = true;
+    bool playerSoldItemToShop = false;
+    bool itemSpecialShopConsumable = false;
+
+    Uint8 itemRequireTradingSkillInShop = 0;
 };
 struct PersistentMechanismState
 {
@@ -110,7 +120,8 @@ enum class Kind : Uint8
 	WallButton,
 	PressurePlate,
 	Pedestal,
-	Chest
+	Chest,
+	ShopkeeperInventory
 };
 
     Kind kind = Kind::None;
@@ -358,6 +369,21 @@ enum class Kind : Uint8
 
     std::vector<PersistentChestItemState>
         chestSavedInventory;
+
+
+	    /*
+     * Shopkeeper inventory state.
+     *
+     * Living/combat state is deliberately deferred to the general
+     * monster-persistence stage.
+     */
+    Sint32 shopkeeperSavedStoreType = 0;
+    Sint32 shopkeeperSavedGold = 0;
+
+    std::string shopkeeperSavedName;
+
+    std::vector<PersistentChestItemState>
+        shopkeeperSavedInventory;
 
 
 // PLACE STUFF ABOVE THIS
@@ -3531,7 +3557,8 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedPedestals = 0;
 	Uint32 capturedChests = 0;
 	Uint32 capturedChestItems = 0;
-
+	Uint32 capturedShopkeepers = 0;
+	Uint32 capturedShopItems = 0;
 
 
 
@@ -3604,6 +3631,100 @@ static void capturePersistentMechanismStates()
             ] = mechanismState;
 
             ++capturedPedestals;
+        }
+		        else if ( entity->behavior == &actMonster )
+        {
+            Stat* shopStats =
+                entity->getStats();
+
+            if ( !shopStats
+                || shopStats->type != SHOPKEEPER )
+            {
+                continue;
+            }
+
+            mechanismState.kind =
+                PersistentMechanismState::Kind::ShopkeeperInventory;
+
+            mechanismState.shopkeeperSavedStoreType =
+                entity->monsterStoreType;
+
+            mechanismState.shopkeeperSavedGold =
+                shopStats->GOLD;
+
+            mechanismState.shopkeeperSavedName =
+                shopStats->name;
+
+            for ( node_t* itemNode =
+                    shopStats->inventory.first;
+                itemNode != nullptr;
+                itemNode = itemNode->next )
+            {
+                Item* item =
+                    static_cast<Item*>(
+                        itemNode->element
+                    );
+
+                if ( !item
+                    || item->count <= 0 )
+                {
+                    continue;
+                }
+
+                PersistentChestItemState itemState;
+
+                itemState.type =
+                    static_cast<Sint32>(
+                        item->type
+                    );
+
+                itemState.status =
+                    static_cast<Sint32>(
+                        item->status
+                    );
+
+                itemState.beatitude =
+                    item->beatitude;
+
+                itemState.count =
+                    item->count;
+
+                itemState.appearance =
+                    item->appearance;
+
+                itemState.identified =
+                    item->identified;
+
+                itemState.x =
+                    item->x;
+
+                itemState.y =
+                    item->y;
+
+                itemState.isDroppable =
+                    item->isDroppable;
+
+                itemState.playerSoldItemToShop =
+                    item->playerSoldItemToShop;
+
+                itemState.itemSpecialShopConsumable =
+                    item->itemSpecialShopConsumable;
+
+                itemState.itemRequireTradingSkillInShop =
+                    item->itemRequireTradingSkillInShop;
+
+                mechanismState
+                    .shopkeeperSavedInventory
+                    .push_back(itemState);
+
+                ++capturedShopItems;
+            }
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = std::move(mechanismState);
+
+            ++capturedShopkeepers;
         }
 		        else if ( entity->behavior == &actChest )
         {
@@ -4397,7 +4518,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u shopkeeper(s), %u shop item stack(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -4418,6 +4539,8 @@ printlog(
     capturedNormalPressurePlates,
     capturedPermanentPressurePlates,
 	capturedPedestals,
+	capturedShopkeepers,
+	capturedShopItems,
 	capturedChests,
 	capturedChestItems,
     capturedDynamicBoulders
@@ -5857,6 +5980,164 @@ printlog(
 	restoredNormalPressurePlates,
 	restoredPermanentPressurePlates
 );
+}
+bool applyPersistentShopkeeperInventory(
+    Entity* shopkeeperEntity
+)
+{
+    if ( multiplayer == CLIENT
+        || !shopkeeperEntity
+        || shopkeeperEntity->persistentID <= 0
+        || shopkeeperEntity->behavior != &actMonster )
+    {
+        return false;
+    }
+
+    Stat* shopStats =
+        shopkeeperEntity->getStats();
+
+    if ( !shopStats
+        || shopStats->type != SHOPKEEPER )
+    {
+        return false;
+    }
+
+    const std::string mapKey =
+        getPersistentMapKey();
+
+    if ( mapKey.empty() )
+    {
+        return false;
+    }
+
+    const auto mapIterator =
+        persistentMapRemovalRegistry.find(
+            mapKey
+        );
+
+    if ( mapIterator
+        == persistentMapRemovalRegistry.end() )
+    {
+        return false;
+    }
+
+    const auto stateIterator =
+        mapIterator->second.mechanismStates.find(
+            shopkeeperEntity->persistentID
+        );
+
+    if ( stateIterator
+        == mapIterator->second.mechanismStates.end() )
+    {
+        return false;
+    }
+
+    const PersistentMechanismState& savedState =
+        stateIterator->second;
+
+    if ( savedState.kind
+        != PersistentMechanismState::Kind::ShopkeeperInventory )
+    {
+        return false;
+    }
+
+    /*
+     * initShopkeeper() has now generated a fresh random inventory.
+     * Delete it before restoring the saved authoritative inventory.
+     */
+    list_FreeAll(
+        &shopStats->inventory
+    );
+
+    shopkeeperEntity->monsterStoreType =
+        savedState.shopkeeperSavedStoreType;
+
+    shopStats->GOLD =
+        savedState.shopkeeperSavedGold;
+
+    if ( !savedState.shopkeeperSavedName.empty() )
+    {
+        strncpy(
+            shopStats->name,
+            savedState.shopkeeperSavedName.c_str(),
+            sizeof(shopStats->name) - 1
+        );
+
+        shopStats->name[
+            sizeof(shopStats->name) - 1
+        ] = '\0';
+    }
+
+    Uint32 restoredItems = 0;
+
+    for ( const PersistentChestItemState& itemState :
+        savedState.shopkeeperSavedInventory )
+    {
+        if ( itemState.type < 0
+            || itemState.type >= NUMITEMS
+            || itemState.count <= 0 )
+        {
+            printlog(
+                "[Persistent World] Ignored invalid shop item for shopkeeper ID %d: type=%d count=%d.",
+                shopkeeperEntity->persistentID,
+                itemState.type,
+                itemState.count
+            );
+
+            continue;
+        }
+
+        Item* restoredItem =
+            newItem(
+                static_cast<ItemType>(
+                    itemState.type
+                ),
+                static_cast<Status>(
+                    itemState.status
+                ),
+                itemState.beatitude,
+                itemState.count,
+                itemState.appearance,
+                itemState.identified,
+                &shopStats->inventory
+            );
+
+        if ( !restoredItem )
+        {
+            continue;
+        }
+
+        restoredItem->x =
+            itemState.x;
+
+        restoredItem->y =
+            itemState.y;
+
+        restoredItem->isDroppable =
+            itemState.isDroppable;
+
+        restoredItem->playerSoldItemToShop =
+            itemState.playerSoldItemToShop;
+
+        restoredItem->itemSpecialShopConsumable =
+            itemState.itemSpecialShopConsumable;
+
+        restoredItem->itemRequireTradingSkillInShop =
+            itemState.itemRequireTradingSkillInShop;
+
+        ++restoredItems;
+    }
+
+    printlog(
+        "[Persistent World] Restored shopkeeper ID %d in '%s': store type %d, gold %d, %u item stack(s).",
+        shopkeeperEntity->persistentID,
+        mapKey.c_str(),
+        shopkeeperEntity->monsterStoreType,
+        shopStats->GOLD,
+        restoredItems
+    );
+
+    return true;
 }
 static void capturePersistentMapRemovals()
 {

@@ -232,6 +232,9 @@ void receiveClientPersistentChestState(
     Sint32 oldHealth,
     Sint32 voidState
 );
+bool applyPersistentShopkeeperInventory(
+    Entity* shopkeeperEntity
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
