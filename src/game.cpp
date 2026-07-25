@@ -88,7 +88,8 @@ enum class Kind : Uint8
 	Campfire,
 	WallLock,
 	WallButton,
-	PressurePlate
+	PressurePlate,
+	Pedestal
 };
 
     Kind kind = Kind::None;
@@ -302,6 +303,24 @@ enum class Kind : Uint8
     bool pressurePlatePermanent = false;
     Sint32 pressurePlatePower = 0;
     Sint32 pressurePlateInteractionLock = 0;
+
+	    /*
+     * Orb-pedestal runtime state.
+     *
+     * The pedestal's floating orb is a generated child and is rebuilt
+     * by assignActions(). Only the parent pedestal owns persistent
+     * gameplay state.
+     */
+    Sint32 pedestalSavedHasOrb = 0;
+    Sint32 pedestalSavedPowerStatus = 0;
+    Sint32 pedestalSavedInit = 0;
+    Sint32 pedestalSavedInGround = 0;
+
+    real_t pedestalSavedZ = 4.5;
+    real_t pedestalSavedVelZ = 0.0;
+
+    bool pedestalSavedPassable = false;
+
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -1289,6 +1308,54 @@ void receiveClientPersistentPressurePlateState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentPedestalState(
+    Sint32 persistentID,
+    Sint32 hasOrb,
+    Sint32 powerStatus,
+    Sint32 initialized,
+    Sint32 inGround,
+    real_t z,
+    real_t velZ,
+    bool passable
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Pedestal;
+
+    state.pedestalSavedHasOrb =
+        hasOrb;
+
+    state.pedestalSavedPowerStatus =
+        powerStatus;
+
+    state.pedestalSavedInit =
+        initialized;
+
+    state.pedestalSavedInGround =
+        inGround;
+
+    state.pedestalSavedZ =
+        z;
+
+    state.pedestalSavedVelZ =
+        velZ;
+
+    state.pedestalSavedPassable =
+        passable;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void receiveClientPersistentTileState(
     Sint32 x,
     Sint32 y,
@@ -1443,6 +1510,9 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 wallButtonsSent = 0;
 	Uint32 pressurePlatesSent = 0;
 	Uint32 tilesSent = 0;
+	Uint32 pedestalsSent = 0;
+
+
 
     if ( state )
     {
@@ -1730,6 +1800,98 @@ void sendPersistentWorldSnapshotToClient(
                 );
 
                 ++pressurePlatesSent;
+            }
+			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::Pedestal )
+            {
+                /*
+                 * PWPD:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   contained orb type, 0 = empty
+                 * bytes 12-15  current power status
+                 * bytes 16-19  initialized state
+                 * bytes 20-23  underground/emergence state
+                 * bytes 24-27  z * 65536
+                 * bytes 28-31  vertical velocity * 65536
+                 * byte  32     passable
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWPD"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        persistentID
+                    ),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pedestalSavedHasOrb
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pedestalSavedPowerStatus
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pedestalSavedInit
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.pedestalSavedInGround
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.pedestalSavedZ
+                        * 65536.0
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Sint32>(
+                        mechanism.pedestalSavedVelZ
+                        * 65536.0
+                    ),
+                    &net_packet->data[28]
+                );
+
+                net_packet->data[32] =
+                    mechanism.pedestalSavedPassable
+                        ? 1
+                        : 0;
+
+                net_packet->len = 33;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++pedestalsSent;
             }
             else if ( mechanism.kind
                 == PersistentMechanismState::Kind::Gate )
@@ -2774,7 +2936,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s), %u tile override(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s), %u tile override(s), %u pedestal state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2792,6 +2954,7 @@ printlog(
     wallLocksSent,
     wallButtonsSent,
     pressurePlatesSent,
+	pedestalsSent,
     tilesSent
 );
 }
@@ -3186,7 +3349,7 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedWallButtons = 0;
 	Uint32 capturedNormalPressurePlates = 0;
 	Uint32 capturedPermanentPressurePlates = 0;
-
+	Uint32 capturedPedestals = 0;
 
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
@@ -3225,6 +3388,38 @@ static void capturePersistentMechanismStates()
             ] = mechanismState;
 
             ++capturedLevers;
+        }
+		        else if ( entity->behavior == &actPedestalBase )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Pedestal;
+
+            mechanismState.pedestalSavedHasOrb =
+                entity->pedestalHasOrb;
+
+            mechanismState.pedestalSavedPowerStatus =
+                entity->pedestalPowerStatus;
+
+            mechanismState.pedestalSavedInit =
+                entity->pedestalInit;
+
+            mechanismState.pedestalSavedInGround =
+                entity->pedestalInGround;
+
+            mechanismState.pedestalSavedZ =
+                entity->z;
+
+            mechanismState.pedestalSavedVelZ =
+                entity->vel_z;
+
+            mechanismState.pedestalSavedPassable =
+                entity->flags[PASSABLE];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedPedestals;
         }
         else if ( entity->behavior
             == &actSwitchWithTimer )
@@ -3919,7 +4114,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -3939,6 +4134,7 @@ printlog(
     capturedWallButtons,
     capturedNormalPressurePlates,
     capturedPermanentPressurePlates,
+	capturedPedestals,
     capturedDynamicBoulders
 );
 }
@@ -4017,7 +4213,7 @@ void applyPersistentMechanismStates()
 	Uint32 restoredWallButtons = 0;
 	Uint32 restoredNormalPressurePlates = 0;
 	Uint32 restoredPermanentPressurePlates = 0;
-
+	Uint32 restoredPedestals = 0;
 
 
     for ( node_t* node = map.entities->first;
@@ -4164,6 +4360,114 @@ void applyPersistentMechanismStates()
                     entity->switchUpdateNeighbors();
                 }
 
+                break;
+            }
+			            case PersistentMechanismState::Kind::Pedestal:
+            {
+                if ( entity->behavior != &actPedestalBase )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a pedestal but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->pedestalHasOrb =
+                    savedState.pedestalSavedHasOrb;
+
+                entity->pedestalPowerStatus =
+                    savedState.pedestalSavedPowerStatus;
+
+                entity->pedestalInit =
+                    savedState.pedestalSavedInit;
+
+                entity->pedestalInGround =
+                    savedState.pedestalSavedInGround;
+
+                entity->z =
+                    savedState.pedestalSavedZ;
+
+                entity->vel_z =
+                    savedState.pedestalSavedVelZ;
+
+                entity->flags[PASSABLE] =
+                    savedState.pedestalSavedPassable;
+
+                /*
+                 * The generated floating-orb child is recreated during
+                 * assignActions(). Synchronize its position to the
+                 * restored pedestal.
+                 *
+                 * Pedestal base and orb always use a 6.5-unit vertical
+                 * separation:
+                 *
+                 * emerged:    base 4.5, orb -2.0
+                 * underground base 15.5, orb 9.0
+                 */
+                Entity* orbEntity = nullptr;
+
+                for ( node_t* childNode =
+                        entity->children.first;
+                    childNode != nullptr;
+                    childNode = childNode->next )
+                {
+                    Entity* child =
+                        static_cast<Entity*>(
+                            childNode->element
+                        );
+
+                    if ( child
+                        && child->behavior
+                            == &actPedestalOrb )
+                    {
+                        orbEntity = child;
+                        break;
+                    }
+                }
+
+				if ( orbEntity )
+				{
+					orbEntity->x =
+						entity->x;
+
+					orbEntity->y =
+						entity->y;
+
+					orbEntity->z =
+						entity->z - 6.5;
+
+					orbEntity->vel_z =
+						entity->vel_z;
+
+					/*
+					* These orb aliases are private Entity members, so game.cpp must
+					* access their underlying public skill/fskill storage directly.
+					*
+					* orbInitialised      = skill[1]
+					* orbHoverDirection   = skill[7]
+					* orbHoverWaitTimer   = skill[8]
+					* orbStartZ           = fskill[0]
+					*/
+					orbEntity->skill[1] = 0;
+					orbEntity->skill[7] = 0;
+					orbEntity->skill[8] = 0;
+					orbEntity->fskill[0] =
+						entity->z - 6.5;
+				}
+
+                /*
+                 * Reapply the saved circuit output to the newly loaded
+                 * circuit graph.
+                 */
+				if ( multiplayer != CLIENT
+					&& entity->pedestalPowerStatus == 1 )
+				{
+					entity->switchUpdateNeighbors();
+				}
+
+                ++restoredPedestals;
                 break;
             }
             case PersistentMechanismState::Kind::TimedLever:
@@ -5123,7 +5427,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -5140,6 +5444,7 @@ printlog(
     restoredFountains,
     restoredCampfires,
     restoredWallLocks,
+	restoredPedestals,
     restoredDynamicBoulders,
 	restoredWallButtons,
 	restoredNormalPressurePlates,

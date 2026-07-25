@@ -212,6 +212,16 @@ void receiveClientPersistentTileState(
     Sint32 layer,
     Sint32 tile
 );
+void receiveClientPersistentPedestalState(
+    Sint32 persistentID,
+    Sint32 hasOrb,
+    Sint32 powerStatus,
+    Sint32 initialized,
+    Sint32 inGround,
+    real_t z,
+    real_t velZ,
+    bool passable
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
