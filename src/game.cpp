@@ -143,6 +143,37 @@ struct PersistentWorldItemState
     bool burning = false;
     bool burnable = true;
 };
+/*
+ * One gold pile currently existing directly in the world.
+ *
+ * Gold hidden inside a chest, breakable container, or other parent
+ * entity is excluded. Its owning entity is responsible for recreating
+ * it until the gold is released into the world.
+ */
+struct PersistentGoldBagState
+{
+    Sint32 amount = 0;
+    Sint32 amountBonus = 0;
+
+    Sint32 sokoban = 0;
+    Sint32 bouncing = 0;
+    Sint32 droppedByPlayer = 0;
+
+    real_t x = 0.0;
+    real_t y = 0.0;
+    real_t z = 0.0;
+
+    real_t yaw = 0.0;
+    real_t pitch = 0.0;
+    real_t roll = 0.0;
+
+    real_t velX = 0.0;
+    real_t velY = 0.0;
+    real_t velZ = 0.0;
+
+    bool passable = true;
+    bool invisible = false;
+};
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -166,7 +197,8 @@ enum class Kind : Uint8
 	Pedestal,
 	Chest,
 	ShopkeeperInventory,
-    WorldItem
+    WorldItem,
+    GoldBag
 };
 
     Kind kind = Kind::None;
@@ -436,6 +468,10 @@ enum class Kind : Uint8
     * mechanismStates.
     */
     PersistentWorldItemState worldItemState;
+    /*
+    * Runtime state for an original gold pile from the .lmp.
+    */
+    PersistentGoldBagState goldBagState;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -567,6 +603,12 @@ struct PersistentMapRemovalState
     * This is replaced with a fresh snapshot every time the map is left.
     */
     std::vector<PersistentWorldItemState> dynamicWorldItems;
+    /*
+    * Gold piles created during gameplay do not have an original .lmp
+    * persistent ID. Replace this vector with a fresh snapshot whenever
+    * the player leaves the map.
+    */
+    std::vector<PersistentGoldBagState> dynamicGoldBags;
 
     bool originalIDsRegistered = false;
 };
@@ -751,6 +793,7 @@ void beginClientPersistentWorldSnapshot(
 		state.tileStates.clear();
         state.dynamicBoulders.clear();
         state.dynamicWorldItems.clear();
+        state.dynamicGoldBags.clear();
 		/*
 		* The destination map has not loaded yet. Its fresh raw tiles will
 		* become the new baseline inside applyPersistentMapRemovals().
@@ -3415,6 +3458,192 @@ printlog(
 );
 }
 /*
+ * Copy one visible/world gold pile into persistent storage.
+ */
+static bool capturePersistentGoldBagState(
+    const Entity* entity,
+    PersistentGoldBagState& savedState
+)
+{
+    if ( !entity
+        || entity->behavior != &actGoldBag
+        || entity->goldInContainer != 0
+        || entity->goldAmount <= 0 )
+    {
+        return false;
+    }
+
+    savedState.amount =
+        entity->goldAmount;
+
+    savedState.amountBonus =
+        entity->goldAmountBonus;
+
+    savedState.sokoban =
+        entity->goldSokoban;
+
+    savedState.bouncing =
+        entity->goldBouncing;
+
+    savedState.droppedByPlayer =
+        entity->goldDroppedByPlayer;
+
+    savedState.x =
+        entity->x;
+
+    savedState.y =
+        entity->y;
+
+    savedState.z =
+        entity->z;
+
+    savedState.yaw =
+        entity->yaw;
+
+    savedState.pitch =
+        entity->pitch;
+
+    savedState.roll =
+        entity->roll;
+
+    savedState.velX =
+        entity->vel_x;
+
+    savedState.velY =
+        entity->vel_y;
+
+    savedState.velZ =
+        entity->vel_z;
+
+    savedState.passable =
+        entity->flags[PASSABLE];
+
+    savedState.invisible =
+        entity->flags[INVISIBLE];
+
+    return true;
+}
+/*
+ * Apply saved gold state to either an original map gold entity or a
+ * newly created dynamic gold entity.
+ */
+static bool applyPersistentGoldBagState(
+    Entity* entity,
+    const PersistentGoldBagState& savedState
+)
+{
+    if ( !entity
+        || savedState.amount <= 0 )
+    {
+        return false;
+    }
+
+    entity->behavior =
+        &actGoldBag;
+
+    entity->sizex = 4;
+    entity->sizey = 4;
+
+    entity->goldAmount =
+        savedState.amount;
+
+    entity->goldAmountBonus =
+        savedState.amountBonus;
+
+    entity->goldSokoban =
+        savedState.sokoban;
+
+    entity->goldBouncing =
+        savedState.bouncing;
+
+    entity->goldDroppedByPlayer =
+        savedState.droppedByPlayer;
+
+    /*
+     * The original parent UID cannot be reused after loading another
+     * map. Restored gold is a free-standing world entity.
+     */
+    entity->goldInContainer = 0;
+    entity->parent = 0;
+
+    /*
+     * Sound ambience and client-only telepathy are recalculated.
+     */
+    entity->goldAmbience = 0;
+    entity->goldTelepathy = 0;
+
+    entity->x =
+        savedState.x;
+
+    entity->y =
+        savedState.y;
+
+    entity->z =
+        savedState.z;
+
+    entity->new_x =
+        savedState.x;
+
+    entity->new_y =
+        savedState.y;
+
+    entity->new_z =
+        savedState.z;
+
+    entity->yaw =
+        savedState.yaw;
+
+    entity->pitch =
+        savedState.pitch;
+
+    entity->roll =
+        savedState.roll;
+
+    entity->new_yaw =
+        savedState.yaw;
+
+    entity->new_pitch =
+        savedState.pitch;
+
+    entity->new_roll =
+        savedState.roll;
+
+    entity->vel_x =
+        savedState.velX;
+
+    entity->vel_y =
+        savedState.velY;
+
+    entity->vel_z =
+        savedState.velZ;
+
+    entity->flags[PASSABLE] =
+        savedState.passable;
+
+    entity->flags[INVISIBLE] =
+        savedState.invisible;
+
+    entity->flags[UPDATENEEDED] =
+        true;
+
+    entity->flags[BURNING] =
+        false;
+
+    /*
+     * Barony uses a loose coin model for fewer than five gold and the
+     * normal gold-bag model for larger piles.
+     */
+    entity->sprite =
+        savedState.amount < 5
+            ? 1379
+            : 130;
+
+    entity->bNeedsRenderPositionInit =
+        true;
+
+    return true;
+}
+/*
  * Copy a live floor-item entity into persistent storage.
  *
  * Items hidden inside another world entity are excluded. Their parent
@@ -3886,7 +4115,8 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedShopItems = 0;
     Uint32 capturedOriginalWorldItems = 0;
     Uint32 capturedDynamicWorldItems = 0;
-
+    Uint32 capturedOriginalGoldBags = 0;
+    Uint32 capturedDynamicGoldBags = 0;
 
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
@@ -3894,7 +4124,7 @@ static void capturePersistentMechanismStates()
 	*/
 	mapState.dynamicBoulders.clear();
     mapState.dynamicWorldItems.clear();
-
+    mapState.dynamicGoldBags.clear();
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -4334,6 +4564,30 @@ static void capturePersistentMechanismStates()
 
 			++capturedDoors;
 		}
+        else if ( entity->behavior == &actGoldBag )
+        {
+            PersistentGoldBagState goldState;
+
+            if ( !capturePersistentGoldBagState(
+                entity,
+                goldState
+            ) )
+            {
+                continue;
+            }
+
+            mechanismState.kind =
+                PersistentMechanismState::Kind::GoldBag;
+
+            mechanismState.goldBagState =
+                goldState;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedOriginalGoldBags;
+        }
         else if ( entity->behavior == &actItem )
         {
             PersistentWorldItemState itemState;
@@ -4924,8 +5178,43 @@ for ( node_t* itemNode = map.entities->first;
 
     ++capturedDynamicWorldItems;
 }
+/*
+ * Capture free-standing gold piles created during gameplay.
+ */
+for ( node_t* goldNode = map.entities->first;
+    goldNode != nullptr;
+    goldNode = goldNode->next )
+{
+    Entity* goldEntity =
+        static_cast<Entity*>(
+            goldNode->element
+        );
+
+    if ( !goldEntity
+        || goldEntity->persistentID > 0
+        || goldEntity->behavior != &actGoldBag )
+    {
+        continue;
+    }
+
+    PersistentGoldBagState goldState;
+
+    if ( !capturePersistentGoldBagState(
+        goldEntity,
+        goldState
+    ) )
+    {
+        continue;
+    }
+
+    mapState.dynamicGoldBags.push_back(
+        goldState
+    );
+
+    ++capturedDynamicGoldBags;
+}
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u shopkeeper(s), %u shop item stack(s), %u original floor item(s), %u dynamic floor item(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u shopkeeper(s), %u shop item stack(s), %u original floor item(s), %u dynamic floor item(s), %u original gold pile(s), %u dynamic gold pile(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -4952,7 +5241,9 @@ printlog(
 	capturedChestItems,
     capturedDynamicBoulders,
     capturedOriginalWorldItems,
-    capturedDynamicWorldItems
+    capturedDynamicWorldItems,
+    capturedOriginalGoldBags,
+    capturedDynamicGoldBags
 );
 }
 /*
@@ -5035,6 +5326,8 @@ PersistentMapRemovalState& mapState =
 	Uint32 restoredChestItems = 0;
     Uint32 restoredOriginalWorldItems = 0;
     Uint32 restoredDynamicWorldItems = 0;
+    Uint32 restoredOriginalGoldBags = 0;
+    Uint32 restoredDynamicGoldBags = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -6211,6 +6504,28 @@ PersistentMapRemovalState& mapState =
 				++restoredPowerCrystals;
 				break;
 				}
+                case PersistentMechanismState::Kind::GoldBag:
+                {
+                    if ( entity->behavior != &actGoldBag )
+                    {
+                        printlog(
+                            "[Persistent World] Warning: entity ID %d was saved as gold but no longer uses actGoldBag.",
+                            entity->persistentID
+                        );
+
+                        break;
+                    }
+
+                    if ( applyPersistentGoldBagState(
+                        entity,
+                        savedState.goldBagState
+                    ) )
+                    {
+                        ++restoredOriginalGoldBags;
+                    }
+
+                    break;
+                }
                 case PersistentMechanismState::Kind::WorldItem:
                 {
                     if ( entity->behavior != &actItem )
@@ -6425,9 +6740,51 @@ PersistentMapRemovalState& mapState =
 
             ++restoredDynamicWorldItems;
         }
+        /*
+        * Recreate gold piles that did not exist in the original .lmp.
+        *
+        * Only the server or single-player instance creates them. Multiplayer
+        * clients receive them through normal entity synchronization.
+        */
+        for ( const PersistentGoldBagState& savedGold :
+            mapState.dynamicGoldBags )
+        {
+            Entity* goldEntity =
+                newEntity(
+                    savedGold.amount < 5
+                        ? 1379
+                        : 130,
+                    1,
+                    map.entities,
+                    nullptr
+                );
+
+            if ( !goldEntity )
+            {
+                printlog(
+                    "[Persistent World] Warning: failed to allocate persistent dynamic gold pile."
+                );
+
+                continue;
+            }
+
+            if ( !applyPersistentGoldBagState(
+                goldEntity,
+                savedGold
+            ) )
+            {
+                list_RemoveNode(
+                    goldEntity->mynode
+                );
+
+                continue;
+            }
+
+            ++restoredDynamicGoldBags;
+        }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u original floor item(s), %u dynamic floor item(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u original floor item(s), %u dynamic floor item(s), %u original gold pile(s), %u dynamic gold pile(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -6452,7 +6809,9 @@ printlog(
 	restoredNormalPressurePlates,
 	restoredPermanentPressurePlates,
     restoredOriginalWorldItems,
-    restoredDynamicWorldItems
+    restoredDynamicWorldItems,
+    restoredOriginalGoldBags,
+    restoredDynamicGoldBags
 );
 }
 bool applyPersistentShopkeeperInventory(
