@@ -99,6 +99,50 @@ struct PersistentChestItemState
 
     Uint8 itemRequireTradingSkillInShop = 0;
 };
+/*
+ * One item currently existing directly in the game world.
+ *
+ * This structure is used for both:
+ *
+ * 1. Original .lmp items with a stable persistentID.
+ * 2. Dynamic items dropped or spawned during gameplay.
+ *
+ * Entity UID relationships are deliberately not preserved because
+ * runtime UIDs can refer to different entities after another map loads.
+ */
+struct PersistentWorldItemState
+{
+    Sint32 type = 0;
+    Sint32 status = 0;
+    Sint32 beatitude = 0;
+    Sint32 count = 0;
+
+    Uint32 appearance = 0;
+    bool identified = false;
+
+    real_t x = 0.0;
+    real_t y = 0.0;
+    real_t z = 0.0;
+
+    real_t yaw = 0.0;
+    real_t pitch = 0.0;
+    real_t roll = 0.0;
+
+    real_t velX = 0.0;
+    real_t velY = 0.0;
+    real_t velZ = 0.0;
+
+    Sint32 itemNotMoving = 0;
+    Sint32 itemSokobanReward = 0;
+    Sint32 itemStolen = 0;
+    Sint32 itemShowOnMap = 0;
+    Sint32 itemDelayMonsterPickingUp = 0;
+
+    bool passable = true;
+    bool invisible = false;
+    bool burning = false;
+    bool burnable = true;
+};
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -121,7 +165,8 @@ enum class Kind : Uint8
 	PressurePlate,
 	Pedestal,
 	Chest,
-	ShopkeeperInventory
+	ShopkeeperInventory,
+    WorldItem
 };
 
     Kind kind = Kind::None;
@@ -384,7 +429,13 @@ enum class Kind : Uint8
 
     std::vector<PersistentChestItemState>
         shopkeeperSavedInventory;
-
+    /*
+    * Runtime state for an original floor item from the .lmp.
+    *
+    * Original items are indexed by their stable persistentID through
+    * mechanismStates.
+    */
+    PersistentWorldItemState worldItemState;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -509,7 +560,13 @@ struct PersistentMapRemovalState
      * is captured.
      */
     std::vector<PersistentBoulderState> dynamicBoulders;
-
+    /*
+    * Current world items that were created during gameplay and therefore
+    * do not have an original .lmp persistentID.
+    *
+    * This is replaced with a fresh snapshot every time the map is left.
+    */
+    std::vector<PersistentWorldItemState> dynamicWorldItems;
 
     bool originalIDsRegistered = false;
 };
@@ -692,7 +749,8 @@ void beginClientPersistentWorldSnapshot(
 		state.removedEntityIDs.clear();
 		state.mechanismStates.clear();
 		state.tileStates.clear();
-
+        state.dynamicBoulders.clear();
+        state.dynamicWorldItems.clear();
 		/*
 		* The destination map has not loaded yet. Its fresh raw tiles will
 		* become the new baseline inside applyPersistentMapRemovals().
@@ -3357,6 +3415,273 @@ printlog(
 );
 }
 /*
+ * Copy a live floor-item entity into persistent storage.
+ *
+ * Items hidden inside another world entity are excluded. Their parent
+ * mechanism owns their state and recreates them when appropriate.
+ */
+static bool capturePersistentWorldItemState(
+    const Entity* entity,
+    PersistentWorldItemState& savedState
+)
+{
+    if ( !entity
+        || entity->behavior != &actItem
+        || entity->itemContainer != 0
+        || entity->skill[10] < 0
+        || entity->skill[10] >= NUMITEMS
+        || entity->skill[13] <= 0 )
+    {
+        return false;
+    }
+
+    /*
+     * Duck items immediately transform into duck entities inside
+     * actItem(). They should not be restored as ordinary floor items.
+     */
+    if ( entity->skill[10] == TOOL_DUCK )
+    {
+        return false;
+    }
+
+    savedState.type =
+        entity->skill[10];
+
+    savedState.status =
+        entity->skill[11];
+
+    savedState.beatitude =
+        entity->skill[12];
+
+    savedState.count =
+        entity->skill[13];
+
+    savedState.appearance =
+        static_cast<Uint32>(
+            entity->skill[14]
+        );
+
+    savedState.identified =
+        entity->skill[15] != 0;
+
+    savedState.x =
+        entity->x;
+
+    savedState.y =
+        entity->y;
+
+    savedState.z =
+        entity->z;
+
+    savedState.yaw =
+        entity->yaw;
+
+    savedState.pitch =
+        entity->pitch;
+
+    savedState.roll =
+        entity->roll;
+
+    savedState.velX =
+        entity->vel_x;
+
+    savedState.velY =
+        entity->vel_y;
+
+    savedState.velZ =
+        entity->vel_z;
+
+    savedState.itemNotMoving =
+        entity->itemNotMoving;
+
+    savedState.itemSokobanReward =
+        entity->itemSokobanReward;
+
+    savedState.itemStolen =
+        entity->itemStolen;
+
+    savedState.itemShowOnMap =
+        entity->itemShowOnMap;
+
+    savedState.itemDelayMonsterPickingUp =
+        entity->itemDelayMonsterPickingUp;
+
+    savedState.passable =
+        entity->flags[PASSABLE];
+
+    savedState.invisible =
+        entity->flags[INVISIBLE];
+
+    savedState.burning =
+        entity->flags[BURNING];
+
+    savedState.burnable =
+        entity->flags[BURNABLE];
+
+    return true;
+}
+/*
+ * Apply a persistent floor-item state to an existing or newly allocated
+ * actItem entity.
+ */
+static bool applyPersistentWorldItemState(
+    Entity* entity,
+    const PersistentWorldItemState& savedState
+)
+{
+    if ( !entity
+        || savedState.type < 0
+        || savedState.type >= NUMITEMS
+        || savedState.count <= 0
+        || savedState.type == TOOL_DUCK )
+    {
+        return false;
+    }
+
+    entity->behavior =
+        &actItem;
+
+    entity->sizex = 4;
+    entity->sizey = 4;
+
+    entity->skill[10] =
+        savedState.type;
+
+    entity->skill[11] =
+        savedState.status;
+
+    entity->skill[12] =
+        savedState.beatitude;
+
+    entity->skill[13] =
+        savedState.count;
+
+    entity->skill[14] =
+        static_cast<Sint32>(
+            savedState.appearance
+        );
+
+    entity->skill[15] =
+        savedState.identified ? 1 : 0;
+
+    /*
+     * Reset item life so actItem() safely rebuilds its tooltip and any
+     * ordinary first-tick presentation state.
+     */
+    entity->skill[16] = 0;
+
+    entity->x =
+        savedState.x;
+
+    entity->y =
+        savedState.y;
+
+    entity->z =
+        savedState.z;
+
+    entity->new_x =
+        savedState.x;
+
+    entity->new_y =
+        savedState.y;
+
+    entity->new_z =
+        savedState.z;
+
+    entity->yaw =
+        savedState.yaw;
+
+    entity->pitch =
+        savedState.pitch;
+
+    entity->roll =
+        savedState.roll;
+
+    entity->new_yaw =
+        savedState.yaw;
+
+    entity->new_pitch =
+        savedState.pitch;
+
+    entity->new_roll =
+        savedState.roll;
+
+    entity->vel_x =
+        savedState.velX;
+
+    entity->vel_y =
+        savedState.velY;
+
+    entity->vel_z =
+        savedState.velZ;
+
+    entity->itemNotMoving =
+        savedState.itemNotMoving;
+
+    entity->itemNotMovingClient =
+        savedState.itemNotMoving;
+
+    entity->itemSokobanReward =
+        savedState.itemSokobanReward;
+
+    entity->itemStolen =
+        savedState.itemStolen;
+
+    entity->itemShowOnMap =
+        savedState.itemShowOnMap;
+
+    entity->itemDelayMonsterPickingUp =
+        savedState.itemDelayMonsterPickingUp;
+
+    /*
+     * Runtime UID relationships cannot safely cross map loads.
+     */
+    entity->parent = 0;
+    entity->itemOriginalOwner = 0;
+    entity->itemAutoSalvageByPlayer = 0;
+    entity->itemFollowUID = 0;
+    entity->itemReturnUID = 0;
+    entity->itemContainer = 0;
+
+    entity->flags[PASSABLE] =
+        savedState.passable;
+
+    entity->flags[INVISIBLE] =
+        savedState.invisible;
+
+    entity->flags[BURNING] =
+        savedState.burning;
+
+    entity->flags[BURNABLE] =
+        savedState.burnable;
+
+    entity->flags[UPDATENEEDED] =
+        true;
+
+    entity->bNeedsRenderPositionInit =
+        true;
+
+    /*
+     * Calculate the correct model immediately instead of waiting for
+     * the first actItem() tick.
+     */
+    Item* temporaryItem =
+        newItemFromEntity(
+            entity,
+            true
+        );
+
+    if ( temporaryItem )
+    {
+        entity->sprite =
+            itemModel(temporaryItem);
+
+        free(temporaryItem);
+    }
+
+    return true;
+}
+/*
  * Convert a boulder-trap behavior function into a stable persistence
  * type. Zero means that the entity is not a supported boulder trap.
  */
@@ -3559,7 +3884,8 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedChestItems = 0;
 	Uint32 capturedShopkeepers = 0;
 	Uint32 capturedShopItems = 0;
-
+    Uint32 capturedOriginalWorldItems = 0;
+    Uint32 capturedDynamicWorldItems = 0;
 
 
 	/*
@@ -3567,7 +3893,7 @@ static void capturePersistentMechanismStates()
 	* snapshot so destroyed boulders do not return later.
 	*/
 	mapState.dynamicBoulders.clear();
-
+    mapState.dynamicWorldItems.clear();
 
     for ( node_t* node = map.entities->first;
         node != nullptr;
@@ -4008,6 +4334,30 @@ static void capturePersistentMechanismStates()
 
 			++capturedDoors;
 		}
+        else if ( entity->behavior == &actItem )
+        {
+            PersistentWorldItemState itemState;
+
+            if ( !capturePersistentWorldItemState(
+                entity,
+                itemState
+            ) )
+            {
+                continue;
+            }
+
+            mechanismState.kind =
+                PersistentMechanismState::Kind::WorldItem;
+
+            mechanismState.worldItemState =
+                itemState;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedOriginalWorldItems;
+        }
 		else if ( entity->behavior == &actFurniture )
 		{
 			mechanismState.kind =
@@ -4536,8 +4886,46 @@ static void capturePersistentMechanismStates()
 
         ++capturedDynamicBoulders;
     }
+    /*
+ * Capture floor items created after the original .lmp loaded.
+ *
+ * Original authored items were captured above through their stable
+ * persistent IDs. This collection contains only entities without one.
+ */
+for ( node_t* itemNode = map.entities->first;
+    itemNode != nullptr;
+    itemNode = itemNode->next )
+{
+    Entity* itemEntity =
+        static_cast<Entity*>(
+            itemNode->element
+        );
+
+    if ( !itemEntity
+        || itemEntity->persistentID > 0
+        || itemEntity->behavior != &actItem )
+    {
+        continue;
+    }
+
+    PersistentWorldItemState itemState;
+
+    if ( !capturePersistentWorldItemState(
+        itemEntity,
+        itemState
+    ) )
+    {
+        continue;
+    }
+
+    mapState.dynamicWorldItems.push_back(
+        itemState
+    );
+
+    ++capturedDynamicWorldItems;
+}
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u shopkeeper(s), %u shop item stack(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u surviving trap boulder(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u shopkeeper(s), %u shop item stack(s), %u original floor item(s), %u dynamic floor item(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -4562,7 +4950,9 @@ printlog(
 	capturedShopItems,
 	capturedChests,
 	capturedChestItems,
-    capturedDynamicBoulders
+    capturedDynamicBoulders,
+    capturedOriginalWorldItems,
+    capturedDynamicWorldItems
 );
 }
 /*
@@ -4643,7 +5033,8 @@ PersistentMapRemovalState& mapState =
 	Uint32 restoredPedestals = 0;
 	Uint32 restoredChests = 0;
 	Uint32 restoredChestItems = 0;
-
+    Uint32 restoredOriginalWorldItems = 0;
+    Uint32 restoredDynamicWorldItems = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -5820,6 +6211,28 @@ PersistentMapRemovalState& mapState =
 				++restoredPowerCrystals;
 				break;
 				}
+                case PersistentMechanismState::Kind::WorldItem:
+                {
+                    if ( entity->behavior != &actItem )
+                    {
+                    printlog(
+                        "[Persistent World] Warning: entity ID %d was saved as a floor item but no longer uses actItem.",
+                        entity->persistentID
+                    );
+
+                        break;
+                    }
+
+                    if ( applyPersistentWorldItemState(
+                        entity,
+                        savedState.worldItemState
+                    ) )
+                    {
+                        ++restoredOriginalWorldItems;
+                    }
+
+                    break;
+                }
 				case PersistentMechanismState::Kind::None:
 				default:
 					break;
@@ -5972,9 +6385,49 @@ PersistentMapRemovalState& mapState =
 
             ++restoredDynamicBoulders;
         }
+        /*
+        * Recreate items that did not exist in the original .lmp.
+        *
+        * Only the host creates these entities. Multiplayer clients receive
+        * them through normal entity synchronization.
+        */
+        for ( const PersistentWorldItemState& savedItem :
+            mapState.dynamicWorldItems )
+        {
+            Entity* itemEntity =
+                newEntity(
+                    -1,
+                    1,
+                    map.entities,
+                    nullptr
+                );
+
+            if ( !itemEntity )
+            {
+                printlog(
+                    "[Persistent World] Warning: failed to allocate persistent dynamic floor item."
+                );
+
+                continue;
+            }
+
+            if ( !applyPersistentWorldItemState(
+                itemEntity,
+                savedItem
+            ) )
+            {
+                list_RemoveNode(
+                    itemEntity->mynode
+                );
+
+                continue;
+            }
+
+            ++restoredDynamicWorldItems;
+        }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s), %u chest(s), %u chest item stack(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s), %u wall button(s), %u ordinary pressure plate(s), %u latched pressure plate(s), %u pedestal(s), %u chest(s), %u chest item stack(s), %u original floor item(s), %u dynamic floor item(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -5997,7 +6450,9 @@ printlog(
     restoredDynamicBoulders,
 	restoredWallButtons,
 	restoredNormalPressurePlates,
-	restoredPermanentPressurePlates
+	restoredPermanentPressurePlates,
+    restoredOriginalWorldItems,
+    restoredDynamicWorldItems
 );
 }
 bool applyPersistentShopkeeperInventory(
