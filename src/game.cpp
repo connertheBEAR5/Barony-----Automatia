@@ -83,7 +83,8 @@ enum class Kind : Uint8
 	PowerCrystal,
 	BoulderTrap,
 	SignalController,
-	Bell
+	Bell,
+	SinkOrFountain
 };
 
     Kind kind = Kind::None;
@@ -214,6 +215,28 @@ enum class Kind : Uint8
     bool bellBurnable = false;
     bool bellInvisible = false;
 
+	    /*
+     * Sink and fountain runtime state.
+     *
+     * waterSourceIsFountain:
+     * false = sink
+     * true  = fountain
+     */
+    bool waterSourceIsFountain = false;
+
+    /*
+     * Sink:
+     * skill[0] = remaining uses
+     * skill[3] = effect selected for the next use
+     *
+     * Fountain:
+     * skill[0] = full/dry
+     * skill[1] = selected main effect
+     * skill[3] = selected potion effect
+     */
+    Sint32 waterSourceUses = 0;
+    Sint32 waterSourceMainEffect = 0;
+    Sint32 waterSourceSecondaryEffect = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -972,6 +995,42 @@ void receiveClientPersistentBellState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentWaterSourceState(
+    Sint32 persistentID,
+    bool isFountain,
+    Sint32 uses,
+    Sint32 mainEffect,
+    Sint32 secondaryEffect
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::SinkOrFountain;
+
+    state.waterSourceIsFountain =
+        isFountain;
+
+    state.waterSourceUses =
+        uses;
+
+    state.waterSourceMainEffect =
+        mainEffect;
+
+    state.waterSourceSecondaryEffect =
+        secondaryEffect;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -1085,6 +1144,12 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 boulderTrapsSent = 0;
 	Uint32 signalControllersSent = 0;
 	Uint32 bellsSent = 0;
+	Uint32 waterSourcesSent = 0;
+
+
+
+
+
     if ( state )
     {
         /*
@@ -1838,6 +1903,72 @@ void sendPersistentWorldSnapshotToClient(
                 ++signalControllersSent;
             }
 			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::SinkOrFountain )
+            {
+                /*
+                 * PWSW:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   type: 0 sink, 1 fountain
+                 * bytes 12-15  remaining uses or full/dry state
+                 * bytes 16-19  main effect
+                 * bytes 20-23  secondary/next effect
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWSW"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    mechanism.waterSourceIsFountain
+                        ? 1
+                        : 0,
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.waterSourceUses
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.waterSourceMainEffect
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.waterSourceSecondaryEffect
+                    ),
+                    &net_packet->data[20]
+                );
+
+                net_packet->len = 24;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++waterSourcesSent;
+            }
+			            else if ( mechanism.kind
                 == PersistentMechanismState::Kind::Bell )
             {
                 /*
@@ -1943,7 +2074,7 @@ void sendPersistentWorldSnapshotToClient(
 					mechanism.bellInvisible ? 1 : 0;
 
 				net_packet->len = 51;
-				
+
                 prepareClientAddress();
 
                 sendPacketSafe(
@@ -2064,7 +2195,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2076,7 +2207,8 @@ printlog(
     powerCrystalsSent,
     boulderTrapsSent,
     signalControllersSent,
-    bellsSent
+    bellsSent,
+    waterSourcesSent
 );
 }
 /*
@@ -2271,7 +2403,8 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedANDGates = 0;
 	Uint32 capturedDynamicBoulders = 0;
 	Uint32 capturedBells = 0;
-
+	Uint32 capturedSinks = 0;
+	Uint32 capturedFountains = 0;
 
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
@@ -2514,6 +2647,56 @@ static void capturePersistentMechanismStates()
 
 			++capturedColliders;
 		}
+		        else if (
+            entity->behavior == &actSink
+            || entity->behavior == &actFountain
+        )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::SinkOrFountain;
+
+            mechanismState.waterSourceIsFountain =
+                entity->behavior == &actFountain;
+
+            /*
+             * skill[0]:
+             * sink     = remaining uses
+             * fountain = full/dry
+             */
+            mechanismState.waterSourceUses =
+                entity->skill[0];
+
+            if ( mechanismState.waterSourceIsFountain )
+            {
+                /*
+                 * Fountain main effect and potion effect.
+                 */
+                mechanismState.waterSourceMainEffect =
+                    entity->skill[1];
+
+                mechanismState.waterSourceSecondaryEffect =
+                    entity->skill[3];
+
+                ++capturedFountains;
+            }
+            else
+            {
+                /*
+                 * A sink chooses the effect of its next use in skill[3].
+                 * skill[1] is not meaningful sink runtime state.
+                 */
+                mechanismState.waterSourceMainEffect = 0;
+
+                mechanismState.waterSourceSecondaryEffect =
+                    entity->skill[3];
+
+                ++capturedSinks;
+            }
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+        }
 		        else if ( entity->behavior == &actBell )
         {
             mechanismState.kind =
@@ -2860,7 +3043,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -2873,6 +3056,8 @@ printlog(
     capturedSignalTimers,
     capturedANDGates,
     capturedBells,
+    capturedSinks,
+    capturedFountains,
     capturedDynamicBoulders
 );
 }
@@ -2944,6 +3129,14 @@ void applyPersistentMechanismStates()
 	Uint32 restoredANDGates = 0;
 	Uint32 restoredDynamicBoulders = 0;
 	Uint32 restoredBells = 0;
+	Uint32 restoredSinks = 0;
+	Uint32 restoredFountains = 0;
+
+
+
+
+
+
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -3335,6 +3528,70 @@ void applyPersistentMechanismStates()
 				++restoredColliders;
 				break;
 			}
+			            case PersistentMechanismState::Kind::SinkOrFountain:
+            {
+                const bool loadedAsSink =
+                    entity->behavior == &actSink;
+
+                const bool loadedAsFountain =
+                    entity->behavior == &actFountain;
+
+                if ( !loadedAsSink
+                    && !loadedAsFountain )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a sink/fountain but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                if ( savedState.waterSourceIsFountain
+                    != loadedAsFountain )
+                {
+                    printlog(
+                        "[Persistent World] Warning: water-source ID %d changed between sink and fountain.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.waterSourceUses;
+
+                if ( loadedAsFountain )
+                {
+                    entity->skill[1] =
+                        savedState.waterSourceMainEffect;
+
+                    entity->skill[3] =
+                        savedState.waterSourceSecondaryEffect;
+
+                    ++restoredFountains;
+                }
+                else
+                {
+                    entity->skill[3] =
+                        savedState.waterSourceSecondaryEffect;
+
+                    ++restoredSinks;
+                }
+
+                /*
+                 * Do not restore:
+                 *
+                 * skill[2] = temporary water-particle timer
+                 * skill[7] = ambience timer
+                 *
+                 * Those are cosmetic and can restart safely.
+                 */
+                entity->skill[2] = 0;
+                entity->skill[7] = 0;
+
+                break;
+            }
 			            case PersistentMechanismState::Kind::Bell:
             {
                 if ( entity->behavior != &actBell )
@@ -3803,7 +4060,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -3816,6 +4073,8 @@ printlog(
     restoredSignalTimers,
     restoredANDGates,
     restoredBells,
+    restoredSinks,
+    restoredFountains,
     restoredDynamicBoulders
 );
 }

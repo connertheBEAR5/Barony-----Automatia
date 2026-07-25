@@ -176,6 +176,13 @@ void receiveClientPersistentBellState(
     bool burnable,
     bool invisible
 );
+void receiveClientPersistentWaterSourceState(
+    Sint32 persistentID,
+    bool isFountain,
+    Sint32 uses,
+    Sint32 mainEffect,
+    Sint32 secondaryEffect
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

@@ -6159,6 +6159,45 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			net_packet->data[50] != 0
         );
     }},
+	    // Authoritative persistent sink/fountain state.
+    {'PWSW', []()
+    {
+        if ( net_packet->len < 24 )
+        {
+            printlog(
+                "[Persistent World MP] Ignored malformed PWSW packet with length %d.",
+                net_packet->len
+            );
+
+            return;
+        }
+
+        receiveClientPersistentWaterSourceState(
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[4]
+                )
+            ),
+            SDLNet_Read32(
+                &net_packet->data[8]
+            ) != 0,
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[12]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[16]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[20]
+                )
+            )
+        );
+    }},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{
