@@ -85,7 +85,8 @@ enum class Kind : Uint8
 	SignalController,
 	Bell,
 	SinkOrFountain,
-	Campfire
+	Campfire,
+	WallLock
 };
 
     Kind kind = Kind::None;
@@ -247,6 +248,25 @@ enum class Kind : Uint8
      */
     Sint32 campfireHealth = 0;
 
+	    /*
+     * Wall-lock runtime state.
+     *
+     * wallLockState:
+     * skill[0] - current key/lock state
+     *
+     * wallLockPower:
+     * skill[8] - current unlocked/bypassed power state
+     *
+     * wallLockPickHealth:
+     * skill[12] - remaining lockpick health
+     *
+     * wallLockPreventLockpickExploit:
+     * skill[14] - lockpick anti-exploit progress/state
+     */
+    Sint32 wallLockSavedState = 0;
+    Sint32 wallLockSavedPower = 0;
+    Sint32 wallLockSavedPickHealth = 50;
+    Sint32 wallLockSavedPreventExploit = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -1065,6 +1085,42 @@ void receiveClientPersistentCampfireState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentWallLockState(
+    Sint32 persistentID,
+    Sint32 lockState,
+    Sint32 power,
+    Sint32 pickHealth,
+    Sint32 preventExploit
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::WallLock;
+
+    state.wallLockSavedState =
+        lockState;
+
+    state.wallLockSavedPower =
+        power;
+
+    state.wallLockSavedPickHealth =
+        pickHealth;
+
+    state.wallLockSavedPreventExploit =
+        preventExploit;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -1180,7 +1236,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 bellsSent = 0;
 	Uint32 waterSourcesSent = 0;
 	Uint32 campfiresSent = 0;
-
+	Uint32 wallLocksSent = 0;
 
 
 
@@ -1979,6 +2035,72 @@ void sendPersistentWorldSnapshotToClient(
                 ++campfiresSent;
             }
 			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::WallLock )
+            {
+                /*
+                 * PWWL:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   wall-lock state
+                 * bytes 12-15  wall-lock power
+                 * bytes 16-19  lockpick health
+                 * bytes 20-23  anti-lockpick-exploit state
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWWL"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallLockSavedState
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallLockSavedPower
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallLockSavedPickHealth
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.wallLockSavedPreventExploit
+                    ),
+                    &net_packet->data[20]
+                );
+
+                net_packet->len = 24;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++wallLocksSent;
+            }
+			            else if ( mechanism.kind
                 == PersistentMechanismState::Kind::SinkOrFountain )
             {
                 /*
@@ -2271,7 +2393,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2285,7 +2407,8 @@ printlog(
     signalControllersSent,
     bellsSent,
     waterSourcesSent,
-    campfiresSent
+    campfiresSent,
+    wallLocksSent
 );
 }
 /*
@@ -2483,7 +2606,7 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedSinks = 0;
 	Uint32 capturedFountains = 0;
 	Uint32 capturedCampfires = 0;
-
+	Uint32 capturedWallLocks = 0;
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
 	* snapshot so destroyed boulders do not return later.
@@ -2838,6 +2961,29 @@ static void capturePersistentMechanismStates()
 
             ++capturedBells;
         }
+		        else if ( entity->behavior == &actWallLock )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::WallLock;
+
+            mechanismState.wallLockSavedState =
+                entity->wallLockState;
+
+            mechanismState.wallLockSavedPower =
+                entity->wallLockPower;
+
+            mechanismState.wallLockSavedPickHealth =
+                entity->wallLockPickHealth;
+
+            mechanismState.wallLockSavedPreventExploit =
+                entity->wallLockPreventLockpickExploit;
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedWallLocks;
+        }
 		        else if ( entity->behavior == &actCampfire )
         {
             mechanismState.kind =
@@ -3139,7 +3285,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -3155,6 +3301,7 @@ printlog(
     capturedSinks,
     capturedFountains,
     capturedCampfires,
+    capturedWallLocks,
     capturedDynamicBoulders
 );
 }
@@ -3229,7 +3376,7 @@ void applyPersistentMechanismStates()
 	Uint32 restoredSinks = 0;
 	Uint32 restoredFountains = 0;
 	Uint32 restoredCampfires = 0;
-
+	Uint32 restoredWallLocks = 0;
 
 
 
@@ -3369,6 +3516,46 @@ void applyPersistentMechanismStates()
                 entity->bNeedsRenderPositionInit = true;
 
                 ++restoredGates;
+                break;
+            }
+			            case PersistentMechanismState::Kind::WallLock:
+            {
+                if ( entity->behavior != &actWallLock )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a wall lock but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->wallLockState =
+                    savedState.wallLockSavedState;
+
+                entity->wallLockPower =
+                    savedState.wallLockSavedPower;
+
+                entity->wallLockPickHealth =
+                    savedState.wallLockSavedPickHealth;
+
+                entity->wallLockPreventLockpickExploit =
+                    savedState.wallLockSavedPreventExploit;
+
+                /*
+                 * Prevent actWallLock() from resetting pick health to 50
+                 * and clearing the saved anti-exploit state.
+                 */
+                entity->wallLockInit = 1;
+
+                /*
+                 * Runtime player UIDs are invalid after changing maps.
+                 * Never restore an interaction that was in progress.
+                 */
+                entity->wallLockClientInteractDelay = 0;
+                entity->wallLockPlayerInteracting = 0;
+
+                ++restoredWallLocks;
                 break;
             }
 			case PersistentMechanismState::Kind::Door:
@@ -4202,7 +4389,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u wall lock(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -4218,6 +4405,7 @@ printlog(
     restoredSinks,
     restoredFountains,
     restoredCampfires,
+    restoredWallLocks,
     restoredDynamicBoulders
 );
 }

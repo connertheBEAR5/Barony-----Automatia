@@ -187,6 +187,13 @@ void receiveClientPersistentCampfireState(
     Sint32 persistentID,
     Sint32 health
 );
+void receiveClientPersistentWallLockState(
+    Sint32 persistentID,
+    Sint32 lockState,
+    Sint32 power,
+    Sint32 pickHealth,
+    Sint32 preventExploit
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
