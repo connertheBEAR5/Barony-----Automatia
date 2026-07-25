@@ -148,6 +148,18 @@ void receiveClientPersistentBoulderTrapState(
     Sint32 circuitStatus,
     Sint32 sabotaged
 );
+void receiveClientPersistentSignalControllerState(
+    Sint32 persistentID,
+    bool isANDGate,
+    Sint32 switchPower,
+    Sint32 delayCount,
+    Sint32 timerCount,
+    Sint32 repeatCount,
+    Sint32 latchInput,
+    Sint32 andPowerMask,
+    Sint32 circuitStatus,
+    Sint32 initialized
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

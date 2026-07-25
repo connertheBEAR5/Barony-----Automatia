@@ -62,6 +62,13 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cctype>
+/*
+ * Implemented in mechanisms.cpp.
+ * Reapplies the restored output of a signal timer or AND gate.
+ */
+void persistentSignalControllerBroadcastOutput(
+    Entity* controller
+);
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -74,7 +81,8 @@ enum class Kind : Uint8
 	Furniture,
 	ColliderDecoration,
 	PowerCrystal,
-	BoulderTrap
+	BoulderTrap,
+	SignalController
 };
 
     Kind kind = Kind::None;
@@ -167,6 +175,23 @@ enum class Kind : Uint8
     Sint32 boulderTrapCircuitStatus = 0;
     Sint32 boulderTrapSabotaged = 0;
 
+	/*
+     * Signal timer and AND-gate controller runtime state.
+     *
+     * signalControllerIsAND:
+     * 0 = signal timer
+     * 1 = AND gate
+     */
+    bool signalControllerIsAND = false;
+
+    Sint32 signalSwitchPower = 0;
+    Sint32 signalDelayCount = 0;
+    Sint32 signalTimerCount = 0;
+    Sint32 signalRepeatCount = 0;
+    Sint32 signalLatchInput = 0;
+    Sint32 signalANDPowerMask = 0;
+    Sint32 signalCircuitStatus = 0;
+    Sint32 signalInitialized = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -797,6 +822,62 @@ void receiveClientPersistentBoulderTrapState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentSignalControllerState(
+    Sint32 persistentID,
+    bool isANDGate,
+    Sint32 switchPower,
+    Sint32 delayCount,
+    Sint32 timerCount,
+    Sint32 repeatCount,
+    Sint32 latchInput,
+    Sint32 andPowerMask,
+    Sint32 circuitStatus,
+    Sint32 initialized
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::SignalController;
+
+    state.signalControllerIsAND =
+        isANDGate;
+
+    state.signalSwitchPower =
+        switchPower;
+
+    state.signalDelayCount =
+        delayCount;
+
+    state.signalTimerCount =
+        timerCount;
+
+    state.signalRepeatCount =
+        repeatCount;
+
+    state.signalLatchInput =
+        latchInput;
+
+    state.signalANDPowerMask =
+        andPowerMask;
+
+    state.signalCircuitStatus =
+        circuitStatus;
+
+    state.signalInitialized =
+        initialized;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -908,6 +989,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 collidersSent = 0;
 	Uint32 powerCrystalsSent = 0;
 	Uint32 boulderTrapsSent = 0;
+	Uint32 signalControllersSent = 0;
     if ( state )
     {
         /*
@@ -1554,6 +1636,112 @@ void sendPersistentWorldSnapshotToClient(
 
 				++powerCrystalsSent;
 			}
+			else if ( mechanism.kind
+                == PersistentMechanismState::Kind::SignalController )
+            {
+                /*
+                 * PWSG:
+                 *
+                 * bytes 0-3    packet name
+                 * bytes 4-7    persistent ID
+                 * bytes 8-11   type: 0 timer, 1 AND gate
+                 * bytes 12-15  current switch/output state
+                 * bytes 16-19  activation-delay countdown
+                 * bytes 20-23  interval countdown
+                 * bytes 24-27  remaining repeat count
+                 * bytes 28-31  latch-input state
+                 * bytes 32-35  AND input bitmask
+                 * bytes 36-39  input circuit status
+                 * bytes 40-43  initialized state
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWSG"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    mechanism.signalControllerIsAND
+                        ? 1
+                        : 0,
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalSwitchPower
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalDelayCount
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalTimerCount
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalRepeatCount
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalLatchInput
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalANDPowerMask
+                    ),
+                    &net_packet->data[32]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalCircuitStatus
+                    ),
+                    &net_packet->data[36]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.signalInitialized
+                    ),
+                    &net_packet->data[40]
+                );
+
+                net_packet->len = 44;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++signalControllersSent;
+            }
 			else if ( mechanism.kind == PersistentMechanismState::Kind::BoulderTrap )
             {
                 /*
@@ -1663,7 +1851,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -1673,7 +1861,8 @@ printlog(
     furnitureSent,
     collidersSent,
     powerCrystalsSent,
-    boulderTrapsSent
+    boulderTrapsSent,
+    signalControllersSent
 );
 }
 /*
@@ -1864,6 +2053,8 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedColliders = 0;
 	Uint32 capturedPowerCrystals = 0;
 	Uint32 capturedBoulderTraps = 0;
+	Uint32 capturedSignalTimers = 0;
+	Uint32 capturedANDGates = 0;
 	Uint32 capturedDynamicBoulders = 0;
 
 
@@ -2109,6 +2300,68 @@ static void capturePersistentMechanismStates()
 
 			++capturedColliders;
 		}
+		else if (
+            entity->behavior == &::actSignalTimer
+            || entity->behavior == &::actSignalGateAND
+        )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::SignalController;
+
+            mechanismState.signalControllerIsAND =
+                entity->behavior == &::actSignalGateAND;
+
+            /*
+             * Runtime fields:
+             *
+             * skill[0]  = switch_power/current pulse output
+             * skill[6]  = activation delay remaining
+             * skill[7]  = pulse interval remaining
+             * skill[8]  = repeat count remaining
+             * skill[9]  = AND-gate powered-input mask
+             * skill[11] = initialization state
+             * skill[28] = input circuit status
+             *
+             * signalTimerLatchInput is skill[4] and changes from
+             * authored value 1 to runtime latched value 2.
+             */
+            mechanismState.signalSwitchPower =
+                entity->skill[0];
+
+            mechanismState.signalDelayCount =
+                entity->skill[6];
+
+            mechanismState.signalTimerCount =
+                entity->skill[7];
+
+            mechanismState.signalRepeatCount =
+                entity->skill[8];
+
+            mechanismState.signalLatchInput =
+                entity->signalTimerLatchInput;
+
+            mechanismState.signalANDPowerMask =
+                entity->signalGateANDPowerCount;
+
+            mechanismState.signalCircuitStatus =
+                entity->skill[28];
+
+            mechanismState.signalInitialized =
+                entity->skill[11];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            if ( mechanismState.signalControllerIsAND )
+            {
+                ++capturedANDGates;
+            }
+            else
+            {
+                ++capturedSignalTimers;
+            }
+        }
 		else if (getPersistentBoulderTrapBehavior(entity) != 0)
         {
             mechanismState.kind =
@@ -2330,7 +2583,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -2340,6 +2593,8 @@ printlog(
     capturedColliders,
     capturedPowerCrystals,
     capturedBoulderTraps,
+    capturedSignalTimers,
+    capturedANDGates,
     capturedDynamicBoulders
 );
 }
@@ -2407,6 +2662,8 @@ void applyPersistentMechanismStates()
 	Uint32 restoredColliders = 0;
 	Uint32 restoredPowerCrystals = 0;
 	Uint32 restoredBoulderTraps = 0;
+	Uint32 restoredSignalTimers = 0;
+	Uint32 restoredANDGates = 0;
 	Uint32 restoredDynamicBoulders = 0;
     for ( node_t* node = map.entities->first;
         node != nullptr;
@@ -2799,6 +3056,88 @@ void applyPersistentMechanismStates()
 				++restoredColliders;
 				break;
 			}
+			case PersistentMechanismState::Kind::SignalController:
+            {
+                const bool loadedAsTimer =
+                    entity->behavior == &::actSignalTimer;
+
+                const bool loadedAsANDGate =
+                    entity->behavior == &::actSignalGateAND;
+
+                if ( !loadedAsTimer
+                    && !loadedAsANDGate )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a signal controller but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                if ( savedState.signalControllerIsAND
+                    != loadedAsANDGate )
+                {
+                    printlog(
+                        "[Persistent World] Warning: signal controller ID %d changed between timer and AND-gate types.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.signalSwitchPower;
+
+                entity->skill[6] =
+                    savedState.signalDelayCount;
+
+                entity->skill[7] =
+                    savedState.signalTimerCount;
+
+                entity->skill[8] =
+                    savedState.signalRepeatCount;
+
+                entity->signalTimerLatchInput =
+                    savedState.signalLatchInput;
+
+                entity->signalGateANDPowerCount =
+                    savedState.signalANDPowerMask;
+
+                entity->skill[28] =
+                    savedState.signalCircuitStatus;
+
+                /*
+                 * Force the controller into initialized mode so its first
+                 * tick does not treat this as a fresh map load and emit an
+                 * extra inverted-output initialization pulse.
+                 */
+                entity->skill[11] =
+                    savedState.signalInitialized != 0
+                        ? savedState.signalInitialized
+                        : 1;
+
+                /*
+                 * Reapply the saved output to freshly loaded circuit nodes.
+                 */
+                if ( multiplayer != CLIENT )
+                {
+                    persistentSignalControllerBroadcastOutput(
+                        entity
+                    );
+                }
+
+                if ( loadedAsANDGate )
+                {
+                    ++restoredANDGates;
+                }
+                else
+                {
+                    ++restoredSignalTimers;
+                }
+
+                break;
+            }
 			case PersistentMechanismState::Kind::BoulderTrap:
             {
                 const Sint32 loadedBehavior =
@@ -3119,7 +3458,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -3129,6 +3468,8 @@ printlog(
     restoredColliders,
     restoredPowerCrystals,
     restoredBoulderTraps,
+    restoredSignalTimers,
+    restoredANDGates,
     restoredDynamicBoulders
 );
 }

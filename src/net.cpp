@@ -6021,6 +6021,70 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
             )
         );
     }},
+	    // Authoritative persistent signal-timer / AND-gate state.
+    {'PWSG', []()
+    {
+        if ( net_packet->len < 44 )
+        {
+            printlog(
+                "[Persistent World MP] Ignored malformed PWSG packet with length %d.",
+                net_packet->len
+            );
+
+            return;
+        }
+
+        receiveClientPersistentSignalControllerState(
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[4]
+                )
+            ),
+            SDLNet_Read32(
+                &net_packet->data[8]
+            ) != 0,
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[12]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[16]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[20]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[24]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[28]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[32]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[36]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[40]
+                )
+            )
+        );
+    }},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{

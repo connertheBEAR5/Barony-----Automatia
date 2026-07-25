@@ -27,7 +27,12 @@
  * ambiguous name lookup.
  */
 extern void actPowerCrystal(Entity* my);
-
+/*
+ * Defined in mechanisms.cpp.
+ */
+extern void persistentSignalControllerBroadcastOutput(
+    Entity* controller
+);
 static void (*const powerCrystalBehavior)(Entity*) =
     &::actPowerCrystal;
 //Circuits do not overlap. They connect to all their neighbors, allowing for circuits to interfere with eachother.
@@ -1162,7 +1167,260 @@ void Entity::actSoundSource()
 #define SIGNALTIMER_TIMERCOUNT skill[7]
 #define SIGNALTIMER_REPEATCOUNT skill[8]
 #define SIGNAL_INIT skill[11]
+/*
+ * Reapply the current output of a restored signal timer or AND gate.
+ *
+ * Freshly loaded circuit nodes begin in their authored/default state.
+ * Restoring the controller's counters alone is therefore insufficient:
+ * its current output must be delivered to the output-side neighbor.
+ */
+void persistentSignalControllerBroadcastOutput(
+    Entity* controller
+)
+{
+    if ( !controller
+        || multiplayer == CLIENT )
+    {
+        return;
+    }
 
+    const bool isTimer =
+        controller->behavior == &::actSignalTimer;
+
+    const bool isANDGate =
+        controller->behavior == &::actSignalGateAND;
+
+    if ( !isTimer && !isANDGate )
+    {
+        return;
+    }
+
+    const int tx =
+        static_cast<int>(controller->x / 16);
+
+    const int ty =
+        static_cast<int>(controller->y / 16);
+
+    int outputX = tx;
+    int outputY = ty;
+
+    if ( isTimer )
+    {
+        /*
+         * A timer outputs from the side opposite its configured input.
+         */
+        switch ( controller->signalInputDirection )
+        {
+            case 0: // input west, output east
+                ++outputX;
+                break;
+
+            case 1: // input south, output north
+                --outputY;
+                break;
+
+            case 2: // input east, output west
+                --outputX;
+                break;
+
+            case 3: // input north, output south
+                ++outputY;
+                break;
+
+            default:
+                return;
+        }
+    }
+    else
+    {
+        /*
+         * AND-gate signalInputDirection stores the output direction in
+         * its lowest two bits.
+         */
+        switch ( controller->signalInputDirection % 4 )
+        {
+            case 0: // east
+                ++outputX;
+                break;
+
+            case 1: // south
+                ++outputY;
+                break;
+
+            case 2: // west
+                --outputX;
+                break;
+
+            case 3: // north
+                --outputY;
+                break;
+
+            default:
+                return;
+        }
+    }
+
+    list_t* neighbors = nullptr;
+
+    getPowerablesOnTile(
+        outputX,
+        outputY,
+        &neighbors
+    );
+
+    if ( !neighbors )
+    {
+        return;
+    }
+
+	/*
+	* Signal-controller output is stored in skill[0].
+	*
+	* The controller code treats:
+	* 0 = SWITCH_UNPOWERED
+	* 1 = SWITCH_POWERED
+	* 2 = pulse-off/intermediate unpowered state
+	*/
+	const bool rawOutputPowered =
+		controller->skill[0] == 1;
+
+	const bool outputPowered =
+		controller->signalInvertOutput == 0
+			? rawOutputPowered
+			: !rawOutputPowered;
+
+    for ( node_t* node = neighbors->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* powerable =
+            static_cast<Entity*>(node->element);
+
+        if ( !powerable
+            || powerable == controller )
+        {
+            continue;
+        }
+
+        if ( powerable->behavior == &actCircuit )
+        {
+            if ( outputPowered )
+            {
+                powerable->circuitPowerOn();
+            }
+            else
+            {
+                powerable->circuitPowerOff();
+            }
+        }
+        else if ( powerable->behavior == &::actSignalTimer )
+        {
+            /*
+             * Preserve the timer's directional-input restrictions.
+             */
+            const int sourceX =
+                static_cast<int>(controller->x / 16);
+
+            const int sourceY =
+                static_cast<int>(controller->y / 16);
+
+            const int targetX =
+                static_cast<int>(powerable->x / 16);
+
+            const int targetY =
+                static_cast<int>(powerable->y / 16);
+
+            bool validInputSide = false;
+
+            switch ( powerable->signalInputDirection )
+            {
+                case 0: // west
+                    validInputSide =
+                        sourceX + 1 == targetX
+                        && sourceY == targetY;
+                    break;
+
+                case 1: // south
+                    validInputSide =
+                        sourceY - 1 == targetY
+                        && sourceX == targetX;
+                    break;
+
+                case 2: // east
+                    validInputSide =
+                        sourceX - 1 == targetX
+                        && sourceY == targetY;
+                    break;
+
+                case 3: // north
+                    validInputSide =
+                        sourceY + 1 == targetY
+                        && sourceX == targetX;
+                    break;
+
+                default:
+                    break;
+            }
+
+            if ( validInputSide )
+            {
+                if ( outputPowered )
+                {
+                    powerable->mechanismPowerOn();
+                }
+                else
+                {
+                    powerable->mechanismPowerOff();
+                }
+            }
+        }
+        else if ( powerable->behavior
+            == &::actSignalGateAND )
+        {
+            signalGateANDOnReceive(
+                *powerable,
+                outputPowered,
+                static_cast<int>(controller->x / 16),
+                static_cast<int>(controller->y / 16)
+            );
+        }
+        else if ( powerable->behavior
+            == powerCrystalBehavior )
+        {
+		/*
+		* Circuit states used throughout mechanisms.cpp:
+		* 1 = off
+		* 2 = on
+		*/
+		powerable->skill[12] =
+			outputPowered
+				? 2
+				: 1;
+
+            if ( multiplayer == SERVER )
+            {
+                serverUpdateEntitySkill(
+                    powerable,
+                    12
+                );
+            }
+        }
+        else
+        {
+            if ( outputPowered )
+            {
+                powerable->mechanismPowerOn();
+            }
+            else
+            {
+                powerable->mechanismPowerOff();
+            }
+        }
+    }
+
+    list_FreeAll(neighbors);
+    free(neighbors);
+}
 void actSignalTimer(Entity* my)
 {
 	if ( !my )
