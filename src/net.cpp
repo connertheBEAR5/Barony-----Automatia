@@ -6198,6 +6198,32 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
             )
         );
     }},
+	    // Authoritative persistent campfire state.
+    {'PWCF', []()
+    {
+        if ( net_packet->len < 12 )
+        {
+            printlog(
+                "[Persistent World MP] Ignored malformed PWCF packet with length %d.",
+                net_packet->len
+            );
+
+            return;
+        }
+
+        receiveClientPersistentCampfireState(
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[4]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[8]
+                )
+            )
+        );
+    }},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{

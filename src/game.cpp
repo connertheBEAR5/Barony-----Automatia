@@ -84,7 +84,8 @@ enum class Kind : Uint8
 	BoulderTrap,
 	SignalController,
 	Bell,
-	SinkOrFountain
+	SinkOrFountain,
+	Campfire
 };
 
     Kind kind = Kind::None;
@@ -237,6 +238,15 @@ enum class Kind : Uint8
     Sint32 waterSourceUses = 0;
     Sint32 waterSourceMainEffect = 0;
     Sint32 waterSourceSecondaryEffect = 0;
+
+
+	/*
+     * Campfire runtime state.
+     *
+     * skill[3] = remaining uses / fire health
+     */
+    Sint32 campfireHealth = 0;
+
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -1031,6 +1041,30 @@ void receiveClientPersistentWaterSourceState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentCampfireState(
+    Sint32 persistentID,
+    Sint32 health
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::Campfire;
+
+    state.campfireHealth =
+        health;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -1145,7 +1179,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 signalControllersSent = 0;
 	Uint32 bellsSent = 0;
 	Uint32 waterSourcesSent = 0;
-
+	Uint32 campfiresSent = 0;
 
 
 
@@ -1903,6 +1937,48 @@ void sendPersistentWorldSnapshotToClient(
                 ++signalControllersSent;
             }
 			            else if ( mechanism.kind
+                == PersistentMechanismState::Kind::Campfire )
+            {
+                /*
+                 * PWCF:
+                 *
+                 * bytes 0-3   packet name
+                 * bytes 4-7   persistent ID
+                 * bytes 8-11  remaining campfire health/uses
+                 */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWCF"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(persistentID),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.campfireHealth
+                    ),
+                    &net_packet->data[8]
+                );
+
+                net_packet->len = 12;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++campfiresSent;
+            }
+			            else if ( mechanism.kind
                 == PersistentMechanismState::Kind::SinkOrFountain )
             {
                 /*
@@ -2195,7 +2271,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2208,7 +2284,8 @@ printlog(
     boulderTrapsSent,
     signalControllersSent,
     bellsSent,
-    waterSourcesSent
+    waterSourcesSent,
+    campfiresSent
 );
 }
 /*
@@ -2405,6 +2482,7 @@ static void capturePersistentMechanismStates()
 	Uint32 capturedBells = 0;
 	Uint32 capturedSinks = 0;
 	Uint32 capturedFountains = 0;
+	Uint32 capturedCampfires = 0;
 
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
@@ -2760,6 +2838,24 @@ static void capturePersistentMechanismStates()
 
             ++capturedBells;
         }
+		        else if ( entity->behavior == &actCampfire )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::Campfire;
+
+            /*
+             * actCampfire:
+             * skill[3] = remaining uses / fire health.
+             */
+            mechanismState.campfireHealth =
+                entity->skill[3];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedCampfires;
+        }
 		else if (
             entity->behavior == &::actSignalTimer
             || entity->behavior == &::actSignalGateAND
@@ -3043,7 +3139,7 @@ static void capturePersistentMechanismStates()
         ++capturedDynamicBoulders;
     }
 printlog(
-    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u surviving trap boulder(s).",
+    "[Persistent World] Captured mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     capturedLevers,
     capturedTimedLevers,
@@ -3058,6 +3154,7 @@ printlog(
     capturedBells,
     capturedSinks,
     capturedFountains,
+    capturedCampfires,
     capturedDynamicBoulders
 );
 }
@@ -3131,7 +3228,7 @@ void applyPersistentMechanismStates()
 	Uint32 restoredBells = 0;
 	Uint32 restoredSinks = 0;
 	Uint32 restoredFountains = 0;
-
+	Uint32 restoredCampfires = 0;
 
 
 
@@ -3405,6 +3502,51 @@ void applyPersistentMechanismStates()
 				++restoredDoors;
 				break;
 			}
+			            case PersistentMechanismState::Kind::Campfire:
+            {
+                if ( entity->behavior != &actCampfire )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a campfire but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[3] =
+                    savedState.campfireHealth;
+
+                /*
+                 * actCampfire() normally initializes skill[3] to
+                 * MAXPLAYERS whenever skill[4] is zero.
+                 *
+                 * Mark it initialized so the restored health is not
+                 * overwritten on the first tick.
+                 */
+                entity->skill[4] = 1;
+
+                /*
+                 * Light, flicker and sound state are cosmetic. Reset
+                 * them so actCampfire() recreates the correct effects
+                 * from the restored health value.
+                 */
+                entity->skill[0] = 0;
+                entity->skill[1] = 0;
+                entity->skill[5] = 0;
+
+                entity->removeLightField();
+                entity->light = nullptr;
+
+                /*
+                 * Setting skill[4] to 1 skips the normal initialization
+                 * block, so recreate the tooltip here.
+                 */
+                entity->createWorldUITooltip();
+
+                ++restoredCampfires;
+                break;
+            }
 			case PersistentMechanismState::Kind::Furniture:
 			{
 				if ( entity->behavior != &actFurniture )
@@ -4060,7 +4202,7 @@ void applyPersistentMechanismStates()
         }
     }
 printlog(
-    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u surviving trap boulder(s).",
+    "[Persistent World] Restored mechanism state for '%s': %u lever(s), %u timed lever(s), %u gate(s), %u door(s), %u furniture object(s), %u collider decoration(s), %u power crystal(s), %u boulder trap(s), %u signal timer(s), %u AND gate(s), %u bell(s), %u sink(s), %u fountain(s), %u campfire(s), %u surviving trap boulder(s).",
     mapKey.c_str(),
     restoredLevers,
     restoredTimedLevers,
@@ -4075,6 +4217,7 @@ printlog(
     restoredBells,
     restoredSinks,
     restoredFountains,
+    restoredCampfires,
     restoredDynamicBoulders
 );
 }

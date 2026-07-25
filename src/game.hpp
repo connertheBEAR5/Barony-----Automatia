@@ -183,6 +183,10 @@ void receiveClientPersistentWaterSourceState(
     Sint32 mainEffect,
     Sint32 secondaryEffect
 );
+void receiveClientPersistentCampfireState(
+    Sint32 persistentID,
+    Sint32 health
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t
