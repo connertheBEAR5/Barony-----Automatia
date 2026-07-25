@@ -342,6 +342,50 @@ struct PersistentBoulderState
 
     bool passable = false;
 };
+/*
+ * One persistent tile override.
+ *
+ * The original map is reloaded normally. Only tile values that differ
+ * from that original loaded baseline are stored here and reapplied.
+ */
+struct PersistentTileState
+{
+    Sint32 x = 0;
+    Sint32 y = 0;
+    Sint32 layer = 0;
+    Sint32 tile = 0;
+};
+
+/*
+ * Existing wall packets use 16-bit map coordinates, and runtime maps
+ * use far fewer than 65536 tiles per axis.
+ *
+ * Packed layout:
+ * bits  0-15: x
+ * bits 16-31: y
+ * bits 32-47: layer
+ */
+static Uint64 makePersistentTileKey(
+    Sint32 x,
+    Sint32 y,
+    Sint32 layer
+)
+{
+    return
+        static_cast<Uint64>(
+            static_cast<Uint16>(x)
+        )
+        | (
+            static_cast<Uint64>(
+                static_cast<Uint16>(y)
+            ) << 16
+        )
+        | (
+            static_cast<Uint64>(
+                static_cast<Uint16>(layer)
+            ) << 32
+        );
+}
 struct PersistentMapRemovalState
 {
     std::unordered_set<Sint32> originalEntityIDs;
@@ -355,7 +399,26 @@ struct PersistentMapRemovalState
         Sint32,
         PersistentMechanismState
     > mechanismStates;
+	    /*
+     * Raw tile baseline captured immediately after the .lmp is loaded,
+     * before persistent overrides are applied.
+     *
+     * This is replaced on every visit so edited map files use their
+     * newest authored baseline.
+     */
+    std::vector<Sint32> originalTiles;
 
+    Sint32 originalTileWidth = 0;
+    Sint32 originalTileHeight = 0;
+    Sint32 originalTileLayers = 0;
+
+    /*
+     * Only coordinates whose current tile differs from originalTiles.
+     */
+    std::unordered_map<
+        Uint64,
+        PersistentTileState
+    > tileStates;
 	    /*
      * Current surviving runtime boulders created by map traps.
      *
@@ -543,8 +606,18 @@ void beginClientPersistentWorldSnapshot(
             clientPersistentSnapshotMapKey
         ];
 
-    state.removedEntityIDs.clear();
-    state.mechanismStates.clear();
+		state.removedEntityIDs.clear();
+		state.mechanismStates.clear();
+		state.tileStates.clear();
+
+		/*
+		* The destination map has not loaded yet. Its fresh raw tiles will
+		* become the new baseline inside applyPersistentMapRemovals().
+		*/
+		state.originalTiles.clear();
+		state.originalTileWidth = 0;
+		state.originalTileHeight = 0;
+		state.originalTileLayers = 0;
 
     printlog(
         "[Persistent World MP] Client began snapshot for '%s'.",
@@ -1216,6 +1289,40 @@ void receiveClientPersistentPressurePlateState(
         clientPersistentSnapshotMapKey
     ].mechanismStates[persistentID] = state;
 }
+void receiveClientPersistentTileState(
+    Sint32 x,
+    Sint32 y,
+    Sint32 layer,
+    Sint32 tile
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || x < 0
+        || y < 0
+        || layer < 0
+        || layer >= MAPLAYERS )
+    {
+        return;
+    }
+
+    PersistentTileState state;
+
+    state.x = x;
+    state.y = y;
+    state.layer = layer;
+    state.tile = tile;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].tileStates[
+        makePersistentTileKey(
+            x,
+            y,
+            layer
+        )
+    ] = state;
+}
 void finishClientPersistentWorldSnapshot()
 {
     if ( multiplayer != CLIENT
@@ -1232,12 +1339,13 @@ void finishClientPersistentWorldSnapshot()
     clientPersistentSnapshotReceiving = false;
     clientPersistentSnapshotComplete = true;
 
-    printlog(
-        "[Persistent World MP] Client completed snapshot for '%s': %zu removal(s), %zu mechanism state(s).",
-        clientPersistentSnapshotMapKey.c_str(),
-        state.removedEntityIDs.size(),
-        state.mechanismStates.size()
-    );
+printlog(
+    "[Persistent World MP] Client completed snapshot for '%s': %zu removal(s), %zu mechanism state(s), %zu tile override(s).",
+    clientPersistentSnapshotMapKey.c_str(),
+    state.removedEntityIDs.size(),
+    state.mechanismStates.size(),
+    state.tileStates.size()
+);
 }
 void sendPersistentWorldSnapshotToClient(
     int player,
@@ -1334,7 +1442,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 wallLocksSent = 0;
 	Uint32 wallButtonsSent = 0;
 	Uint32 pressurePlatesSent = 0;
-
+	Uint32 tilesSent = 0;
 
     if ( state )
     {
@@ -1370,7 +1478,69 @@ void sendPersistentWorldSnapshotToClient(
 
             ++removalsSent;
         }
+		        /*
+         * PWTL:
+         *
+         * bytes 0-3    packet name
+         * bytes 4-7    tile x
+         * bytes 8-11   tile y
+         * bytes 12-15  layer
+         * bytes 16-19  tile value
+         */
+        for ( const auto& tilePair :
+            state->tileStates )
+        {
+            const PersistentTileState& tileState =
+                tilePair.second;
 
+            strcpy(
+                reinterpret_cast<char*>(
+                    net_packet->data
+                ),
+                "PWTL"
+            );
+
+            SDLNet_Write32(
+                static_cast<Uint32>(
+                    tileState.x
+                ),
+                &net_packet->data[4]
+            );
+
+            SDLNet_Write32(
+                static_cast<Uint32>(
+                    tileState.y
+                ),
+                &net_packet->data[8]
+            );
+
+            SDLNet_Write32(
+                static_cast<Uint32>(
+                    tileState.layer
+                ),
+                &net_packet->data[12]
+            );
+
+            SDLNet_Write32(
+                static_cast<Uint32>(
+                    tileState.tile
+                ),
+                &net_packet->data[16]
+            );
+
+            net_packet->len = 20;
+
+            prepareClientAddress();
+
+            sendPacketSafe(
+                net_sock,
+                -1,
+                net_packet,
+                player - 1
+            );
+
+            ++tilesSent;
+        }
         for ( const auto& mechanismPair :
             state->mechanismStates )
         {
@@ -2466,6 +2636,13 @@ void sendPersistentWorldSnapshotToClient(
                     &net_packet->data[40]
                 );
 
+				SDLNet_Write32(
+					static_cast<Uint32>(
+						mechanism.bellScrapCreated
+					),
+					&net_packet->data[44]
+				);
+
 				net_packet->data[48] =
 					mechanism.bellBurning ? 1 : 0;
 
@@ -2597,7 +2774,7 @@ void sendPersistentWorldSnapshotToClient(
     );
 
 printlog(
-    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s).",
+    "[Persistent World MP] Sent '%s' snapshot to client %d: %u removal(s), %u lever state(s), %u gate state(s), %u door state(s), %u furniture state(s), %u collider state(s), %u power crystal state(s), %u boulder trap state(s), %u signal controller state(s), %u bell state(s), %u water-source state(s), %u campfire state(s), %u wall-lock state(s), %u wall-button state(s), %u pressure-plate state(s), %u tile override(s).",
     mapKey.c_str(),
     player,
     removalsSent,
@@ -2613,8 +2790,9 @@ printlog(
     waterSourcesSent,
     campfiresSent,
     wallLocksSent,
-	wallButtonsSent,
-	pressurePlatesSent
+    wallButtonsSent,
+    pressurePlatesSent,
+    tilesSent
 );
 }
 /*
@@ -2663,7 +2841,80 @@ void applyPersistentMapRemovals()
 
     PersistentMapRemovalState& state =
         persistentMapRemovalRegistry[mapKey];
+	    /*
+     * The map currently contains the newly loaded/generated raw tiles.
+     * Save that exact data as the baseline before applying persistent
+     * overrides.
+     *
+     * Refresh this on every visit so authored edits to the .lmp are
+     * recognized during development.
+     */
+    const size_t rawTileCount =
+        static_cast<size_t>(map.width)
+        * static_cast<size_t>(map.height)
+        * static_cast<size_t>(MAPLAYERS);
 
+    state.originalTiles.assign(
+        map.tiles,
+        map.tiles + rawTileCount
+    );
+
+    state.originalTileWidth =
+        map.width;
+
+    state.originalTileHeight =
+        map.height;
+
+    state.originalTileLayers =
+        MAPLAYERS;
+
+    Uint32 appliedTileStates = 0;
+    Uint32 rejectedTileStates = 0;
+
+    for ( const auto& tilePair :
+        state.tileStates )
+    {
+        const PersistentTileState& tileState =
+            tilePair.second;
+
+        if ( tileState.x < 0
+            || tileState.x >= map.width
+            || tileState.y < 0
+            || tileState.y >= map.height
+            || tileState.layer < 0
+            || tileState.layer >= MAPLAYERS )
+        {
+            ++rejectedTileStates;
+
+            printlog(
+                "[Persistent World] Ignored invalid tile override for '%s': x=%d y=%d layer=%d tile=%d.",
+                mapKey.c_str(),
+                tileState.x,
+                tileState.y,
+                tileState.layer,
+                tileState.tile
+            );
+
+            continue;
+        }
+
+        const size_t index =
+            static_cast<size_t>(
+                tileState.layer
+            )
+            + static_cast<size_t>(
+                tileState.y
+            ) * MAPLAYERS
+            + static_cast<size_t>(
+                tileState.x
+            ) * MAPLAYERS
+                * map.height;
+
+        map.tiles[index] =
+            tileState.tile;
+
+        ++appliedTileStates;
+    }
     Uint32 registeredIDs = 0;
 
     /*
@@ -2726,14 +2977,16 @@ void applyPersistentMapRemovals()
         node = nextNode;
     }
 
-    printlog(
-        "[Persistent World] Loaded '%s': %zu original ID(s), %zu persistent removal(s), %u newly registered ID(s), %u entity removal(s) applied.",
-        mapKey.c_str(),
-        state.originalEntityIDs.size(),
-        state.removedEntityIDs.size(),
-        registeredIDs,
-        removedEntities
-    );
+printlog(
+    "[Persistent World] Loaded '%s': %zu original ID(s), %zu persistent removal(s), %u newly registered ID(s), %u entity removal(s) applied, %u tile override(s) applied, %u invalid tile override(s) rejected.",
+    mapKey.c_str(),
+    state.originalEntityIDs.size(),
+    state.removedEntityIDs.size(),
+    registeredIDs,
+    removedEntities,
+    appliedTileStates,
+    rejectedTileStates
+);
 }
 /*
  * Convert a boulder-trap behavior function into a stable persistence
@@ -2796,7 +3049,124 @@ static void capturePersistentMechanismStates()
 
     PersistentMapRemovalState& mapState =
         persistentMapRemovalRegistry[mapKey];
+    /*
+     * Capture every tile that differs from the raw loaded baseline.
+     *
+     * Build a fresh collection each time. This allows a tile that was
+     * changed and later restored to its original value to disappear
+     * from persistent storage.
+     */
+    const size_t currentTileCount =
+        static_cast<size_t>(map.width)
+        * static_cast<size_t>(map.height)
+        * static_cast<size_t>(MAPLAYERS);
 
+    const bool baselineMatchesMap =
+        mapState.originalTiles.size()
+            == currentTileCount
+        && mapState.originalTileWidth
+            == map.width
+        && mapState.originalTileHeight
+            == map.height
+        && mapState.originalTileLayers
+            == MAPLAYERS;
+
+    if ( !baselineMatchesMap )
+    {
+        /*
+         * Defensive fallback. Normally the baseline is registered by
+         * applyPersistentMapRemovals() immediately after map loading.
+         *
+         * Do not interpret an absent or dimension-mismatched baseline
+         * as every tile in the map having changed.
+         */
+        mapState.originalTiles.assign(
+            map.tiles,
+            map.tiles + currentTileCount
+        );
+
+        mapState.originalTileWidth =
+            map.width;
+
+        mapState.originalTileHeight =
+            map.height;
+
+        mapState.originalTileLayers =
+            MAPLAYERS;
+
+        mapState.tileStates.clear();
+
+        printlog(
+            "[Persistent World] Rebuilt missing tile baseline for '%s': %zu tile value(s).",
+            mapKey.c_str(),
+            currentTileCount
+        );
+    }
+    else
+    {
+        std::unordered_map<
+            Uint64,
+            PersistentTileState
+        > currentTileStates;
+
+        for ( Sint32 x = 0;
+            x < map.width;
+            ++x )
+        {
+            for ( Sint32 y = 0;
+                y < map.height;
+                ++y )
+            {
+                for ( Sint32 layer = 0;
+                    layer < MAPLAYERS;
+                    ++layer )
+                {
+                    const size_t index =
+                        static_cast<size_t>(layer)
+                        + static_cast<size_t>(y)
+                            * MAPLAYERS
+                        + static_cast<size_t>(x)
+                            * MAPLAYERS
+                            * map.height;
+
+                    const Sint32 currentTile =
+                        map.tiles[index];
+
+                    const Sint32 originalTile =
+                        mapState.originalTiles[index];
+
+                    if ( currentTile == originalTile )
+                    {
+                        continue;
+                    }
+
+                    PersistentTileState tileState;
+
+                    tileState.x = x;
+                    tileState.y = y;
+                    tileState.layer = layer;
+                    tileState.tile = currentTile;
+
+                    currentTileStates[
+                        makePersistentTileKey(
+                            x,
+                            y,
+                            layer
+                        )
+                    ] = tileState;
+                }
+            }
+        }
+
+        mapState.tileStates =
+            std::move(currentTileStates);
+
+        printlog(
+            "[Persistent World] Captured %zu changed tile value(s) for '%s'.",
+            mapState.tileStates.size(),
+            mapKey.c_str()
+        );
+    }
     Uint32 capturedLevers = 0;
     Uint32 capturedTimedLevers = 0;
     Uint32 capturedGates = 0;

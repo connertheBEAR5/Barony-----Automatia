@@ -206,6 +206,12 @@ void receiveClientPersistentPressurePlateState(
     Sint32 power,
     Sint32 interactionLock
 );
+void receiveClientPersistentTileState(
+    Sint32 x,
+    Sint32 y,
+    Sint32 layer,
+    Sint32 tile
+);
 void finishClientPersistentWorldSnapshot();
 // net packet send
 typedef struct packetsend_t

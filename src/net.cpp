@@ -6330,6 +6330,42 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
             )
         );
     }},
+	    // Authoritative persistent tile override.
+    {'PWTL', []()
+    {
+        if ( net_packet->len < 20 )
+        {
+            printlog(
+                "[Persistent World MP] Ignored malformed PWTL packet with length %d.",
+                net_packet->len
+            );
+
+            return;
+        }
+
+        receiveClientPersistentTileState(
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[4]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[8]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[12]
+                )
+            ),
+            static_cast<Sint32>(
+                SDLNet_Read32(
+                    &net_packet->data[16]
+                )
+            )
+        );
+    }},
 	// Finish authoritative persistent-world snapshot.
 	{'PWEN', []()
 	{
