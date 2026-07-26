@@ -700,6 +700,15 @@ struct PersistentMapRemovalState
     */
     std::vector<PersistentGoldBagState> dynamicGoldBags;
 
+    /*
+    * Negative persistent IDs belonging to runtime monsters which must be
+    * recreated when this map is visited again.
+    *
+    * Their actual living/inventory/effect state remains stored in
+    * mechanismStates using the same negative ID.
+    */
+    std::unordered_set<Sint32> dynamicMonsterIDs;
+
     bool originalIDsRegistered = false;
 };
 
@@ -707,6 +716,13 @@ static std::unordered_map<
     std::string,
     PersistentMapRemovalState
 > persistentMapRemovalRegistry;
+/*
+ * Original map entities use positive persistent IDs.
+ * Explicitly persistent runtime monsters use negative IDs.
+ *
+ * Zero remains reserved for nonpersistent runtime entities.
+ */
+static Sint32 nextDynamicMonsterPersistentID = -1;
 /*
  * Clients receive one complete map snapshot before the corresponding
  * LVLC/LVLR packet.
@@ -720,6 +736,8 @@ void resetPersistentWorldSession()
         persistentMapRemovalRegistry.size();
 
     persistentMapRemovalRegistry.clear();
+
+    nextDynamicMonsterPersistentID = -1;
 
     clientPersistentSnapshotMapKey.clear();
     clientPersistentSnapshotReceiving = false;
@@ -3535,7 +3553,148 @@ void applyPersistentMapRemovals()
 
         node = nextNode;
     }
+    /*
+ * Recreate surviving persistent runtime monsters.
+ *
+ * summonMonsterNoSmoke() builds the normal monster entity and Stat.
+ * Its species initializer runs on the first monster tick, after which
+ * actMonster() calls applyPersistentMonsterLivingState() and replaces
+ * the generated state with the saved state.
+ */
+Uint32 restoredDynamicMonsterSpawns = 0;
+Uint32 rejectedDynamicMonsterSpawns = 0;
 
+if ( multiplayer != CLIENT )
+{
+    for ( const Sint32 dynamicPersistentID :
+        state.dynamicMonsterIDs )
+    {
+        if ( dynamicPersistentID >= 0 )
+        {
+            ++rejectedDynamicMonsterSpawns;
+            continue;
+        }
+
+        const auto savedStateIterator =
+            state.mechanismStates.find(
+                dynamicPersistentID
+            );
+
+        if ( savedStateIterator
+            == state.mechanismStates.end() )
+        {
+            ++rejectedDynamicMonsterSpawns;
+
+            printlog(
+                "[Persistent World] Dynamic monster ID %d has no saved living state in '%s'.",
+                dynamicPersistentID,
+                mapKey.c_str()
+            );
+
+            continue;
+        }
+
+        const PersistentMechanismState& savedState =
+            savedStateIterator->second;
+
+        if ( savedState.kind
+                != PersistentMechanismState::Kind::MonsterLivingState
+            && savedState.kind
+                != PersistentMechanismState::Kind::ShopkeeperInventory )
+        {
+            ++rejectedDynamicMonsterSpawns;
+            continue;
+        }
+
+        if ( savedState.monsterSavedType <= NOTHING
+            || savedState.monsterSavedType >= NUMMONSTERS
+            || savedState.monsterSavedHP <= 0 )
+        {
+            ++rejectedDynamicMonsterSpawns;
+
+            printlog(
+                "[Persistent World] Rejected invalid dynamic monster ID %d in '%s': type=%d HP=%d.",
+                dynamicPersistentID,
+                mapKey.c_str(),
+                savedState.monsterSavedType,
+                savedState.monsterSavedHP
+            );
+
+            continue;
+        }
+
+        Entity* restoredMonster =
+            summonMonsterNoSmoke(
+                static_cast<Monster>(
+                    savedState.monsterSavedType
+                ),
+                static_cast<long>(
+                    savedState.monsterSavedX
+                ),
+                static_cast<long>(
+                    savedState.monsterSavedY
+                ),
+                true
+            );
+
+        if ( !restoredMonster )
+        {
+            ++rejectedDynamicMonsterSpawns;
+
+            printlog(
+                "[Persistent World] Failed to recreate dynamic monster ID %d in '%s'.",
+                dynamicPersistentID,
+                mapKey.c_str()
+            );
+
+            continue;
+        }
+
+        restoredMonster->persistentID =
+            dynamicPersistentID;
+
+        restoredMonster->persistentDynamicMonster =
+            true;
+
+        /*
+         * Set the stored transform immediately. The full persistent
+         * living-state restore repeats this after species initialization.
+         */
+        restoredMonster->x =
+            savedState.monsterSavedX;
+
+        restoredMonster->y =
+            savedState.monsterSavedY;
+
+        restoredMonster->z =
+            savedState.monsterSavedZ;
+
+        restoredMonster->yaw =
+            savedState.monsterSavedYaw;
+
+        restoredMonster->pitch =
+            savedState.monsterSavedPitch;
+
+        restoredMonster->roll =
+            savedState.monsterSavedRoll;
+
+        ++restoredDynamicMonsterSpawns;
+
+        printlog(
+            "[Persistent World] Recreated dynamic monster ID %d, type %d, in '%s'.",
+            dynamicPersistentID,
+            savedState.monsterSavedType,
+            mapKey.c_str()
+        );
+    }
+}
+
+printlog(
+    "[Persistent World] Dynamic monster recreation for '%s': %u recreated, %u rejected.",
+    mapKey.c_str(),
+    restoredDynamicMonsterSpawns,
+    rejectedDynamicMonsterSpawns
+);
 printlog(
     "[Persistent World] Loaded '%s': %zu original ID(s), %zu persistent removal(s), %u newly registered ID(s), %u entity removal(s) applied, %u tile override(s) applied, %u invalid tile override(s) rejected.",
     mapKey.c_str(),
@@ -3657,7 +3816,18 @@ static bool capturePersistentMonsterLivingState(
 {
     if ( !entity
         || entity->behavior != &actMonster
-        || entity->persistentID <= 0 )
+        || entity->persistentID == 0 )
+    {
+        return false;
+    }
+
+    /*
+    * Positive IDs are original map monsters.
+    * Negative IDs are allowed only for explicitly persistent dynamic
+    * monsters.
+    */
+    if ( entity->persistentID < 0
+        && !entity->persistentDynamicMonster )
     {
         return false;
     }
@@ -4601,22 +4771,96 @@ static void capturePersistentMechanismStates()
 	* Dynamic entities are a current-world snapshot. Replace the previous
 	* snapshot so destroyed boulders do not return later.
 	*/
-	mapState.dynamicBoulders.clear();
+    mapState.dynamicBoulders.clear();
     mapState.dynamicWorldItems.clear();
     mapState.dynamicGoldBags.clear();
+    mapState.dynamicMonsterIDs.clear();
+
+    /*
+    * Remove the previous dynamic-monster state records.
+    *
+    * Positive records belong to original map entities and must remain.
+    * The current surviving dynamic monsters will create a fresh negative-ID
+    * snapshot below.
+    */
+    for ( auto stateIterator =
+            mapState.mechanismStates.begin();
+        stateIterator != mapState.mechanismStates.end(); )
+    {
+        if ( stateIterator->first < 0 )
+        {
+            stateIterator =
+                mapState.mechanismStates.erase(
+                    stateIterator
+                );
+        }
+        else
+        {
+            ++stateIterator;
+        }
+    }
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
     {
-        Entity* entity =
-            static_cast<Entity*>(node->element);
+    Entity* entity =
+        static_cast<Entity*>(node->element);
 
-        if ( !entity || entity->persistentID <= 0 )
+    if ( !entity )
+    {
+        continue;
+    }
+
+    /*
+    * Assign a stable negative ID the first time an explicitly persistent
+    * runtime monster is captured.
+    */
+    if ( entity->behavior == &actMonster
+        && entity->persistentDynamicMonster
+        && entity->persistentID == 0 )
+    {
+        entity->persistentID =
+            nextDynamicMonsterPersistentID;
+
+        --nextDynamicMonsterPersistentID;
+
+        /*
+        * Keep zero reserved even if the signed counter eventually wraps.
+        * Reaching this would require more than two billion dynamic monsters
+        * in one session, but preserve the invariant defensively.
+        */
+        if ( nextDynamicMonsterPersistentID == 0 )
         {
-            continue;
+            nextDynamicMonsterPersistentID = -1;
         }
 
-        PersistentMechanismState mechanismState;
+        printlog(
+            "[Persistent World] Assigned dynamic monster persistent ID %d.",
+            entity->persistentID
+        );
+    }
+
+    /*
+    * Preserve ordinary positive-ID entities.
+    *
+    * Negative IDs are accepted only for explicitly marked dynamic
+    * monsters. All other runtime entities remain nonpersistent.
+    */
+    if ( entity->persistentID == 0 )
+    {
+        continue;
+    }
+
+    if ( entity->persistentID < 0
+        && (
+            entity->behavior != &actMonster
+            || !entity->persistentDynamicMonster
+        ) )
+    {
+        continue;
+    }
+
+    PersistentMechanismState mechanismState;
 
         if ( entity->behavior == &actSwitch )
         {
@@ -4798,6 +5042,14 @@ static void capturePersistentMechanismStates()
                     mapState.mechanismStates[
                         entity->persistentID
                     ] = mechanismState;
+
+                    if ( entity->persistentID < 0
+                        && entity->persistentDynamicMonster )
+                    {
+                        mapState.dynamicMonsterIDs.insert(
+                            entity->persistentID
+                        );
+                    }
                 }
 		        else if ( entity->behavior == &actChest )
         {
@@ -7589,8 +7841,14 @@ bool applyPersistentMonsterLivingState(
 {
     if ( multiplayer == CLIENT
         || !monsterEntity
-        || monsterEntity->persistentID <= 0
+        || monsterEntity->persistentID == 0
         || monsterEntity->behavior != &actMonster )
+    {
+        return false;
+    }
+
+    if ( monsterEntity->persistentID < 0
+        && !monsterEntity->persistentDynamicMonster )
     {
         return false;
     }

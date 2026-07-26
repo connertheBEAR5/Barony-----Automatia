@@ -98,8 +98,18 @@ public:
     // Stable map-file identity used by persistent world state.
     // This is separate from the temporary runtime/network UID.
     // 0 means the entity has not received an ID yet.
-    Sint32 persistentID = 0;
-    bool ditheringDisabled = false;
+	Sint32 persistentID = 0;
+
+	/*
+	* Runtime monsters normally have persistentID == 0 and disappear when
+	* their map unloads.
+	*
+	* When this flag is true, persistent-world capture assigns the monster
+	* a negative persistent ID and preserves it across map revisits.
+	*/
+	bool persistentDynamicMonster = false;
+
+	bool ditheringDisabled = false;
 	int ditheringOverride = -1;
     struct Dither {
         int value = 0;

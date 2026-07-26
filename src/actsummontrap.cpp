@@ -149,10 +149,23 @@ void actSummonTrap(Entity* my)
 					{
 						typeToSpawn = customMonsterType;
 					}
-					monster = summonMonster(static_cast<Monster>(typeToSpawn), my->x, my->y);
-					if ( monster && monster->getStats() )
-					{
-						monster->seedEntityRNG(rng.getU32());
+						monster = summonMonster(
+							static_cast<Monster>(typeToSpawn),
+							my->x,
+							my->y
+						);
+
+						if ( monster && monster->getStats() )
+						{
+							/*
+							* Summoning-trap creatures belong to the persistent map rather than
+							* to a temporary spell or short-lived summon.
+							*/
+							monster->persistentDynamicMonster = true;
+
+							monster->seedEntityRNG(
+								rng.getU32()
+							);
 						if ( !(gameModeManager.getMode() == gameModeManager.GAME_MODE_TUTORIAL
 							|| gameModeManager.getMode() == gameModeManager.GAME_MODE_TUTORIAL_INIT) )
 						{

@@ -1447,7 +1447,72 @@ namespace ConsoleCommands {
 			messagePlayer(clientnum, MESSAGE_MISC, Language::get(299));
 		}
 		});
+		static ConsoleCommand ccmd_spawnpersistentmonster(
+    "/spawnpersistentmonster",
+    "spawn one persistent dynamic human for testing",
+    []CCMD
+    {
+        if ( !(svFlags & SV_FLAG_CHEATS) )
+        {
+            messagePlayer(
+                clientnum,
+                MESSAGE_MISC,
+                Language::get(277)
+            );
 
+            return;
+        }
+
+        if ( multiplayer == CLIENT )
+        {
+            messagePlayer(
+                clientnum,
+                MESSAGE_MISC,
+                "Only the host can spawn a persistent monster."
+            );
+
+            return;
+        }
+
+        if ( !players[clientnum]
+            || !players[clientnum]->entity )
+        {
+            return;
+        }
+
+        Entity* playerEntity =
+            players[clientnum]->entity;
+
+        Entity* monster =
+            summonMonster(
+                HUMAN,
+                playerEntity->x
+                    + 32.0 * cos(playerEntity->yaw),
+                playerEntity->y
+                    + 32.0 * sin(playerEntity->yaw),
+                true
+            );
+
+        if ( !monster )
+        {
+            messagePlayer(
+                clientnum,
+                MESSAGE_MISC,
+                "Failed to spawn persistent test monster."
+            );
+
+            return;
+        }
+
+        monster->persistentDynamicMonster = true;
+
+        messagePlayer(
+            clientnum,
+            MESSAGE_MISC,
+            "Spawned a persistent dynamic human. Its ID will be assigned when this map is captured."
+        );
+    }
+);
 	static ConsoleCommand ccmd_numentities("/numentities", "display number of entities in the level", []CCMD{
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(300), list_Size(map.entities));
 		});
