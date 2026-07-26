@@ -3898,9 +3898,12 @@ int main(int argc, char** argv)
 								keystatus[SDLK_TAB] = 0;
 								cursorflash = ticks;
 								editproperty++;
-								if ( editproperty == numProperties * 2 - 2 )
+								/*
+								* The original monster fields use indices 0 through 25.
+								* Index 26 is the custom dialogue ID.
+								*/
+								if ( editproperty > 26 )
 								{
-									// limit of properties is twice the vertical count
 									editproperty = 0;
 								}
 								
@@ -3977,7 +3980,80 @@ int main(int argc, char** argv)
 									}
 								}
 							}
+							/*
+							* Custom dialogue assignment.
+							*
+							* The full visual node editor will be opened from this area in a later
+							* stage. For now, this field establishes a stable graph ID.
+							*/
+							const int dialogueLabelX =
+								subx1 + 8;
 
+							const int dialogueLabelY =
+								suby1 + 360;
+
+							const int dialogueFieldX1 =
+								subx1 + 8;
+
+							const int dialogueFieldY1 =
+								dialogueLabelY + 14;
+
+							const int dialogueFieldX2 =
+								subx2 - 80;
+
+							const int dialogueFieldY2 =
+								dialogueFieldY1 + 16;
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								dialogueLabelX,
+								dialogueLabelY,
+								makeColorRGB(255, 255, 255),
+								"Custom Dialogue ID:"
+							);
+
+							drawDepressed(
+								dialogueFieldX1 - 4,
+								dialogueFieldY1 - 4,
+								dialogueFieldX2,
+								dialogueFieldY2
+							);
+
+							/*
+							* Only display the portion that fits in the current fixed editor field.
+							* The full value remains in spriteProperties[26].
+							*/
+							char visibleDialogueID[48] = "";
+
+							strncpy(
+								visibleDialogueID,
+								spriteProperties[26],
+								sizeof(visibleDialogueID) - 1
+							);
+
+							visibleDialogueID[
+								sizeof(visibleDialogueID) - 1
+							] = '\0';
+
+							printText(
+								font8x8_bmp,
+								dialogueFieldX1,
+								dialogueFieldY1,
+								visibleDialogueID
+							);
+
+							if ( mousestatus[SDL_BUTTON_LEFT]
+								&& omousex >= dialogueFieldX1 - 4
+								&& omousex < dialogueFieldX2
+								&& omousey >= dialogueFieldY1 - 4
+								&& omousey < dialogueFieldY2 )
+							{
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+
+								inputstr = spriteProperties[26];
+								editproperty = 26;
+								cursorflash = ticks;
+							}
 							//items for monster
 							pad_y2 = suby1 + 28 + 2 * spacing;
 							pad_x3 = 40;
@@ -4051,7 +4127,7 @@ int main(int argc, char** argv)
 								}
 							}
 
-							if ( editproperty < numProperties * 2 - 2 )   // edit property values
+							if ( editproperty <= 26 )
 							{
 								// limit of properties is twice the vertical count
 								if ( !SDL_IsTextInputActive() )
@@ -4066,6 +4142,13 @@ int main(int argc, char** argv)
 								{
 									inputlen = 31;
 								}
+								else if ( editproperty == 26 )
+								{
+									/*
+									* Reserve one byte for null termination in Stat::customDialogueID.
+									*/
+									inputlen = 63;
+								}
 								else
 								{
 									inputlen = 4;
@@ -4074,7 +4157,33 @@ int main(int argc, char** argv)
 								{
 									pad_y1 = suby1 + 28 + editproperty * spacing;
 
-									if ( editproperty == 0 )
+									if ( editproperty == 26 )
+									{
+										const int dialogueCursorX =
+											subx1
+											+ 8
+											+ static_cast<int>(
+												strlen(spriteProperties[26])
+											) * 8;
+
+										const int dialogueCursorY =
+											suby1 + 374;
+
+										/*
+										* Keep the cursor inside the visible field even when the stored ID
+										* is longer than the currently visible portion.
+										*/
+										printText(
+											font8x8_bmp,
+											std::min(
+												dialogueCursorX,
+												subx2 - 88
+											),
+											dialogueCursorY,
+											"\26"
+										);
+									}
+									else if ( editproperty == 0 )
 									{
 										printText(font8x8_bmp, pad_x1 + strlen(spriteProperties[editproperty]) * 8, pad_y1 + 16, "\26");
 									}

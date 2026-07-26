@@ -3394,6 +3394,18 @@ void buttonSpritePropertiesConfirm(button_t* my)
 							tmpSpriteStats->RANDOM_CHR = 0;
 						}
 						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_NPC] = (Sint32)atoi(spriteProperties[25]);
+						/*
+						* Save the editor-authored custom dialogue graph ID.
+						*/
+						strncpy(
+							tmpSpriteStats->customDialogueID,
+							spriteProperties[26],
+							sizeof(tmpSpriteStats->customDialogueID) - 1
+						);
+
+						tmpSpriteStats->customDialogueID[
+							sizeof(tmpSpriteStats->customDialogueID) - 1
+						] = '\0';
 						if ( !strcmp(spriteProperties[31], "disable") )
 						{
 							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] = 1;
@@ -4208,15 +4220,16 @@ void buttonMonsterItems(button_t* my)
 	butMonsterItemX->focused = 1;
 }
 
-void initMonsterPropertiesWindow() {
-	cursorflash = ticks;
-	menuVisible = 0;
-	subwindow = 1;
-	newwindow = 2;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 190;
-	suby2 = yres / 2 + 190;
+void initMonsterPropertiesWindow()
+{
+    cursorflash = ticks;
+    menuVisible = 0;
+    subwindow = 1;
+    newwindow = 2;
+    subx1 = xres / 2 - 200;
+    subx2 = xres / 2 + 200;
+    suby1 = yres / 2 - 220;
+    suby2 = yres / 2 + 220;
 	strcpy(subtext, "Sprite properties: ");
 	strcat(subtext, spriteEditorNameStrings[selectedEntity[0]->sprite]);
 }
@@ -4251,6 +4264,18 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 		snprintf(spriteProperties[23], 4, "%d", tmpSpriteStats->RANDOM_PER + tmpSpriteStats->PER);
 		snprintf(spriteProperties[24], 4, "%d", tmpSpriteStats->RANDOM_CHR + tmpSpriteStats->CHR);
 		snprintf(spriteProperties[25], 4, "%d", tmpSpriteStats->MISC_FLAGS[STAT_FLAG_NPC]);
+		/*
+		* The editor's dedicated custom dialogue assignment field.
+		*/
+		strncpy(
+			spriteProperties[26],
+			tmpSpriteStats->customDialogueID,
+			sizeof(spriteProperties[26]) - 1
+		);
+
+		spriteProperties[26][
+			sizeof(spriteProperties[26]) - 1
+		] = '\0';
 		if ( tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] == 0 )
 		{
 			strcpy(spriteProperties[31], "");

@@ -2402,8 +2402,29 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 	}
 
 	// read map version number
-	fp->read(valid_data, sizeof(char), strlen("BARONY LMPV2.0"));
-	if ( strncmp(valid_data, "BARONY LMPV4.5", strlen("BARONY LMPV4.5")) == 0 )
+	fp->read(
+		valid_data,
+		sizeof(char),
+		strlen("BARONY LMPV2.0")
+	);
+
+	if ( strncmp(
+			valid_data,
+			"BARONY LMPV4.6",
+			strlen("BARONY LMPV4.6")
+		) == 0 )
+	{
+		/*
+		* Adds a fixed-size custom dialogue graph ID to editor-authored
+		* monster records.
+		*/
+		editorVersion = 46;
+	}
+	else if ( strncmp(
+			valid_data,
+			"BARONY LMPV4.5",
+			strlen("BARONY LMPV4.5")
+		) == 0 )
 	{
 		// Adds stable persistent IDs to all map entities.
 		editorVersion = 45;
@@ -2914,6 +2935,28 @@ fp->read(&numentities, sizeof(Uint32), 1);
 							fp->read(&myStats->EDITOR_ITEMS, sizeof(Sint32), 96);
 						}
 						fp->read(&myStats->MISC_FLAGS, sizeof(Sint32), 32);
+						if ( editorVersion >= 46 )
+						{
+							fp->read(
+								&myStats->customDialogueID,
+								sizeof(myStats->customDialogueID),
+								1
+							);
+
+							/*
+							* Protect against malformed map files that omit null termination.
+							*/
+							myStats->customDialogueID[
+								sizeof(myStats->customDialogueID) - 1
+							] = '\0';
+						}
+						else
+						{
+							/*
+							* Legacy maps have no custom dialogue assignment.
+							*/
+							myStats->customDialogueID[0] = '\0';
+						}
 					}
 					//Read dummy values to move fp for the client
 					else
@@ -2956,7 +2999,33 @@ fp->read(&numentities, sizeof(Uint32), 1);
 						{
 							fp->read(&dummyStats->EDITOR_ITEMS, sizeof(Sint32), 96);
 						}
-						fp->read(&dummyStats->MISC_FLAGS, sizeof(Sint32), 32);
+						fp->read(
+							&dummyStats->MISC_FLAGS,
+							sizeof(Sint32),
+							32
+						);
+
+						if ( editorVersion >= 46 )
+						{
+							/*
+							* Clients still need to consume this data from the map stream even
+							* though monster creation and authoritative state belong to the host.
+							*/
+							fp->read(
+								&dummyStats->customDialogueID,
+								sizeof(dummyStats->customDialogueID),
+								1
+							);
+
+							dummyStats->customDialogueID[
+								sizeof(dummyStats->customDialogueID) - 1
+							] = '\0';
+						}
+						else
+						{
+							dummyStats->customDialogueID[0] = '\0';
+						}
+
 						delete dummyStats;
 					}
 					break;
@@ -3804,11 +3873,14 @@ int saveMap(const char* filename2)
 			usedPersistentIDs.size()
 		);
 
-		// Saving produces a V4.5 32-layer map with stable entity IDs.
+		/*
+		* Saving produces a V4.6 32-layer map with stable entity IDs and
+		* editor-authored custom monster dialogue IDs.
+		*/
 		fp->write(
-			"BARONY LMPV4.5",
+			"BARONY LMPV4.6",
 			sizeof(char),
-			strlen("BARONY LMPV4.5")
+			strlen("BARONY LMPV4.6")
 		);
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
@@ -3877,8 +3949,31 @@ int saveMap(const char* filename2)
 					fp->write(&myStats->RANDOM_LVL, sizeof(Sint32), 1);
 					fp->write(&myStats->RANDOM_GOLD, sizeof(Sint32), 1);
 
-					fp->write(&myStats->EDITOR_ITEMS, sizeof(Sint32), ITEM_SLOT_NUM);
-					fp->write(&myStats->MISC_FLAGS, sizeof(Sint32), 32);
+					fp->write(
+						&myStats->EDITOR_ITEMS,
+						sizeof(Sint32),
+						ITEM_SLOT_NUM
+					);
+
+					fp->write(
+						&myStats->MISC_FLAGS,
+						sizeof(Sint32),
+						32
+					);
+
+					/*
+					* V4.6 custom dialogue graph assignment.
+					*/
+					myStats->customDialogueID[
+						sizeof(myStats->customDialogueID) - 1
+					] = '\0';
+
+					fp->write(
+						&myStats->customDialogueID,
+						sizeof(myStats->customDialogueID),
+						1
+					);
+
 					break;
 				case 2:
 					// chests

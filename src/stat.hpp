@@ -315,10 +315,26 @@ class Stat
 	Sint32 PROFICIENCIES[NUMPROFICIENCIES];
 	Uint8 EFFECTS[NUMEFFECTS];
 public:
-	Monster type;
-	sex_t sex;
-	Uint32 stat_appearance = 0;
-	char name[128];
+Monster type;
+sex_t sex;
+Uint32 stat_appearance = 0;
+char name[128];
+
+/*
+ * Editor-authored custom dialogue graph ID.
+ *
+ * Examples:
+ *
+ * mara_farmhouse_quest
+ * village_blacksmith
+ * castle_guard_warning
+ *
+ * This is separate from STAT_FLAG_NPC, which continues to control
+ * Barony's original numbered NPC chatter behavior.
+ *
+ * Empty string means no custom dialogue is assigned.
+ */
+char customDialogueID[64] = "";
 
 	// uid of the entity which killed me via burning/poison (for rewarding XP to them)
 	Uint32 poisonKiller;
