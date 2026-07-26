@@ -7564,6 +7564,23 @@ static Uint32 restorePersistentMonsterEffects(
         ++restoredEffects;
     }
 
+    /*
+     * Directly restoring Stat effect values bypasses Entity::setEffect(),
+     * so multiplayer clients have not yet received the restored effect
+     * list.
+     *
+     * EFFE contains the entity's complete active-effect bitset. Send one
+     * guaranteed update after the whole saved list has been rebuilt,
+     * rather than sending one packet for every individual effect.
+     */
+    if ( restoredEffects > 0
+        && multiplayer == SERVER )
+    {
+        monsterEntity->serverUpdateEffectsForEntity(
+            true
+        );
+    }
+
     return restoredEffects;
 }
 bool applyPersistentMonsterLivingState(
