@@ -207,6 +207,23 @@ struct PersistentMonsterItemState
     Sint32 x = 0;
     Sint32 y = 0;
 };
+/*
+ * One temporary status effect currently active on a persistent
+ * monster or NPC.
+ *
+ * effectValue is Uint8 rather than bool because several Barony effects
+ * use this byte to store effect strength or additional state.
+ *
+ * Only effects with a positive finite timer are captured. Permanent,
+ * equipment-derived, sustained-spell, and entity-linked effects are
+ * deliberately allowed to initialize normally.
+ */
+struct PersistentMonsterEffectState
+{
+    Sint32 effectID = -1;
+    Uint8 effectValue = 0;
+    Sint32 timer = 0;
+};
 struct PersistentMechanismState
 {
 enum class Kind : Uint8
@@ -529,6 +546,13 @@ enum class Kind : Uint8
     */
     std::vector<PersistentMonsterItemState>
         monsterSavedItems;
+
+        /*
+    * Temporary effects that should remain frozen while the map is
+    * unloaded.
+    */
+    std::vector<PersistentMonsterEffectState>
+        monsterSavedEffects;
     real_t monsterSavedX = 0.0;
     real_t monsterSavedY = 0.0;
     real_t monsterSavedZ = 0.0;
@@ -3583,6 +3607,46 @@ static bool capturePersistentMonsterItem(
     return true;
 }
 /*
+ * Effects that represent meaningful temporary conditions which should
+ * remain paused while a map is unloaded.
+ *
+ * Effects not listed here are allowed to be rebuilt by monster
+ * initialization, equipment, spells, AI controllers, or other runtime
+ * systems.
+ */
+static bool isPersistentMonsterEffect(
+    Sint32 effectID
+)
+{
+    switch ( effectID )
+    {
+        case EFF_ASLEEP:
+        case EFF_POISONED:
+        case EFF_STUNNED:
+        case EFF_CONFUSED:
+        case EFF_INVISIBLE:
+        case EFF_BLIND:
+        case EFF_FAST:
+        case EFF_PARALYZED:
+        case EFF_BLEEDING:
+        case EFF_SLOW:
+        case EFF_HP_REGEN:
+        case EFF_MP_REGEN:
+        case EFF_PACIFY:
+        case EFF_WEBBED:
+        case EFF_FEAR:
+        case EFF_ROOTED:
+        case EFF_NAUSEA_PROTECTION:
+        case EFF_WEAKNESS:
+        case EFF_SPORES:
+        case EFF_FROST:
+            return true;
+
+        default:
+            return false;
+    }
+}
+/*
  * Copy the living state shared by ordinary monsters, NPCs and
  * shopkeepers.
  */
@@ -3624,6 +3688,54 @@ static bool capturePersistentMonsterLivingState(
 
     savedState.monsterSavedMAXMP =
         monsterStats->MAXMP;
+
+    /*
+ * Capture selected finite-duration status effects.
+ *
+ * Positive timers represent temporary active effects. Timers such as
+ * -1 and -2 are commonly used for permanent or sustained effects and
+ * must be rebuilt by their owning game systems instead.
+ */
+savedState.monsterSavedEffects.clear();
+
+for ( Sint32 effectID = 0;
+    effectID < NUMEFFECTS;
+    ++effectID )
+{
+    if ( !isPersistentMonsterEffect(effectID) )
+    {
+        continue;
+    }
+
+    const Uint8 effectValue =
+        monsterStats->getEffectActive(
+            effectID
+        );
+
+    const Sint32 effectTimer =
+        monsterStats->EFFECTS_TIMERS[effectID];
+
+    if ( effectValue == 0
+        || effectTimer <= 0 )
+    {
+        continue;
+    }
+
+    PersistentMonsterEffectState effectState;
+
+    effectState.effectID =
+        effectID;
+
+    effectState.effectValue =
+        effectValue;
+
+    effectState.timer =
+        effectTimer;
+
+    savedState.monsterSavedEffects.push_back(
+        effectState
+    );
+}
     
     /*
  * Capture the monster's original randomized loadout on the first map
@@ -7373,6 +7485,87 @@ static Uint32 restorePersistentMonsterItems(
 
     return restoredItems;
 }
+/*
+ * Replace selected temporary effects generated during fresh monster
+ * initialization with the effects captured when the map was left.
+ */
+static Uint32 restorePersistentMonsterEffects(
+    Entity* monsterEntity,
+    Stat* monsterStats,
+    const PersistentMechanismState& savedState
+)
+{
+    if ( !monsterEntity
+        || !monsterStats )
+    {
+        return 0;
+    }
+
+    /*
+     * Clear only the allowlisted effects.
+     *
+     * Other effects may represent intrinsic monster properties,
+     * equipment, transformations, spell controllers, or state owned by
+     * another system.
+     */
+    for ( Sint32 effectID = 0;
+        effectID < NUMEFFECTS;
+        ++effectID )
+    {
+        if ( !isPersistentMonsterEffect(effectID) )
+        {
+            continue;
+        }
+
+        monsterStats->clearEffect(
+            effectID
+        );
+
+        monsterStats->EFFECTS_TIMERS[
+            effectID
+        ] = 0;
+    }
+
+    Uint32 restoredEffects = 0;
+
+    for ( const PersistentMonsterEffectState& effectState :
+        savedState.monsterSavedEffects )
+    {
+        if ( effectState.effectID < 0
+            || effectState.effectID >= NUMEFFECTS
+            || !isPersistentMonsterEffect(
+                effectState.effectID
+            )
+            || effectState.effectValue == 0
+            || effectState.timer <= 0 )
+        {
+            printlog(
+                "[Persistent World] Ignored invalid saved effect for monster ID %d: effect=%d value=%u timer=%d.",
+                monsterEntity->persistentID,
+                effectState.effectID,
+                static_cast<Uint32>(
+                    effectState.effectValue
+                ),
+                effectState.timer
+            );
+
+            continue;
+        }
+
+        monsterStats->setEffectActive(
+            effectState.effectID,
+            effectState.effectValue
+        );
+
+        monsterStats->EFFECTS_TIMERS[
+            effectState.effectID
+        ] = effectState.timer;
+
+        ++restoredEffects;
+    }
+
+    return restoredEffects;
+}
 bool applyPersistentMonsterLivingState(
     Entity* monsterEntity
 )
@@ -7472,6 +7665,16 @@ bool applyPersistentMonsterLivingState(
     */
     const Uint32 restoredMonsterItems =
         restorePersistentMonsterItems(
+            monsterEntity,
+            monsterStats,
+            savedState
+        );
+    /*
+    * Restore temporary conditions after species initialization so the
+    * initializer cannot replace them with a fresh state.
+    */
+    const Uint32 restoredMonsterEffects =
+        restorePersistentMonsterEffects(
             monsterEntity,
             monsterStats,
             savedState
@@ -7606,7 +7809,7 @@ bool applyPersistentMonsterLivingState(
         true;
 
 printlog(
-    "[Persistent World] Restored monster ID %d type %d at %.2f/%.2f: HP %d/%d, %u inventory/equipment item(s)%s.",
+    "[Persistent World] Restored monster ID %d type %d at %.2f/%.2f: HP %d/%d, %u inventory/equipment item(s), %u temporary effect(s)%s.",
     monsterEntity->persistentID,
     static_cast<Sint32>(
         monsterStats->type
@@ -7616,6 +7819,7 @@ printlog(
     monsterStats->HP,
     monsterStats->MAXHP,
     restoredMonsterItems,
+    restoredMonsterEffects,
     mechanicalCreature
         ? " without passive healing"
         : " after +5 revisit healing"
