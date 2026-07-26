@@ -44,6 +44,216 @@ extern Uint32 joyimpulses[NUM_JOY_IMPULSES]; //Joystick/gamepad only impulses.
 bool handleEvents(void);
 void startMessages();
 void resetPersistentWorldSession();
+/*
+ * Custom dialogue and quest persistence.
+ *
+ * These functions currently operate on session memory only.
+ * The server/host owns all mutations.
+ */
+
+/* Global world variables and flags. */
+bool persistentStorySetWorldVariable(
+    const std::string& variableID,
+    Sint32 value
+);
+
+Sint32 persistentStoryGetWorldVariable(
+    const std::string& variableID,
+    Sint32 fallbackValue = 0
+);
+
+bool persistentStoryAddWorldVariable(
+    const std::string& variableID,
+    Sint32 amount
+);
+
+bool persistentStorySetWorldFlag(
+    const std::string& flagID,
+    bool enabled
+);
+
+bool persistentStoryGetWorldFlag(
+    const std::string& flagID
+);
+
+/* Shared quest state. */
+bool persistentStorySetQuestStage(
+    const std::string& questID,
+    Sint32 stage
+);
+
+Sint32 persistentStoryGetQuestStage(
+    const std::string& questID,
+    Sint32 fallbackStage = 0
+);
+
+bool persistentStorySetQuestStarted(
+    const std::string& questID,
+    bool started
+);
+
+bool persistentStorySetQuestAccepted(
+    const std::string& questID,
+    bool accepted
+);
+
+bool persistentStorySetQuestCompleted(
+    const std::string& questID,
+    bool completed
+);
+
+bool persistentStorySetQuestFailed(
+    const std::string& questID,
+    bool failed
+);
+
+bool persistentStoryQuestIsStarted(
+    const std::string& questID
+);
+
+bool persistentStoryQuestIsAccepted(
+    const std::string& questID
+);
+
+bool persistentStoryQuestIsCompleted(
+    const std::string& questID
+);
+
+bool persistentStoryQuestIsFailed(
+    const std::string& questID
+);
+
+bool persistentStorySetQuestVariable(
+    const std::string& questID,
+    const std::string& variableID,
+    Sint32 value
+);
+
+Sint32 persistentStoryGetQuestVariable(
+    const std::string& questID,
+    const std::string& variableID,
+    Sint32 fallbackValue = 0
+);
+
+bool persistentStorySetQuestFlag(
+    const std::string& questID,
+    const std::string& flagID,
+    bool enabled
+);
+
+bool persistentStoryGetQuestFlag(
+    const std::string& questID,
+    const std::string& flagID
+);
+
+bool persistentStorySetQuestObjectiveComplete(
+    const std::string& questID,
+    const std::string& objectiveID,
+    bool completed
+);
+
+bool persistentStoryQuestObjectiveIsComplete(
+    const std::string& questID,
+    const std::string& objectiveID
+);
+
+bool persistentStorySetQuestChoiceUsed(
+    const std::string& questID,
+    const std::string& choiceID,
+    bool used
+);
+
+bool persistentStoryQuestChoiceWasUsed(
+    const std::string& questID,
+    const std::string& choiceID
+);
+
+/* Memory belonging to one persistent original-map NPC. */
+bool persistentStoryAssignNPCDialogue(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& dialogueID
+);
+
+std::string persistentStoryGetNPCDialogue(
+    const std::string& mapName,
+    Sint32 persistentID
+);
+
+bool persistentStorySetNPCNode(
+    const std::string& mapName,
+    Sint32 persistentID,
+    Sint32 nodeID
+);
+
+Sint32 persistentStoryGetNPCNode(
+    const std::string& mapName,
+    Sint32 persistentID,
+    Sint32 fallbackNode = 0
+);
+
+bool persistentStorySetNPCVariable(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& variableID,
+    Sint32 value
+);
+
+Sint32 persistentStoryGetNPCVariable(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& variableID,
+    Sint32 fallbackValue = 0
+);
+
+bool persistentStorySetNPCFlag(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& flagID,
+    bool enabled
+);
+
+bool persistentStoryGetNPCFlag(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& flagID
+);
+
+bool persistentStorySetNPCChoiceUsed(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& choiceID,
+    bool used
+);
+
+bool persistentStoryNPCChoiceWasUsed(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& choiceID
+);
+
+bool persistentStorySetNPCNodeSeen(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& nodeID,
+    bool seen
+);
+
+bool persistentStoryNPCNodeWasSeen(
+    const std::string& mapName,
+    Sint32 persistentID,
+    const std::string& nodeID
+);
+
+/* Cross-map persistent-state conditions. */
+bool persistentStoryMapHasState(
+    const std::string& mapName
+);
+
+bool persistentStoryOriginalEntityIsRemoved(
+    const std::string& mapName,
+    Sint32 persistentID
+);
 void applyPersistentMapRemovals();
 void applyPersistentMechanismStates();
 /*

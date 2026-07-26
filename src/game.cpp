@@ -54,7 +54,7 @@
 #include "ui/LoadingScreen.hpp"
 
 #include "UnicodeDecoder.h"
-
+#include <string>
 #include <atomic>
 #include <future>
 #include <thread>
@@ -729,11 +729,150 @@ struct PersistentMapRemovalState
 
     bool originalIDsRegistered = false;
 };
+/*
+ * Session-persistent custom dialogue and quest state.
+ *
+ * Authored dialogue definitions will be loaded separately. These
+ * structures contain only mutable runtime progress and are therefore
+ * suitable for eventual disk serialization.
+ *
+ * Important:
+ * - Do not store Entity pointers.
+ * - Do not store runtime entity UIDs.
+ * - Original map entities are identified with normalized map keys and
+ *   positive persistent IDs.
+ */
 
+/*
+ * Shared progress for one named quest.
+ *
+ * A quest may be read or modified by multiple NPCs on multiple maps.
+ */
+struct PersistentQuestState
+{
+    bool started = false;
+    bool accepted = false;
+    bool completed = false;
+    bool failed = false;
+
+    Sint32 stage = 0;
+
+    /*
+     * Creator-defined quest values.
+     *
+     * Examples:
+     * negotiated_reward = 100
+     * bandits_defeated = 4
+     * trust = 2
+     */
+    std::unordered_map<
+        std::string,
+        Sint32
+    > variables;
+
+    /*
+     * Creator-defined Boolean facts.
+     *
+     * Examples:
+     * asked_about_castle
+     * reward_claimed
+     * farmhouse_cleared
+     */
+    std::unordered_set<std::string> flags;
+
+    /*
+     * Stable string IDs authored by the dialogue/quest editor.
+     */
+    std::unordered_set<std::string> completedObjectives;
+    std::unordered_set<std::string> usedChoices;
+};
+
+/*
+ * Personal memory belonging to one persistent NPC.
+ *
+ * The registry key is:
+ *
+ * normalized-map-name + ":" + positive persistent ID
+ *
+ * Example:
+ *
+ * village.lmp:125
+ */
+struct PersistentNPCDialogueState
+{
+    /*
+     * Authored dialogue graph assigned to this NPC.
+     *
+     * The graph itself is not copied into runtime persistence.
+     */
+    std::string dialogueID;
+
+    /*
+     * The node to evaluate when this NPC is next interacted with.
+     */
+    Sint32 currentNode = 0;
+
+    bool conversationStarted = false;
+    bool rewardGiven = false;
+
+    /*
+     * NPC-local creator variables and flags.
+     *
+     * These are intentionally separate from shared quest/world state.
+     */
+    std::unordered_map<
+        std::string,
+        Sint32
+    > variables;
+
+    std::unordered_set<std::string> flags;
+    std::unordered_set<std::string> usedChoices;
+    std::unordered_set<std::string> seenNodes;
+};
+
+/*
+ * Story state shared across every visited map in the active session.
+ */
+struct PersistentWorldStoryState
+{
+    /*
+     * Shared quest state indexed by creator-defined quest ID.
+     */
+    std::unordered_map<
+        std::string,
+        PersistentQuestState
+    > quests;
+
+    /*
+     * Story values readable from any map.
+     */
+    std::unordered_map<
+        std::string,
+        Sint32
+    > worldVariables;
+
+    std::unordered_set<std::string> worldFlags;
+
+    /*
+     * NPC-local memories indexed by normalized map and persistent ID.
+     */
+    std::unordered_map<
+        std::string,
+        PersistentNPCDialogueState
+    > npcDialogueStates;
+};
 static std::unordered_map<
     std::string,
     PersistentMapRemovalState
 > persistentMapRemovalRegistry;
+/*
+ * Session-only custom dialogue, quest, and world-story memory.
+ *
+ * This is deliberately separate from per-map physical state because
+ * quests and world facts may be shared by many maps and NPCs.
+ */
+static PersistentWorldStoryState
+    persistentWorldStoryState;
 /*
  * Original map entities use positive persistent IDs.
  * Explicitly persistent runtime monsters use negative IDs.
@@ -753,7 +892,22 @@ void resetPersistentWorldSession()
     const size_t clearedMaps =
         persistentMapRemovalRegistry.size();
 
+    const size_t clearedQuests =
+        persistentWorldStoryState.quests.size();
+
+    const size_t clearedNPCMemories =
+        persistentWorldStoryState.npcDialogueStates.size();
+
+    const size_t clearedWorldVariables =
+        persistentWorldStoryState.worldVariables.size();
+
+    const size_t clearedWorldFlags =
+        persistentWorldStoryState.worldFlags.size();
+
     persistentMapRemovalRegistry.clear();
+
+        persistentWorldStoryState =
+        PersistentWorldStoryState{};
 
     nextDynamicMonsterPersistentID = -1;
 
@@ -762,8 +916,12 @@ void resetPersistentWorldSession()
     clientPersistentSnapshotComplete = false;
 
     printlog(
-        "[Persistent World] Reset session registry; cleared %zu map state record(s).",
-        clearedMaps
+        "[Persistent World] Reset session registry; cleared %zu map state record(s), %zu quest(s), %zu NPC dialogue memory record(s), %zu world variable(s), and %zu world flag(s).",
+        clearedMaps,
+        clearedQuests,
+        clearedNPCMemories,
+        clearedWorldVariables,
+        clearedWorldFlags
     );
 }
 /*
@@ -879,6 +1037,1284 @@ static std::string normalizePersistentMapKey(
     }
 
     return key;
+}
+/*
+ * Normalize a creator-defined dialogue, quest, flag, variable, choice,
+ * objective, or node ID.
+ *
+ * IDs are case-insensitive. Spaces and unsupported punctuation become
+ * underscores so editor-authored names remain safe and predictable.
+ *
+ * Examples:
+ *
+ * "Farmhouse Quest"        -> "farmhouse_quest"
+ * "Bandit-Leader Dead"     -> "bandit-leader_dead"
+ * "  Mara Trust  "         -> "mara_trust"
+ */
+static std::string normalizePersistentStoryID(
+    std::string id
+)
+{
+    std::string normalized;
+    normalized.reserve(id.length());
+
+    bool previousWasSeparator = false;
+
+    for ( const unsigned char character : id )
+    {
+        if ( std::isalnum(character)
+            || character == '_'
+            || character == '-'
+            || character == '.' )
+        {
+            normalized.push_back(
+                static_cast<char>(
+                    std::tolower(character)
+                )
+            );
+
+            previousWasSeparator = false;
+        }
+        else
+        {
+            /*
+             * Convert whitespace and unsupported punctuation into one
+             * underscore rather than generating repeated separators.
+             */
+            if ( !normalized.empty()
+                && !previousWasSeparator )
+            {
+                normalized.push_back('_');
+                previousWasSeparator = true;
+            }
+        }
+    }
+
+    while ( !normalized.empty()
+        && normalized.back() == '_' )
+    {
+        normalized.pop_back();
+    }
+
+    return normalized;
+}
+
+/*
+ * Produce the stable registry key for one original map NPC.
+ */
+static std::string makePersistentNPCDialogueKey(
+    const std::string& mapName,
+    const Sint32 persistentID
+)
+{
+    if ( persistentID <= 0 )
+    {
+        return "";
+    }
+
+    const std::string mapKey =
+        normalizePersistentMapKey(mapName);
+
+    if ( mapKey.empty() )
+    {
+        return "";
+    }
+
+    return
+        mapKey
+        + ":"
+        + std::to_string(persistentID);
+}
+bool persistentStorySetWorldVariable(
+    const std::string& variableID,
+    const Sint32 value
+)
+{
+    /*
+     * The host owns persistent story progress.
+     *
+     * Remote clients will receive authoritative updates in a later
+     * multiplayer stage.
+     */
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(variableID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    persistentWorldStoryState.worldVariables[key] =
+        value;
+
+    return true;
+}
+
+Sint32 persistentStoryGetWorldVariable(
+    const std::string& variableID,
+    const Sint32 fallbackValue
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(variableID);
+
+    if ( key.empty() )
+    {
+        return fallbackValue;
+    }
+
+    const auto iterator =
+        persistentWorldStoryState.worldVariables.find(
+            key
+        );
+
+    if ( iterator
+        == persistentWorldStoryState.worldVariables.end() )
+    {
+        return fallbackValue;
+    }
+
+    return iterator->second;
+}
+
+bool persistentStoryAddWorldVariable(
+    const std::string& variableID,
+    const Sint32 amount
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(variableID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    persistentWorldStoryState.worldVariables[key] +=
+        amount;
+
+    return true;
+}
+
+bool persistentStorySetWorldFlag(
+    const std::string& flagID,
+    const bool enabled
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(flagID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    if ( enabled )
+    {
+        persistentWorldStoryState.worldFlags.insert(
+            key
+        );
+    }
+    else
+    {
+        persistentWorldStoryState.worldFlags.erase(
+            key
+        );
+    }
+
+    return true;
+}
+
+bool persistentStoryGetWorldFlag(
+    const std::string& flagID
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(flagID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    return
+        persistentWorldStoryState.worldFlags.find(key)
+        != persistentWorldStoryState.worldFlags.end();
+}
+bool persistentStorySetQuestStage(
+    const std::string& questID,
+    const Sint32 stage
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[key];
+
+    quest.started = true;
+    quest.stage = stage;
+
+    return true;
+}
+
+Sint32 persistentStoryGetQuestStage(
+    const std::string& questID,
+    const Sint32 fallbackStage
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return fallbackStage;
+    }
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(key);
+
+    if ( iterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return fallbackStage;
+    }
+
+    return iterator->second.stage;
+}
+
+bool persistentStorySetQuestStarted(
+    const std::string& questID,
+    const bool started
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[key];
+
+    quest.started = started;
+
+    if ( !started )
+    {
+        quest.accepted = false;
+    }
+
+    return true;
+}
+
+bool persistentStorySetQuestAccepted(
+    const std::string& questID,
+    const bool accepted
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[key];
+
+    quest.started = true;
+    quest.accepted = accepted;
+
+    return true;
+}
+
+bool persistentStorySetQuestCompleted(
+    const std::string& questID,
+    const bool completed
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[key];
+
+    quest.started = true;
+    quest.completed = completed;
+
+    if ( completed )
+    {
+        quest.failed = false;
+    }
+
+    return true;
+}
+
+bool persistentStorySetQuestFailed(
+    const std::string& questID,
+    const bool failed
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    if ( key.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[key];
+
+    quest.started = true;
+    quest.failed = failed;
+
+    if ( failed )
+    {
+        quest.completed = false;
+    }
+
+    return true;
+}
+
+bool persistentStoryQuestIsStarted(
+    const std::string& questID
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(key);
+
+    return
+        !key.empty()
+        && iterator
+            != persistentWorldStoryState.quests.end()
+        && iterator->second.started;
+}
+
+bool persistentStoryQuestIsAccepted(
+    const std::string& questID
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(key);
+
+    return
+        !key.empty()
+        && iterator
+            != persistentWorldStoryState.quests.end()
+        && iterator->second.accepted;
+}
+
+bool persistentStoryQuestIsCompleted(
+    const std::string& questID
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(key);
+
+    return
+        !key.empty()
+        && iterator
+            != persistentWorldStoryState.quests.end()
+        && iterator->second.completed;
+}
+
+bool persistentStoryQuestIsFailed(
+    const std::string& questID
+)
+{
+    const std::string key =
+        normalizePersistentStoryID(questID);
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(key);
+
+    return
+        !key.empty()
+        && iterator
+            != persistentWorldStoryState.quests.end()
+        && iterator->second.failed;
+}
+bool persistentStorySetQuestVariable(
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 value
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string variableKey =
+        normalizePersistentStoryID(variableID);
+
+    if ( questKey.empty()
+        || variableKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[questKey];
+
+    quest.started = true;
+    quest.variables[variableKey] = value;
+
+    return true;
+}
+
+Sint32 persistentStoryGetQuestVariable(
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 fallbackValue
+)
+{
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string variableKey =
+        normalizePersistentStoryID(variableID);
+
+    if ( questKey.empty()
+        || variableKey.empty() )
+    {
+        return fallbackValue;
+    }
+
+    const auto questIterator =
+        persistentWorldStoryState.quests.find(
+            questKey
+        );
+
+    if ( questIterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return fallbackValue;
+    }
+
+    const auto variableIterator =
+        questIterator->second.variables.find(
+            variableKey
+        );
+
+    if ( variableIterator
+        == questIterator->second.variables.end() )
+    {
+        return fallbackValue;
+    }
+
+    return variableIterator->second;
+}
+
+bool persistentStorySetQuestFlag(
+    const std::string& questID,
+    const std::string& flagID,
+    const bool enabled
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string flagKey =
+        normalizePersistentStoryID(flagID);
+
+    if ( questKey.empty()
+        || flagKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[questKey];
+
+    quest.started = true;
+
+    if ( enabled )
+    {
+        quest.flags.insert(flagKey);
+    }
+    else
+    {
+        quest.flags.erase(flagKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryGetQuestFlag(
+    const std::string& questID,
+    const std::string& flagID
+)
+{
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string flagKey =
+        normalizePersistentStoryID(flagID);
+
+    if ( questKey.empty()
+        || flagKey.empty() )
+    {
+        return false;
+    }
+
+    const auto questIterator =
+        persistentWorldStoryState.quests.find(
+            questKey
+        );
+
+    if ( questIterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return false;
+    }
+
+    return
+        questIterator->second.flags.find(flagKey)
+        != questIterator->second.flags.end();
+}
+
+bool persistentStorySetQuestObjectiveComplete(
+    const std::string& questID,
+    const std::string& objectiveID,
+    const bool completed
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string objectiveKey =
+        normalizePersistentStoryID(objectiveID);
+
+    if ( questKey.empty()
+        || objectiveKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[questKey];
+
+    quest.started = true;
+
+    if ( completed )
+    {
+        quest.completedObjectives.insert(
+            objectiveKey
+        );
+    }
+    else
+    {
+        quest.completedObjectives.erase(
+            objectiveKey
+        );
+    }
+
+    return true;
+}
+
+bool persistentStoryQuestObjectiveIsComplete(
+    const std::string& questID,
+    const std::string& objectiveID
+)
+{
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string objectiveKey =
+        normalizePersistentStoryID(objectiveID);
+
+    if ( questKey.empty()
+        || objectiveKey.empty() )
+    {
+        return false;
+    }
+
+    const auto questIterator =
+        persistentWorldStoryState.quests.find(
+            questKey
+        );
+
+    if ( questIterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return false;
+    }
+
+    return
+        questIterator->second.completedObjectives.find(
+            objectiveKey
+        )
+        != questIterator->second.completedObjectives.end();
+}
+
+bool persistentStorySetQuestChoiceUsed(
+    const std::string& questID,
+    const std::string& choiceID,
+    const bool used
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string choiceKey =
+        normalizePersistentStoryID(choiceID);
+
+    if ( questKey.empty()
+        || choiceKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[questKey];
+
+    quest.started = true;
+
+    if ( used )
+    {
+        quest.usedChoices.insert(choiceKey);
+    }
+    else
+    {
+        quest.usedChoices.erase(choiceKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryQuestChoiceWasUsed(
+    const std::string& questID,
+    const std::string& choiceID
+)
+{
+    const std::string questKey =
+        normalizePersistentStoryID(questID);
+
+    const std::string choiceKey =
+        normalizePersistentStoryID(choiceID);
+
+    if ( questKey.empty()
+        || choiceKey.empty() )
+    {
+        return false;
+    }
+
+    const auto questIterator =
+        persistentWorldStoryState.quests.find(
+            questKey
+        );
+
+    if ( questIterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return false;
+    }
+
+    return
+        questIterator->second.usedChoices.find(
+            choiceKey
+        )
+        != questIterator->second.usedChoices.end();
+}
+bool persistentStoryAssignNPCDialogue(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& dialogueID
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string dialogueKey =
+        normalizePersistentStoryID(dialogueID);
+
+    if ( npcKey.empty()
+        || dialogueKey.empty() )
+    {
+        return false;
+    }
+
+    persistentWorldStoryState
+        .npcDialogueStates[npcKey]
+        .dialogueID = dialogueKey;
+
+    return true;
+}
+
+std::string persistentStoryGetNPCDialogue(
+    const std::string& mapName,
+    const Sint32 persistentID
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    if ( npcKey.empty() )
+    {
+        return "";
+    }
+
+    const auto iterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( iterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return "";
+    }
+
+    return iterator->second.dialogueID;
+}
+
+bool persistentStorySetNPCNode(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const Sint32 nodeID
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    if ( npcKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentNPCDialogueState& npcState =
+        persistentWorldStoryState
+            .npcDialogueStates[npcKey];
+
+    npcState.currentNode = nodeID;
+    npcState.conversationStarted = true;
+
+    return true;
+}
+
+Sint32 persistentStoryGetNPCNode(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const Sint32 fallbackNode
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    if ( npcKey.empty() )
+    {
+        return fallbackNode;
+    }
+
+    const auto iterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( iterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return fallbackNode;
+    }
+
+    return iterator->second.currentNode;
+}
+
+bool persistentStorySetNPCVariable(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& variableID,
+    const Sint32 value
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string variableKey =
+        normalizePersistentStoryID(variableID);
+
+    if ( npcKey.empty()
+        || variableKey.empty() )
+    {
+        return false;
+    }
+
+    persistentWorldStoryState
+        .npcDialogueStates[npcKey]
+        .variables[variableKey] = value;
+
+    return true;
+}
+
+Sint32 persistentStoryGetNPCVariable(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& variableID,
+    const Sint32 fallbackValue
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string variableKey =
+        normalizePersistentStoryID(variableID);
+
+    if ( npcKey.empty()
+        || variableKey.empty() )
+    {
+        return fallbackValue;
+    }
+
+    const auto npcIterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( npcIterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return fallbackValue;
+    }
+
+    const auto variableIterator =
+        npcIterator->second.variables.find(
+            variableKey
+        );
+
+    if ( variableIterator
+        == npcIterator->second.variables.end() )
+    {
+        return fallbackValue;
+    }
+
+    return variableIterator->second;
+}
+
+bool persistentStorySetNPCFlag(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& flagID,
+    const bool enabled
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string flagKey =
+        normalizePersistentStoryID(flagID);
+
+    if ( npcKey.empty()
+        || flagKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentNPCDialogueState& npcState =
+        persistentWorldStoryState
+            .npcDialogueStates[npcKey];
+
+    if ( enabled )
+    {
+        npcState.flags.insert(flagKey);
+    }
+    else
+    {
+        npcState.flags.erase(flagKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryGetNPCFlag(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& flagID
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string flagKey =
+        normalizePersistentStoryID(flagID);
+
+    if ( npcKey.empty()
+        || flagKey.empty() )
+    {
+        return false;
+    }
+
+    const auto npcIterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( npcIterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return false;
+    }
+
+    return
+        npcIterator->second.flags.find(flagKey)
+        != npcIterator->second.flags.end();
+}
+
+bool persistentStorySetNPCChoiceUsed(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& choiceID,
+    const bool used
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string choiceKey =
+        normalizePersistentStoryID(choiceID);
+
+    if ( npcKey.empty()
+        || choiceKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentNPCDialogueState& npcState =
+        persistentWorldStoryState
+            .npcDialogueStates[npcKey];
+
+    if ( used )
+    {
+        npcState.usedChoices.insert(choiceKey);
+    }
+    else
+    {
+        npcState.usedChoices.erase(choiceKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryNPCChoiceWasUsed(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& choiceID
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string choiceKey =
+        normalizePersistentStoryID(choiceID);
+
+    if ( npcKey.empty()
+        || choiceKey.empty() )
+    {
+        return false;
+    }
+
+    const auto npcIterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( npcIterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return false;
+    }
+
+    return
+        npcIterator->second.usedChoices.find(
+            choiceKey
+        )
+        != npcIterator->second.usedChoices.end();
+}
+
+bool persistentStorySetNPCNodeSeen(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& nodeID,
+    const bool seen
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string nodeKey =
+        normalizePersistentStoryID(nodeID);
+
+    if ( npcKey.empty()
+        || nodeKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentNPCDialogueState& npcState =
+        persistentWorldStoryState
+            .npcDialogueStates[npcKey];
+
+    if ( seen )
+    {
+        npcState.seenNodes.insert(nodeKey);
+    }
+    else
+    {
+        npcState.seenNodes.erase(nodeKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryNPCNodeWasSeen(
+    const std::string& mapName,
+    const Sint32 persistentID,
+    const std::string& nodeID
+)
+{
+    const std::string npcKey =
+        makePersistentNPCDialogueKey(
+            mapName,
+            persistentID
+        );
+
+    const std::string nodeKey =
+        normalizePersistentStoryID(nodeID);
+
+    if ( npcKey.empty()
+        || nodeKey.empty() )
+    {
+        return false;
+    }
+
+    const auto npcIterator =
+        persistentWorldStoryState
+            .npcDialogueStates
+            .find(npcKey);
+
+    if ( npcIterator
+        == persistentWorldStoryState
+            .npcDialogueStates
+            .end() )
+    {
+        return false;
+    }
+
+    return
+        npcIterator->second.seenNodes.find(
+            nodeKey
+        )
+        != npcIterator->second.seenNodes.end();
+}
+bool persistentStoryMapHasState(
+    const std::string& mapName
+)
+{
+    const std::string mapKey =
+        normalizePersistentMapKey(mapName);
+
+    if ( mapKey.empty() )
+    {
+        return false;
+    }
+
+    return
+        persistentMapRemovalRegistry.find(mapKey)
+        != persistentMapRemovalRegistry.end();
+}
+
+bool persistentStoryOriginalEntityIsRemoved(
+    const std::string& mapName,
+    const Sint32 persistentID
+)
+{
+    if ( persistentID <= 0 )
+    {
+        return false;
+    }
+
+    const std::string mapKey =
+        normalizePersistentMapKey(mapName);
+
+    if ( mapKey.empty() )
+    {
+        return false;
+    }
+
+    const auto mapIterator =
+        persistentMapRemovalRegistry.find(mapKey);
+
+    if ( mapIterator
+        == persistentMapRemovalRegistry.end() )
+    {
+        /*
+         * No map record means the target map has not yet supplied
+         * authoritative persistent state.
+         *
+         * Do not incorrectly treat unknown as dead.
+         */
+        return false;
+    }
+
+    return
+        mapIterator->second.removedEntityIDs.find(
+            persistentID
+        )
+        != mapIterator->second.removedEntityIDs.end();
 }
 void beginClientPersistentWorldSnapshot(
     const std::string& mapName
