@@ -138,6 +138,19 @@ void receiveClientPersistentPowerCrystalState(
     Sint32 crystalPowerToActivate,
     Sint32 crystalCircuitStatus
 );
+void receiveClientPersistentSummonTrapState(
+    Sint32 persistentID,
+    Sint32 monster,
+    Sint32 count,
+    Sint32 interval,
+    Sint32 spawnCycles,
+    Sint32 powerToDisable,
+    Sint32 failureRate,
+    Sint32 fired,
+    Sint32 initialized,
+    Sint32 ticksToFire,
+    Sint32 playerProximity
+);
 void receiveClientPersistentBoulderTrapState(
     Sint32 persistentID,
     Sint32 trapBehavior,

@@ -249,7 +249,8 @@ enum class Kind : Uint8
 	ShopkeeperInventory,
     WorldItem,
     GoldBag,
-    MonsterLivingState
+    MonsterLivingState,
+    SummonTrap
 };
 
     Kind kind = Kind::None;
@@ -341,6 +342,7 @@ enum class Kind : Uint8
     Sint32 boulderTrapPreDelay = 0;
     Sint32 boulderTrapCircuitStatus = 0;
     Sint32 boulderTrapSabotaged = 0;
+
 
 	/*
      * Signal timer and AND-gate controller runtime state.
@@ -561,7 +563,23 @@ enum class Kind : Uint8
     real_t monsterSavedPitch = 0.0;
     real_t monsterSavedRoll = 0.0;
 
-
+    /*
+    * Summoning-trap runtime state.
+    *
+    * These correspond to skill[0] through skill[9].
+    * Persisting the complete block prevents completed cycles from
+    * restarting and prevents random/scaled traps from rerolling.
+    */
+    Sint32 summonTrapMonster = 0;
+    Sint32 summonTrapCount = 0;
+    Sint32 summonTrapInterval = 0;
+    Sint32 summonTrapSpawnCycles = 0;
+    Sint32 summonTrapPowerToDisable = 0;
+    Sint32 summonTrapFailureRate = 0;
+    Sint32 summonTrapFired = 0;
+    Sint32 summonTrapInitialized = 0;
+    Sint32 summonTrapTicksToFire = 0;
+    Sint32 summonTrapPlayerProximity = 0;
 
 // PLACE STUFF ABOVE THIS
     bool passable = false;
@@ -902,6 +920,7 @@ void beginClientPersistentWorldSnapshot(
         state.dynamicBoulders.clear();
         state.dynamicWorldItems.clear();
         state.dynamicGoldBags.clear();
+        state.dynamicMonsterIDs.clear();
 		/*
 		* The destination map has not loaded yet. Its fresh raw tiles will
 		* become the new baseline inside applyPersistentMapRemovals().
@@ -1292,6 +1311,66 @@ void receiveClientPersistentBoulderTrapState(
 
     state.boulderTrapSabotaged =
         sabotaged;
+
+    persistentMapRemovalRegistry[
+        clientPersistentSnapshotMapKey
+    ].mechanismStates[persistentID] = state;
+}
+void receiveClientPersistentSummonTrapState(
+    Sint32 persistentID,
+    Sint32 monster,
+    Sint32 count,
+    Sint32 interval,
+    Sint32 spawnCycles,
+    Sint32 powerToDisable,
+    Sint32 failureRate,
+    Sint32 fired,
+    Sint32 initialized,
+    Sint32 ticksToFire,
+    Sint32 playerProximity
+)
+{
+    if ( multiplayer != CLIENT
+        || !clientPersistentSnapshotReceiving
+        || persistentID <= 0 )
+    {
+        return;
+    }
+
+    PersistentMechanismState state;
+
+    state.kind =
+        PersistentMechanismState::Kind::SummonTrap;
+
+    state.summonTrapMonster =
+        monster;
+
+    state.summonTrapCount =
+        count;
+
+    state.summonTrapInterval =
+        interval;
+
+    state.summonTrapSpawnCycles =
+        spawnCycles;
+
+    state.summonTrapPowerToDisable =
+        powerToDisable;
+
+    state.summonTrapFailureRate =
+        failureRate;
+
+    state.summonTrapFired =
+        fired;
+
+    state.summonTrapInitialized =
+        initialized;
+
+    state.summonTrapTicksToFire =
+        ticksToFire;
+
+    state.summonTrapPlayerProximity =
+        playerProximity;
 
     persistentMapRemovalRegistry[
         clientPersistentSnapshotMapKey
@@ -1833,7 +1912,7 @@ void sendPersistentWorldSnapshotToClient(
 	Uint32 tilesSent = 0;
 	Uint32 pedestalsSent = 0;
 	Uint32 chestsSent = 0;
-
+    Uint32 summonTrapsSent = 0;
 
     if ( state )
     {
@@ -2013,6 +2092,121 @@ void sendPersistentWorldSnapshotToClient(
                 );
 
                 ++leversSent;
+            }
+            else if ( mechanism.kind == PersistentMechanismState::Kind::SummonTrap )
+            {
+                /*
+                * PWST:
+                *
+                * bytes 0-3    packet name
+                * bytes 4-7    persistent trap ID
+                * bytes 8-11   selected monster
+                * bytes 12-15  monsters per cycle
+                * bytes 16-19  interval
+                * bytes 20-23  remaining spawn cycles
+                * bytes 24-27  power-to-disable setting
+                * bytes 28-31  failure rate
+                * bytes 32-35  fired/broken state
+                * bytes 36-39  initialized state
+                * bytes 40-43  ticks until next cycle
+                * bytes 44-47  player proximity radius
+                */
+                strcpy(
+                    reinterpret_cast<char*>(
+                        net_packet->data
+                    ),
+                    "PWST"
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        persistentID
+                    ),
+                    &net_packet->data[4]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapMonster
+                    ),
+                    &net_packet->data[8]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapCount
+                    ),
+                    &net_packet->data[12]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapInterval
+                    ),
+                    &net_packet->data[16]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapSpawnCycles
+                    ),
+                    &net_packet->data[20]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapPowerToDisable
+                    ),
+                    &net_packet->data[24]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapFailureRate
+                    ),
+                    &net_packet->data[28]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapFired
+                    ),
+                    &net_packet->data[32]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapInitialized
+                    ),
+                    &net_packet->data[36]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapTicksToFire
+                    ),
+                    &net_packet->data[40]
+                );
+
+                SDLNet_Write32(
+                    static_cast<Uint32>(
+                        mechanism.summonTrapPlayerProximity
+                    ),
+                    &net_packet->data[44]
+                );
+
+                net_packet->len = 48;
+
+                prepareClientAddress();
+
+                sendPacketSafe(
+                    net_sock,
+                    -1,
+                    net_packet,
+                    player - 1
+                );
+
+                ++summonTrapsSent;
             }
 			            else if ( mechanism.kind
                 == PersistentMechanismState::Kind::Chest )
@@ -4766,7 +4960,7 @@ static void capturePersistentMechanismStates()
     Uint32 capturedDynamicWorldItems = 0;
     Uint32 capturedOriginalGoldBags = 0;
     Uint32 capturedDynamicGoldBags = 0;
-
+    Uint32 capturedSummonTraps = 0;
 	/*
 	* Dynamic entities are a current-world snapshot. Replace the previous
 	* snapshot so destroyed boulders do not return later.
@@ -4910,6 +5104,47 @@ static void capturePersistentMechanismStates()
             ] = mechanismState;
 
             ++capturedPedestals;
+        }
+        else if ( entity->behavior == &actSummonTrap )
+        {
+            mechanismState.kind =
+                PersistentMechanismState::Kind::SummonTrap;
+
+            mechanismState.summonTrapMonster =
+                entity->skill[0];
+
+            mechanismState.summonTrapCount =
+                entity->skill[1];
+
+            mechanismState.summonTrapInterval =
+                entity->skill[2];
+
+            mechanismState.summonTrapSpawnCycles =
+                entity->skill[3];
+
+            mechanismState.summonTrapPowerToDisable =
+                entity->skill[4];
+
+            mechanismState.summonTrapFailureRate =
+                entity->skill[5];
+
+            mechanismState.summonTrapFired =
+                entity->skill[6];
+
+            mechanismState.summonTrapInitialized =
+                entity->skill[7];
+
+            mechanismState.summonTrapTicksToFire =
+                entity->skill[8];
+
+            mechanismState.summonTrapPlayerProximity =
+                entity->skill[9];
+
+            mapState.mechanismStates[
+                entity->persistentID
+            ] = mechanismState;
+
+            ++capturedSummonTraps;
         }
 		else if ( entity->behavior == &actMonster )
                 {
@@ -6078,6 +6313,8 @@ PersistentMapRemovalState& mapState =
     Uint32 restoredDynamicWorldItems = 0;
     Uint32 restoredOriginalGoldBags = 0;
     Uint32 restoredDynamicGoldBags = 0;
+    Uint32 restoredSummonTraps = 0;
+
     for ( node_t* node = map.entities->first;
         node != nullptr;
         node = node->next )
@@ -6280,6 +6517,51 @@ PersistentMapRemovalState& mapState =
                 }
 
                 ++restoredChests;
+                break;
+            }
+            case PersistentMechanismState::Kind::SummonTrap:
+            {
+                if ( entity->behavior != &actSummonTrap )
+                {
+                    printlog(
+                        "[Persistent World] Warning: ID %d was saved as a summoning trap but loaded with another behavior.",
+                        entity->persistentID
+                    );
+
+                    break;
+                }
+
+                entity->skill[0] =
+                    savedState.summonTrapMonster;
+
+                entity->skill[1] =
+                    savedState.summonTrapCount;
+
+                entity->skill[2] =
+                    savedState.summonTrapInterval;
+
+                entity->skill[3] =
+                    savedState.summonTrapSpawnCycles;
+
+                entity->skill[4] =
+                    savedState.summonTrapPowerToDisable;
+
+                entity->skill[5] =
+                    savedState.summonTrapFailureRate;
+
+                entity->skill[6] =
+                    savedState.summonTrapFired;
+
+                entity->skill[7] =
+                    savedState.summonTrapInitialized;
+
+                entity->skill[8] =
+                    savedState.summonTrapTicksToFire;
+
+                entity->skill[9] =
+                    savedState.summonTrapPlayerProximity;
+
+                ++restoredSummonTraps;
                 break;
             }
 			            case PersistentMechanismState::Kind::PressurePlate:
