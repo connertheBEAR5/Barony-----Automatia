@@ -47,6 +47,22 @@ struct CustomDialogueNode
     Sint32 id = 0;
     Sint32 nextNode = 0;
     std::string text;
+
+    /*
+     * Optional Stage 5 inventory condition.
+     *
+     * When conditionItem is non-empty, the condition is evaluated before
+     * displaying this node:
+     *
+     * - hasItemNode is selected when the player owns enough items.
+     * - missingItemNode is selected otherwise.
+     * - consumeConditionItem removes the requested quantity on success.
+     */
+    std::string conditionItem;
+    Sint32 conditionItemCount = 1;
+    Sint32 hasItemNode = 0;
+    Sint32 missingItemNode = 0;
+    bool consumeConditionItem = false;
 };
 
 /*
@@ -129,6 +145,99 @@ static std::string normalizeCustomDialogueID(
 
     return result;
 }
+
+/*
+ * Resolve creator-friendly item names used by Stage 5 dialogue JSON.
+ *
+ * More names can be added here in later stages without changing the
+ * authored dialogue graph format.
+ */
+static bool resolveCustomDialogueItemType(
+    const std::string& rawItemName,
+    ItemType& itemType
+)
+{
+    const std::string itemName =
+        normalizeCustomDialogueID(rawItemName);
+
+    if ( itemName == "torch"
+        || itemName == "tool_torch" )
+    {
+        itemType = TOOL_TORCH;
+        return true;
+    }
+
+    return false;
+}
+
+static Item* findCustomDialoguePlayerItem(
+    const int player,
+    const ItemType itemType,
+    const Sint32 requiredCount
+)
+{
+    if ( player < 0
+        || player >= MAXPLAYERS
+        || !stats[player]
+        || requiredCount <= 0 )
+    {
+        return nullptr;
+    }
+
+    for ( node_t* node =
+            stats[player]->inventory.first;
+        node;
+        node = node->next )
+    {
+        Item* item =
+            static_cast<Item*>(node->element);
+
+        if ( item
+            && item->type == itemType
+            && item->count >= requiredCount )
+        {
+            return item;
+        }
+    }
+
+    return nullptr;
+}
+
+static bool consumeCustomDialoguePlayerItem(
+    const int player,
+    Item*& item,
+    const Sint32 amount
+)
+{
+    if ( amount <= 0 )
+    {
+        return true;
+    }
+
+    for ( Sint32 count = 0;
+        count < amount;
+        ++count )
+    {
+        if ( !item )
+        {
+            return false;
+        }
+
+        const Sint32 previousCount =
+            item->count;
+
+        consumeItem(item, player);
+
+        if ( item
+            && item->count == previousCount )
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static CustomDialogueDefinition loadCustomDialogueDefinition(
     const std::string& rawDialogueID
 )
@@ -468,6 +577,125 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 nodeValue["next"].GetInt();
         }
 
+        node.hasItemNode = node.id;
+        node.missingItemNode = node.id;
+
+        if ( nodeValue.HasMember("condition") )
+        {
+            const rapidjson::Value& condition =
+                nodeValue["condition"];
+
+            if ( !condition.IsObject()
+                || !condition.HasMember("type")
+                || !condition["type"].IsString() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d has an invalid condition object.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
+            }
+
+            const std::string conditionType =
+                normalizeCustomDialogueID(
+                    condition["type"].GetString()
+                );
+
+            if ( conditionType != "has_item" )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d uses unsupported condition type '%s'.",
+                    realPath.c_str(),
+                    node.id,
+                    condition["type"].GetString()
+                );
+
+                return definition;
+            }
+
+            if ( !condition.HasMember("item")
+                || !condition["item"].IsString()
+                || !condition.HasMember("has_item_node")
+                || !condition["has_item_node"].IsInt()
+                || !condition.HasMember("missing_item_node")
+                || !condition["missing_item_node"].IsInt() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d item condition requires string 'item' and integer branch nodes.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
+            }
+
+            node.conditionItem =
+                condition["item"].GetString();
+
+            ItemType resolvedItemType =
+                TOOL_TORCH;
+
+            if ( !resolveCustomDialogueItemType(
+                    node.conditionItem,
+                    resolvedItemType
+                ) )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d references unsupported item '%s'.",
+                    realPath.c_str(),
+                    node.id,
+                    node.conditionItem.c_str()
+                );
+
+                return definition;
+            }
+
+            node.conditionItemCount = 1;
+
+            if ( condition.HasMember("count") )
+            {
+                if ( !condition["count"].IsInt()
+                    || condition["count"].GetInt() <= 0 )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d condition count must be a positive integer.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionItemCount =
+                    condition["count"].GetInt();
+            }
+
+            node.hasItemNode =
+                condition["has_item_node"].GetInt();
+
+            node.missingItemNode =
+                condition["missing_item_node"].GetInt();
+
+            if ( condition.HasMember("consume") )
+            {
+                if ( !condition["consume"].IsBool() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d condition 'consume' must be Boolean.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.consumeConditionItem =
+                    condition["consume"].GetBool();
+            }
+        }
+
         if ( definition.nodes.find(node.id)
             != definition.nodes.end() )
         {
@@ -519,6 +747,23 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 realPath.c_str(),
                 node.id,
                 node.nextNode
+            );
+
+            return definition;
+        }
+
+        if ( !node.conditionItem.empty()
+            && (
+                definition.nodes.find(node.hasItemNode)
+                    == definition.nodes.end()
+                || definition.nodes.find(node.missingItemNode)
+                    == definition.nodes.end()
+            ) )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' node %d has an item-condition branch pointing to a missing node.",
+                realPath.c_str(),
+                node.id
             );
 
             return definition;
@@ -12802,12 +13047,6 @@ bool handleCustomMonsterDialogue(
     Stat* myStats
 )
 {
-	printlog(
-    "[Custom Dialogue] NPC UID=%u persistentID=%d dialogue='%s'.",
-    my->getUID(),
-    my->persistentID,
-    myStats->customDialogueID
-);
     if ( !my
         || !myStats )
     {
@@ -12940,6 +13179,90 @@ bool handleCustomMonsterDialogue(
         return true;
     }
 
+    /*
+     * Stage 5 conditions redirect before the selected dialogue is
+     * displayed. This allows a waiting node to branch directly to a
+     * success line as soon as the player owns the required item.
+     */
+    if ( !nodeIterator->second.conditionItem.empty() )
+    {
+        ItemType conditionItemType =
+            TOOL_TORCH;
+
+        if ( !resolveCustomDialogueItemType(
+                nodeIterator->second.conditionItem,
+                conditionItemType
+            ) )
+        {
+            printlog(
+                "[Custom Dialogue] Dialogue '%s' node %d could not resolve item '%s' at runtime.",
+                definition->dialogueID.c_str(),
+                nodeIterator->second.id,
+                nodeIterator->second.conditionItem.c_str()
+            );
+
+            return true;
+        }
+
+        Item* matchingItem =
+            findCustomDialoguePlayerItem(
+                monsterclicked,
+                conditionItemType,
+                nodeIterator->second.conditionItemCount
+            );
+
+        Sint32 selectedNodeID =
+            matchingItem
+                ? nodeIterator->second.hasItemNode
+                : nodeIterator->second.missingItemNode;
+
+        if ( matchingItem
+            && nodeIterator->second.consumeConditionItem )
+        {
+            if ( !consumeCustomDialoguePlayerItem(
+                    monsterclicked,
+                    matchingItem,
+                    nodeIterator->second.conditionItemCount
+                ) )
+            {
+                printlog(
+                    "[Custom Dialogue] Failed to consume %d '%s' item(s) from player %d.",
+                    nodeIterator->second.conditionItemCount,
+                    nodeIterator->second.conditionItem.c_str(),
+                    monsterclicked
+                );
+
+                selectedNodeID =
+                    nodeIterator->second.missingItemNode;
+            }
+        }
+
+        currentNodeID =
+            selectedNodeID;
+
+        nodeIterator =
+            definition->nodes.find(
+                currentNodeID
+            );
+
+        if ( nodeIterator
+            == definition->nodes.end() )
+        {
+            players[monsterclicked]
+                ->worldUI
+                .worldTooltipDialogue
+                .createDialogueTooltip(
+                    my->getUID(),
+                    Player::WorldUI_t
+                        ::WorldTooltipDialogue_t
+                        ::DIALOGUE_NPC,
+                    "This character's dialogue contains an invalid condition branch."
+                );
+
+            return true;
+        }
+    }
+
     const CustomDialogueNode& node =
         nodeIterator->second;
 
@@ -12972,8 +13295,8 @@ bool handleCustomMonsterDialogue(
         );
 
         /*
-         * Progress after displaying the current node. A terminal node
-         * simply points to itself and therefore repeats.
+         * Progress after displaying the selected node. A terminal node
+         * points to itself and therefore repeats.
          */
         persistentStorySetNPCNode(
             sourceMap,
