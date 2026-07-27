@@ -73,9 +73,12 @@ struct CustomDialogueNode
     Sint32 questStage = -1;
 
     /*
-     * Stage 7 one-time player reward.
+     * Stage 7/8 one-time player rewards.
      */
     Sint32 rewardGold = 0;
+
+    std::string rewardItem;
+    Sint32 rewardItemCount = 0;
 };
 
 /*
@@ -173,6 +176,38 @@ static bool resolveCustomDialogueItemType(
 {
     const std::string itemName =
         normalizeCustomDialogueID(rawItemName);
+
+    if ( itemName == "torch"
+        || itemName == "tool_torch" )
+    {
+        itemType = TOOL_TORCH;
+        return true;
+    }
+
+    return false;
+}
+
+
+/*
+ * Resolve creator-friendly reward item names.
+ *
+ * This table is intentionally small during Stage 8. It can be expanded
+ * without changing the JSON format.
+ */
+static bool resolveCustomDialogueRewardItemType(
+    const std::string& rawItemName,
+    ItemType& itemType
+)
+{
+    const std::string itemName =
+        normalizeCustomDialogueID(rawItemName);
+
+    if ( itemName == "healing_potion"
+        || itemName == "potion_healing" )
+    {
+        itemType = POTION_HEALING;
+        return true;
+    }
 
     if ( itemName == "torch"
         || itemName == "tool_torch" )
@@ -839,6 +874,66 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
                 node.rewardGold =
                     action["reward_gold"].GetInt();
+            }
+
+            if ( action.HasMember("reward_item") )
+            {
+                const rapidjson::Value& rewardItem =
+                    action["reward_item"];
+
+                if ( !rewardItem.IsObject()
+                    || !rewardItem.HasMember("item")
+                    || !rewardItem["item"].IsString() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d action 'reward_item' requires a string 'item'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.rewardItem =
+                    rewardItem["item"].GetString();
+
+                node.rewardItemCount = 1;
+
+                if ( rewardItem.HasMember("count") )
+                {
+                    if ( !rewardItem["count"].IsInt()
+                        || rewardItem["count"].GetInt() <= 0 )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d reward item count must be a positive integer.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.rewardItemCount =
+                        rewardItem["count"].GetInt();
+                }
+
+                ItemType rewardItemType =
+                    POTION_HEALING;
+
+                if ( !resolveCustomDialogueRewardItemType(
+                        node.rewardItem,
+                        rewardItemType
+                    ) )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d references unsupported reward item '%s'.",
+                        realPath.c_str(),
+                        node.id,
+                        node.rewardItem.c_str()
+                    );
+
+                    return definition;
+                }
             }
 
             if ( (
@@ -13535,6 +13630,86 @@ bool handleCustomMonsterDialogue(
                 }
             }
 
+            if ( !node.rewardItem.empty()
+                && node.rewardItemCount > 0 )
+            {
+                ItemType rewardItemType =
+                    POTION_HEALING;
+
+                if ( resolveCustomDialogueRewardItemType(
+                        node.rewardItem,
+                        rewardItemType
+                    ) )
+                {
+                    Item* createdItem =
+                        newItem(
+                            rewardItemType,
+                            EXCELLENT,
+                            0,
+                            node.rewardItemCount,
+                            local_rng.rand(),
+                            true,
+                            nullptr
+                        );
+
+                    if ( createdItem )
+                    {
+                        Item* pickedUpItem =
+                            itemPickup(
+                                monsterclicked,
+                                createdItem
+                            );
+
+                        if ( pickedUpItem )
+                        {
+                            messagePlayer(
+                                monsterclicked,
+                                MESSAGE_INTERACTION
+                                    | MESSAGE_INVENTORY,
+                                Language::get(504),
+                                createdItem->description()
+                            );
+
+                            if ( players[monsterclicked]
+                                && players[monsterclicked]->entity )
+                            {
+                                playSoundEntity(
+                                    players[monsterclicked]->entity,
+                                    35 + local_rng.rand() % 3,
+                                    64
+                                );
+                            }
+
+                            /*
+                             * itemPickup() returns the destination stack
+                             * for local players and the transmitted source
+                             * item for remote players.
+                             */
+                            if ( players[monsterclicked]
+                                && players[monsterclicked]->isLocalPlayer() )
+                            {
+                                free(createdItem);
+                            }
+                            else
+                            {
+                                free(pickedUpItem);
+                            }
+                        }
+                        else
+                        {
+                            free(createdItem);
+
+                            printlog(
+                                "[Custom Dialogue] Failed to give reward item '%s' x%d to player %d.",
+                                node.rewardItem.c_str(),
+                                node.rewardItemCount,
+                                monsterclicked
+                            );
+                        }
+                    }
+                }
+            }
+
             persistentStorySetNPCFlag(
                 sourceMap,
                 my->persistentID,
@@ -13543,11 +13718,13 @@ bool handleCustomMonsterDialogue(
             );
 
             printlog(
-                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d; gold reward=%d.",
+                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d; gold reward=%d, item reward='%s' x%d.",
                 node.actionID.c_str(),
                 definition->questID.c_str(),
                 node.id,
-                node.rewardGold
+                node.rewardGold,
+                node.rewardItem.c_str(),
+                node.rewardItemCount
             );
         }
     }
