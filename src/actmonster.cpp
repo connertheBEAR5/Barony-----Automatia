@@ -37,11 +37,20 @@
 #include "json.hpp"
 float limbs[NUMMONSTERS][30][3];
 /*
- * One authored custom-dialogue definition.
+ * One node in an authored custom-dialogue graph.
  *
- * Stage 3 supports a single dialogue text node. Later stages will expand
- * this into multiple nodes, choices, conditions, and actions without
- * changing the NPC's assigned customDialogueID.
+ * Stage 4 supports automatic node-to-node progression. Choices,
+ * conditions, and actions will be added in later stages.
+ */
+struct CustomDialogueNode
+{
+    Sint32 id = 0;
+    Sint32 nextNode = 0;
+    std::string text;
+};
+
+/*
+ * One authored custom-dialogue graph loaded from JSON.
  */
 struct CustomDialogueDefinition
 {
@@ -49,7 +58,12 @@ struct CustomDialogueDefinition
     bool valid = false;
 
     std::string dialogueID;
-    std::string text;
+    Sint32 startNode = 0;
+
+    std::unordered_map<
+        Sint32,
+        CustomDialogueNode
+    > nodes;
 };
 
 /*
@@ -327,35 +341,196 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         return definition;
     }
 
-    if ( !document.HasMember("text")
-        || !document["text"].IsString() )
+    /*
+     * Preserve compatibility with the Stage 3 one-line JSON format:
+     *
+     * {
+     *     "version": 1,
+     *     "text": "Hello."
+     * }
+     */
+    if ( document.HasMember("text")
+        && document["text"].IsString()
+        && !document.HasMember("nodes") )
     {
+        CustomDialogueNode node;
+        node.id = 0;
+        node.nextNode = 0;
+        node.text = document["text"].GetString();
+
+        if ( node.text.empty() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' contains an empty dialogue text.",
+                realPath.c_str()
+            );
+
+            return definition;
+        }
+
+        definition.startNode = 0;
+        definition.nodes[node.id] = node;
+        definition.valid = true;
+
         printlog(
-            "[Custom Dialogue] '%s' has no string 'text' field.",
+            "[Custom Dialogue] Loaded Stage 3-compatible dialogue '%s' from '%s'.",
+            definition.dialogueID.c_str(),
             realPath.c_str()
         );
 
         return definition;
     }
 
-    definition.text =
-        document["text"].GetString();
-
-    if ( definition.text.empty() )
+    if ( !document.HasMember("start_node")
+        || !document["start_node"].IsInt() )
     {
         printlog(
-            "[Custom Dialogue] '%s' contains an empty dialogue text.",
+            "[Custom Dialogue] '%s' has no integer 'start_node' field.",
             realPath.c_str()
         );
 
         return definition;
+    }
+
+    if ( !document.HasMember("nodes")
+        || !document["nodes"].IsArray() )
+    {
+        printlog(
+            "[Custom Dialogue] '%s' has no array 'nodes' field.",
+            realPath.c_str()
+        );
+
+        return definition;
+    }
+
+    definition.startNode =
+        document["start_node"].GetInt();
+
+    const rapidjson::Value& nodes =
+        document["nodes"];
+
+    for ( rapidjson::SizeType index = 0;
+        index < nodes.Size();
+        ++index )
+    {
+        const rapidjson::Value& nodeValue =
+            nodes[index];
+
+        if ( !nodeValue.IsObject()
+            || !nodeValue.HasMember("id")
+            || !nodeValue["id"].IsInt()
+            || !nodeValue.HasMember("text")
+            || !nodeValue["text"].IsString() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' node index %u must contain integer 'id' and string 'text'.",
+                realPath.c_str(),
+                static_cast<unsigned int>(index)
+            );
+
+            return definition;
+        }
+
+        CustomDialogueNode node;
+        node.id = nodeValue["id"].GetInt();
+        node.text = nodeValue["text"].GetString();
+
+        if ( node.text.empty() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' node %d contains empty text.",
+                realPath.c_str(),
+                node.id
+            );
+
+            return definition;
+        }
+
+        /*
+         * A node without "next" repeats itself on later interactions.
+         */
+        node.nextNode = node.id;
+
+        if ( nodeValue.HasMember("next") )
+        {
+            if ( !nodeValue["next"].IsInt() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d has a non-integer 'next' field.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
+            }
+
+            node.nextNode =
+                nodeValue["next"].GetInt();
+        }
+
+        if ( definition.nodes.find(node.id)
+            != definition.nodes.end() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' contains duplicate node ID %d.",
+                realPath.c_str(),
+                node.id
+            );
+
+            return definition;
+        }
+
+        definition.nodes[node.id] =
+            std::move(node);
+    }
+
+    if ( definition.nodes.empty() )
+    {
+        printlog(
+            "[Custom Dialogue] '%s' contains no dialogue nodes.",
+            realPath.c_str()
+        );
+
+        return definition;
+    }
+
+    if ( definition.nodes.find(definition.startNode)
+        == definition.nodes.end() )
+    {
+        printlog(
+            "[Custom Dialogue] '%s' start node %d does not exist.",
+            realPath.c_str(),
+            definition.startNode
+        );
+
+        return definition;
+    }
+
+    for ( const auto& pair : definition.nodes )
+    {
+        const CustomDialogueNode& node =
+            pair.second;
+
+        if ( definition.nodes.find(node.nextNode)
+            == definition.nodes.end() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' node %d points to missing next node %d.",
+                realPath.c_str(),
+                node.id,
+                node.nextNode
+            );
+
+            return definition;
+        }
     }
 
     definition.valid = true;
 
     printlog(
-        "[Custom Dialogue] Loaded dialogue '%s' from '%s'.",
+        "[Custom Dialogue] Loaded dialogue '%s' with %zu node(s) from '%s'.",
         definition.dialogueID.c_str(),
+        definition.nodes.size(),
         realPath.c_str()
     );
 
@@ -12627,6 +12802,12 @@ bool handleCustomMonsterDialogue(
     Stat* myStats
 )
 {
+	printlog(
+    "[Custom Dialogue] NPC UID=%u persistentID=%d dialogue='%s'.",
+    my->getUID(),
+    my->persistentID,
+    myStats->customDialogueID
+);
     if ( !my
         || !myStats )
     {
@@ -12658,12 +12839,6 @@ bool handleCustomMonsterDialogue(
 
     if ( !definition )
     {
-        /*
-         * The NPC has a custom ID but its file is missing or invalid.
-         *
-         * Return true so the NPC does not unexpectedly become
-         * recruitable or fall through to unrelated numbered chatter.
-         */
         players[monsterclicked]
             ->worldUI
             .worldTooltipDialogue
@@ -12678,14 +12853,106 @@ bool handleCustomMonsterDialogue(
         return true;
     }
 
-    /*
-     * map.filename is the correct source when available because it is
-     * the same normalized identity used by the persistent-world system.
-     */
     const std::string sourceMap =
         map.filename[0]
             ? map.filename
             : map.name;
+
+    Sint32 currentNodeID =
+        definition->startNode;
+
+    if ( multiplayer != CLIENT
+        && my->persistentID > 0 )
+    {
+        const std::string assignedDialogue =
+            persistentStoryGetNPCDialogue(
+                sourceMap,
+                my->persistentID
+            );
+
+        /*
+         * A newly assigned or changed dialogue graph begins at its
+         * authored start node.
+         */
+        if ( assignedDialogue
+            != definition->dialogueID )
+        {
+            persistentStoryAssignNPCDialogue(
+                sourceMap,
+                my->persistentID,
+                definition->dialogueID
+            );
+
+            persistentStorySetNPCNode(
+                sourceMap,
+                my->persistentID,
+                definition->startNode
+            );
+        }
+
+        currentNodeID =
+            persistentStoryGetNPCNode(
+                sourceMap,
+                my->persistentID,
+                definition->startNode
+            );
+    }
+
+    auto nodeIterator =
+        definition->nodes.find(
+            currentNodeID
+        );
+
+    if ( nodeIterator
+        == definition->nodes.end() )
+    {
+        printlog(
+            "[Custom Dialogue] NPC persistent ID %d referenced missing node %d in dialogue '%s'; resetting to start node %d.",
+            my->persistentID,
+            currentNodeID,
+            definition->dialogueID.c_str(),
+            definition->startNode
+        );
+
+        currentNodeID =
+            definition->startNode;
+
+        nodeIterator =
+            definition->nodes.find(
+                currentNodeID
+            );
+    }
+
+    if ( nodeIterator
+        == definition->nodes.end() )
+    {
+        players[monsterclicked]
+            ->worldUI
+            .worldTooltipDialogue
+            .createDialogueTooltip(
+                my->getUID(),
+                Player::WorldUI_t
+                    ::WorldTooltipDialogue_t
+                    ::DIALOGUE_NPC,
+                "This character's dialogue contains an invalid node."
+            );
+
+        return true;
+    }
+
+    const CustomDialogueNode& node =
+        nodeIterator->second;
+
+    players[monsterclicked]
+        ->worldUI
+        .worldTooltipDialogue
+        .createDialogueTooltip(
+            my->getUID(),
+            Player::WorldUI_t
+                ::WorldTooltipDialogue_t
+                ::DIALOGUE_NPC,
+            node.text.c_str()
+        );
 
     if ( multiplayer != CLIENT
         && my->persistentID > 0 )
@@ -12696,33 +12963,24 @@ bool handleCustomMonsterDialogue(
             definition->dialogueID
         );
 
-        /*
-         * Stage 3 contains one authored node, node zero.
-         */
         persistentStorySetNPCNodeSeen(
             sourceMap,
             my->persistentID,
-            "node_0",
+            "node_"
+                + std::to_string(node.id),
             true
         );
 
+        /*
+         * Progress after displaying the current node. A terminal node
+         * simply points to itself and therefore repeats.
+         */
         persistentStorySetNPCNode(
             sourceMap,
             my->persistentID,
-            0
+            node.nextNode
         );
     }
-
-    players[monsterclicked]
-        ->worldUI
-        .worldTooltipDialogue
-        .createDialogueTooltip(
-            my->getUID(),
-            Player::WorldUI_t
-                ::WorldTooltipDialogue_t
-                ::DIALOGUE_NPC,
-            definition->text.c_str()
-        );
 
     return true;
 }

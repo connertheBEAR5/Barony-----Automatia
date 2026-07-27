@@ -134,170 +134,119 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         return definition;
     }
 
-/*
- * Barony can run from several layouts:
- *
- * 1. Runtime data root:
- *      ./images/
- *      ./maps/
- *      ./dialogue/
- *
- * 2. Repository root:
- *      ./data/images/
- *      ./data/maps/
- *      ./data/dialogue/
- *
- * Try both PhysFS and direct filesystem paths.
- */
-const std::string relativeDialoguePath =
-    "dialogue/"
-    + definition.dialogueID
-    + ".json";
-
-const std::string dataDialoguePath =
-    "data/dialogue/"
-    + definition.dialogueID
-    + ".json";
-
-std::string realPath;
-
-/*
- * First try the paths through PhysFS.
- *
- * Do not begin the paths with '/', because some PhysFS configurations
- * expect paths relative to their mounted root.
- */
-if ( const char* realDirectory =
-        PHYSFS_getRealDir(relativeDialoguePath.c_str()) )
-{
-    realPath = realDirectory;
-    realPath += PHYSFS_getDirSeparator();
-    realPath += relativeDialoguePath;
-}
-else if ( const char* realDirectory =
-        PHYSFS_getRealDir(dataDialoguePath.c_str()) )
-{
-    realPath = realDirectory;
-    realPath += PHYSFS_getDirSeparator();
-    realPath += dataDialoguePath;
-}
-else
-{
-    /*
-     * PhysFS may not include development files created after startup,
-     * or the executable may use datadir directly. Try real filesystem
-     * paths as a fallback.
-     */
-    const std::string datadirRoot =
-        datadir && datadir[0]
-            ? datadir
-            : "./";
-
-    const std::string directRelativePath =
-        datadirRoot
-        + "/dialogue/"
+    const std::string relativeDialoguePath =
+        "dialogue/"
         + definition.dialogueID
         + ".json";
 
-    const std::string directDataPath =
-        datadirRoot
-        + "/data/dialogue/"
+    const std::string dataDialoguePath =
+        "data/dialogue/"
         + definition.dialogueID
         + ".json";
 
-    File* testFile =
-        FileIO::open(
-            directRelativePath.c_str(),
-            "rb"
-        );
+    std::string realPath;
 
-    if ( testFile )
+    if ( const char* realDirectory =
+            PHYSFS_getRealDir(relativeDialoguePath.c_str()) )
     {
-        FileIO::close(testFile);
-        realPath = directRelativePath;
+        realPath = realDirectory;
+
+        if ( !realPath.empty()
+            && realPath.back() != '/'
+            && realPath.back() != '\\' )
+        {
+            realPath += PHYSFS_getDirSeparator();
+        }
+
+        realPath += relativeDialoguePath;
+    }
+    else if ( const char* realDirectory =
+            PHYSFS_getRealDir(dataDialoguePath.c_str()) )
+    {
+        realPath = realDirectory;
+
+        if ( !realPath.empty()
+            && realPath.back() != '/'
+            && realPath.back() != '\\' )
+        {
+            realPath += PHYSFS_getDirSeparator();
+        }
+
+        realPath += dataDialoguePath;
     }
     else
     {
-        testFile =
+        const std::string datadirRoot =
+            datadir && datadir[0]
+                ? datadir
+                : "./";
+
+        const std::string directRelativePath =
+            datadirRoot
+            + "/dialogue/"
+            + definition.dialogueID
+            + ".json";
+
+        const std::string directDataPath =
+            datadirRoot
+            + "/data/dialogue/"
+            + definition.dialogueID
+            + ".json";
+
+        File* testFile =
             FileIO::open(
-                directDataPath.c_str(),
+                directRelativePath.c_str(),
                 "rb"
             );
 
         if ( testFile )
         {
             FileIO::close(testFile);
-            realPath = directDataPath;
+            realPath = directRelativePath;
+        }
+        else
+        {
+            testFile =
+                FileIO::open(
+                    directDataPath.c_str(),
+                    "rb"
+                );
+
+            if ( testFile )
+            {
+                FileIO::close(testFile);
+                realPath = directDataPath;
+            }
         }
     }
-}
 
-if ( realPath.empty() )
-{
-    printlog(
-        "[Custom Dialogue] Could not locate '%s' or '%s'. datadir='%s', cwd-based paths also failed.",
-        relativeDialoguePath.c_str(),
-        dataDialoguePath.c_str(),
-        datadir ? datadir : "(null)"
-    );
-
-    return definition;
-}
-
-printlog(
-    "[Custom Dialogue] Opening real file path '%s'.",
-    realPath.c_str()
-);
-
-File* file =
-    FileIO::open(
-        realPath.c_str(),
-        "rb"
-    );
-
-if ( !file )
-{
-    printlog(
-        "[Custom Dialogue] File was located but could not be opened: '%s'.",
-        realPath.c_str()
-    );
-
-    return definition;
-}
-    /*
-     * Ask PhysFS which mounted directory owns the file.
-     *
-     * This is the same general approach Barony uses for its existing
-     * JSON configuration files.
-     */
-	printlog(
-    "[Custom Dialogue] Searching PhysFS for '%s'.",
-    virtualPath.c_str()
-);
-    const char* realDirectory =
-        PHYSFS_getRealDir(virtualPath.c_str());
-
-    if ( !realDirectory )
+    if ( realPath.empty() )
     {
         printlog(
-            "[Custom Dialogue] Could not locate JSON file '%s' through PhysFS.",
-            virtualPath.c_str()
+            "[Custom Dialogue] Could not locate '%s' or '%s'. datadir='%s'.",
+            relativeDialoguePath.c_str(),
+            dataDialoguePath.c_str(),
+            datadir ? datadir : "(null)"
         );
 
         return definition;
     }
 
-    std::string realPath = realDirectory;
-    realPath += virtualPath;
+    printlog(
+        "[Custom Dialogue] Opening real file path '%s'.",
+        realPath.c_str()
+    );
 
     File* file =
-        FileIO::open(realPath.c_str(), "rb");
+        FileIO::open(
+            realPath.c_str(),
+            "rb"
+        );
 
     if ( !file )
     {
         printlog(
-            "[Custom Dialogue] PhysFS found '%s', but FileIO could not open '%s'.",
-            virtualPath.c_str(),
+            "[Custom Dialogue] File was located but could not be opened: '%s'.",
             realPath.c_str()
         );
 
