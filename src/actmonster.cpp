@@ -63,6 +63,14 @@ struct CustomDialogueNode
     Sint32 hasItemNode = 0;
     Sint32 missingItemNode = 0;
     bool consumeConditionItem = false;
+
+    /*
+     * Optional one-time Stage 6 quest actions.
+     */
+    std::string actionID;
+    bool questAccept = false;
+    bool questComplete = false;
+    Sint32 questStage = -1;
 };
 
 /*
@@ -74,6 +82,7 @@ struct CustomDialogueDefinition
     bool valid = false;
 
     std::string dialogueID;
+    std::string questID;
     Sint32 startNode = 0;
 
     std::unordered_map<
@@ -450,6 +459,34 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         return definition;
     }
 
+    if ( document.HasMember("quest_id") )
+    {
+        if ( !document["quest_id"].IsString() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' field 'quest_id' must be a string.",
+                realPath.c_str()
+            );
+
+            return definition;
+        }
+
+        definition.questID =
+            normalizeCustomDialogueID(
+                document["quest_id"].GetString()
+            );
+
+        if ( definition.questID.empty() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' contains an empty quest ID.",
+                realPath.c_str()
+            );
+
+            return definition;
+        }
+    }
+
     /*
      * Preserve compatibility with the Stage 3 one-line JSON format:
      *
@@ -693,6 +730,108 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
                 node.consumeConditionItem =
                     condition["consume"].GetBool();
+            }
+        }
+
+        if ( nodeValue.HasMember("action") )
+        {
+            const rapidjson::Value& action =
+                nodeValue["action"];
+
+            if ( !action.IsObject()
+                || !action.HasMember("id")
+                || !action["id"].IsString() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d action requires a string 'id'.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
+            }
+
+            node.actionID =
+                normalizeCustomDialogueID(
+                    action["id"].GetString()
+                );
+
+            if ( node.actionID.empty() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d contains an empty action ID.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
+            }
+
+            if ( action.HasMember("quest_accept") )
+            {
+                if ( !action["quest_accept"].IsBool() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d action 'quest_accept' must be Boolean.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.questAccept =
+                    action["quest_accept"].GetBool();
+            }
+
+            if ( action.HasMember("quest_complete") )
+            {
+                if ( !action["quest_complete"].IsBool() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d action 'quest_complete' must be Boolean.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.questComplete =
+                    action["quest_complete"].GetBool();
+            }
+
+            if ( action.HasMember("quest_stage") )
+            {
+                if ( !action["quest_stage"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d action 'quest_stage' must be an integer.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.questStage =
+                    action["quest_stage"].GetInt();
+            }
+
+            if ( (
+                    node.questAccept
+                    || node.questComplete
+                    || node.questStage >= 0
+                )
+                && definition.questID.empty() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' node %d has quest actions but the root has no 'quest_id'.",
+                    realPath.c_str(),
+                    node.id
+                );
+
+                return definition;
             }
         }
 
@@ -13276,6 +13415,60 @@ bool handleCustomMonsterDialogue(
                 ::DIALOGUE_NPC,
             node.text.c_str()
         );
+
+    if ( multiplayer != CLIENT
+        && my->persistentID > 0
+        && !node.actionID.empty() )
+    {
+        const std::string actionFlag =
+            "dialogue_action_"
+            + node.actionID;
+
+        if ( !persistentStoryGetNPCFlag(
+                sourceMap,
+                my->persistentID,
+                actionFlag
+            ) )
+        {
+            if ( node.questAccept )
+            {
+                persistentStorySetQuestAccepted(
+                    definition->questID,
+                    true
+                );
+            }
+
+            if ( node.questStage >= 0 )
+            {
+                persistentStorySetQuestStage(
+                    definition->questID,
+                    node.questStage
+                );
+            }
+
+            if ( node.questComplete )
+            {
+                persistentStorySetQuestCompleted(
+                    definition->questID,
+                    true
+                );
+            }
+
+            persistentStorySetNPCFlag(
+                sourceMap,
+                my->persistentID,
+                actionFlag,
+                true
+            );
+
+            printlog(
+                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d.",
+                node.actionID.c_str(),
+                definition->questID.c_str(),
+                node.id
+            );
+        }
+    }
 
     if ( multiplayer != CLIENT
         && my->persistentID > 0 )
