@@ -71,6 +71,11 @@ struct CustomDialogueNode
     bool questAccept = false;
     bool questComplete = false;
     Sint32 questStage = -1;
+
+    /*
+     * Stage 7 one-time player reward.
+     */
+    Sint32 rewardGold = 0;
 };
 
 /*
@@ -816,6 +821,24 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
                 node.questStage =
                     action["quest_stage"].GetInt();
+            }
+
+            if ( action.HasMember("reward_gold") )
+            {
+                if ( !action["reward_gold"].IsInt()
+                    || action["reward_gold"].GetInt() < 0 )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d action 'reward_gold' must be a non-negative integer.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.rewardGold =
+                    action["reward_gold"].GetInt();
             }
 
             if ( (
@@ -13454,6 +13477,64 @@ bool handleCustomMonsterDialogue(
                 );
             }
 
+            if ( node.rewardGold > 0
+                && stats[monsterclicked] )
+            {
+                stats[monsterclicked]->GOLD +=
+                    node.rewardGold;
+
+                if ( players[monsterclicked]
+                    && players[monsterclicked]->entity )
+                {
+                    playSoundEntity(
+                        players[monsterclicked]->entity,
+                        242 + local_rng.rand() % 4,
+                        64
+                    );
+                }
+
+                messagePlayer(
+                    monsterclicked,
+                    MESSAGE_INTERACTION
+                        | MESSAGE_INVENTORY,
+                    "You received %d gold.",
+                    node.rewardGold
+                );
+
+                if ( multiplayer == SERVER
+                    && monsterclicked > 0
+                    && !client_disconnected[monsterclicked]
+                    && !players[monsterclicked]->isLocalPlayer() )
+                {
+                    strcpy(
+                        reinterpret_cast<char*>(
+                            net_packet->data
+                        ),
+                        "GOLD"
+                    );
+
+                    SDLNet_Write32(
+                        stats[monsterclicked]->GOLD,
+                        &net_packet->data[4]
+                    );
+
+                    net_packet->address.host =
+                        net_clients[monsterclicked - 1].host;
+
+                    net_packet->address.port =
+                        net_clients[monsterclicked - 1].port;
+
+                    net_packet->len = 8;
+
+                    sendPacketSafe(
+                        net_sock,
+                        -1,
+                        net_packet,
+                        monsterclicked - 1
+                    );
+                }
+            }
+
             persistentStorySetNPCFlag(
                 sourceMap,
                 my->persistentID,
@@ -13462,10 +13543,11 @@ bool handleCustomMonsterDialogue(
             );
 
             printlog(
-                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d.",
+                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d; gold reward=%d.",
                 node.actionID.c_str(),
                 definition->questID.c_str(),
-                node.id
+                node.id,
+                node.rewardGold
             );
         }
     }
