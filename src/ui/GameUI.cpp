@@ -308,6 +308,7 @@ MinotaurWarning_t minotaurWarning[MAXPLAYERS];
 void updateLevelUpFrame(const int player);
 void updateSkillUpFrame(const int player);
 void drawClockwiseSquareMesh(const char* texture, float lerp, SDL_Rect rect, Uint32 color);
+void openCustomDialogueQuestJournalUI(const int player);
 
 void capitalizeString(std::string& str)
 {
@@ -4836,6 +4837,26 @@ void createUINavigation(const int player)
 
 		auto skillsButtonGlyph = uiNavFrame->addImage(SDL_Rect{ 0, 0, glyphSize, glyphSize },
 			0xFFFFFFFF, "images/system/white.png", "skills button glyph")->disabled = true;
+
+		auto questsButton = uiNavFrame->addButton("quests button");
+		questsButton->setText("Quests");
+		questsButton->setFont(buttonFont);
+		questsButton->setBackground("*#images/ui/HUD/HUD_Button_Base_Small_00.png");
+		questsButton->setBackgroundActivated("*#images/ui/HUD/HUD_Button_Base_SmallPress_00.png");
+		questsButton->setBackgroundHighlighted("*#images/ui/HUD/HUD_Button_Base_SmallHigh_00.png");
+		questsButton->setSize(SDL_Rect{ 0, 0, 98, 38 });
+		questsButton->setHideGlyphs(true);
+		questsButton->setHideKeyboardGlyphs(true);
+		questsButton->setHideSelectors(true);
+		questsButton->setMenuConfirmControlType(0);
+		questsButton->setColor(makeColor(255, 255, 255, 255));
+		questsButton->setHighlightColor(makeColor(255, 255, 255, 255));
+		questsButton->setCallback([](Button& button) {
+			openCustomDialogueQuestJournalUI(button.getOwner());
+		});
+
+		auto questsButtonGlyph = uiNavFrame->addImage(SDL_Rect{ 0, 0, glyphSize, glyphSize },
+			0xFFFFFFFF, "images/system/white.png", "quests button glyph")->disabled = true;
 	}
 	{
 		const int glyphSize = 32;
@@ -5375,6 +5396,8 @@ void Player::HUD_t::updateUINavigation()
 	auto statusButtonGlyph = uiNavFrame->findImage("status button glyph");
 	auto skillsButton = uiNavFrame->findButton("skills button");
 	auto skillsButtonGlyph = uiNavFrame->findImage("skills button glyph");
+	auto questsButton = uiNavFrame->findButton("quests button");
+	auto questsButtonGlyph = uiNavFrame->findImage("quests button glyph");
 
 	static ConsoleVariable<bool> cvar_spell_unread_blink("/spell_unread_blink", true);
 	if ( *cvar_spell_unread_blink 
@@ -5431,6 +5454,21 @@ void Player::HUD_t::updateUINavigation()
 	int bottomAlignY = topAlignY + 52;
 
 	int numButtonsToShow = 2;
+
+	if ( questsButton )
+	{
+		questsButton->setDisabled(false);
+		questsButton->setSize(SDL_Rect{
+			uiNavFrame->getSize().w / 2 - 49,
+			bottomAlignY + 46,
+			98,
+			38
+		});
+	}
+	if ( questsButtonGlyph )
+	{
+		questsButtonGlyph->disabled = true;
+	}
 
 	for ( auto& buttonAndGlyph : allButtonsAndGlyphs )
 	{
@@ -30920,6 +30958,10 @@ namespace CustomDialogueQuestJournalUI
             questSnapshots;
 
         bool snapshotsInitialized = false;
+
+        std::string trackedQuestID;
+        Frame* trackerFrame = nullptr;
+
         bool keyLatch = false;
         bool openedStatusScreen = false;
     };
@@ -31265,6 +31307,155 @@ namespace CustomDialogueQuestJournalUI
         return result;
     }
 
+    static std::string buildTrackerObjectiveText(
+        const CustomDialogueQuestJournalEntry& entry
+    )
+    {
+        std::string result;
+        Sint32 displayed = 0;
+
+        for ( const auto& objective : entry.objectives )
+        {
+            if ( !objective.visible || objective.completed )
+            {
+                continue;
+            }
+
+            if ( displayed >= 3 )
+            {
+                result += "...";
+                break;
+            }
+
+            result += "- ";
+            if ( objective.optional )
+            {
+                result += "(Optional) ";
+            }
+            result += objective.text;
+            result += "\n";
+            ++displayed;
+        }
+
+        if ( result.empty() )
+        {
+            result = "No unfinished visible objectives.";
+        }
+
+        return result;
+    }
+
+    static void createTracker(const int player)
+    {
+        State& state = states[player];
+
+        if ( state.trackerFrame || !gameUIFrame[player] )
+        {
+            return;
+        }
+
+        state.trackerFrame =
+            gameUIFrame[player]->addFrame(
+                "custom dialogue quest tracker"
+            );
+
+        state.trackerFrame->setOwner(player);
+        state.trackerFrame->setHollow(false);
+        state.trackerFrame->setBorder(2);
+        state.trackerFrame->setColor(
+            makeColor(22, 24, 29, 220)
+        );
+        state.trackerFrame->setDisabled(true);
+
+        auto title =
+            state.trackerFrame->addField(
+                "quest tracker title",
+                256
+            );
+        title->setFont("fonts/pixelmix.ttf#16#2");
+        title->setTextColor(makeColor(255, 226, 166, 255));
+        title->setHJustify(Field::justify_t::LEFT);
+        title->setVJustify(Field::justify_t::TOP);
+
+        auto objectives =
+            state.trackerFrame->addField(
+                "quest tracker objectives",
+                2048
+            );
+        objectives->setFont(
+            "fonts/pixel_maz_multiline.ttf#16#2"
+        );
+        objectives->setTextColor(
+            makeColor(238, 233, 220, 255)
+        );
+        objectives->setHJustify(Field::justify_t::LEFT);
+        objectives->setVJustify(Field::justify_t::TOP);
+    }
+
+    static void updateTracker(const int player)
+    {
+        State& state = states[player];
+        createTracker(player);
+
+        if ( !state.trackerFrame )
+        {
+            return;
+        }
+
+        if ( state.trackedQuestID.empty()
+            || !players[player]
+            || !players[player]->shootmode
+            || (state.frame && !state.frame->isDisabled()) )
+        {
+            state.trackerFrame->setDisabled(true);
+            return;
+        }
+
+        CustomDialogueQuestJournalEntry entry;
+        if ( !getCustomDialogueQuestJournalEntry(
+                player,
+                state.trackedQuestID,
+                entry
+            )
+            || entry.status
+                != CustomDialogueQuestJournalStatus::Active )
+        {
+            state.trackerFrame->setDisabled(true);
+            return;
+        }
+
+        const Sint32 width = 340;
+        const Sint32 height = 116;
+
+        state.trackerFrame->setSize(SDL_Rect{
+            players[player]->camera_virtualx2() - width - 18,
+            players[player]->camera_virtualy1() + 72,
+            width,
+            height
+        });
+
+        state.trackerFrame->findField(
+            "quest tracker title"
+        )->setSize(SDL_Rect{ 12, 8, width - 24, 26 });
+
+        state.trackerFrame->findField(
+            "quest tracker objectives"
+        )->setSize(SDL_Rect{ 12, 38, width - 24, height - 46 });
+
+        state.trackerFrame->findField(
+            "quest tracker title"
+        )->setText(entry.title.c_str());
+
+        const std::string objectives =
+            buildTrackerObjectiveText(entry);
+
+        state.trackerFrame->findField(
+            "quest tracker objectives"
+        )->setText(objectives.c_str());
+
+        state.trackerFrame->setDisabled(false);
+    }
+
     static void close(
         const int player
     )
@@ -31563,6 +31754,68 @@ namespace CustomDialogueQuestJournalUI
             }
         );
 
+        auto trackButton =
+            state.frame->addButton(
+                "quest journal track"
+            );
+
+        trackButton->setOwner(player);
+        trackButton->setText("Track Quest");
+        trackButton->setFont(
+            "fonts/pixel_maz.ttf#16#2"
+        );
+        styleButton(trackButton);
+        trackButton->setCallback(
+            [](Button& button)
+            {
+                const int owner = button.getOwner();
+                State& clickedState = states[owner];
+
+                if ( clickedState.visibleEntries.empty()
+                    || clickedState.selectedQuest < 0
+                    || clickedState.selectedQuest
+                        >= static_cast<Sint32>(
+                            clickedState.visibleEntries.size()
+                        ) )
+                {
+                    return;
+                }
+
+                const auto& entry =
+                    clickedState.visibleEntries[
+                        clickedState.selectedQuest
+                    ];
+
+                if ( entry.status
+                    != CustomDialogueQuestJournalStatus::Active )
+                {
+                    return;
+                }
+
+                if ( clickedState.trackedQuestID == entry.questID )
+                {
+                    clickedState.trackedQuestID.clear();
+                    messagePlayer(
+                        owner,
+                        MESSAGE_INVENTORY,
+                        "Quest tracking cleared."
+                    );
+                }
+                else
+                {
+                    clickedState.trackedQuestID = entry.questID;
+                    messagePlayer(
+                        owner,
+                        MESSAGE_INVENTORY,
+                        "Tracking quest: %s",
+                        entry.title.c_str()
+                    );
+                }
+
+                Player::soundActivate();
+            }
+        );
+
         const char* tabNames[3] =
         {
             "Active",
@@ -31845,6 +32098,15 @@ namespace CustomDialogueQuestJournalUI
             }
         );
 
+        auto trackButton =
+            state.frame->findButton(
+                "quest journal track"
+            );
+
+        trackButton->setSize(
+            SDL_Rect{ width - 180, 56, 160, 30 }
+        );
+
         auto listPanel =
             state.frame->findFrame(
                 "quest journal list panel"
@@ -32017,6 +32279,42 @@ namespace CustomDialogueQuestJournalUI
             completedCount,
             failedCount
         };
+
+
+        auto trackButton =
+            state.frame->findButton(
+                "quest journal track"
+            );
+
+        if ( state.visibleEntries.empty()
+            || state.selectedQuest < 0
+            || state.selectedQuest
+                >= static_cast<Sint32>(
+                    state.visibleEntries.size()
+                )
+            || state.visibleEntries[
+                state.selectedQuest
+            ].status
+                != CustomDialogueQuestJournalStatus::Active )
+        {
+            trackButton->setDisabled(true);
+            trackButton->setText("Track Quest");
+        }
+        else
+        {
+            const auto& selectedEntry =
+                state.visibleEntries[
+                    state.selectedQuest
+                ];
+
+            trackButton->setDisabled(false);
+            trackButton->setText(
+                state.trackedQuestID
+                    == selectedEntry.questID
+                    ? "Untrack Quest"
+                    : "Track Quest"
+            );
+        }
 
         for ( Sint32 tab = 0;
             tab < 3;
@@ -32505,7 +32803,24 @@ namespace CustomDialogueQuestJournalUI
         updateNotifications(player);
         navigation(player);
         updateContents(player);
+        updateTracker(player);
     }
+}
+
+void openCustomDialogueQuestJournalUI(
+    const int player
+)
+{
+    if ( player < 0
+        || player >= MAXPLAYERS
+        || !players[player] )
+    {
+        return;
+    }
+
+    CustomDialogueQuestJournalUI::create(player);
+    CustomDialogueQuestJournalUI::layout(player);
+    CustomDialogueQuestJournalUI::open(player);
 }
 
 
