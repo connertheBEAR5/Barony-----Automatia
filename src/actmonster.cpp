@@ -89,6 +89,7 @@ struct CustomDialogueChoice
 	std::string completeObjectiveID;
 	std::string clearObjectiveID;
 	bool resetQuest = false;
+	bool recruitNPC = false;
 
 	/*
 	 * Optional condition controlling whether this choice is visible.
@@ -246,6 +247,8 @@ struct CustomDialogueDefinition
     std::string questOriginMap;
     Sint32 questOriginX = -1;
     Sint32 questOriginY = -1;
+    bool questOriginTrackNPC = false;
+    Sint32 questOriginPersistentID = 0;
 
     /*
      * Authored ownership and repeatability metadata.
@@ -982,6 +985,34 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 }
                 definition.questOriginX = origin["x"].GetInt();
                 definition.questOriginY = origin["y"].GetInt();
+            }
+            if ( origin.HasMember("track_npc") )
+            {
+                if ( !origin["track_npc"].IsBool() )
+                {
+                    return definition;
+                }
+                definition.questOriginTrackNPC =
+                    origin["track_npc"].GetBool();
+            }
+            if ( origin.HasMember("npc_persistent_id") )
+            {
+                if ( !origin["npc_persistent_id"].IsInt()
+                    || origin["npc_persistent_id"].GetInt() <= 0 )
+                {
+                    return definition;
+                }
+                definition.questOriginPersistentID =
+                    origin["npc_persistent_id"].GetInt();
+            }
+            if ( definition.questOriginTrackNPC
+                && definition.questOriginPersistentID <= 0 )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' dynamic quest origin requires positive npc_persistent_id.",
+                    realPath.c_str()
+                );
+                return definition;
             }
         }
 
@@ -2344,6 +2375,16 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 							choiceAction["quest_reset"].GetBool();
 					}
 
+					if ( choiceAction.HasMember("recruit_npc") )
+					{
+						if ( !choiceAction["recruit_npc"].IsBool() )
+						{
+							return definition;
+						}
+						choice.recruitNPC =
+							choiceAction["recruit_npc"].GetBool();
+					}
+
 					if ( choiceAction.HasMember("set_world_flag") )
 					{
 						const rapidjson::Value& flag =
@@ -3361,8 +3402,68 @@ bool getCustomDialogueQuestJournalEntries(
         entry.originMap = definition.questOriginMap;
         entry.originX = definition.questOriginX;
         entry.originY = definition.questOriginY;
+        entry.originTracksNPC =
+            definition.questOriginTrackNPC;
+        entry.originNPCPersistentID =
+            definition.questOriginPersistentID;
+
+        if ( entry.originTracksNPC
+            && entry.originNPCPersistentID > 0 )
+        {
+            entry.originX = -1;
+            entry.originY = -1;
+
+            const std::string currentMap =
+                normalizeCustomDialogueID(
+                    map.filename[0]
+                        ? map.filename
+                        : map.name
+                );
+
+            if ( currentMap == entry.originMap )
+            {
+                for ( node_t* entityNode = map.entities->first;
+                    entityNode;
+                    entityNode = entityNode->next )
+                {
+                    Entity* originNPC =
+                        static_cast<Entity*>(entityNode->element);
+
+                    if ( !originNPC
+                        || originNPC->behavior != &actMonster
+                        || originNPC->persistentID
+                            != entry.originNPCPersistentID )
+                    {
+                        continue;
+                    }
+
+                    /*
+                     * Once recruited, this NPC is no longer a stationary
+                     * quest giver and should not keep a giver marker.
+                     */
+                    if ( originNPC->monsterAllyIndex >= 0 )
+                    {
+                        break;
+                    }
+
+                    entry.originX =
+                        static_cast<Sint32>(
+                            floor(originNPC->x / 16.0)
+                        );
+
+                    entry.originY =
+                        static_cast<Sint32>(
+                            floor(originNPC->y / 16.0)
+                        );
+                    break;
+                }
+            }
+        }
+
         entry.hasOriginMarker =
-            !entry.originMap.empty() && entry.originX >= 0 && entry.originY >= 0;
+            !entry.originMap.empty()
+            && entry.originX >= 0
+            && entry.originY >= 0;
 
         entry.repeatable =
             definition.questRepeatable;
@@ -17072,6 +17173,51 @@ bool handleCustomMonsterDialogueChoice(
 		map.filename[0]
 			? map.filename
 			: map.name;
+
+	if ( choice.recruitNPC )
+	{
+		if ( !players[player]
+			|| !players[player]->entity
+			|| !npc
+			|| npc->behavior != &actMonster
+			|| !npc->getStats() )
+		{
+			return false;
+		}
+
+		if ( npc->monsterAllyIndex < 0 )
+		{
+			if ( !forceFollower(
+					*players[player]->entity,
+					*npc
+				) )
+			{
+				printlog(
+					"[Custom Dialogue] Failed to recruit NPC persistent ID %d for player %d.",
+					npc->persistentID,
+					player
+				);
+				return false;
+			}
+		}
+
+		persistentStorySetNPCFlag(
+			player,
+			sourceMap,
+			npc->persistentID,
+			"recruited",
+			true
+		);
+
+		messagePlayer(
+			player,
+			MESSAGE_INTERACTION,
+			"%s has joined you.",
+			npc->getStats()->name[0]
+				? npc->getStats()->name
+				: "The NPC"
+		);
+	}
 
 	if ( choice.removeGold > 0
 		&& stats[player] )

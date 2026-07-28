@@ -96,6 +96,9 @@ struct QuestDialogueEditorPreview
 	std::string scope;
 	bool repeatable = false;
 	bool hasOriginMarker = false;
+	bool originTracksNPC = false;
+	int originNPCPersistentID = 0;
+	int recruitActionCount = 0;
 	int objectiveCount = 0;
 	int objectiveMarkerCount = 0;
 	std::vector<QuestDialogueEditorNodePreview> nodes;
@@ -255,6 +258,23 @@ static void questDialogueEditorLoadPreview(
 				&& origin["x"].IsInt()
 				&& origin.HasMember("y")
 				&& origin["y"].IsInt();
+
+			questDialogueEditorPreview.originTracksNPC =
+				origin.HasMember("track_npc")
+				&& origin["track_npc"].IsBool()
+				&& origin["track_npc"].GetBool();
+
+			if ( origin.HasMember("npc_persistent_id")
+				&& origin["npc_persistent_id"].IsInt() )
+			{
+				questDialogueEditorPreview.originNPCPersistentID =
+					origin["npc_persistent_id"].GetInt();
+			}
+
+			if ( questDialogueEditorPreview.originTracksNPC )
+			{
+				questDialogueEditorPreview.hasOriginMarker = true;
+			}
 		}
 
 		if ( quest.HasMember("objectives")
@@ -369,6 +389,15 @@ static void questDialogueEditorLoadPreview(
 								choice["action"]
 							);
 					}
+
+					if ( choice.HasMember("action")
+						&& choice["action"].IsObject()
+						&& choice["action"].HasMember("recruit_npc")
+						&& choice["action"]["recruit_npc"].IsBool()
+						&& choice["action"]["recruit_npc"].GetBool() )
+					{
+						++questDialogueEditorPreview.recruitActionCount;
+					}
 				}
 			}
 
@@ -384,6 +413,29 @@ static void questDialogueEditorLoadPreview(
 
 void openQuestDialogueEditor()
 {
+	/*
+	 * This window can be opened directly from the monster-properties
+	 * subwindow. Remove the focused buttons owned by that old subwindow
+	 * before creating the dialogue editor's controls.
+	 *
+	 * Merely changing newwindow/subwindow is not enough because focused
+	 * equipment, inventory, OK, and Cancel buttons remain in button_l.
+	 */
+	for ( node_t* node = button_l.first;
+		node; )
+	{
+		node_t* nextNode = node->next;
+		button_t* oldButton =
+			static_cast<button_t*>(node->element);
+
+		if ( oldButton && oldButton->focused )
+		{
+			list_RemoveNode(node);
+		}
+
+		node = nextNode;
+	}
+
 	menuVisible = 0;
 	subwindow = 1;
 	newwindow = 38;
@@ -680,8 +732,33 @@ static void drawQuestDialogueEditor()
 		detailY,
 		"Giver marker: %s",
 		questDialogueEditorPreview.hasOriginMarker
-			? "Enabled"
+			? (
+				questDialogueEditorPreview.originTracksNPC
+					? "Follow NPC"
+					: "Static tile"
+			)
 			: "Optional / Off"
+	);
+	detailY += 16;
+
+	if ( questDialogueEditorPreview.originTracksNPC )
+	{
+		printTextFormatted(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			"NPC persistent ID: %d",
+			questDialogueEditorPreview.originNPCPersistentID
+		);
+		detailY += 16;
+	}
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Recruit actions: %d",
+		questDialogueEditorPreview.recruitActionCount
 	);
 	detailY += 16;
 

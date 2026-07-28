@@ -1210,6 +1210,8 @@ struct CustomDialogueQuestJournalEntry
     Sint32 originX = -1;
     Sint32 originY = -1;
     bool hasOriginMarker = false;
+    bool originTracksNPC = false;
+    Sint32 originNPCPersistentID = 0;
 
     Sint32 stage = 0;
 

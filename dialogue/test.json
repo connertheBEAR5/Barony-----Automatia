@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "quest_id": "test",
+  "quest": {
+    "title": "New Quest",
+    "summary": "Describe the quest here.",
+    "objective": "Complete the objective.",
+    "scope": "player",
+    "repeatable": false,
+    "origin": {
+      "label": "deez2",
+      "map": "start.lmp",
+      "x": 5,
+      "y": 6
+    },
+    "objectives": [
+      {
+        "id": "test_objective",
+        "text": "Complete the objective.",
+        "stage": 0,
+        "optional": false,
+        "map_marker": {
+          "map": "start.lmp",
+          "x": 5,
+          "y": 6
+        }
+      }
+    ]
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Will you help me?",
+      "choices": [
+        {
+          "id": "accept",
+          "text": "I'll help.",
+          "next": 1,
+          "once": true,
+          "action": {
+            "quest_start": true,
+            "quest_accept": true
+          }
+        },
+        {
+          "id": "decline",
+          "text": "Not right now.",
+          "next": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Thank you. Check your journal and map.",
+      "next": 1
+    }
+  ]
+}

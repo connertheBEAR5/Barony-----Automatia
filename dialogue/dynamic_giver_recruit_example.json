@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "quest_id": "convince_guard",
+  "quest": {
+    "title": "Convince the Guard",
+    "summary": "Earn the guard's trust.",
+    "scope": "player",
+    "repeatable": false,
+    "origin": {
+      "label": "testy",
+      "map": "start.lmp",
+      "track_npc": true,
+      "npc_persistent_id": 125
+    },
+    "objectives": []
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Why should I follow you?",
+      "choices": [
+        {
+          "id": "recruit_after_quest",
+          "text": "I proved myself.",
+          "next": 1,
+          "once": true,
+          "condition": {
+            "type": "quest_completed",
+            "quest": "prove_yourself"
+          },
+          "action": {
+            "recruit_npc": true
+          }
+        },
+        {
+          "id": "later",
+          "text": "Maybe later.",
+          "next": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "All right. I will follow you.",
+      "next": 1
+    }
+  ]
+}
