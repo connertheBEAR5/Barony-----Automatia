@@ -176,12 +176,20 @@ enum QuestDialogueActionGroup
 	QUEST_DIALOGUE_ACTION_GROUP_FLAGS,
 	QUEST_DIALOGUE_ACTION_GROUP_VARIABLES,
 	QUEST_DIALOGUE_ACTION_GROUP_NPC,
+	QUEST_DIALOGUE_ACTION_GROUP_STATUS,
 	QUEST_DIALOGUE_ACTION_GROUP_COUNT
 };
 
 static QuestDialogueActionGroup
 	questDialogueEditorActionGroup =
 		QUEST_DIALOGUE_ACTION_GROUP_QUEST;
+
+static int questDialogueEditorSelectedItemID = 0;
+static int questDialogueEditorSelectedItemCount = 1;
+static int questDialogueEditorGoldAmount = 100;
+static int questDialogueEditorSelectedEffectID = 0;
+static int questDialogueEditorEffectDurationSeconds = 30;
+static int questDialogueEditorEffectStrength = 1;
 
 static void questDialogueEditorRefreshFiles()
 {
@@ -1769,6 +1777,11 @@ static std::string questDialogueEditorChoiceActionName()
 		|| action.HasMember("add_quest_variable") )
 	{
 		return "Quest Variable";
+	}
+
+	if ( action.HasMember("status_effect") )
+	{
+		return "Status Effect";
 	}
 
 	return "Custom";
@@ -3575,6 +3588,8 @@ static const char* questDialogueEditorActionGroupName()
 			return "Variables";
 		case QUEST_DIALOGUE_ACTION_GROUP_NPC:
 			return "NPC";
+		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
+			return "Status";
 		default:
 			return "Quest";
 	}
@@ -3892,7 +3907,7 @@ static void questDialogueEditorApplyGuidedAction(
 				questDialogueEditorSetIntMember(
 					*action,
 					"reward_gold",
-					100
+					questDialogueEditorGoldAmount
 				);
 			}
 			else
@@ -3906,12 +3921,14 @@ static void questDialogueEditorApplyGuidedAction(
 				questDialogueEditorSetStringMember(
 					reward,
 					"item",
-					"healing_potion"
+					std::to_string(
+						questDialogueEditorSelectedItemID
+					)
 				);
 				questDialogueEditorSetIntMember(
 					reward,
 					"count",
-					1
+					questDialogueEditorSelectedItemCount
 				);
 			}
 			break;
@@ -3922,7 +3939,7 @@ static void questDialogueEditorApplyGuidedAction(
 				questDialogueEditorSetIntMember(
 					*action,
 					"remove_gold",
-					100
+					questDialogueEditorGoldAmount
 				);
 			}
 			else
@@ -3936,12 +3953,14 @@ static void questDialogueEditorApplyGuidedAction(
 				questDialogueEditorSetStringMember(
 					removal,
 					"item",
-					"torch"
+					std::to_string(
+						questDialogueEditorSelectedItemID
+					)
 				);
 				questDialogueEditorSetIntMember(
 					removal,
 					"count",
-					1
+					questDialogueEditorSelectedItemCount
 				);
 			}
 			break;
@@ -4058,6 +4077,37 @@ static void questDialogueEditorApplyGuidedAction(
 			}
 			break;
 
+		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
+		{
+			rapidjson::Value& status =
+				questDialogueEditorSetObjectMember(
+					*action,
+					"status_effect"
+				);
+
+			questDialogueEditorSetIntMember(
+				status,
+				"effect",
+				questDialogueEditorSelectedEffectID
+			);
+			questDialogueEditorSetIntMember(
+				status,
+				"duration_seconds",
+				questDialogueEditorEffectDurationSeconds
+			);
+			questDialogueEditorSetIntMember(
+				status,
+				"strength",
+				questDialogueEditorEffectStrength
+			);
+			questDialogueEditorSetBoolMember(
+				status,
+				"enabled",
+				slot == 0
+			);
+			break;
+		}
+
 		default:
 			break;
 	}
@@ -4068,6 +4118,552 @@ static void questDialogueEditorApplyGuidedAction(
 		std::string("Added ")
 		+ questDialogueEditorChoiceActionName()
 		+ " action."
+	);
+}
+
+
+static void questDialogueEditorCycleSelectedItem(
+	const int direction
+)
+{
+	questDialogueEditorSelectedItemID += direction;
+
+	if ( questDialogueEditorSelectedItemID < 0 )
+	{
+		questDialogueEditorSelectedItemID =
+			NUMITEMS - 1;
+	}
+	else if ( questDialogueEditorSelectedItemID
+		>= NUMITEMS )
+	{
+		questDialogueEditorSelectedItemID = 0;
+	}
+
+	questDialogueEditorSetMessage(
+		"Item "
+		+ std::to_string(
+			questDialogueEditorSelectedItemID
+		)
+		+ ": "
+		+ items[
+			questDialogueEditorSelectedItemID
+		].getIdentifiedName()
+	);
+}
+
+static const char* questDialogueEditorEffectName(
+	const int effectID
+)
+{
+	static const char* names[] =
+	{
+		"Asleep",
+		"Poisoned",
+		"Stunned",
+		"Confused",
+		"Drunk",
+		"Invisible",
+		"Blind",
+		"Greasy",
+		"Messy",
+		"Fast",
+		"Paralyzed",
+		"Levitating",
+		"Telepathy",
+		"Vomiting",
+		"Bleeding",
+		"Slow",
+		"Magic Resistance",
+		"Magic Reflection",
+		"Vampiric Aura",
+		"Red Shrine Buff",
+		"Green Shrine Buff",
+		"Blue Shrine Buff",
+		"Health Regeneration",
+		"Mana Regeneration",
+		"Pacify",
+		"Polymorph",
+		"Knockback",
+		"Withdrawal",
+		"Strength Potion",
+		"Shapeshift",
+		"Webbed",
+		"Fear",
+		"Magic Amplification",
+		"Disoriented",
+		"Shadow Tagged",
+		"Troll's Blood",
+		"Flutter",
+		"Dash",
+		"Distracted Cooldown",
+		"Mimic Locked",
+		"Rooted",
+		"Nausea Protection",
+		"Constitution Bonus",
+		"Power",
+		"Agility",
+		"Rally",
+		"Marigold",
+		"Ensemble Flute",
+		"Ensemble Lyre",
+		"Ensemble Drum",
+		"Ensemble Lute",
+		"Ensemble Horn",
+		"Lift",
+		"Guard Spirit",
+		"Guard Body",
+		"Divine Guard",
+		"Nimbleness",
+		"Greater Might",
+		"Counsel",
+		"Sturdiness",
+		"Bless Food",
+		"Pinpoint",
+		"Penance",
+		"Sacred Path",
+		"Detect Enemy",
+		"Blood Ward",
+		"True Blood",
+		"Divine Zeal",
+		"Maximise",
+		"Minimise",
+		"Weakness",
+		"Incoherence",
+		"Overcharge",
+		"Envenom Weapon",
+		"Magic Grease",
+		"Command",
+		"Mimic Void",
+		"Curse Flesh",
+		"Numbing Bolt",
+		"Delay Pain",
+		"Seek Creature",
+		"Taboo",
+		"Courage",
+		"Cowardice",
+		"Spores",
+		"Abundance",
+		"Greater Abundance",
+		"Preserve",
+		"Mist Form",
+		"Force Shield",
+		"Lighten Load",
+		"Attract Items",
+		"Return Item",
+		"Demesne Door",
+		"Reflector Shield",
+		"Dizzy",
+		"Spin",
+		"Critical Spell",
+		"Magic Well",
+		"Static",
+		"Absorb Magic",
+		"Flame Cloak",
+		"Dusted",
+		"Noise Visibility",
+		"Spicy Ration",
+		"Sour Ration",
+		"Bitter Ration",
+		"Hearty Ration",
+		"Herbal Ration",
+		"Sweet Ration",
+		"Growth",
+		"Thorns",
+		"Blade Vines",
+		"Bastion Mushroom",
+		"Bastion Roots",
+		"Foci: Peace",
+		"Foci: Justice",
+		"Foci: Providence",
+		"Foci: Purity",
+		"Foci: Sanctuary",
+		"Stasis",
+		"Health/Mana Regeneration",
+		"Disrupted",
+		"Frost",
+		"Magician's Armor",
+		"Project Spirit",
+		"Defy Flesh",
+		"Pinpoint Damage",
+		"Salamander Heart",
+		"Divine Fire",
+		"Healing Word",
+		"Holy Fire",
+		"Sigil",
+		"Sanctuary",
+		"Ducked"
+	};
+
+	const int namedCount =
+		static_cast<int>(
+			sizeof(names) / sizeof(names[0])
+		);
+
+	if ( effectID >= 0
+		&& effectID < namedCount )
+	{
+		return names[effectID];
+	}
+
+	if ( effectID >= namedCount
+		&& effectID < NUMEFFECTS )
+	{
+		return "Reserved / unnamed";
+	}
+
+	return "Invalid effect";
+}
+
+static std::string questDialogueEditorConditionSummary(
+	const rapidjson::Value& choice
+)
+{
+	if ( !choice.IsObject()
+		|| !choice.HasMember("condition")
+		|| !choice["condition"].IsObject() )
+	{
+		return "None";
+	}
+
+	const rapidjson::Value& condition =
+		choice["condition"];
+
+	if ( !condition.HasMember("type")
+		|| !condition["type"].IsString() )
+	{
+		return "Invalid condition";
+	}
+
+	const std::string type =
+		condition["type"].GetString();
+
+	auto stringMember =
+		[
+			&condition
+		](
+			const char* member,
+			const char* fallback
+		) -> std::string
+		{
+			return condition.HasMember(member)
+				&& condition[member].IsString()
+					? condition[member].GetString()
+					: fallback;
+		};
+
+	auto intMember =
+		[
+			&condition
+		](
+			const char* member,
+			const int fallback
+		) -> int
+		{
+			return condition.HasMember(member)
+				&& condition[member].IsInt()
+					? condition[member].GetInt()
+					: fallback;
+		};
+
+	if ( type == "has_item" )
+	{
+		std::string item =
+			stringMember("item", "?");
+		std::string itemName = item;
+
+		bool numeric = !item.empty();
+		for ( const char character : item )
+		{
+			if ( character < '0'
+				|| character > '9' )
+			{
+				numeric = false;
+				break;
+			}
+		}
+
+		if ( numeric )
+		{
+			const int itemID =
+				std::atoi(item.c_str());
+
+			if ( itemID >= 0
+				&& itemID < NUMITEMS )
+			{
+				itemName =
+					items[itemID]
+						.getIdentifiedName();
+			}
+		}
+
+		return "Requires "
+			+ itemName
+			+ " x"
+			+ std::to_string(
+				intMember("count", 1)
+			);
+	}
+
+	if ( type == "has_gold" )
+	{
+		return "Requires "
+			+ std::to_string(
+				intMember("amount", 0)
+			)
+			+ " gold";
+	}
+
+	if ( type == "quest_started" )
+	{
+		return "Quest started: "
+			+ stringMember("quest", "?");
+	}
+
+	if ( type == "quest_accepted" )
+	{
+		return "Quest accepted: "
+			+ stringMember("quest", "?");
+	}
+
+	if ( type == "quest_completed" )
+	{
+		return "Quest completed: "
+			+ stringMember("quest", "?");
+	}
+
+	if ( type == "quest_failed" )
+	{
+		return "Quest failed: "
+			+ stringMember("quest", "?");
+	}
+
+	if ( type == "quest_stage" )
+	{
+		return "Quest "
+			+ stringMember("quest", "?")
+			+ " stage "
+			+ std::to_string(
+				intMember("stage", 0)
+			);
+	}
+
+	if ( type == "objective_completed" )
+	{
+		return "Objective completed: "
+			+ stringMember("objective", "?");
+	}
+
+	if ( type == "objective_incomplete" )
+	{
+		return "Objective incomplete: "
+			+ stringMember("objective", "?");
+	}
+
+	if ( type == "world_flag" )
+	{
+		return "World flag: "
+			+ stringMember("id", "?");
+	}
+
+	if ( type == "npc_flag" )
+	{
+		return "NPC flag: "
+			+ stringMember("id", "?");
+	}
+
+	if ( type == "world_variable" )
+	{
+		return "World variable "
+			+ stringMember("id", "?")
+			+ " = "
+			+ std::to_string(
+				intMember("value", 0)
+			);
+	}
+
+	if ( type == "npc_variable" )
+	{
+		return "NPC variable "
+			+ stringMember("id", "?")
+			+ " = "
+			+ std::to_string(
+				intMember("value", 0)
+			);
+	}
+
+	return "Condition: " + type;
+}
+
+static std::string questDialogueEditorChoiceActionSummaryShort(
+	const rapidjson::Value& choice
+)
+{
+	if ( !choice.IsObject()
+		|| !choice.HasMember("action")
+		|| !choice["action"].IsObject() )
+	{
+		return "None";
+	}
+
+	const rapidjson::Value& action =
+		choice["action"];
+
+	if ( action.HasMember("reward_gold")
+		&& action["reward_gold"].IsInt() )
+	{
+		return "Give "
+			+ std::to_string(
+				action["reward_gold"].GetInt()
+			)
+			+ " gold";
+	}
+
+	if ( action.HasMember("remove_gold")
+		&& action["remove_gold"].IsInt() )
+	{
+		return "Take "
+			+ std::to_string(
+				action["remove_gold"].GetInt()
+			)
+			+ " gold";
+	}
+
+	if ( action.HasMember("reward_item")
+		&& action["reward_item"].IsObject() )
+	{
+		return "Give item";
+	}
+
+	if ( action.HasMember("remove_item")
+		&& action["remove_item"].IsObject() )
+	{
+		return "Take item";
+	}
+
+	if ( action.HasMember("status_effect")
+		&& action["status_effect"].IsObject() )
+	{
+		const rapidjson::Value& status =
+			action["status_effect"];
+
+		const int effectID =
+			status.HasMember("effect")
+			&& status["effect"].IsInt()
+				? status["effect"].GetInt()
+				: -1;
+
+		return std::string("Status: ")
+			+ questDialogueEditorEffectName(
+				effectID
+			);
+	}
+
+	if ( action.HasMember("objective_complete")
+		&& action["objective_complete"].IsString() )
+	{
+		return "Complete objective";
+	}
+
+	if ( action.HasMember("objective_clear")
+		&& action["objective_clear"].IsString() )
+	{
+		return "Clear objective";
+	}
+
+	if ( action.HasMember("quest_start") )
+	{
+		return "Start quest";
+	}
+
+	if ( action.HasMember("quest_accept") )
+	{
+		return "Accept quest";
+	}
+
+	if ( action.HasMember("quest_complete") )
+	{
+		return "Complete quest";
+	}
+
+	if ( action.HasMember("quest_fail") )
+	{
+		return "Fail quest";
+	}
+
+	if ( action.HasMember("quest_reset") )
+	{
+		return "Reset quest";
+	}
+
+	if ( action.HasMember("recruit_npc") )
+	{
+		return "Recruit NPC";
+	}
+
+	return "Custom action";
+}
+
+static std::string questDialogueEditorChoiceObjectiveSummary(
+	const rapidjson::Value& choice
+)
+{
+	if ( !choice.IsObject()
+		|| !choice.HasMember("action")
+		|| !choice["action"].IsObject() )
+	{
+		return "";
+	}
+
+	const rapidjson::Value& action =
+		choice["action"];
+
+	if ( action.HasMember("objective_complete")
+		&& action["objective_complete"].IsString() )
+	{
+		return "Completes: "
+			+ std::string(
+				action["objective_complete"].GetString()
+			);
+	}
+
+	if ( action.HasMember("objective_clear")
+		&& action["objective_clear"].IsString() )
+	{
+		return "Clears: "
+			+ std::string(
+				action["objective_clear"].GetString()
+			);
+	}
+
+	return "";
+}
+
+static void questDialogueEditorCycleSelectedEffect(
+	const int direction
+)
+{
+	questDialogueEditorSelectedEffectID += direction;
+
+	if ( questDialogueEditorSelectedEffectID < 0 )
+	{
+		questDialogueEditorSelectedEffectID =
+			NUMEFFECTS - 1;
+	}
+	else if ( questDialogueEditorSelectedEffectID
+		>= NUMEFFECTS )
+	{
+		questDialogueEditorSelectedEffectID = 0;
+	}
+
+	questDialogueEditorSetMessage(
+		"Effect "
+		+ std::to_string(
+			questDialogueEditorSelectedEffectID
+		)
+		+ ": "
+		+ questDialogueEditorEffectName(
+			questDialogueEditorSelectedEffectID
+		)
 	);
 }
 
@@ -4133,6 +4729,11 @@ static const char* questDialogueEditorGuidedActionLabel(
 			return slot == 0
 				? "RECRUIT NPC"
 				: "EMPTY ACTION";
+
+		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
+			return slot == 0
+				? "APPLY STATUS"
+				: "CLEAR STATUS";
 
 		default:
 			return "ACTION";
@@ -4435,6 +5036,531 @@ static bool questDialogueEditorValidateDocument(
 	return true;
 }
 
+
+
+static std::vector<std::string>
+questDialogueEditorAppliedActionSummary()
+{
+	std::vector<std::string> lines;
+
+	rapidjson::Value* choice =
+		questDialogueEditorSelectedChoiceValueForEdit();
+
+	if ( !choice
+		|| !choice->IsObject()
+		|| !choice->HasMember("action")
+		|| !(*choice)["action"].IsObject() )
+	{
+		lines.push_back("None");
+		return lines;
+	}
+
+	const rapidjson::Value& action =
+		(*choice)["action"];
+
+	auto addBoolAction =
+		[
+			&action,
+			&lines
+		](
+			const char* member,
+			const char* label
+		)
+		{
+			if ( action.HasMember(member)
+				&& action[member].IsBool()
+				&& action[member].GetBool() )
+			{
+				lines.push_back(label);
+			}
+		};
+
+	addBoolAction("quest_start", "Start quest");
+	addBoolAction("quest_accept", "Accept quest");
+	addBoolAction("quest_complete", "Complete quest");
+	addBoolAction("quest_fail", "Fail quest");
+	addBoolAction("quest_reset", "Reset quest");
+	addBoolAction("recruit_npc", "Recruit NPC");
+
+	if ( action.HasMember("quest_stage")
+		&& action["quest_stage"].IsInt() )
+	{
+		lines.push_back(
+			"Set quest stage: "
+			+ std::to_string(
+				action["quest_stage"].GetInt()
+			)
+		);
+	}
+
+	if ( action.HasMember("reward_gold")
+		&& action["reward_gold"].IsInt() )
+	{
+		lines.push_back(
+			"Give gold: "
+			+ std::to_string(
+				action["reward_gold"].GetInt()
+			)
+		);
+	}
+
+	if ( action.HasMember("remove_gold")
+		&& action["remove_gold"].IsInt() )
+	{
+		lines.push_back(
+			"Take gold: "
+			+ std::to_string(
+				action["remove_gold"].GetInt()
+			)
+		);
+	}
+
+	auto addItemAction =
+		[
+			&action,
+			&lines
+		](
+			const char* member,
+			const char* label
+		)
+		{
+			if ( !action.HasMember(member)
+				|| !action[member].IsObject() )
+			{
+				return;
+			}
+
+			const rapidjson::Value& item =
+				action[member];
+
+			std::string itemText = "?";
+			int count = 1;
+
+			if ( item.HasMember("item")
+				&& item["item"].IsString() )
+			{
+				itemText = item["item"].GetString();
+
+				bool numeric = !itemText.empty();
+
+				for ( const char character : itemText )
+				{
+					if ( character < '0'
+						|| character > '9' )
+					{
+						numeric = false;
+						break;
+					}
+				}
+
+				if ( numeric )
+				{
+					const int itemID =
+						std::atoi(
+							itemText.c_str()
+						);
+
+					if ( itemID >= 0
+						&& itemID < NUMITEMS )
+					{
+						itemText =
+							items[itemID]
+								.getIdentifiedName();
+					}
+				}
+			}
+
+			if ( item.HasMember("count")
+				&& item["count"].IsInt() )
+			{
+				count = item["count"].GetInt();
+			}
+
+			lines.push_back(
+				std::string(label)
+				+ ": "
+				+ itemText
+				+ " x"
+				+ std::to_string(count)
+			);
+		};
+
+	addItemAction(
+		"reward_item",
+		"Give item"
+	);
+
+	addItemAction(
+		"remove_item",
+		"Take item"
+	);
+
+	auto addStringAction =
+		[
+			&action,
+			&lines
+		](
+			const char* member,
+			const char* label
+		)
+		{
+			if ( action.HasMember(member)
+				&& action[member].IsString() )
+			{
+				lines.push_back(
+					std::string(label)
+					+ ": "
+					+ action[member].GetString()
+				);
+			}
+		};
+
+	addStringAction(
+		"objective_complete",
+		"Complete objective"
+	);
+
+	addStringAction(
+		"objective_clear",
+		"Clear objective"
+	);
+
+	auto addObjectIDAction =
+		[
+			&action,
+			&lines
+		](
+			const char* member,
+			const char* label
+		)
+		{
+			if ( !action.HasMember(member)
+				|| !action[member].IsObject() )
+			{
+				return;
+			}
+
+			const rapidjson::Value& object =
+				action[member];
+
+			std::string id = "?";
+
+			if ( object.HasMember("id")
+				&& object["id"].IsString() )
+			{
+				id = object["id"].GetString();
+			}
+
+			lines.push_back(
+				std::string(label)
+				+ ": "
+				+ id
+			);
+		};
+
+	addObjectIDAction(
+		"set_world_flag",
+		"Set world flag"
+	);
+	addObjectIDAction(
+		"set_npc_flag",
+		"Set NPC flag"
+	);
+	addObjectIDAction(
+		"set_world_variable",
+		"Set world variable"
+	);
+	addObjectIDAction(
+		"add_world_variable",
+		"Add world variable"
+	);
+	addObjectIDAction(
+		"set_npc_variable",
+		"Set NPC variable"
+	);
+	addObjectIDAction(
+		"add_npc_variable",
+		"Add NPC variable"
+	);
+	addObjectIDAction(
+		"set_quest_variable",
+		"Set quest variable"
+	);
+	addObjectIDAction(
+		"add_quest_variable",
+		"Add quest variable"
+	);
+
+	if ( action.HasMember("status_effect")
+		&& action["status_effect"].IsObject() )
+	{
+		const rapidjson::Value& status =
+			action["status_effect"];
+
+		int effect = -1;
+		int duration = 0;
+		bool enabled = true;
+
+		if ( status.HasMember("effect")
+			&& status["effect"].IsInt() )
+		{
+			effect = status["effect"].GetInt();
+		}
+
+		if ( status.HasMember("duration_seconds")
+			&& status["duration_seconds"].IsInt() )
+		{
+			duration =
+				status["duration_seconds"].GetInt();
+		}
+
+		if ( status.HasMember("enabled")
+			&& status["enabled"].IsBool() )
+		{
+			enabled =
+				status["enabled"].GetBool();
+		}
+
+		lines.push_back(
+			std::string(
+				enabled
+					? "Apply status"
+					: "Clear status"
+			)
+			+ ": "
+			+ std::to_string(effect)
+			+ (
+				enabled
+					? " for "
+						+ std::to_string(duration)
+						+ "s"
+					: ""
+			)
+		);
+	}
+
+	if ( lines.empty() )
+	{
+		lines.push_back(
+			"Custom action fields"
+		);
+	}
+
+	return lines;
+}
+
+static bool questDialogueEditorUseSelectedNPCAsQuestGiver()
+{
+	if ( !selectedEntity[0] )
+	{
+		questDialogueEditorSetMessage(
+			"Select an NPC in the map first."
+		);
+		return false;
+	}
+
+	if ( selectedEntity[0]->persistentID <= 0 )
+	{
+		questDialogueEditorSetMessage(
+			"Selected NPC has no persistent ID. Save the map, then select it again."
+		);
+		return false;
+	}
+
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest )
+	{
+		questDialogueEditorSetMessage(
+			"This dialogue has no quest object."
+		);
+		return false;
+	}
+
+	auto& allocator =
+		questDialogueEditorDocument.GetAllocator();
+
+	if ( !quest->HasMember("origin") )
+	{
+		rapidjson::Value origin(
+			rapidjson::kObjectType
+		);
+
+		quest->AddMember(
+			"origin",
+			origin,
+			allocator
+		);
+	}
+	else if ( !(*quest)["origin"].IsObject() )
+	{
+		(*quest)["origin"].SetObject();
+	}
+
+	rapidjson::Value& origin =
+		(*quest)["origin"];
+
+	const std::string mapName =
+		questEditorCurrentMapFilename();
+
+	if ( origin.HasMember("label") )
+	{
+		origin["label"].SetString(
+			"Quest Giver",
+			allocator
+		);
+	}
+	else
+	{
+		rapidjson::Value label;
+		label.SetString(
+			"Quest Giver",
+			allocator
+		);
+
+		origin.AddMember(
+			"label",
+			label,
+			allocator
+		);
+	}
+
+	if ( origin.HasMember("map") )
+	{
+		origin["map"].SetString(
+			mapName.c_str(),
+			allocator
+		);
+	}
+	else
+	{
+		rapidjson::Value mapValue;
+		mapValue.SetString(
+			mapName.c_str(),
+			allocator
+		);
+
+		origin.AddMember(
+			"map",
+			mapValue,
+			allocator
+		);
+	}
+
+	if ( origin.HasMember("track_npc") )
+	{
+		origin["track_npc"].SetBool(true);
+	}
+	else
+	{
+		origin.AddMember(
+			"track_npc",
+			true,
+			allocator
+		);
+	}
+
+	if ( origin.HasMember("npc_persistent_id") )
+	{
+		origin["npc_persistent_id"].SetInt(
+			selectedEntity[0]->persistentID
+		);
+	}
+	else
+	{
+		origin.AddMember(
+			"npc_persistent_id",
+			selectedEntity[0]->persistentID,
+			allocator
+		);
+	}
+
+	origin.RemoveMember("x");
+	origin.RemoveMember("y");
+
+	if ( !questDialogueEditorSaveDocument() )
+	{
+		return false;
+	}
+
+	questDialogueEditorSetMessage(
+		"Quest giver set to selected NPC, persistent ID "
+		+ std::to_string(
+			selectedEntity[0]->persistentID
+		)
+		+ "."
+	);
+
+	return true;
+}
+
+static bool questDialogueEditorClearQuestGiver()
+{
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest
+		|| !quest->HasMember("origin")
+		|| !(*quest)["origin"].IsObject() )
+	{
+		questDialogueEditorSetMessage(
+			"No quest giver is currently assigned."
+		);
+		return false;
+	}
+
+	rapidjson::Value& origin =
+		(*quest)["origin"];
+
+	origin.RemoveMember("track_npc");
+	origin.RemoveMember("npc_persistent_id");
+
+	if ( !origin.HasMember("x")
+		&& !origin.HasMember("y") )
+	{
+		quest->RemoveMember("origin");
+	}
+
+	if ( !questDialogueEditorSaveDocument() )
+	{
+		return false;
+	}
+
+	questDialogueEditorSetMessage(
+		"Quest giver cleared."
+	);
+
+	return true;
+}
+
+static int questDialogueEditorQuestGiverPersistentID()
+{
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest
+		|| !quest->HasMember("origin")
+		|| !(*quest)["origin"].IsObject() )
+	{
+		return 0;
+	}
+
+	const rapidjson::Value& origin =
+		(*quest)["origin"];
+
+	if ( origin.HasMember("track_npc")
+		&& origin["track_npc"].IsBool()
+		&& origin["track_npc"].GetBool()
+		&& origin.HasMember("npc_persistent_id")
+		&& origin["npc_persistent_id"].IsInt() )
+	{
+		return origin["npc_persistent_id"].GetInt();
+	}
+
+	return 0;
+}
+
 void openQuestDialogueEditor()
 {
 	questDialogueEditorEditingField = false;
@@ -4472,7 +5598,7 @@ void openQuestDialogueEditor()
 	const int desiredHalfWidth =
 		std::max(390, std::min(560, xres / 2 - 20));
 	const int desiredHalfHeight =
-		std::max(350, std::min(470, yres / 2 - 12));
+		std::max(410, std::min(530, yres / 2 - 4));
 
 	subx1 = std::max(
 		8,
@@ -5111,7 +6237,7 @@ static void drawQuestDialogueEditor()
 
 	toolboxButtonPair(
 		toolboxY,
-		"COND TYPE",
+		"NEXT CONDITION",
 		"CLEAR ACTION",
 		[]()
 		{
@@ -5121,6 +6247,16 @@ static void drawQuestDialogueEditor()
 		{
 			questDialogueEditorClearChoiceAction();
 		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		toolboxX1,
+		toolboxY + 4,
+		makeColorRGB(128, 255, 160),
+		"Requires: %.20s",
+		questDialogueEditorChoiceConditionName().c_str()
 	);
 	toolboxY += toolboxRowHeight;
 
@@ -5163,6 +6299,197 @@ static void drawQuestDialogueEditor()
 		}
 	);
 	toolboxY += toolboxRowHeight;
+
+	if ( questDialogueEditorActionGroup
+		== QUEST_DIALOGUE_ACTION_GROUP_REWARDS
+		|| questDialogueEditorActionGroup
+			== QUEST_DIALOGUE_ACTION_GROUP_COSTS )
+	{
+		toolboxButtonPair(
+			toolboxY,
+			"ITEM <",
+			"ITEM >",
+			[]()
+			{
+				questDialogueEditorCycleSelectedItem(-1);
+			},
+			[]()
+			{
+				questDialogueEditorCycleSelectedItem(1);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Selected item ID: %d",
+			questDialogueEditorSelectedItemID
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(255, 230, 96),
+			"Item: %.24s",
+			items[
+				questDialogueEditorSelectedItemID
+			].getIdentifiedName()
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"QTY -",
+			"QTY +",
+			[]()
+			{
+				questDialogueEditorSelectedItemCount =
+					std::max(
+						1,
+						questDialogueEditorSelectedItemCount - 1
+					);
+			},
+			[]()
+			{
+				questDialogueEditorSelectedItemCount =
+					std::min(
+						999,
+						questDialogueEditorSelectedItemCount + 1
+					);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Item quantity: %d",
+			questDialogueEditorSelectedItemCount
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"GOLD -10",
+			"GOLD +10",
+			[]()
+			{
+				questDialogueEditorGoldAmount =
+					std::max(
+						0,
+						questDialogueEditorGoldAmount - 10
+					);
+			},
+			[]()
+			{
+				questDialogueEditorGoldAmount =
+					std::min(
+						999999,
+						questDialogueEditorGoldAmount + 10
+					);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(255, 230, 96),
+			"Gold amount: %d",
+			questDialogueEditorGoldAmount
+		);
+		toolboxY += toolboxRowHeight;
+	}
+
+	if ( questDialogueEditorActionGroup
+		== QUEST_DIALOGUE_ACTION_GROUP_STATUS )
+	{
+		toolboxButtonPair(
+			toolboxY,
+			"EFFECT <",
+			"EFFECT >",
+			[]()
+			{
+				questDialogueEditorCycleSelectedEffect(-1);
+			},
+			[]()
+			{
+				questDialogueEditorCycleSelectedEffect(1);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"TIME -",
+			"TIME +",
+			[]()
+			{
+				questDialogueEditorEffectDurationSeconds =
+					std::max(
+						0,
+						questDialogueEditorEffectDurationSeconds - 5
+					);
+			},
+			[]()
+			{
+				questDialogueEditorEffectDurationSeconds += 5;
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"POWER -",
+			"POWER +",
+			[]()
+			{
+				questDialogueEditorEffectStrength =
+					std::max(
+						1,
+						questDialogueEditorEffectStrength - 1
+					);
+			},
+			[]()
+			{
+				questDialogueEditorEffectStrength =
+					std::min(
+						255,
+						questDialogueEditorEffectStrength + 1
+					);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(255, 230, 96),
+			"Effect %d: %.18s",
+			questDialogueEditorSelectedEffectID,
+			questDialogueEditorEffectName(
+				questDialogueEditorSelectedEffectID
+			)
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Duration: %ds | Strength: %d",
+			questDialogueEditorEffectDurationSeconds,
+			questDialogueEditorEffectStrength
+		);
+		toolboxY += toolboxRowHeight;
+	}
 
 	if ( questDialogueEditorActionGroup
 		== QUEST_DIALOGUE_ACTION_GROUP_QUEST
@@ -5270,6 +6597,33 @@ static void drawQuestDialogueEditor()
 		questDialogueEditorCycleGiverMarker();
 	}
 
+	toolboxY += toolboxRowHeight;
+
+	toolboxButtonPair(
+		toolboxY,
+		"USE SELECTED NPC",
+		"CLEAR GIVER",
+		[]()
+		{
+			questDialogueEditorUseSelectedNPCAsQuestGiver();
+		},
+		[]()
+		{
+			questDialogueEditorClearQuestGiver();
+		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		toolboxX1,
+		toolboxY + 4,
+		questDialogueEditorQuestGiverPersistentID() > 0
+			? makeColorRGB(128, 255, 160)
+			: makeColorRGB(255, 160, 128),
+		"Quest giver ID: %d",
+		questDialogueEditorQuestGiverPersistentID()
+	);
 	toolboxY += toolboxRowHeight + 3;
 
 	toolboxButtonPair(
@@ -5585,6 +6939,90 @@ static void drawQuestDialogueEditor()
 					treeY += 12;
 				}
 
+				if ( questDialogueEditorDocument.IsObject()
+					&& questDialogueEditorDocument.HasMember("nodes")
+					&& questDialogueEditorDocument["nodes"].IsArray()
+					&& nodeIndex
+						< static_cast<int>(
+							questDialogueEditorDocument["nodes"].Size()
+						) )
+				{
+					const rapidjson::Value& documentNode =
+						questDialogueEditorDocument["nodes"][
+							static_cast<rapidjson::SizeType>(
+								nodeIndex
+							)
+						];
+
+					if ( documentNode.IsObject()
+						&& documentNode.HasMember("choices")
+						&& documentNode["choices"].IsArray()
+						&& choiceIndex
+							< documentNode["choices"].Size() )
+					{
+						const rapidjson::Value& documentChoice =
+							documentNode["choices"][
+								static_cast<rapidjson::SizeType>(
+									choiceIndex
+								)
+							];
+
+						const std::string conditionSummary =
+							questDialogueEditorConditionSummary(
+								documentChoice
+							);
+
+						if ( conditionSummary != "None" )
+						{
+							printTextFormattedColor(
+								font8x8_bmp,
+								treeX1 + 28,
+								treeY,
+								makeColorRGB(128, 255, 160),
+								"Requires: %.24s",
+								conditionSummary.c_str()
+							);
+							treeY += 12;
+						}
+
+						const std::string objectiveSummary =
+							questDialogueEditorChoiceObjectiveSummary(
+								documentChoice
+							);
+
+						if ( !objectiveSummary.empty() )
+						{
+							printTextFormattedColor(
+								font8x8_bmp,
+								treeX1 + 28,
+								treeY,
+								makeColorRGB(128, 192, 255),
+								"Objective: %.23s",
+								objectiveSummary.c_str()
+							);
+							treeY += 12;
+						}
+
+						const std::string actionSummary =
+							questDialogueEditorChoiceActionSummaryShort(
+								documentChoice
+							);
+
+						if ( actionSummary != "None" )
+						{
+							printTextFormattedColor(
+								font8x8_bmp,
+								treeX1 + 28,
+								treeY,
+								makeColorRGB(255, 128, 128),
+								"Action: %.26s",
+								actionSummary.c_str()
+							);
+							treeY += 12;
+						}
+					}
+				}
+
 				if ( mousestatus[SDL_BUTTON_LEFT]
 					&& omousex >= treeX1 + 16
 					&& omousex < treeX2 - 4
@@ -5847,6 +7285,27 @@ static void drawQuestDialogueEditor()
 			);
 			detailY += 16;
 
+			rapidjson::Value* selectedChoiceForSummary =
+				questDialogueEditorSelectedChoiceValueForEdit();
+
+			if ( selectedChoiceForSummary )
+			{
+				const std::string currentRequirement =
+					questDialogueEditorConditionSummary(
+						*selectedChoiceForSummary
+					);
+
+				printTextFormattedColor(
+					font8x8_bmp,
+					detailX1 + 12,
+					detailY,
+					makeColorRGB(128, 255, 160),
+					"Requires: %.23s",
+					currentRequirement.c_str()
+				);
+				detailY += 16;
+			}
+
 			printTextFormatted(
 				font8x8_bmp,
 				detailX1 + 8,
@@ -5855,6 +7314,53 @@ static void drawQuestDialogueEditor()
 				questDialogueEditorChoiceActionName().c_str()
 			);
 			detailY += 24;
+
+			printTextFormattedColor(
+				font8x8_bmp,
+				detailX1 + 8,
+				detailY,
+				makeColorRGB(128, 255, 160),
+				"Applied actions:"
+			);
+			detailY += 12;
+
+			const std::vector<std::string>
+				appliedActionLines =
+					questDialogueEditorAppliedActionSummary();
+
+			for ( const std::string& line :
+				appliedActionLines )
+			{
+				const std::string clippedAction =
+					dialogueEditorClippedText(
+						"- " + line,
+						detailX2 - detailX1 - 24
+					);
+
+				printTextFormatted(
+					font8x8_bmp,
+					detailX1 + 12,
+					detailY,
+					"%s",
+					clippedAction.c_str()
+				);
+
+				detailY += 12;
+
+				if ( detailY > panelY2 - 72 )
+				{
+					printTextFormatted(
+						font8x8_bmp,
+						detailX1 + 12,
+						detailY,
+						"..."
+					);
+					detailY += 12;
+					break;
+				}
+			}
+
+			detailY += 6;
 
 			if ( questDialogueEditorSelectedChoice
 				< static_cast<int>(node.choices.size()) )
@@ -5891,6 +7397,25 @@ static void drawQuestDialogueEditor()
 		"Builder Categories"
 	);
 	detailY += 16;
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		makeColorRGB(128, 255, 160),
+		"Condition choices:"
+	);
+	detailY += 12;
+
+	dialogueEditorDrawWrappedText(
+		detailX1 + 12,
+		detailY,
+		detailX2 - detailX1 - 24,
+		"None, Has Item, Has Gold, Quest Started, Accepted, Completed, Failed, Quest Stage, Objective Complete/Incomplete, World/NPC Flag, World/NPC Variable",
+		6,
+		makeColorRGB(160, 255, 180)
+	);
+	detailY += 6;
 
 	const char* categories[] =
 	{

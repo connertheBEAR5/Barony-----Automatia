@@ -63,6 +63,11 @@ struct CustomDialogueChoice
 	std::string rewardItem;
 	Sint32 rewardItemCount = 0;
 
+	Sint32 statusEffectID = -1;
+	Sint32 statusEffectDurationSeconds = 30;
+	Sint32 statusEffectStrength = 1;
+	bool statusEffectEnabled = true;
+
 	std::string setWorldFlagID;
 	bool setWorldFlagValue = false;
 
@@ -375,10 +380,47 @@ static bool resolveCustomDialogueItemType(
     const std::string itemName =
         normalizeCustomDialogueID(rawItemName);
 
+    if ( !itemName.empty()
+        && std::all_of(
+            itemName.begin(),
+            itemName.end(),
+            [](const unsigned char character)
+            {
+                return std::isdigit(character);
+            }
+        ) )
+    {
+        const long numericID =
+            std::strtol(
+                itemName.c_str(),
+                nullptr,
+                10
+            );
+
+        if ( numericID >= 0
+            && numericID < NUMITEMS )
+        {
+            itemType =
+                static_cast<ItemType>(
+                    numericID
+                );
+            return true;
+        }
+
+        return false;
+    }
+
     if ( itemName == "torch"
         || itemName == "tool_torch" )
     {
         itemType = TOOL_TORCH;
+        return true;
+    }
+
+    if ( itemName == "healing_potion"
+        || itemName == "potion_healing" )
+    {
+        itemType = POTION_HEALING;
         return true;
     }
 
@@ -397,24 +439,10 @@ static bool resolveCustomDialogueRewardItemType(
     ItemType& itemType
 )
 {
-    const std::string itemName =
-        normalizeCustomDialogueID(rawItemName);
-
-    if ( itemName == "healing_potion"
-        || itemName == "potion_healing" )
-    {
-        itemType = POTION_HEALING;
-        return true;
-    }
-
-    if ( itemName == "torch"
-        || itemName == "tool_torch" )
-    {
-        itemType = TOOL_TORCH;
-        return true;
-    }
-
-    return false;
+    return resolveCustomDialogueItemType(
+        rawItemName,
+        itemType
+    );
 }
 
 static Item* findCustomDialoguePlayerItem(
@@ -2277,6 +2305,64 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 							);
 
 							return definition;
+						}
+					}
+
+					if ( choiceAction.HasMember("status_effect") )
+					{
+						const rapidjson::Value& statusEffect =
+							choiceAction["status_effect"];
+
+						if ( !statusEffect.IsObject()
+							|| !statusEffect.HasMember("effect")
+							|| !statusEffect["effect"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.statusEffectID =
+							statusEffect["effect"].GetInt();
+
+						if ( choice.statusEffectID < 0
+							|| choice.statusEffectID >= NUMEFFECTS )
+						{
+							return definition;
+						}
+
+						if ( statusEffect.HasMember("duration_seconds") )
+						{
+							if ( !statusEffect["duration_seconds"].IsInt()
+								|| statusEffect["duration_seconds"].GetInt() < 0 )
+							{
+								return definition;
+							}
+
+							choice.statusEffectDurationSeconds =
+								statusEffect["duration_seconds"].GetInt();
+						}
+
+						if ( statusEffect.HasMember("strength") )
+						{
+							if ( !statusEffect["strength"].IsInt()
+								|| statusEffect["strength"].GetInt() < 1
+								|| statusEffect["strength"].GetInt() > 255 )
+							{
+								return definition;
+							}
+
+							choice.statusEffectStrength =
+								statusEffect["strength"].GetInt();
+						}
+
+						if ( statusEffect.HasMember("enabled") )
+						{
+							if ( !statusEffect["enabled"].IsBool() )
+							{
+								return definition;
+							}
+
+							choice.statusEffectEnabled =
+								statusEffect["enabled"].GetBool();
 						}
 					}
 
@@ -17274,6 +17360,39 @@ bool handleCustomMonsterDialogueChoice(
 			player,
 			removeItemPointer,
 			choice.removeItemCount
+		);
+	}
+
+	if ( choice.statusEffectID >= 0
+		&& choice.statusEffectID < NUMEFFECTS
+		&& players[player]
+		&& players[player]->entity )
+	{
+		const int duration =
+			choice.statusEffectEnabled
+				? choice.statusEffectDurationSeconds
+					* TICKS_PER_SECOND
+				: 0;
+
+		players[player]->entity->setEffect(
+			choice.statusEffectID,
+			choice.statusEffectEnabled
+				? static_cast<Uint8>(
+					choice.statusEffectStrength
+				)
+				: static_cast<Uint8>(0),
+			duration,
+			true
+		);
+
+		messagePlayer(
+			player,
+			MESSAGE_STATUS,
+			choice.statusEffectEnabled
+				? "Status effect %d applied for %d seconds."
+				: "Status effect %d cleared.",
+			choice.statusEffectID,
+			choice.statusEffectDurationSeconds
 		);
 	}
 

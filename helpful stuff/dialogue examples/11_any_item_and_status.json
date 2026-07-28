@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Choose a reward.",
+      "next": 0,
+      "choices": [
+        {
+          "id": "item_reward",
+          "text": "Give me the selected item.",
+          "next": 1,
+          "action": {
+            "reward_item": {
+              "item": "0",
+              "count": 1
+            }
+          }
+        },
+        {
+          "id": "status_reward",
+          "text": "Give me a temporary status.",
+          "next": 1,
+          "action": {
+            "status_effect": {
+              "effect": 0,
+              "duration_seconds": 30,
+              "strength": 1,
+              "enabled": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Done.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

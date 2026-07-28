@@ -658,3 +658,214 @@ Examples are intentionally limited to fields understood by the current
 runtime. The runtime currently accepts quest state actions, item/gold
 rewards and costs, objective actions, world/NPC/quest variables, flags,
 and recruitment.
+
+
+PART 14: UNIVERSAL ITEM AND STATUS REWARDS
+==========================================
+
+Any item
+--------
+The Rewards and Costs groups now show ITEM < and ITEM >.
+
+The editor displays:
+    Item ID
+    identified in-game item name
+
+GIVE ITEM creates a reward using the selected item.
+TAKE ITEM creates a cost using the selected item.
+
+The JSON stores the numeric ItemType as a string:
+
+    "reward_item": {
+        "item": "42",
+        "count": 1
+    }
+
+Numeric strings from 0 through NUMITEMS - 1 are accepted. Existing
+friendly aliases such as torch and healing_potion remain compatible.
+
+Status effects
+--------------
+Choose the Status action group.
+
+Controls:
+    EFFECT < / EFFECT >
+    TIME - / TIME +
+    POWER - / POWER +
+    APPLY STATUS / CLEAR STATUS
+
+TIME is measured in seconds.
+POWER is the effect strength from 1 through 255.
+
+Generated JSON:
+
+    "status_effect": {
+        "effect": 5,
+        "duration_seconds": 30,
+        "strength": 1,
+        "enabled": true
+    }
+
+CLEAR STATUS writes enabled false and removes the selected effect from
+the player.
+
+Important:
+Some Barony effects are internal mechanics rather than ordinary player
+buffs or debuffs. The system permits all valid effect IDs, but map
+authors should test unusual IDs before shipping a map.
+
+
+PART 14 COMPILE-FIX NOTE
+========================
+The universal item selector currently displays the selected numeric item
+ID rather than reading ItemGeneric's private internal item-name field.
+
+This does not reduce runtime item support. GIVE ITEM and TAKE ITEM still
+accept every valid ItemType from 0 through NUMITEMS - 1.
+
+A later UI improvement should resolve names through a confirmed public
+ItemGeneric accessor or a separate editor-safe item-name table.
+
+
+PART 15: QUEST-GIVER BINDING AND ITEM NAMES
+===========================================
+
+Quest giver binding
+-------------------
+
+Custom Dialogue ID only tells an NPC which JSON file to open. It does
+not automatically assign that NPC as the quest giver.
+
+To assign the quest giver:
+
+1. Place the NPC.
+2. Save the map so the NPC receives a persistent ID.
+3. Select the NPC again.
+4. Open the Dialogue and Quest Editor.
+5. Open the quest JSON.
+6. Click USE SELECTED NPC.
+
+The editor copies the selected NPC's persistent ID and current map into
+the quest origin. It also enables track_npc and removes static x/y
+coordinates.
+
+CLEAR GIVER removes the dynamic NPC assignment.
+
+The toolbox displays:
+
+    Quest giver ID: 1842
+
+A value of zero means no dynamic quest giver is assigned.
+
+Item-name display
+-----------------
+
+The universal item selector now displays both:
+
+    Selected item ID: 42
+    Item: identified item name
+
+The name comes from ItemGeneric::getIdentifiedName(), which is the
+public accessor used elsewhere in Barony.
+
+The JSON still stores the numeric item ID so every ItemType remains
+supported.
+
+
+Viewing actions already applied
+-------------------------------
+
+Select a choice in the Decision Tree.
+
+The right-side details panel now shows:
+
+    Applied actions:
+    - Start quest
+    - Give item: iron sword x1
+    - Complete objective: bring_supplies
+    - Set world flag: gate_open
+
+The summary reads every supported field from the selected choice's
+action object. Numeric item IDs are converted back to identified item
+names.
+
+When an action uses unsupported custom JSON fields, the summary shows:
+
+    Custom action fields
+
+
+PART 16: GUIDED UI STATUS AND AMOUNT CONTROLS
+=============================================
+
+Gold amounts
+------------
+
+The Rewards and Costs action groups now show:
+
+    GOLD -10
+    GOLD +10
+    Gold amount: 100
+
+Set the amount first, then click GIVE GOLD or TAKE GOLD. The amount is
+written directly into reward_gold or remove_gold.
+
+Item quantities
+---------------
+
+The item selector now shows:
+
+    Selected item ID: 31
+    Item: identified item name
+    QTY -
+    QTY +
+    Item quantity: 1
+
+Set the item and quantity before clicking GIVE ITEM or TAKE ITEM.
+
+Named effects
+-------------
+
+The Status group now displays:
+
+    Effect 22: Health Regeneration
+    Duration: 30s
+    Strength: 1
+
+Effect IDs 0 through 134 have readable names taken from the current
+Barony effect constants. IDs 135 through 159 are displayed as Reserved /
+unnamed.
+
+Choice colors
+-------------
+
+The Decision Tree now explains authored behavior beneath each choice:
+
+    Green:
+        Requirements and conditions
+
+    Blue:
+        Objective complete/clear actions
+
+    Red:
+        Actions and rewards
+
+Example:
+
+    -> I brought the torch. [next 2]
+       Requires: Requires torch x1
+       Objective: Completes bring_torch
+       Action: Take item
+
+Condition selection
+-------------------
+
+NEXT CONDITION cycles through the supported condition templates. The
+current condition is shown immediately below the button.
+
+The details panel lists the available condition families and shows the
+selected choice's exact requirement. Use the existing Condition
+Reference and Condition Number editable fields to change IDs, item
+references, stages, amounts, or variable values.
+
+This is intentionally guided: the editor shows what is selected, what
+will be written, and what is already attached to each choice.
