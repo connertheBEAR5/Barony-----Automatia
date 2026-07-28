@@ -4064,6 +4064,52 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		spawnDamageGib(uidToEntity(uid), dmg, gib, displayType);
 	}},
 
+	// custom dialogue choice selected by a remote client
+	{'CDSL', []() {
+		if ( multiplayer != SERVER
+			|| net_packet->len < 10 )
+		{
+			return;
+		}
+
+		const int player =
+			static_cast<int>(
+				net_packet->data[4]
+			);
+
+		if ( player <= 0
+			|| player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| players[player]->isLocalPlayer() )
+		{
+			return;
+		}
+
+		const Uint32 npcUID =
+			SDLNet_Read32(
+				&net_packet->data[5]
+			);
+
+		const int choiceIndex =
+			static_cast<int>(
+				net_packet->data[9]
+			);
+
+		if ( !handleCustomMonsterDialogueChoice(
+				player,
+				npcUID,
+				choiceIndex
+			) )
+		{
+			printlog(
+				"[Custom Dialogue] Host rejected player %d choice index %d for NPC UID %u.",
+				player,
+				choiceIndex,
+				npcUID
+			);
+		}
+	}},
+
 	// ping
 	{'PING', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1117), (SDL_GetTicks() - pingtime));
@@ -7544,6 +7590,120 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			playfabUser.postScore(clientnum);
 #endif
 		}
+	}},
+
+	// custom dialogue choices from host
+	{'CDCH', []() {
+		if ( multiplayer != CLIENT
+			|| net_packet->len < 12 )
+		{
+			return;
+		}
+
+		const Uint32 uid =
+			SDLNet_Read32(
+				&net_packet->data[4]
+			);
+
+		const auto type =
+			static_cast<
+				Player::WorldUI_t
+					::WorldTooltipDialogue_t
+					::DialogueType_t
+			>(
+				net_packet->data[8]
+			);
+
+		const Uint8 choiceCount =
+			net_packet->data[9];
+
+		const Uint16 messageLength =
+			SDLNet_Read16(
+				&net_packet->data[10]
+			);
+
+		int offset = 12;
+
+		if ( offset + messageLength
+			> net_packet->len )
+		{
+			printlog(
+				"[Custom Dialogue] Rejected malformed CDCH base message."
+			);
+
+			return;
+		}
+
+		std::string message(
+			reinterpret_cast<char*>(
+				&net_packet->data[offset]
+			),
+			messageLength
+		);
+
+		offset += messageLength;
+
+		std::vector<std::string> choices;
+		choices.reserve(choiceCount);
+
+		for ( Uint8 index = 0;
+			index < choiceCount;
+			++index )
+		{
+			if ( offset + 2
+				> net_packet->len )
+			{
+				printlog(
+					"[Custom Dialogue] Rejected malformed CDCH choice header."
+				);
+
+				return;
+			}
+
+			const Uint16 choiceLength =
+				SDLNet_Read16(
+					&net_packet->data[offset]
+				);
+
+			offset += 2;
+
+			if ( offset + choiceLength
+				> net_packet->len )
+			{
+				printlog(
+					"[Custom Dialogue] Rejected malformed CDCH choice text."
+				);
+
+				return;
+			}
+
+			choices.emplace_back(
+				reinterpret_cast<char*>(
+					&net_packet->data[offset]
+				),
+				choiceLength
+			);
+
+			offset += choiceLength;
+		}
+
+		players[clientnum]
+			->worldUI
+			.worldTooltipDialogue
+			.createDialogueChoiceTooltip(
+				uid,
+				type,
+				message,
+				choices
+			);
+
+		printlog(
+			"[Custom Dialogue] Client received %u choice(s) for NPC UID %u.",
+			static_cast<unsigned int>(
+				choiceCount
+			),
+			uid
+		);
 	}},
 
 	// text bubbles

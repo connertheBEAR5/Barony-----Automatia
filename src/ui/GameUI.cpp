@@ -42154,11 +42154,131 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::createDialogueChoiceTooltip(
 	if ( multiplayer == SERVER
 		&& player.playernum != clientnum )
 	{
-		createDialogueTooltip(
+		const int remotePlayer =
+			player.playernum;
+
+		if ( remotePlayer <= 0
+			|| remotePlayer >= MAXPLAYERS
+			|| client_disconnected[remotePlayer]
+			|| players[remotePlayer]->isLocalPlayer() )
+		{
+			return;
+		}
+
+		/*
+		 * Packet layout:
+		 * 0..3   "CDCH"
+		 * 4..7   NPC UID
+		 * 8      dialogue type
+		 * 9      choice count
+		 * 10..11 base message byte length
+		 * 12..   base message bytes
+		 * then repeated: uint16 length + choice bytes
+		 */
+		constexpr int maximumChoices = 8;
+		constexpr size_t maximumStringBytes = 240;
+
+		const Uint8 choiceCount =
+			static_cast<Uint8>(
+				std::min(
+					static_cast<size_t>(
+						maximumChoices
+					),
+					choices.size()
+				)
+			);
+
+		strcpy(
+			reinterpret_cast<char*>(
+				net_packet->data
+			),
+			"CDCH"
+		);
+
+		SDLNet_Write32(
 			uid,
-			type,
-			"%s",
-			message.c_str()
+			&net_packet->data[4]
+		);
+
+		net_packet->data[8] =
+			static_cast<Uint8>(type);
+
+		net_packet->data[9] =
+			choiceCount;
+
+		int offset = 12;
+
+		const Uint16 messageLength =
+			static_cast<Uint16>(
+				std::min(
+					maximumStringBytes,
+					message.size()
+				)
+			);
+
+		SDLNet_Write16(
+			messageLength,
+			&net_packet->data[10]
+		);
+
+		memcpy(
+			&net_packet->data[offset],
+			message.data(),
+			messageLength
+		);
+
+		offset += messageLength;
+
+		for ( Uint8 index = 0;
+			index < choiceCount;
+			++index )
+		{
+			const Uint16 choiceLength =
+				static_cast<Uint16>(
+					std::min(
+						maximumStringBytes,
+						choices[index].size()
+					)
+				);
+
+			SDLNet_Write16(
+				choiceLength,
+				&net_packet->data[offset]
+			);
+
+			offset += 2;
+
+			memcpy(
+				&net_packet->data[offset],
+				choices[index].data(),
+				choiceLength
+			);
+
+			offset += choiceLength;
+		}
+
+		net_packet->address.host =
+			net_clients[remotePlayer - 1].host;
+
+		net_packet->address.port =
+			net_clients[remotePlayer - 1].port;
+
+		net_packet->len = offset;
+
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			remotePlayer - 1
+		);
+
+		printlog(
+			"[Custom Dialogue] Sent %u choice(s) for NPC UID %u to remote player %d.",
+			static_cast<unsigned int>(
+				choiceCount
+			),
+			uid,
+			remotePlayer
 		);
 
 		return;

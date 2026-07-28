@@ -15002,6 +15002,62 @@ bool handleCustomMonsterDialogueChoice(
 		return false;
 	}
 
+	/*
+	 * Remote clients never apply dialogue consequences locally.
+	 * They send only the selected index and NPC UID to the host.
+	 * The host validates this against its pending choice state.
+	 */
+	if ( multiplayer == CLIENT )
+	{
+		if ( player != clientnum
+			|| choiceIndex < 0
+			|| choiceIndex > 255 )
+		{
+			return false;
+		}
+
+		strcpy(
+			reinterpret_cast<char*>(
+				net_packet->data
+			),
+			"CDSL"
+		);
+
+		net_packet->data[4] =
+			static_cast<Uint8>(player);
+
+		SDLNet_Write32(
+			npcUID,
+			&net_packet->data[5]
+		);
+
+		net_packet->data[9] =
+			static_cast<Uint8>(choiceIndex);
+
+		net_packet->address.host =
+			net_server.host;
+
+		net_packet->address.port =
+			net_server.port;
+
+		net_packet->len = 10;
+
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			0
+		);
+
+		printlog(
+			"[Custom Dialogue] Client sent choice index %d for NPC UID %u.",
+			choiceIndex,
+			npcUID
+		);
+
+		return true;
+	}
+
 	PendingCustomDialogueChoiceState& pending =
 		pendingCustomDialogueChoices[player];
 
