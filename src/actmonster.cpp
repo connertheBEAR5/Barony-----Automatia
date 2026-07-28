@@ -225,6 +225,19 @@ struct CustomDialogueDefinition
     std::string questCompletedText;
     std::string questFailedText;
 
+    /*
+     * Authored ownership and repeatability metadata.
+     *
+     * Runtime support in this stage:
+     *     scope = "player"
+     *     repeatable = false
+     *
+     * Other combinations are parsed but rejected clearly until their
+     * authoritative reset/share behavior is implemented.
+     */
+    std::string questScope = "player";
+    bool questRepeatable = false;
+
     std::vector<CustomDialogueQuestObjective>
         questObjectives;
 
@@ -995,6 +1008,73 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                     objective
                 );
             }
+        }
+
+
+        if ( quest.HasMember("scope") )
+        {
+            if ( !quest["scope"].IsString() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' quest scope must be a string.",
+                    realPath.c_str()
+                );
+
+                return definition;
+            }
+
+            definition.questScope =
+                normalizeCustomDialogueID(
+                    quest["scope"].GetString()
+                );
+
+            if ( definition.questScope != "player"
+                && definition.questScope != "party"
+                && definition.questScope != "world" )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' uses unsupported quest scope '%s'.",
+                    realPath.c_str(),
+                    definition.questScope.c_str()
+                );
+
+                return definition;
+            }
+        }
+
+        if ( quest.HasMember("repeatable") )
+        {
+            if ( !quest["repeatable"].IsBool() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' quest repeatable must be Boolean.",
+                    realPath.c_str()
+                );
+
+                return definition;
+            }
+
+            definition.questRepeatable =
+                quest["repeatable"].GetBool();
+        }
+
+        /*
+         * Explicitly reject combinations that are authored correctly
+         * but do not yet have safe runtime ownership/reset semantics.
+         */
+        if ( definition.questScope != "player"
+            || definition.questRepeatable )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' requests scope='%s', repeatable=%s, but this runtime currently supports only scope='player' and repeatable=false.",
+                realPath.c_str(),
+                definition.questScope.c_str(),
+                definition.questRepeatable
+                    ? "true"
+                    : "false"
+            );
+
+            return definition;
         }
 
         if ( definition.questID.empty() || definition.questTitle.empty() )
@@ -2778,6 +2858,34 @@ bool getCustomDialogueQuestObjectives(
         stages.push_back(objective.stage);
         optionalFlags.push_back(objective.optional);
     }
+
+    return true;
+}
+
+
+bool getCustomDialogueQuestOwnership(
+    const std::string& dialogueID,
+    std::string& scope,
+    bool& repeatable
+)
+{
+    scope.clear();
+    repeatable = false;
+
+    const CustomDialogueDefinition* definition =
+        getCustomDialogueDefinition(dialogueID);
+
+    if ( !definition
+        || definition->questID.empty() )
+    {
+        return false;
+    }
+
+    scope =
+        definition->questScope;
+
+    repeatable =
+        definition->questRepeatable;
 
     return true;
 }

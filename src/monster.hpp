@@ -1172,6 +1172,16 @@ bool getCustomDialogueQuestObjectives(
     std::vector<bool>& optionalFlags
 );
 
+
+/*
+ * Retrieves immutable authored quest ownership metadata.
+ */
+bool getCustomDialogueQuestOwnership(
+    const std::string& dialogueID,
+    std::string& scope,
+    bool& repeatable
+);
+
 bool getCustomDialogueQuestMetadata(
     const std::string& dialogueID,
     std::string& questID,

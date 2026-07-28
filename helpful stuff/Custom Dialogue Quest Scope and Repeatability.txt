@@ -1,0 +1,85 @@
+CUSTOM DIALOGUE QUEST SCOPE AND REPEATABILITY
+================================================
+
+Purpose
+-------
+Quest ownership and repeatability are separate ideas.
+
+scope
+    Decides who owns one quest-progress record.
+
+repeatable
+    Decides whether that owner may reset and complete it again.
+
+JSON
+----
+Add these fields inside the root quest object:
+
+{
+    "quest": {
+        "title": "A Light in the Dark",
+        "scope": "player",
+        "repeatable": false
+    }
+}
+
+Scopes
+------
+player
+    Every player receives independent progress.
+
+party
+    All members of one party share progress.
+
+world
+    The persistent world has one shared progress record.
+
+Repeatability
+-------------
+false
+    The owner may complete the quest once.
+
+true
+    The owner may reset and complete the quest again according to
+    repeat/reset rules.
+
+Your required behavior
+----------------------
+For a quest every player may complete once:
+
+    "scope": "player",
+    "repeatable": false
+
+Player A may complete it.
+Player C may later complete it independently.
+Neither player may complete it a second time.
+
+Current runtime support
+-----------------------
+This stage safely supports only:
+
+    player + repeatable false
+
+The parser recognizes party, world, and repeatable true, but rejects
+those definitions with a clear log message until their authoritative
+sharing and reset rules are implemented.
+
+This avoids silently treating a party or repeatable quest as a normal
+one-time player quest.
+
+Future combinations
+-------------------
+player + repeatable true
+    Independent reset per player.
+
+party + repeatable false
+    One completion shared by current party members.
+
+party + repeatable true
+    Party-owned repeat cycle.
+
+world + repeatable false
+    One permanent world completion.
+
+world + repeatable true
+    World-owned reset cycle.
