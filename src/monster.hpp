@@ -1161,6 +1161,17 @@ bool handleCustomMonsterDialogue(
  * Called by the local dialogue UI after the player confirms one of the
  * currently displayed custom dialogue choices.
  */
+
+bool getCustomDialogueQuestMetadata(
+    const std::string& dialogueID,
+    std::string& questID,
+    std::string& title,
+    std::string& summary,
+    std::string& objective,
+    std::string& completedText,
+    std::string& failedText
+);
+
 bool handleCustomMonsterDialogueChoice(
 	int player,
 	Uint32 npcUID,

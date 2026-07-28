@@ -207,6 +207,13 @@ struct CustomDialogueDefinition
 
     std::string dialogueID;
     std::string questID;
+
+    std::string questTitle;
+    std::string questSummary;
+    std::string questObjective;
+    std::string questCompletedText;
+    std::string questFailedText;
+
     Sint32 startNode = 0;
 
     std::unordered_map<
@@ -821,6 +828,61 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 realPath.c_str()
             );
 
+            return definition;
+        }
+    }
+
+    if ( document.HasMember("quest") )
+    {
+        const rapidjson::Value& quest = document["quest"];
+
+        if ( !quest.IsObject() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' field 'quest' must be an object.",
+                realPath.c_str()
+            );
+            return definition;
+        }
+
+        auto readQuestText =
+            [&realPath, &quest](
+                const char* field,
+                std::string& destination
+            ) -> bool
+            {
+                if ( !quest.HasMember(field) )
+                {
+                    return true;
+                }
+                if ( !quest[field].IsString() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' quest field '%s' must be a string.",
+                        realPath.c_str(),
+                        field
+                    );
+                    return false;
+                }
+                destination = quest[field].GetString();
+                return true;
+            };
+
+        if ( !readQuestText("title", definition.questTitle)
+            || !readQuestText("summary", definition.questSummary)
+            || !readQuestText("objective", definition.questObjective)
+            || !readQuestText("completed_text", definition.questCompletedText)
+            || !readQuestText("failed_text", definition.questFailedText) )
+        {
+            return definition;
+        }
+
+        if ( definition.questID.empty() || definition.questTitle.empty() )
+        {
+            printlog(
+                "[Custom Dialogue] '%s' quest metadata requires quest_id and a title.",
+                realPath.c_str()
+            );
             return definition;
         }
     }
@@ -2561,6 +2623,41 @@ getCustomDialogueDefinition(
 
     return &iterator->second;
 }
+
+bool getCustomDialogueQuestMetadata(
+    const std::string& dialogueID,
+    std::string& questID,
+    std::string& title,
+    std::string& summary,
+    std::string& objective,
+    std::string& completedText,
+    std::string& failedText
+)
+{
+    questID.clear();
+    title.clear();
+    summary.clear();
+    objective.clear();
+    completedText.clear();
+    failedText.clear();
+
+    const CustomDialogueDefinition* definition =
+        getCustomDialogueDefinition(dialogueID);
+
+    if ( !definition || definition->questID.empty() )
+    {
+        return false;
+    }
+
+    questID = definition->questID;
+    title = definition->questTitle;
+    summary = definition->questSummary;
+    objective = definition->questObjective;
+    completedText = definition->questCompletedText;
+    failedText = definition->questFailedText;
+    return true;
+}
+
 // determines which monsters fight which
 bool swornenemies[NUMMONSTERS][NUMMONSTERS] =
 {

@@ -1,0 +1,24 @@
+CUSTOM DIALOGUE QUEST METADATA
+================================
+
+Adds journal-ready metadata to the root of a dialogue JSON file:
+
+{
+    "version": 1,
+    "quest_id": "torch_for_the_stranger",
+    "quest": {
+        "title": "A Light in the Dark",
+        "summary": "A stranger needs a torch.",
+        "objective": "Bring one torch to the stranger.",
+        "completed_text": "You delivered the requested torch.",
+        "failed_text": "You permanently refused the request."
+    }
+}
+
+Rules:
+- quest is optional.
+- quest_id and quest.title are required when quest metadata exists.
+- Other metadata fields are optional strings.
+- Progress remains separate per player.
+- The future journal UI can read these fields through
+  getCustomDialogueQuestMetadata().
