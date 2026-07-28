@@ -5112,7 +5112,179 @@ int main(int argc, char** argv)
 								mousestatus[SDL_BUTTON_LEFT] = 0;
 								openQuestDialogueEditor();
 							}
+							//items for monster
+							pad_y2 = suby1 + 28 + 2 * spacing;
+							pad_x3 = 40;
+							pad_x4 = subx2 - 112;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Helm");
+							
+							//pad_y2 += spacing * 2 - 16;
+							pad_y2 += spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Amulet");
+
+							//pad_x4 += 64 * 2;
+							pad_y2 += spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 4, pad_y2, color, "Armor");
+
+							//pad_x4 -= 64;
+							//pad_y2 += spacing * 2 - 16;
+							pad_y2 += spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8 - 4, pad_y2, color, " Boots");
+
+							pad_y2 = suby1 + 28 + 2 * spacing;
+							pad_y2 += 16;
+							pad_x4 -= 64;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8 - 4, pad_y2, color, " Cloak");
+
+							pad_x4 += 64 * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Mask");
+
+							pad_x4 -= 64 * 2;
+							pad_y2 += spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Weapon");
+
+							pad_x4 += 64 * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Shield");
+
+							pad_x4 -= 64 * 2;
+							pad_y2 += spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Ring");
+
+							pad_x4 += 64 * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Gloves");
+
+							pad_x4 -= 64 * 2;
+
+							pad_y2 += 32 + spacing * 2;
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Inventory");
+
+							pad_y2 += spacing * 3 + 8;
+							if ( !strcmp(spriteProperties[31], "disable") )
+							{
+								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");
+							}
+							else
+							{
+								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [ ]");
+							}
+							if ( mousestatus[SDL_BUTTON_LEFT] )
+							{
+								int checkbox_x1 = pad_x4 - 8 + strlen("Disable Miniboss: ") * 8;
+								int checkbox_x2 = checkbox_x1 + strlen("[ ]") * 8;
+								if ( omousex >= checkbox_x1 && omousey >= pad_y2 && omousex < checkbox_x2 && omousey < pad_y2 + 8 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									if ( !strcmp(spriteProperties[31], "disable") )
+									{
+										strcpy(spriteProperties[31], "");
+									}
+									else
+									{
+										strcpy(spriteProperties[31], "disable");
+									}
+								}
+							}
+
+							if ( editproperty <= 26 )
+							{
+								// limit of properties is twice the vertical count
+								if ( !SDL_IsTextInputActive() )
+								{
+									SDL_StartTextInput();
+									inputstr = spriteProperties[0];
+								}
+								//strncpy(nametext,inputstr,31);
+
+								// value of 0 is the name field, else the input is a number
+								if ( editproperty == 0 )
+								{
+									inputlen = 31;
+								}
+								else if ( editproperty == 26 )
+								{
+									/*
+									* Reserve one byte for null termination in Stat::customDialogueID.
+									*/
+									inputlen = 63;
+								}
+								else
+								{
+									inputlen = 4;
+								}
+								if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+								{
+									pad_y1 = suby1 + 28 + editproperty * spacing;
+
+									if ( editproperty == 26 )
+									{
+										const int dialogueCursorX =
+											subx1
+											+ 8
+											+ static_cast<int>(
+												strlen(spriteProperties[26])
+											) * 8;
+
+										const int dialogueCursorY =
+											suby1 + 374;
+
+										/*
+										* Keep the cursor inside the visible field even when the stored ID
+										* is longer than the currently visible portion.
+										*/
+										printText(
+											font8x8_bmp,
+											std::min(
+												dialogueCursorX,
+												subx2 - 88
+											),
+											dialogueCursorY,
+											"\26"
+										);
+									}
+									else if ( editproperty == 0 )
+									{
+										printText(font8x8_bmp, pad_x1 + strlen(spriteProperties[editproperty]) * 8, pad_y1 + 16, "\26");
+									}
+									else if ( editproperty < 7 )
+									{
+										pad_y1 += spacing;
+										// left box
+										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
+									}
+									else if ( editproperty < 13 )
+									{
+										pad_y1 += spacing;
+										pad_y1 += spacing + 10;
+										// left box
+										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
+									}
+									else if ( editproperty < 19 )
+									{
+										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
+										pad_y1 += spacing;
+										// right box
+										printText(font8x8_bmp, pad_x1 + pad_x2 + (pad_x3 + 20) + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
+									}
+									else if ( editproperty < 25 )
+									{
+										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
+										pad_y1 += spacing;
+										pad_y1 += spacing + 10;
+										// right box
+										printText(font8x8_bmp, pad_x1 + pad_x2 + (pad_x3 + 20) + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
+									}
+									else if ( editproperty >= 25 )
+									{
+										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
+										pad_y1 += spacing;
+										pad_y1 += spacing + 20;
+										// left box
+										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
+									}
+								}
+							}
 					}
+				}
 				}
 				else if ( newwindow == 3 )
 				{
