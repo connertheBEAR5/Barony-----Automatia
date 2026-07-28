@@ -1,0 +1,55 @@
+QUEST JOURNAL UI FOUNDATION
+==============================
+
+Opening
+-------
+Press J while in game.
+
+Press J again or Escape to close it.
+
+Current controls
+----------------
+Mouse:
+- Active, Completed, and Failed tabs
+- Quest selection
+- Close button
+
+Keyboard:
+- J toggles the journal
+- Escape closes it
+
+Display
+-------
+The journal shows:
+- Tab counts
+- Quest list
+- Status
+- Current stage
+- Repeatable status
+- Title
+- Summary
+- General objective
+- Completion/failure text
+- Required and optional objectives
+- Per-player objective completion
+
+Objective markers:
+[ ] incomplete
+[x] complete
+
+Current limitations
+-------------------
+- Eight quests are visible per tab in this first UI version.
+- Scrolling is not implemented yet.
+- Controller focus/navigation is not implemented yet.
+- The journal opens as an overlay rather than a fully integrated
+  inventory module button.
+- Text wrapping depends on the existing Field widget behavior.
+
+Next UI milestone
+-----------------
+- Add scrolling and page controls.
+- Add controller navigation.
+- Add an inventory/module button.
+- Preserve the selected quest and tab between openings.
+- Add quest-update notifications.

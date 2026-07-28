@@ -30875,6 +30875,862 @@ void Player::Hotbar_t::updateCursor()
 	}
 }
 
+
+/*
+ * Custom Dialogue Quest Journal UI foundation.
+ *
+ * This overlay is attached to the inventory processing loop so it uses
+ * the existing per-player virtual screen and UI ownership system.
+ *
+ * Keyboard:
+ *     J      open/close journal
+ *     Escape close journal
+ *
+ * Mouse:
+ *     Active / Completed / Failed tabs
+ *     Quest list entries
+ *     Close button
+ */
+namespace CustomDialogueQuestJournalUI
+{
+    enum
+    {
+        MAX_VISIBLE_QUESTS = 8
+    };
+
+    struct State
+    {
+        Frame* frame = nullptr;
+
+        CustomDialogueQuestJournalStatus selectedStatus =
+            CustomDialogueQuestJournalStatus::Active;
+
+        Sint32 selectedQuest = 0;
+
+        std::vector<CustomDialogueQuestJournalEntry>
+            visibleEntries;
+
+        bool keyLatch = false;
+    };
+
+    static State states[MAXPLAYERS];
+
+    static const char* statusName(
+        const CustomDialogueQuestJournalStatus status
+    )
+    {
+        switch ( status )
+        {
+            case CustomDialogueQuestJournalStatus::Completed:
+                return "Completed";
+
+            case CustomDialogueQuestJournalStatus::Failed:
+                return "Failed";
+
+            case CustomDialogueQuestJournalStatus::Active:
+            default:
+                return "Active";
+        }
+    }
+
+    static void refresh(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        state.visibleEntries.clear();
+
+        getCustomDialogueQuestJournalEntriesByStatus(
+            player,
+            state.selectedStatus,
+            state.visibleEntries
+        );
+
+        if ( state.selectedQuest < 0 )
+        {
+            state.selectedQuest = 0;
+        }
+
+        if ( state.selectedQuest
+            >= static_cast<Sint32>(
+                state.visibleEntries.size()
+            ) )
+        {
+            state.selectedQuest =
+                state.visibleEntries.empty()
+                    ? 0
+                    : static_cast<Sint32>(
+                        state.visibleEntries.size()
+                    ) - 1;
+        }
+    }
+
+    static std::string buildObjectiveText(
+        const CustomDialogueQuestJournalEntry& entry
+    )
+    {
+        std::string result;
+
+        for ( const auto& objective :
+            entry.objectives )
+        {
+            if ( !objective.visible )
+            {
+                continue;
+            }
+
+            result +=
+                objective.completed
+                    ? "[x] "
+                    : "[ ] ";
+
+            if ( objective.optional )
+            {
+                result +=
+                    "(Optional) ";
+            }
+
+            if ( objective.completed
+                && !objective.completedText.empty() )
+            {
+                result +=
+                    objective.completedText;
+            }
+            else
+            {
+                result +=
+                    objective.text;
+            }
+
+            result +=
+                "\n";
+        }
+
+        if ( result.empty() )
+        {
+            result =
+                "No objectives are visible at this stage.";
+        }
+
+        return result;
+    }
+
+    static void close(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( state.frame )
+        {
+            state.frame->setDisabled(true);
+        }
+    }
+
+    static void create(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( state.frame
+            || !gameUIFrame[player] )
+        {
+            return;
+        }
+
+        state.frame =
+            gameUIFrame[player]->addFrame(
+                "custom dialogue quest journal"
+            );
+
+        state.frame->setOwner(player);
+        state.frame->setHollow(false);
+        state.frame->setBorder(2);
+        state.frame->setColor(
+            makeColor(
+                22,
+                24,
+                29,
+                245
+            )
+        );
+        state.frame->setDisabled(true);
+
+        auto title =
+            state.frame->addField(
+                "quest journal title",
+                128
+            );
+
+        title->setFont(
+            "fonts/pixelmix.ttf#16#2"
+        );
+        title->setText(
+            "QUEST JOURNAL"
+        );
+        title->setHJustify(
+            Field::justify_t::LEFT
+        );
+        title->setVJustify(
+            Field::justify_t::CENTER
+        );
+
+        auto closeButton =
+            state.frame->addButton(
+                "quest journal close"
+            );
+
+        closeButton->setOwner(player);
+        closeButton->setText("X");
+        closeButton->setFont(
+            "fonts/pixelmix.ttf#16#2"
+        );
+        closeButton->setHideGlyphs(true);
+        closeButton->setHideKeyboardGlyphs(true);
+        closeButton->setHideSelectors(true);
+        closeButton->setMenuConfirmControlType(0);
+        closeButton->setCallback(
+            [](Button& button)
+            {
+                close(
+                    button.getOwner()
+                );
+            }
+        );
+
+        const char* tabNames[3] =
+        {
+            "Active",
+            "Completed",
+            "Failed"
+        };
+
+        for ( Sint32 tab = 0;
+            tab < 3;
+            ++tab )
+        {
+            std::string buttonName =
+                "quest journal tab "
+                + std::to_string(tab);
+
+            auto button =
+                state.frame->addButton(
+                    buttonName.c_str()
+                );
+
+            button->setOwner(player);
+            button->setText(
+                tabNames[tab]
+            );
+            button->setFont(
+                "fonts/pixel_maz.ttf#16#2"
+            );
+            button->setHideGlyphs(true);
+            button->setHideKeyboardGlyphs(true);
+            button->setHideSelectors(true);
+            button->setMenuConfirmControlType(0);
+            button->setUserData(
+                reinterpret_cast<void*>(
+                    static_cast<intptr_t>(tab)
+                )
+            );
+            button->setCallback(
+                [](Button& clicked)
+                {
+                    const int owner =
+                        clicked.getOwner();
+
+                    State& clickedState =
+                        states[owner];
+
+                    const Sint32 selectedTab =
+                        static_cast<Sint32>(
+                            reinterpret_cast<intptr_t>(
+                                clicked.getUserData()
+                            )
+                        );
+
+                    clickedState.selectedStatus =
+                        static_cast<
+                            CustomDialogueQuestJournalStatus
+                        >(selectedTab);
+
+                    clickedState.selectedQuest = 0;
+
+                    refresh(owner);
+                }
+            );
+        }
+
+        for ( Sint32 index = 0;
+            index < MAX_VISIBLE_QUESTS;
+            ++index )
+        {
+            std::string buttonName =
+                "quest journal entry "
+                + std::to_string(index);
+
+            auto button =
+                state.frame->addButton(
+                    buttonName.c_str()
+                );
+
+            button->setOwner(player);
+            button->setText("");
+            button->setFont(
+                "fonts/pixel_maz.ttf#16#2"
+            );
+            button->setHideGlyphs(true);
+            button->setHideKeyboardGlyphs(true);
+            button->setHideSelectors(true);
+            button->setMenuConfirmControlType(0);
+            button->setUserData(
+                reinterpret_cast<void*>(
+                    static_cast<intptr_t>(index)
+                )
+            );
+            button->setCallback(
+                [](Button& clicked)
+                {
+                    const int owner =
+                        clicked.getOwner();
+
+                    const Sint32 index =
+                        static_cast<Sint32>(
+                            reinterpret_cast<intptr_t>(
+                                clicked.getUserData()
+                            )
+                        );
+
+                    State& clickedState =
+                        states[owner];
+
+                    if ( index >= 0
+                        && index
+                            < static_cast<Sint32>(
+                                clickedState.visibleEntries.size()
+                            ) )
+                    {
+                        clickedState.selectedQuest =
+                            index;
+                    }
+                }
+            );
+        }
+
+        const char* fieldNames[] =
+        {
+            "quest journal status",
+            "quest journal quest title",
+            "quest journal summary",
+            "quest journal objective heading",
+            "quest journal objectives",
+            "quest journal empty"
+        };
+
+        const size_t capacities[] =
+        {
+            128,
+            256,
+            2048,
+            128,
+            4096,
+            256
+        };
+
+        for ( size_t index = 0;
+            index < 6;
+            ++index )
+        {
+            auto field =
+                state.frame->addField(
+                    fieldNames[index],
+                    capacities[index]
+                );
+
+            field->setFont(
+                index == 1
+                    ? "fonts/pixelmix.ttf#16#2"
+                    : "fonts/pixel_maz_multiline.ttf#16#2"
+            );
+
+            field->setHJustify(
+                Field::justify_t::LEFT
+            );
+
+            field->setVJustify(
+                Field::justify_t::TOP
+            );
+
+            field->setText("");
+        }
+    }
+
+    static void layout(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( !state.frame )
+        {
+            return;
+        }
+
+        const Sint32 width = 600;
+        const Sint32 height = 410;
+
+        const Sint32 cameraWidth =
+            players[player]->camera_virtualWidth();
+
+        const Sint32 cameraHeight =
+            players[player]->camera_virtualHeight();
+
+        state.frame->setSize(
+            SDL_Rect
+            {
+                players[player]->camera_virtualx1()
+                    + (cameraWidth - width) / 2,
+                players[player]->camera_virtualy1()
+                    + (cameraHeight - height) / 2,
+                width,
+                height
+            }
+        );
+
+        auto title =
+            state.frame->findField(
+                "quest journal title"
+            );
+
+        title->setSize(
+            SDL_Rect
+            {
+                14,
+                8,
+                width - 60,
+                28
+            }
+        );
+
+        auto closeButton =
+            state.frame->findButton(
+                "quest journal close"
+            );
+
+        closeButton->setSize(
+            SDL_Rect
+            {
+                width - 38,
+                6,
+                30,
+                28
+            }
+        );
+
+        for ( Sint32 tab = 0;
+            tab < 3;
+            ++tab )
+        {
+            std::string name =
+                "quest journal tab "
+                + std::to_string(tab);
+
+            auto button =
+                state.frame->findButton(
+                    name.c_str()
+                );
+
+            button->setSize(
+                SDL_Rect
+                {
+                    12 + tab * 108,
+                    42,
+                    102,
+                    28
+                }
+            );
+        }
+
+        for ( Sint32 index = 0;
+            index < MAX_VISIBLE_QUESTS;
+            ++index )
+        {
+            std::string name =
+                "quest journal entry "
+                + std::to_string(index);
+
+            auto button =
+                state.frame->findButton(
+                    name.c_str()
+                );
+
+            button->setSize(
+                SDL_Rect
+                {
+                    12,
+                    80 + index * 36,
+                    230,
+                    32
+                }
+            );
+        }
+
+        state.frame->findField(
+            "quest journal status"
+        )->setSize(
+            SDL_Rect
+            {
+                260,
+                46,
+                320,
+                22
+            }
+        );
+
+        state.frame->findField(
+            "quest journal quest title"
+        )->setSize(
+            SDL_Rect
+            {
+                260,
+                80,
+                320,
+                30
+            }
+        );
+
+        state.frame->findField(
+            "quest journal summary"
+        )->setSize(
+            SDL_Rect
+            {
+                260,
+                112,
+                320,
+                72
+            }
+        );
+
+        state.frame->findField(
+            "quest journal objective heading"
+        )->setSize(
+            SDL_Rect
+            {
+                260,
+                194,
+                320,
+                22
+            }
+        );
+
+        state.frame->findField(
+            "quest journal objectives"
+        )->setSize(
+            SDL_Rect
+            {
+                260,
+                220,
+                320,
+                170
+            }
+        );
+
+        state.frame->findField(
+            "quest journal empty"
+        )->setSize(
+            SDL_Rect
+            {
+                18,
+                92,
+                210,
+                80
+            }
+        );
+    }
+
+    static void updateContents(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( !state.frame
+            || state.frame->isDisabled() )
+        {
+            return;
+        }
+
+        refresh(player);
+
+        Sint32 activeCount = 0;
+        Sint32 completedCount = 0;
+        Sint32 failedCount = 0;
+
+        getCustomDialogueQuestJournalCounts(
+            player,
+            activeCount,
+            completedCount,
+            failedCount
+        );
+
+        const Sint32 counts[3] =
+        {
+            activeCount,
+            completedCount,
+            failedCount
+        };
+
+        for ( Sint32 tab = 0;
+            tab < 3;
+            ++tab )
+        {
+            std::string name =
+                "quest journal tab "
+                + std::to_string(tab);
+
+            auto button =
+                state.frame->findButton(
+                    name.c_str()
+                );
+
+            std::string text =
+                std::string(
+                    statusName(
+                        static_cast<
+                            CustomDialogueQuestJournalStatus
+                        >(tab)
+                    )
+                )
+                + " ("
+                + std::to_string(counts[tab])
+                + ")";
+
+            button->setText(
+                text.c_str()
+            );
+        }
+
+        for ( Sint32 index = 0;
+            index < MAX_VISIBLE_QUESTS;
+            ++index )
+        {
+            std::string name =
+                "quest journal entry "
+                + std::to_string(index);
+
+            auto button =
+                state.frame->findButton(
+                    name.c_str()
+                );
+
+            if ( index
+                < static_cast<Sint32>(
+                    state.visibleEntries.size()
+                ) )
+            {
+                const auto& entry =
+                    state.visibleEntries[index];
+
+                std::string text =
+                    index == state.selectedQuest
+                        ? "> "
+                        : "  ";
+
+                text +=
+                    entry.title;
+
+                button->setText(
+                    text.c_str()
+                );
+
+                button->setDisabled(false);
+            }
+            else
+            {
+                button->setText("");
+                button->setDisabled(true);
+            }
+        }
+
+        auto emptyField =
+            state.frame->findField(
+                "quest journal empty"
+            );
+
+        if ( state.visibleEntries.empty() )
+        {
+            emptyField->setText(
+                (
+                    std::string("No ")
+                    + statusName(
+                        state.selectedStatus
+                    )
+                    + " quests."
+                ).c_str()
+            );
+
+            state.frame->findField(
+                "quest journal status"
+            )->setText("");
+
+            state.frame->findField(
+                "quest journal quest title"
+            )->setText("");
+
+            state.frame->findField(
+                "quest journal summary"
+            )->setText("");
+
+            state.frame->findField(
+                "quest journal objective heading"
+            )->setText("");
+
+            state.frame->findField(
+                "quest journal objectives"
+            )->setText("");
+
+            return;
+        }
+
+        emptyField->setText("");
+
+        const CustomDialogueQuestJournalEntry& entry =
+            state.visibleEntries[
+                state.selectedQuest
+            ];
+
+        std::string statusText =
+            std::string("Status: ")
+            + statusName(entry.status)
+            + "    Stage: "
+            + std::to_string(entry.stage);
+
+        if ( entry.repeatable )
+        {
+            statusText +=
+                "    Repeatable";
+        }
+
+        state.frame->findField(
+            "quest journal status"
+        )->setText(
+            statusText.c_str()
+        );
+
+        state.frame->findField(
+            "quest journal quest title"
+        )->setText(
+            entry.title.c_str()
+        );
+
+        std::string summary =
+            entry.summary;
+
+        if ( entry.status
+                == CustomDialogueQuestJournalStatus::Completed
+            && !entry.completedText.empty() )
+        {
+            summary +=
+                "\n\n"
+                + entry.completedText;
+        }
+        else if ( entry.status
+                == CustomDialogueQuestJournalStatus::Failed
+            && !entry.failedText.empty() )
+        {
+            summary +=
+                "\n\n"
+                + entry.failedText;
+        }
+        else if ( !entry.objective.empty() )
+        {
+            summary +=
+                "\n\n"
+                + entry.objective;
+        }
+
+        state.frame->findField(
+            "quest journal summary"
+        )->setText(
+            summary.c_str()
+        );
+
+        state.frame->findField(
+            "quest journal objective heading"
+        )->setText(
+            "OBJECTIVES"
+        );
+
+        const std::string objectiveText =
+            buildObjectiveText(entry);
+
+        state.frame->findField(
+            "quest journal objectives"
+        )->setText(
+            objectiveText.c_str()
+        );
+    }
+
+    static void update(
+        const int player
+    )
+    {
+        if ( player < 0
+            || player >= MAXPLAYERS
+            || !players[player] )
+        {
+            return;
+        }
+
+        create(player);
+        layout(player);
+
+        State& state =
+            states[player];
+
+        const bool togglePressed =
+            keystatus[SDLK_j] != 0;
+
+        if ( togglePressed
+            && !state.keyLatch )
+        {
+            state.keyLatch = true;
+
+            const bool opening =
+                state.frame->isDisabled();
+
+            state.frame->setDisabled(
+                !opening
+            );
+
+            if ( opening )
+            {
+                refresh(player);
+            }
+        }
+        else if ( !togglePressed )
+        {
+            state.keyLatch = false;
+        }
+
+        if ( !state.frame->isDisabled()
+            && keystatus[SDLK_ESCAPE] )
+        {
+            close(player);
+        }
+
+        updateContents(player);
+    }
+}
+
 void Player::Inventory_t::processInventory()
 {
 	if ( !player.characterSheet.sheetFrame )
@@ -30911,6 +31767,8 @@ void Player::Inventory_t::processInventory()
 	{
 		tooltipFrame->setOpacity(0.0);
 	}
+	CustomDialogueQuestJournalUI::update(player.playernum);
+
 }
 
 void Player::HUD_t::resetBars()
