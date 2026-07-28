@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "quest_id": "collect_supplies",
+  "quest": {
+    "title": "Collect Supplies",
+    "summary": "Bring supplies to the quartermaster.",
+    "completed_text": "The supplies were delivered.",
+    "failed_text": "The delivery failed.",
+    "scope": "player",
+    "repeatable": false,
+    "objectives": [
+      {
+        "id": "deliver_torch",
+        "text": "Deliver one torch.",
+        "completed_text": "The torch was delivered.",
+        "progress_variable": "torches_delivered",
+        "target": 1,
+        "stage": 0,
+        "optional": false
+      }
+    ]
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Did you bring the torch?",
+      "next": 0,
+      "choices": [
+        {
+          "id": "deliver",
+          "text": "Here it is.",
+          "next": 1,
+          "condition": {
+            "type": "has_item",
+            "item": "torch",
+            "count": 1
+          },
+          "action": {
+            "remove_item": {
+              "item": "torch",
+              "count": 1
+            },
+            "add_quest_variable": {
+              "id": "torches_delivered",
+              "amount": 1
+            },
+            "objective_complete": "deliver_torch",
+            "quest_complete": true
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Excellent work.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

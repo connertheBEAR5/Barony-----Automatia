@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "I need a torch.",
+      "next": 0,
+      "choices": [
+        {
+          "id": "give_torch",
+          "text": "Take this torch.",
+          "next": 1,
+          "condition": {
+            "type": "has_item",
+            "item": "torch",
+            "count": 1
+          },
+          "action": {
+            "remove_item": {
+              "item": "torch",
+              "count": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Thank you.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

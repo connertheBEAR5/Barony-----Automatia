@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Hello, traveler.",
+      "next": 0,
+      "choices": [
+        {
+          "id": "hello",
+          "text": "Hello.",
+          "next": 1
+        },
+        {
+          "id": "leave",
+          "text": "Goodbye.",
+          "next": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "It is good to meet you.",
+      "next": 0,
+      "choices": []
+    }
+  ]
+}

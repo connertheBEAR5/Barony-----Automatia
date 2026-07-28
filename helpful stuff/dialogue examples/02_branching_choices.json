@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "What do you need?",
+      "next": 0,
+      "choices": [
+        {
+          "id": "work",
+          "text": "Do you have work for me?",
+          "next": 1
+        },
+        {
+          "id": "rumors",
+          "text": "Any rumors?",
+          "next": 2
+        },
+        {
+          "id": "leave",
+          "text": "Nothing.",
+          "next": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Perhaps. Come back prepared.",
+      "next": 0,
+      "choices": []
+    },
+    {
+      "id": 2,
+      "text": "They say the old cellar is haunted.",
+      "next": 0,
+      "choices": []
+    }
+  ]
+}

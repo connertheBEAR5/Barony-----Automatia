@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Trade one torch for a healing potion?",
+      "next": 0,
+      "choices": [
+        {
+          "id": "trade",
+          "text": "Trade.",
+          "next": 1,
+          "condition": {
+            "type": "has_item",
+            "item": "torch",
+            "count": 1
+          },
+          "action": {
+            "remove_item": {
+              "item": "torch",
+              "count": 1
+            },
+            "reward_item": {
+              "item": "healing_potion",
+              "count": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "A fair trade.",
+      "next": 0,
+      "choices": []
+    }
+  ]
+}

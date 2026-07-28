@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "quest_id": "moving_merchant",
+  "quest": {
+    "title": "The Moving Merchant",
+    "summary": "Help a merchant who can move around the current map.",
+    "completed_text": "The merchant was helped.",
+    "failed_text": "The merchant was not helped.",
+    "scope": "player",
+    "repeatable": false,
+    "origin": {
+      "label": "Merchant",
+      "map": "example_map.lmp",
+      "track_npc": true,
+      "npc_persistent_id": 1001
+    },
+    "objectives": [
+      {
+        "id": "speak_to_merchant",
+        "text": "Speak to the merchant.",
+        "completed_text": "You spoke to the merchant.",
+        "stage": 0,
+        "optional": false
+      }
+    ]
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Thank you for finding me.",
+      "next": 1,
+      "choices": [
+        {
+          "id": "finish",
+          "text": "Glad to help.",
+          "next": 1,
+          "action": {
+            "quest_start": true,
+            "quest_accept": true,
+            "objective_complete": "speak_to_merchant",
+            "quest_complete": true
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Safe travels.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

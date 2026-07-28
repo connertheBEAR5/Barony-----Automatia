@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "You have proven yourself. Shall I join you?",
+      "next": 0,
+      "choices": [
+        {
+          "id": "recruit",
+          "text": "Join me.",
+          "next": 1,
+          "once": true,
+          "action": {
+            "recruit_npc": true
+          }
+        },
+        {
+          "id": "not_yet",
+          "text": "Not yet.",
+          "next": 0
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Lead the way.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

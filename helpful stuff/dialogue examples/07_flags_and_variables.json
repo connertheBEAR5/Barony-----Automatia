@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Remember that we spoke.",
+      "next": 0,
+      "choices": [
+        {
+          "id": "remember",
+          "text": "I will.",
+          "next": 1,
+          "action": {
+            "set_world_flag": {
+              "id": "met_village_sage",
+              "value": true
+            },
+            "add_world_variable": {
+              "id": "sage_conversations",
+              "amount": 1
+            },
+            "set_npc_flag": {
+              "id": "introduced",
+              "value": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Good.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

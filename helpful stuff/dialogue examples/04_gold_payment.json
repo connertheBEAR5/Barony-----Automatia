@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "The information costs 100 gold.",
+      "next": 0,
+      "choices": [
+        {
+          "id": "pay",
+          "text": "Pay 100 gold.",
+          "next": 1,
+          "condition": {
+            "type": "has_gold",
+            "amount": 100
+          },
+          "action": {
+            "remove_gold": 100
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "The key is beneath the fountain.",
+      "next": 1,
+      "choices": []
+    }
+  ]
+}

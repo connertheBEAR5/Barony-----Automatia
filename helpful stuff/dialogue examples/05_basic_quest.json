@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "quest_id": "help_the_guard",
+  "quest": {
+    "title": "Help the Guard",
+    "summary": "Speak with the guard and agree to help.",
+    "completed_text": "You agreed to help the guard.",
+    "failed_text": "You refused the guard.",
+    "scope": "player",
+    "repeatable": false,
+    "objectives": [
+      {
+        "id": "accept_job",
+        "text": "Accept the guard's job.",
+        "completed_text": "The job was accepted.",
+        "stage": 0,
+        "optional": false
+      }
+    ]
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Will you help protect the village?",
+      "next": 0,
+      "choices": [
+        {
+          "id": "accept",
+          "text": "Yes.",
+          "next": 1,
+          "action": {
+            "quest_start": true,
+            "quest_accept": true,
+            "objective_complete": "accept_job"
+          }
+        },
+        {
+          "id": "refuse",
+          "text": "No.",
+          "next": 2,
+          "action": {
+            "quest_fail": true
+          }
+        }
+      ]
+    },
+    {
+      "id": 1,
+      "text": "Thank you.",
+      "next": 1,
+      "choices": []
+    },
+    {
+      "id": 2,
+      "text": "Then leave me to my work.",
+      "next": 2,
+      "choices": []
+    }
+  ]
+}

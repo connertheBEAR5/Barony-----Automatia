@@ -556,3 +556,105 @@ DUP FILE
 DEL FILE
     Deletes the selected dialogue JSON. Press DEL FILE twice within four
     seconds to confirm.
+
+
+
+PART 13: GUIDED ACTION BUILDER
+==============================
+
+The old ACTION cycle has been replaced by understandable action groups.
+
+1. Select a choice in the Decision Tree.
+2. Use ACTION < or ACTION > to select a group.
+3. Click the plainly named action you want.
+4. Use the existing editable fields for IDs or numbers that need to be
+   changed from their starter values.
+5. Press VALIDATE.
+
+Action groups
+-------------
+
+Quest:
+    START QUEST
+    ACCEPT QUEST
+    COMPLETE
+    FAIL QUEST
+    RESET QUEST
+    SET STAGE
+
+Rewards:
+    GIVE GOLD
+    GIVE ITEM
+
+Costs:
+    TAKE GOLD
+    TAKE ITEM
+
+Objectives:
+    FINISH OBJ
+    CLEAR OBJ
+
+Flags:
+    WORLD FLAG
+    NPC FLAG
+
+Variables:
+    SET WORLD
+    ADD WORLD
+    SET NPC
+    ADD NPC
+    SET QUEST
+    ADD QUEST
+
+NPC:
+    RECRUIT NPC
+    EMPTY ACTION
+
+CLEAR ACTION removes the whole action object from the selected choice.
+
+Starter values
+--------------
+
+GIVE GOLD:
+    reward_gold = 100
+
+GIVE ITEM:
+    healing_potion, count 1
+
+TAKE GOLD:
+    remove_gold = 100
+
+TAKE ITEM:
+    torch, count 1
+
+SET STAGE:
+    quest_stage = 1
+
+FINISH OBJ / CLEAR OBJ:
+    Uses the currently selected objective ID when available.
+    Otherwise it starts with objective_1.
+
+Flags:
+    Start with story_flag or npc_flag set to true.
+
+Variables:
+    Start with a clearly named placeholder and value/amount 1.
+
+These are starter values, not hidden permanent values. Edit the numeric
+or ID fields after creating the action.
+
+EXAMPLE JSON FILES
+==================
+
+The folder:
+
+    helpful stuff/dialogue examples/
+
+contains small working examples. Copy an example into your project's
+dialogue folder, rename it, and set an NPC's Custom Dialogue ID to the
+filename without .json.
+
+Examples are intentionally limited to fields understood by the current
+runtime. The runtime currently accepts quest state actions, item/gold
+rewards and costs, objective actions, world/NPC/quest variables, flags,
+and recruitment.
