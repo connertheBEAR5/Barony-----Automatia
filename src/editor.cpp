@@ -164,6 +164,8 @@ static QuestDialogueFieldCategory
 
 static char questDialogueEditorEditBuffer[512] = "";
 static bool questDialogueEditorEditingField = false;
+static bool questDialogueEditorDeleteFileConfirm = false;
+static Uint32 questDialogueEditorDeleteFileConfirmUntil = 0;
 
 static void questDialogueEditorRefreshFiles()
 {
@@ -3486,6 +3488,303 @@ static bool questDialogueEditorToggleRemoveGoldDirect()
 	return questDialogueEditorSaveDocument();
 }
 
+
+static void questDialogueEditorEditChoiceTextDirect()
+{
+	if ( !questDialogueEditorSelectedChoiceValueForEdit() )
+	{
+		questDialogueEditorSetMessage(
+			"Select a choice first."
+		);
+		return;
+	}
+
+	questDialogueEditorFieldCategory =
+		QUEST_DIALOGUE_CATEGORY_TEXT;
+	questDialogueEditorEditableField =
+		QUEST_DIALOGUE_FIELD_CHOICE_TEXT;
+	questDialogueEditorBeginEditingField();
+}
+
+static bool questDialogueEditorDuplicateSelectedFile()
+{
+	if ( questDialogueEditorSelectedFile < 0
+		|| questDialogueEditorSelectedFile
+			>= static_cast<int>(
+				questDialogueEditorFiles.size()
+			) )
+	{
+		questDialogueEditorSetMessage(
+			"Select a file first."
+		);
+		return false;
+	}
+
+	const std::string sourceName =
+		questDialogueEditorFiles[
+			questDialogueEditorSelectedFile
+		];
+
+	const std::string baseName =
+		sourceName.size() > 5
+			? sourceName.substr(
+				0,
+				sourceName.size() - 5
+			)
+			: sourceName;
+
+	int suffix = 1;
+	std::string destinationName;
+
+	do
+	{
+		destinationName =
+			baseName
+			+ "_copy_"
+			+ std::to_string(suffix++)
+			+ ".json";
+	}
+	while ( access(
+		("./dialogue/" + destinationName).c_str(),
+		F_OK
+	) == 0 );
+
+	std::ifstream input(
+		("./dialogue/" + sourceName).c_str(),
+		std::ios::binary
+	);
+	std::ofstream output(
+		("./dialogue/" + destinationName).c_str(),
+		std::ios::binary | std::ios::trunc
+	);
+
+	if ( !input.is_open() || !output.is_open() )
+	{
+		questDialogueEditorSetMessage(
+			"Could not duplicate the file."
+		);
+		return false;
+	}
+
+	output << input.rdbuf();
+	input.close();
+	output.close();
+
+	questDialogueEditorRefreshFiles();
+
+	for ( int index = 0;
+		index < static_cast<int>(
+			questDialogueEditorFiles.size()
+		);
+		++index )
+	{
+		if ( questDialogueEditorFiles[index]
+			== destinationName )
+		{
+			questDialogueEditorSelectedFile = index;
+			break;
+		}
+	}
+
+	questDialogueEditorLoadPreview(destinationName);
+	questDialogueEditorSetMessage(
+		"Duplicated as " + destinationName
+	);
+	return true;
+}
+
+static bool questDialogueEditorDeleteSelectedFile()
+{
+	if ( questDialogueEditorSelectedFile < 0
+		|| questDialogueEditorSelectedFile
+			>= static_cast<int>(
+				questDialogueEditorFiles.size()
+			) )
+	{
+		questDialogueEditorSetMessage(
+			"Select a file first."
+		);
+		return false;
+	}
+
+	if ( !questDialogueEditorDeleteFileConfirm
+		|| ticks > questDialogueEditorDeleteFileConfirmUntil )
+	{
+		questDialogueEditorDeleteFileConfirm = true;
+		questDialogueEditorDeleteFileConfirmUntil =
+			ticks + TICKS_PER_SECOND * 4;
+
+		questDialogueEditorSetMessage(
+			"Press DEL FILE again to confirm."
+		);
+		return false;
+	}
+
+	questDialogueEditorDeleteFileConfirm = false;
+
+	const std::string filename =
+		questDialogueEditorFiles[
+			questDialogueEditorSelectedFile
+		];
+
+	if ( std::remove(
+			("./dialogue/" + filename).c_str()
+		) != 0 )
+	{
+		questDialogueEditorSetMessage(
+			"Could not delete the file."
+		);
+		return false;
+	}
+
+	questDialogueEditorRefreshFiles();
+
+	if ( questDialogueEditorFiles.empty() )
+	{
+		questDialogueEditorSelectedFile = -1;
+		questDialogueEditorDocument.SetObject();
+		questDialogueEditorPreview =
+			QuestDialogueEditorPreview();
+	}
+	else
+	{
+		questDialogueEditorSelectedFile =
+			std::min(
+				questDialogueEditorSelectedFile,
+				static_cast<int>(
+					questDialogueEditorFiles.size()
+				) - 1
+			);
+
+		questDialogueEditorLoadPreview(
+			questDialogueEditorFiles[
+				questDialogueEditorSelectedFile
+			]
+		);
+	}
+
+	questDialogueEditorSetMessage(
+		"Deleted " + filename
+	);
+	return true;
+}
+
+static bool questDialogueEditorValidateDocument(
+	std::string& error
+)
+{
+	if ( !questDialogueEditorDocument.IsObject() )
+	{
+		error = "Root must be a JSON object.";
+		return false;
+	}
+
+	if ( !questDialogueEditorDocument.HasMember("version")
+		|| !questDialogueEditorDocument["version"].IsInt()
+		|| questDialogueEditorDocument["version"].GetInt()
+			!= 1 )
+	{
+		error = "version must be integer 1.";
+		return false;
+	}
+
+	if ( !questDialogueEditorDocument.HasMember("start_node")
+		|| !questDialogueEditorDocument["start_node"].IsInt() )
+	{
+		error = "start_node must be an integer.";
+		return false;
+	}
+
+	if ( !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray()
+		|| questDialogueEditorDocument["nodes"].Empty() )
+	{
+		error = "nodes must be a non-empty array.";
+		return false;
+	}
+
+	std::unordered_set<int> nodeIDs;
+
+	for ( const auto& node :
+		questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( !node.IsObject()
+			|| !node.HasMember("id")
+			|| !node["id"].IsInt()
+			|| !node.HasMember("text")
+			|| !node["text"].IsString()
+			|| std::string(
+				node["text"].GetString()
+			).empty() )
+		{
+			error =
+				"Every node needs integer id and non-empty text.";
+			return false;
+		}
+
+		if ( !nodeIDs.insert(
+				node["id"].GetInt()
+			).second )
+		{
+			error = "Duplicate node ID.";
+			return false;
+		}
+	}
+
+	if ( nodeIDs.find(
+			questDialogueEditorDocument[
+				"start_node"
+			].GetInt()
+		) == nodeIDs.end() )
+	{
+		error =
+			"start_node points to a missing node.";
+		return false;
+	}
+
+	for ( const auto& node :
+		questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( node.HasMember("choices") )
+		{
+			if ( !node["choices"].IsArray() )
+			{
+				error = "choices must be an array.";
+				return false;
+			}
+
+			for ( const auto& choice :
+				node["choices"].GetArray() )
+			{
+				if ( !choice.IsObject()
+					|| !choice.HasMember("id")
+					|| !choice["id"].IsString()
+					|| !choice.HasMember("text")
+					|| !choice["text"].IsString()
+					|| !choice.HasMember("next")
+					|| !choice["next"].IsInt() )
+				{
+					error =
+						"Every choice needs id, text, and next.";
+					return false;
+				}
+
+				if ( nodeIDs.find(
+						choice["next"].GetInt()
+					) == nodeIDs.end() )
+				{
+					error =
+						"A choice points to a missing node.";
+					return false;
+				}
+			}
+		}
+	}
+
+	error.clear();
+	return true;
+}
+
 void openQuestDialogueEditor()
 {
 	questDialogueEditorEditingField = false;
@@ -3523,7 +3822,7 @@ void openQuestDialogueEditor()
 	const int desiredHalfWidth =
 		std::max(390, std::min(560, xres / 2 - 20));
 	const int desiredHalfHeight =
-		std::max(270, std::min(360, yres / 2 - 28));
+		std::max(300, std::min(410, yres / 2 - 18));
 
 	subx1 = std::max(
 		8,
@@ -4244,6 +4543,51 @@ static void drawQuestDialogueEditor()
 	{
 		questDialogueEditorCycleGiverMarker();
 	}
+
+	toolboxY += toolboxRowHeight + 3;
+
+	toolboxButtonPair(
+		toolboxY,
+		"EDIT CHOICE",
+		"VALIDATE",
+		[]()
+		{
+			questDialogueEditorEditChoiceTextDirect();
+		},
+		[]()
+		{
+			std::string error;
+
+			if ( questDialogueEditorValidateDocument(error) )
+			{
+				questDialogueEditorSetMessage(
+					"Validation passed."
+				);
+			}
+			else
+			{
+				questDialogueEditorSetMessage(
+					"Validation: " + error
+				);
+			}
+		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	toolboxButtonPair(
+		toolboxY,
+		"DUP FILE",
+		"DEL FILE",
+		[]()
+		{
+			questDialogueEditorDuplicateSelectedFile();
+		},
+		[]()
+		{
+			questDialogueEditorDeleteSelectedFile();
+		}
+	);
+	toolboxY += toolboxRowHeight;
 
 	const int fieldStatusY = toolboxY + 21;
 

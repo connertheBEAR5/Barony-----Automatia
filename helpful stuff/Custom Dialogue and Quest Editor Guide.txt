@@ -536,3 +536,23 @@ text instead of only clipping it.
 The full JSON value is preserved when editing even when only part of it
 fits inside the small toolbox input bar. The right-side details panel is
 the readable multiline preview.
+
+
+PART 12B DIRECT CHOICE AND FILE TOOLS
+====================================
+EDIT CHOICE
+    Select a choice in the decision tree and click EDIT CHOICE. The
+    editor immediately switches to Choice Text and starts text input.
+    Type the new text and click APPLY.
+
+VALIDATE
+    Checks the JSON root, version, start node, node IDs, node text,
+    choice fields, and destination links. The first exact problem is
+    displayed in the editor status line.
+
+DUP FILE
+    Creates a unique copy of the selected dialogue JSON and selects it.
+
+DEL FILE
+    Deletes the selected dialogue JSON. Press DEL FILE twice within four
+    seconds to confirm.
