@@ -1,0 +1,59 @@
+DIALOGUE EDITOR QUEST CONTROLS - PART 6
+=======================================
+
+New objective controls
+----------------------
++OBJECT
+    Adds a required starter objective.
+
+-OBJECT
+    Deletes the selected objective.
+
+OPTIONAL
+    Toggles the selected objective between required and optional.
+
+OBJ MARK
+    Toggles a static map marker for the selected objective. The marker
+    uses the current map and selected NPC/entity tile as its starting
+    coordinates.
+
+NEXT OBJ
+    Cycles through objectives in the details panel.
+
+New choice controls
+-------------------
+CONDITION
+    Cycles the selected choice condition through:
+    1. None
+    2. Has torch
+    3. Has 100 gold
+    4. Current quest completed
+    5. NPC flag recruited == false
+    6. None
+
+ACTION
+    Cycles the selected choice action through:
+    1. None
+    2. Accept quest
+    3. Complete quest
+    4. Reward 100 gold
+    5. Recruit NPC
+    6. None
+
+ONCE
+    Toggles whether the selected choice may only be used once.
+
+The details panel now displays the selected choice's condition and
+action.
+
+Current limitation
+------------------
+These are safe supported presets. Free-form text entry, arbitrary item
+selection, arbitrary flag/variable IDs, reward-item selection, and
+numeric editing remain for the next part.
+
+Formatting
+----------
+- actual C++ tabs are allowed
+- visible backslash-plus-t sequences: 0
+- lexical brace balance: passed

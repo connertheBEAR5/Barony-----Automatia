@@ -1,0 +1,60 @@
+DIALOGUE EDITOR CONTROLS - PART 5
+=================================
+
+Toolbar controls
+----------------
+NEW
+    Creates a unique new_dialogue_N.json file with a valid starter
+    quest and node.
+
+RELOAD
+    Reloads the selected file from disk.
+
+SAVE
+    Writes the current RapidJSON document as formatted JSON.
+
++NODE
+    Adds a new node with a unique integer ID.
+
+-NODE
+    Deletes the selected node only when:
+    - at least one node remains,
+    - it is not the start node,
+    - no node or choice still links to it.
+
++CHOICE
+    Adds a starter choice to the selected node.
+
+-CHOICE
+    Deletes the selected choice.
+
+NEXT>
+    Cycles the selected choice's next destination through existing
+    nodes.
+
+RECRUIT
+    Toggles action.recruit_npc on the selected choice.
+
+REPEAT
+    Toggles quest.repeatable.
+
+MARKER
+    Cycles the giver marker:
+    Off -> Static tile -> Follow selected NPC -> Off
+
+Choice selection
+----------------
+Choices in the decision tree are now clickable. The selected choice
+receives a depressed highlight.
+
+Current limitation
+------------------
+This part adds safe structural and toggle controls. Text entry, item
+condition forms, rewards, flags, variables, objective editing, and the
+complete condition/action forms remain the next editor-control layer.
+
+Formatting
+----------
+Actual C++ tabs are allowed.
+Visible backslash-plus-t sequences: 0
+C++ lexical brace balance: passed
