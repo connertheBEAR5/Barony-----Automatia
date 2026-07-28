@@ -1162,6 +1162,16 @@ bool handleCustomMonsterDialogue(
  * currently displayed custom dialogue choices.
  */
 
+
+bool getCustomDialogueQuestObjectives(
+    const std::string& dialogueID,
+    std::vector<std::string>& objectiveIDs,
+    std::vector<std::string>& objectiveTexts,
+    std::vector<std::string>& completedTexts,
+    std::vector<Sint32>& stages,
+    std::vector<bool>& optionalFlags
+);
+
 bool getCustomDialogueQuestMetadata(
     const std::string& dialogueID,
     std::string& questID,

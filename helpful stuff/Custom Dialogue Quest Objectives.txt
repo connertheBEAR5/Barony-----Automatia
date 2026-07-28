@@ -1,0 +1,60 @@
+CUSTOM DIALOGUE QUEST OBJECTIVES
+=================================
+
+Purpose
+-------
+A quest can now define multiple journal-ready objectives.
+
+JSON example
+------------
+{
+    "quest": {
+        "title": "A Light in the Dark",
+        "summary": "Help the stranger prepare for the road.",
+        "objectives": [
+            {
+                "id": "find_torch",
+                "text": "Find one torch.",
+                "completed_text": "You found a torch.",
+                "stage": 1,
+                "optional": false
+            },
+            {
+                "id": "learn_about_ruins",
+                "text": "Ask about the ruined camps.",
+                "completed_text": "You learned where torches may be found.",
+                "stage": 1,
+                "optional": true
+            },
+            {
+                "id": "return_torch",
+                "text": "Bring the torch to the stranger.",
+                "completed_text": "You delivered the torch.",
+                "stage": 2,
+                "optional": false
+            }
+        ]
+    }
+}
+
+Fields
+------
+id
+    Stable unique objective ID within the quest.
+
+text
+    Active objective text.
+
+completed_text
+    Text used after objective completion.
+
+stage
+    Quest stage associated with the objective.
+
+optional
+    Whether the objective is optional.
+
+Current limitation
+------------------
+This stage defines objective metadata only. Individual per-player
+objective completion is the next stage.

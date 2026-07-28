@@ -200,6 +200,17 @@ struct CustomDialogueNode
 /*
  * One authored custom-dialogue graph loaded from JSON.
  */
+
+struct CustomDialogueQuestObjective
+{
+    std::string id;
+    std::string text;
+    std::string completedText;
+
+    Sint32 stage = 0;
+    bool optional = false;
+};
+
 struct CustomDialogueDefinition
 {
     bool loaded = false;
@@ -213,6 +224,9 @@ struct CustomDialogueDefinition
     std::string questObjective;
     std::string questCompletedText;
     std::string questFailedText;
+
+    std::vector<CustomDialogueQuestObjective>
+        questObjectives;
 
     Sint32 startNode = 0;
 
@@ -875,6 +889,112 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
             || !readQuestText("failed_text", definition.questFailedText) )
         {
             return definition;
+        }
+
+
+        if ( quest.HasMember("objectives") )
+        {
+            const rapidjson::Value& objectives =
+                quest["objectives"];
+
+            if ( !objectives.IsArray() )
+            {
+                printlog(
+                    "[Custom Dialogue] '%s' quest objectives must be an array.",
+                    realPath.c_str()
+                );
+
+                return definition;
+            }
+
+            std::unordered_set<std::string>
+                objectiveIDs;
+
+            for ( rapidjson::SizeType index = 0;
+                index < objectives.Size();
+                ++index )
+            {
+                const rapidjson::Value& objectiveValue =
+                    objectives[index];
+
+                if ( !objectiveValue.IsObject()
+                    || !objectiveValue.HasMember("id")
+                    || !objectiveValue["id"].IsString()
+                    || !objectiveValue.HasMember("text")
+                    || !objectiveValue["text"].IsString() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' quest objective %u requires string id and text.",
+                        realPath.c_str(),
+                        static_cast<unsigned int>(index)
+                    );
+
+                    return definition;
+                }
+
+                CustomDialogueQuestObjective objective;
+
+                objective.id =
+                    normalizeCustomDialogueID(
+                        objectiveValue["id"].GetString()
+                    );
+
+                objective.text =
+                    objectiveValue["text"].GetString();
+
+                if ( objective.id.empty()
+                    || objective.text.empty()
+                    || objectiveIDs.find(objective.id)
+                        != objectiveIDs.end() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' has an empty or duplicate objective ID at index %u.",
+                        realPath.c_str(),
+                        static_cast<unsigned int>(index)
+                    );
+
+                    return definition;
+                }
+
+                objectiveIDs.insert(objective.id);
+
+                if ( objectiveValue.HasMember("completed_text") )
+                {
+                    if ( !objectiveValue["completed_text"].IsString() )
+                    {
+                        return definition;
+                    }
+
+                    objective.completedText =
+                        objectiveValue["completed_text"].GetString();
+                }
+
+                if ( objectiveValue.HasMember("stage") )
+                {
+                    if ( !objectiveValue["stage"].IsInt() )
+                    {
+                        return definition;
+                    }
+
+                    objective.stage =
+                        objectiveValue["stage"].GetInt();
+                }
+
+                if ( objectiveValue.HasMember("optional") )
+                {
+                    if ( !objectiveValue["optional"].IsBool() )
+                    {
+                        return definition;
+                    }
+
+                    objective.optional =
+                        objectiveValue["optional"].GetBool();
+                }
+
+                definition.questObjectives.push_back(
+                    objective
+                );
+            }
         }
 
         if ( definition.questID.empty() || definition.questTitle.empty() )
@@ -2622,6 +2742,44 @@ getCustomDialogueDefinition(
     }
 
     return &iterator->second;
+}
+
+
+bool getCustomDialogueQuestObjectives(
+    const std::string& dialogueID,
+    std::vector<std::string>& objectiveIDs,
+    std::vector<std::string>& objectiveTexts,
+    std::vector<std::string>& completedTexts,
+    std::vector<Sint32>& stages,
+    std::vector<bool>& optionalFlags
+)
+{
+    objectiveIDs.clear();
+    objectiveTexts.clear();
+    completedTexts.clear();
+    stages.clear();
+    optionalFlags.clear();
+
+    const CustomDialogueDefinition* definition =
+        getCustomDialogueDefinition(dialogueID);
+
+    if ( !definition
+        || definition->questID.empty() )
+    {
+        return false;
+    }
+
+    for ( const CustomDialogueQuestObjective& objective :
+        definition->questObjectives )
+    {
+        objectiveIDs.push_back(objective.id);
+        objectiveTexts.push_back(objective.text);
+        completedTexts.push_back(objective.completedText);
+        stages.push_back(objective.stage);
+        optionalFlags.push_back(objective.optional);
+    }
+
+    return true;
 }
 
 bool getCustomDialogueQuestMetadata(
