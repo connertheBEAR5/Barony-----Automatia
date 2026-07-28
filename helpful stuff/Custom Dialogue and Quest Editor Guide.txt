@@ -1,0 +1,500 @@
+BARONY CUSTOM DIALOGUE AND QUEST EDITOR GUIDE
+=============================================
+
+This is the single maintained guide for the custom dialogue/quest
+system. Future packages update this file instead of adding a new
+documentation file for every code change.
+
+
+1. FILE LOCATION AND DIALOGUE IDS
+=================================
+
+Dialogue JSON files are stored in:
+
+    dialogue/<dialogue_file_id>.json
+
+The Custom Dialogue ID entered on an NPC sprite chooses the filename
+directly.
+
+Example:
+
+    NPC Custom Dialogue ID: village_guard
+    Loaded file: dialogue/village_guard.json
+
+The game does not scan every JSON file looking for a quest ID.
+
+Dialogue/File ID and Quest ID are separate:
+
+    Dialogue/File ID
+        Controls the JSON filename and the NPC's Custom Dialogue ID.
+
+    Quest ID
+        Controls persistent quest progress, journal identity,
+        conditions, objectives, completion, and failure state.
+
+Example:
+
+    Dialogue/File ID: village_guard
+    JSON filename:    village_guard.json
+    Quest ID:         convince_the_guard
+
+
+2. OPENING THE EDITOR
+=====================
+
+Open an NPC's sprite properties and use the custom-dialogue EDIT button.
+
+The editor has three main areas:
+
+    Left:
+        Vertical toolbox and JSON file list.
+
+    Center:
+        Dialogue decision tree, nodes, choices, and next-node links.
+
+    Right:
+        Quest metadata, selected node details, conditions, and actions.
+
+
+3. VERTICAL TOOLBOX
+===================
+
+File controls:
+
+    NEW
+        Creates a new valid dialogue JSON file.
+
+    SAVE
+        Writes the current in-memory JSON document.
+
+    RELOAD
+        Discards the current in-memory copy and reloads the selected
+        JSON file.
+
+    RENAME
+        Renames the selected JSON file when Dialogue/File ID is the
+        active editable field.
+
+        It:
+        - normalizes the new filename,
+        - refuses blank names,
+        - refuses overwriting another JSON,
+        - keeps the renamed file selected,
+        - updates the selected NPC's Custom Dialogue ID,
+        - does not change quest_id.
+
+
+Node and choice controls:
+
+    +NODE / -NODE
+        Add or safely remove dialogue nodes.
+
+        A node cannot be removed when:
+        - it is the start node,
+        - it is the only remaining node,
+        - another node links to it,
+        - a choice links to it.
+
+    +CHOICE / -CHOICE
+        Add or remove choices on the selected node.
+
+    NEXT>
+        Cycles the selected choice's destination through existing
+        nodes.
+
+    ONCE
+        Toggles whether the selected choice can only be used once.
+
+
+Objective controls:
+
+    +OBJECT / -OBJECT
+        Add or remove quest objectives.
+
+    OPTIONAL
+        Toggles the selected objective between required and optional.
+
+    OBJ MARK
+        Toggles a static minimap marker for the selected objective.
+
+
+Field controls:
+
+    CAT< / CAT>
+        Change field category.
+
+    FIELD< / FIELD>
+        Move backward or forward inside the current field category.
+
+    EDIT
+        Copies the selected field into the text-input buffer.
+
+    APPLY
+        Writes the edited value to JSON, saves, and reloads the preview.
+
+
+Field categories:
+
+    File/Quest
+        Dialogue/File ID
+        Quest ID
+        Quest Title
+        Quest Summary
+
+    Text
+        Node Text
+        Choice ID
+        Choice Text
+
+    Objective
+        Objective ID
+        Objective Text
+        Objective Stage
+        Objective Target
+
+    Condition
+        Condition Reference
+        Condition Number
+
+    Action
+        Action Number
+
+    Marker
+        Marker X
+        Marker Y
+
+
+Condition and action selectors:
+
+    COND TYPE
+        Cycles supported choice-condition presets.
+
+    ACTION
+        Cycles supported choice-action presets.
+
+    COMPARE
+        Cycles:
+            equals
+            not_equals
+            at_least
+            at_most
+
+    SCOPE
+        Cycles:
+            player
+            party
+            world
+
+        Current runtime limitation:
+        Only player scope is currently accepted by the game runtime.
+
+    COND ITEM
+        Cycles valid current requirement-item aliases:
+            torch
+            tool_torch
+
+    REWARD
+        Cycles:
+            Off
+            healing_potion
+            torch
+            Off
+
+    REMOVE ITEM
+        Toggles removal of one torch.
+
+    REMOVE GOLD
+        Toggles removal of 100 gold.
+        Use Action Number to change the amount.
+
+
+Other controls:
+
+    RECRUIT
+        Toggles action.recruit_npc on the selected choice.
+
+    REPEAT
+        Toggles quest.repeatable.
+
+    GIVER MARKER
+        Cycles:
+            Off
+            Static tile
+            Follow selected NPC
+            Off
+
+
+4. BASIC JSON FORMAT
+====================
+
+A minimal dialogue/quest file:
+
+{
+  "version": 1,
+  "quest_id": "convince_guard",
+  "quest": {
+    "title": "Convince the Guard",
+    "summary": "Earn the guard's trust.",
+    "scope": "player",
+    "repeatable": false,
+    "objectives": []
+  },
+  "start_node": 0,
+  "nodes": [
+    {
+      "id": 0,
+      "text": "Why should I follow you?",
+      "next": 0,
+      "choices": []
+    }
+  ]
+}
+
+
+5. QUEST ORIGIN AND GIVER MARKERS
+================================
+
+Static quest-giver marker:
+
+"origin": {
+  "label": "Village Guard",
+  "map": "village.lmp",
+  "x": 12,
+  "y": 8
+}
+
+Dynamic marker following an NPC:
+
+"origin": {
+  "label": "Village Guard",
+  "map": "village.lmp",
+  "track_npc": true,
+  "npc_persistent_id": 125
+}
+
+Dynamic behavior:
+
+- The marker follows the live NPC's current tile.
+- It only appears while the NPC is on the active origin map.
+- It disappears when the NPC is dead or removed.
+- It disappears after that NPC becomes a follower.
+
+
+6. OBJECTIVES
+=============
+
+Example objective:
+
+{
+  "id": "find_key",
+  "text": "Find the old key.",
+  "completed_text": "The key was recovered.",
+  "stage": 0,
+  "optional": false,
+  "progress_variable": "keys_found",
+  "target": 1,
+  "map_marker": {
+    "map": "village.lmp",
+    "x": 22,
+    "y": 14
+  }
+}
+
+Required fields:
+
+    id
+    text
+
+Optional fields:
+
+    completed_text
+    stage
+    optional
+    progress_variable
+    target
+    map_marker
+
+
+7. DIALOGUE NODES AND CHOICES
+=============================
+
+Node:
+
+{
+  "id": 0,
+  "text": "Can you help me?",
+  "next": 0,
+  "choices": []
+}
+
+Choice:
+
+{
+  "id": "accept",
+  "text": "Yes, I will help.",
+  "next": 1,
+  "once": true
+}
+
+
+8. CHOICE CONDITIONS
+====================
+
+Has item:
+
+"condition": {
+  "type": "has_item",
+  "item": "torch",
+  "count": 1
+}
+
+Has gold:
+
+"condition": {
+  "type": "has_gold",
+  "amount": 100
+}
+
+Quest completed:
+
+"condition": {
+  "type": "quest_completed",
+  "quest": "prove_yourself"
+}
+
+Quest stage:
+
+"condition": {
+  "type": "quest_stage",
+  "quest": "prove_yourself",
+  "stage": 2,
+  "comparison": "at_least"
+}
+
+Objective state:
+
+"condition": {
+  "type": "objective_completed",
+  "quest": "prove_yourself",
+  "objective": "kill_monster"
+}
+
+NPC flag:
+
+"condition": {
+  "type": "npc_flag",
+  "id": "recruited",
+  "value": false
+}
+
+Supported comparisons:
+
+    equals
+    not_equals
+    at_least
+    at_most
+
+
+9. CHOICE ACTIONS
+=================
+
+Accept a quest:
+
+"action": {
+  "quest_accept": true
+}
+
+Complete a quest:
+
+"action": {
+  "quest_complete": true
+}
+
+Change quest stage:
+
+"action": {
+  "quest_stage": 2
+}
+
+Reward gold:
+
+"action": {
+  "reward_gold": 100
+}
+
+Remove gold:
+
+"action": {
+  "remove_gold": 100
+}
+
+Reward an item:
+
+"action": {
+  "reward_item": {
+    "item": "healing_potion",
+    "count": 1
+  }
+}
+
+Remove an item:
+
+"action": {
+  "remove_item": {
+    "item": "torch",
+    "count": 1
+  }
+}
+
+Recruit the NPC:
+
+"action": {
+  "recruit_npc": true
+}
+
+After successful recruitment, the runtime sets the NPC flag:
+
+    recruited = true
+
+
+10. CURRENT ITEM LIMITATIONS
+============================
+
+The current runtime recognizes these authored item names:
+
+Requirement/removal:
+
+    torch
+    tool_torch
+
+Rewards:
+
+    healing_potion
+    potion_healing
+    torch
+    tool_torch
+
+The editor intentionally does not generate unsupported item names.
+
+
+11. EDITOR WORK STILL PLANNED
+=============================
+
+The editor still needs expanded controls for:
+
+- quest start, fail, and reset actions,
+- objective complete and clear actions,
+- arbitrary reward/remove item counts,
+- world/NPC/quest flags and variables,
+- remote power actions,
+- NPC movement actions,
+- node-level conditions,
+- direct true/false branch selection,
+- direct destination-node selection,
+- duplication and reordering,
+- delete/duplicate file controls,
+- validation panel,
+- unsaved-change warning,
+- confirmation prompts,
+- scrolling details panel,
+- improved visual graph layout.
