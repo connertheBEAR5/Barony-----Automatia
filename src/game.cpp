@@ -1256,6 +1256,76 @@ bool persistentStoryGetWorldFlag(
         persistentWorldStoryState.worldFlags.find(key)
         != persistentWorldStoryState.worldFlags.end();
 }
+static std::string makePersistentPlayerQuestKey(const int player, const std::string& questID)
+{
+    if ( player < 0 || player >= MAXPLAYERS ) return "";
+    const std::string normalizedQuestID = normalizePersistentStoryID(questID);
+    if ( normalizedQuestID.empty() ) return "";
+    return "player_" + std::to_string(player) + ":" + normalizedQuestID;
+}
+
+bool persistentStorySetQuestStage(const int player, const std::string& questID, const Sint32 stage)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string key = makePersistentPlayerQuestKey(player, questID);
+    if ( key.empty() ) return false;
+    PersistentQuestState& quest = persistentWorldStoryState.quests[key];
+    quest.started = true; quest.stage = stage; return true;
+}
+Sint32 persistentStoryGetQuestStage(const int player, const std::string& questID, const Sint32 fallbackStage)
+{
+    const std::string key = makePersistentPlayerQuestKey(player, questID);
+    const auto it = persistentWorldStoryState.quests.find(key);
+    return key.empty() || it == persistentWorldStoryState.quests.end() ? fallbackStage : it->second.stage;
+}
+bool persistentStorySetQuestStarted(const int player, const std::string& questID, const bool started)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string key = makePersistentPlayerQuestKey(player, questID); if ( key.empty() ) return false;
+    PersistentQuestState& q = persistentWorldStoryState.quests[key]; q.started = started; if ( !started ) q.accepted = false; return true;
+}
+bool persistentStorySetQuestAccepted(const int player, const std::string& questID, const bool accepted)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string key = makePersistentPlayerQuestKey(player, questID); if ( key.empty() ) return false;
+    PersistentQuestState& q = persistentWorldStoryState.quests[key]; if ( accepted && q.completed ) return false;
+    q.started = true; q.accepted = accepted; return true;
+}
+bool persistentStorySetQuestCompleted(const int player, const std::string& questID, const bool completed)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string key = makePersistentPlayerQuestKey(player, questID); if ( key.empty() ) return false;
+    PersistentQuestState& q = persistentWorldStoryState.quests[key]; q.started = true; q.completed = completed;
+    if ( completed ) { q.accepted = false; q.failed = false; } return true;
+}
+bool persistentStorySetQuestFailed(const int player, const std::string& questID, const bool failed)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string key = makePersistentPlayerQuestKey(player, questID); if ( key.empty() ) return false;
+    PersistentQuestState& q = persistentWorldStoryState.quests[key]; q.started = true; q.failed = failed;
+    if ( failed ) { q.accepted = false; q.completed = false; } return true;
+}
+bool persistentStoryQuestIsStarted(const int player, const std::string& questID)
+{
+    const std::string key = makePersistentPlayerQuestKey(player, questID); const auto it = persistentWorldStoryState.quests.find(key);
+    return !key.empty() && it != persistentWorldStoryState.quests.end() && it->second.started;
+}
+bool persistentStoryQuestIsAccepted(const int player, const std::string& questID)
+{
+    const std::string key = makePersistentPlayerQuestKey(player, questID); const auto it = persistentWorldStoryState.quests.find(key);
+    return !key.empty() && it != persistentWorldStoryState.quests.end() && it->second.accepted;
+}
+bool persistentStoryQuestIsCompleted(const int player, const std::string& questID)
+{
+    const std::string key = makePersistentPlayerQuestKey(player, questID); const auto it = persistentWorldStoryState.quests.find(key);
+    return !key.empty() && it != persistentWorldStoryState.quests.end() && it->second.completed;
+}
+bool persistentStoryQuestIsFailed(const int player, const std::string& questID)
+{
+    const std::string key = makePersistentPlayerQuestKey(player, questID); const auto it = persistentWorldStoryState.quests.find(key);
+    return !key.empty() && it != persistentWorldStoryState.quests.end() && it->second.failed;
+}
+
 bool persistentStorySetQuestStage(
     const std::string& questID,
     const Sint32 stage

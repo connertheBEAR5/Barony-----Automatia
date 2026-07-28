@@ -461,6 +461,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	if ( choice.conditionType == "quest_started" )
 	{
 		return persistentStoryQuestIsStarted(
+			player,
 			choice.conditionQuestID
 		);
 	}
@@ -468,6 +469,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	if ( choice.conditionType == "quest_accepted" )
 	{
 		return persistentStoryQuestIsAccepted(
+			player,
 			choice.conditionQuestID
 		);
 	}
@@ -475,6 +477,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	if ( choice.conditionType == "quest_completed" )
 	{
 		return persistentStoryQuestIsCompleted(
+			player,
 			choice.conditionQuestID
 		);
 	}
@@ -482,6 +485,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	if ( choice.conditionType == "quest_failed" )
 	{
 		return persistentStoryQuestIsFailed(
+			player,
 			choice.conditionQuestID
 		);
 	}
@@ -14974,6 +14978,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryQuestIsCompleted(
+                    monsterclicked,
                     conditionNode.conditionQuestID
                 );
         }
@@ -14982,6 +14987,7 @@ bool handleCustomMonsterDialogue(
         {
             const Sint32 questStage =
                 persistentStoryGetQuestStage(
+                    monsterclicked,
                     conditionNode.conditionQuestID,
                     0
                 );
@@ -15013,6 +15019,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryQuestIsStarted(
+                    monsterclicked,
                     conditionNode.conditionQuestID
                 );
         }
@@ -15021,6 +15028,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryQuestIsAccepted(
+                    monsterclicked,
                     conditionNode.conditionQuestID
                 );
         }
@@ -15029,6 +15037,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryQuestIsFailed(
+                    monsterclicked,
                     conditionNode.conditionQuestID
                 );
         }
@@ -15217,6 +15226,16 @@ bool handleCustomMonsterDialogue(
 				continue;
 			}
 
+			if ( choice.questAccept
+				&& !definition->questID.empty()
+				&& persistentStoryQuestIsCompleted(
+					monsterclicked,
+					definition->questID
+				) )
+			{
+				continue;
+			}
+
 			availableChoices.push_back(choice);
 			choiceTexts.push_back(choice.text);
 		}
@@ -15295,6 +15314,7 @@ bool handleCustomMonsterDialogue(
             if ( node.questAccept )
             {
                 persistentStorySetQuestAccepted(
+                    monsterclicked,
                     definition->questID,
                     true
                 );
@@ -15303,6 +15323,7 @@ bool handleCustomMonsterDialogue(
             if ( node.questStage >= 0 )
             {
                 persistentStorySetQuestStage(
+                    monsterclicked,
                     definition->questID,
                     node.questStage
                 );
@@ -15311,6 +15332,7 @@ bool handleCustomMonsterDialogue(
             if ( node.questComplete )
             {
                 persistentStorySetQuestCompleted(
+                    monsterclicked,
                     definition->questID,
                     true
                 );
@@ -15664,6 +15686,22 @@ bool handleCustomMonsterDialogueChoice(
 	const CustomDialogueChoice choice =
 		pending.choices[choiceIndex];
 
+	if ( choice.questAccept
+		&& !definition->questID.empty()
+		&& persistentStoryQuestIsCompleted(
+			player,
+			definition->questID
+		) )
+	{
+		printlog(
+			"[Custom Dialogue] Host rejected completed one-time quest '%s' for player %d.",
+			definition->questID.c_str(),
+			player
+		);
+		pending = PendingCustomDialogueChoiceState{};
+		return false;
+	}
+
 	if ( !evaluateCustomDialogueChoiceCondition(
 			choice,
 			player,
@@ -15750,6 +15788,7 @@ bool handleCustomMonsterDialogueChoice(
 		if ( choice.questStart )
 		{
 			persistentStorySetQuestStarted(
+				player,
 				definition->questID,
 				true
 			);
@@ -15758,6 +15797,7 @@ bool handleCustomMonsterDialogueChoice(
 		if ( choice.questAccept )
 		{
 			persistentStorySetQuestAccepted(
+				player,
 				definition->questID,
 				true
 			);
@@ -15766,6 +15806,7 @@ bool handleCustomMonsterDialogueChoice(
 		if ( choice.questStage >= 0 )
 		{
 			persistentStorySetQuestStage(
+				player,
 				definition->questID,
 				choice.questStage
 			);
@@ -15774,6 +15815,7 @@ bool handleCustomMonsterDialogueChoice(
 		if ( choice.questComplete )
 		{
 			persistentStorySetQuestCompleted(
+				player,
 				definition->questID,
 				true
 			);
@@ -15782,6 +15824,7 @@ bool handleCustomMonsterDialogueChoice(
 		if ( choice.questFail )
 		{
 			persistentStorySetQuestFailed(
+				player,
 				definition->questID,
 				true
 			);

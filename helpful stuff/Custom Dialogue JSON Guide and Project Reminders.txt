@@ -1,0 +1,89 @@
+BARONY AUTOMATIA CUSTOM DIALOGUE JSON GUIDE
+AND PROJECT REMINDERS
+============================================================
+
+PER-PLAYER QUEST FOUNDATION
+---------------------------
+Quest state is separate for every multiplayer player slot.
+A completed quest is one-time per player: Player A completing Quest A
+does not stop Player C from accepting and completing it, but neither
+player can accept it again after their own completion.
+
+Current key: player_<slot>:<normalized quest ID>
+Limitations: session-only; slot identity; repeatable resets, party/world
+scope, save serialization, and permanent character identity come later.
+
+JSON ROOT
+---------
+Runtime file: build/dialogue/test.json
+Required shape:
+{
+  "version": 1,
+  "quest_id": "torch_for_the_stranger",
+  "start_node": 0,
+  "nodes": []
+}
+
+NODE FIELDS
+-----------
+id: unique integer node ID
+text: NPC text
+next: next node; self-reference is terminal
+choices: selectable replies
+condition: optional redirect
+ action: optional one-time consequence
+
+CHOICE FIELDS
+-------------
+id: stable choice ID
+text: displayed reply
+next: destination node
+once: remember as used
+condition: visibility requirement
+action: host-authoritative consequences
+
+SUPPORTED CONDITIONS
+--------------------
+has_item, has_gold, quest_started, quest_accepted, quest_completed,
+quest_failed, quest_stage, world_flag, npc_flag, world_variable,
+npc_variable, node_seen
+Comparisons: equals, not_equals, at_least, at_most
+Quest conditions use the interacting player's personal quest state.
+
+SUPPORTED ACTIONS
+-----------------
+quest_start, quest_accept, quest_stage, quest_complete, quest_fail,
+reward_gold, remove_gold, reward_item, remove_item, set_world_flag,
+set_npc_flag, set_world_variable, add_world_variable,
+set_npc_variable, add_npc_variable
+
+MULTIPLAYER
+-----------
+The host validates choices and applies quests, rewards, payments,
+variables, flags, and dialogue progression. Remote clients only receive
+choices and send a selection.
+
+REMINDERS.TXT SUMMARY
+---------------------
+Secret doorway pools: minesSecretDoorways, swampSecretDoorways,
+labyrinthSecretDoorways.
+Expected names: mines_secret_doorwayXX, swamp_secret_doorwayXX,
+labyrinth_secret_doorwayXX (00-99).
+Warning: generating only secret_doorwayXX and then searching that name
+for biome prefixes cannot work; generate each biome-specific name.
+Noted chances: Mines 3%, Swamp 5%, Labyrinth 3%, all others 0%.
+secretDoorwayHasSpawned limits the map to one secret doorway.
+possibleRooms true = selectable; false = unavailable/used.
+Sky clearance: src/opengl.cpp, SKY_LAYER_CLEARANCE = 3; higher means
+more empty layers below the sky plane.
+Shopkeeper restock reminder: formerly near src/game.cpp line 6073;
+search the restock logic because line numbers move.
+
+ROADMAP
+-------
+Quest save serialization; stable saved-player identity; repeatable reset
+rules; party/world scopes; quest metadata and journal UI.
+Persistent dynamic dropped entities later.
+Editor rectangular mass tile/sprite selection and cross-layer copy/paste.
+Shopkeepers later restock after roughly 2-6 distinct map visits, without
+repeatedly counting alternation between the same maps.

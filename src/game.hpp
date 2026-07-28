@@ -77,6 +77,18 @@ bool persistentStoryGetWorldFlag(
 );
 
 /* Shared quest state. */
+/* Player-scoped quest API. */
+bool persistentStorySetQuestStage(const int player, const std::string& questID, const Sint32 stage);
+Sint32 persistentStoryGetQuestStage(const int player, const std::string& questID, const Sint32 fallbackStage);
+bool persistentStorySetQuestStarted(const int player, const std::string& questID, const bool started);
+bool persistentStorySetQuestAccepted(const int player, const std::string& questID, const bool accepted);
+bool persistentStorySetQuestCompleted(const int player, const std::string& questID, const bool completed);
+bool persistentStorySetQuestFailed(const int player, const std::string& questID, const bool failed);
+bool persistentStoryQuestIsStarted(const int player, const std::string& questID);
+bool persistentStoryQuestIsAccepted(const int player, const std::string& questID);
+bool persistentStoryQuestIsCompleted(const int player, const std::string& questID);
+bool persistentStoryQuestIsFailed(const int player, const std::string& questID);
+
 bool persistentStorySetQuestStage(
     const std::string& questID,
     Sint32 stage
