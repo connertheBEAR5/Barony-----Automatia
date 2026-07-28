@@ -30911,9 +30911,36 @@ namespace CustomDialogueQuestJournalUI
             visibleEntries;
 
         bool keyLatch = false;
+        bool openedStatusScreen = false;
     };
 
     static State states[MAXPLAYERS];
+
+    static const std::vector<std::string> panelImages =
+    {
+        "quest journal panel top left",
+        "quest journal panel top right",
+        "quest journal panel top",
+        "quest journal panel left",
+        "quest journal panel right",
+        "quest journal panel middle",
+        "quest journal panel bottom left",
+        "quest journal panel bottom right",
+        "quest journal panel bottom"
+    };
+
+    static const std::vector<std::string> innerPanelImages =
+    {
+        "quest journal inner top left",
+        "quest journal inner top right",
+        "quest journal inner top",
+        "quest journal inner left",
+        "quest journal inner right",
+        "quest journal inner middle",
+        "quest journal inner bottom left",
+        "quest journal inner bottom right",
+        "quest journal inner bottom"
+    };
 
     static const char* statusName(
         const CustomDialogueQuestJournalStatus status
@@ -30931,6 +30958,86 @@ namespace CustomDialogueQuestJournalUI
             default:
                 return "Active";
         }
+    }
+
+    static void addNineSlice(
+        Frame* frame,
+        const std::vector<std::string>& names,
+        const bool darkCenter
+    )
+    {
+        const Uint32 white =
+            makeColor(255, 255, 255, 255);
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_TL_00.png",
+            names[Player::GUI_t::TOP_LEFT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_TR_00.png",
+            names[Player::GUI_t::TOP_RIGHT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_T_00.png",
+            names[Player::GUI_t::TOP].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_L_00.png",
+            names[Player::GUI_t::MIDDLE_LEFT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_R_00.png",
+            names[Player::GUI_t::MIDDLE_RIGHT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            darkCenter
+                ? makeColor(22, 24, 29, 248)
+                : makeColor(37, 32, 27, 242),
+            "images/system/white.png",
+            names[Player::GUI_t::MIDDLE].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_BL_00.png",
+            names[Player::GUI_t::BOTTOM_LEFT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_BR_00.png",
+            names[Player::GUI_t::BOTTOM_RIGHT].c_str()
+        );
+
+        frame->addImage(
+            SDL_Rect{ 0, 0, 6, 6 },
+            white,
+            "*#images/ui/CharSheet/HUD_CharSheet_Tooltip_B_00.png",
+            names[Player::GUI_t::BOTTOM].c_str()
+        );
+
+        Player::GUI_t::imageSetWidthHeight9x9(
+            frame,
+            names
+        );
     }
 
     static void refresh(
@@ -30989,7 +31096,7 @@ namespace CustomDialogueQuestJournalUI
             if ( objective.optional )
             {
                 result +=
-                    "(Optional) ";
+                    "Optional: ";
             }
 
             if ( objective.completed
@@ -31005,7 +31112,7 @@ namespace CustomDialogueQuestJournalUI
             }
 
             result +=
-                "\n";
+                "\n\n";
         }
 
         if ( result.empty() )
@@ -31028,6 +31135,94 @@ namespace CustomDialogueQuestJournalUI
         {
             state.frame->setDisabled(true);
         }
+
+        if ( state.openedStatusScreen
+            && players[player] )
+        {
+            state.openedStatusScreen = false;
+
+            players[player]->closeAllGUIs(
+                CLOSEGUI_ENABLE_SHOOTMODE,
+                CLOSEGUI_CLOSE_ALL
+            );
+        }
+
+        Player::soundCancel();
+    }
+
+    static void open(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( !state.frame
+            || !players[player] )
+        {
+            return;
+        }
+
+        state.openedStatusScreen =
+            players[player]->shootmode;
+
+        if ( players[player]->shootmode )
+        {
+            /*
+             * Use Barony's normal inventory-opening path. This disables
+             * shoot mode, releases relative mouse control, displays the
+             * cursor, and prevents camera movement while the journal is
+             * open.
+             */
+            players[player]->openStatusScreen(
+                GUI_MODE_INVENTORY,
+                INVENTORY_MODE_ITEM
+            );
+        }
+
+        state.frame->setDisabled(false);
+        refresh(player);
+        Player::soundStatusOpen();
+    }
+
+    static void styleButton(
+        Button* button
+    )
+    {
+        button->setColor(
+            makeColor(255, 255, 255, 255)
+        );
+
+        button->setHighlightColor(
+            makeColor(255, 255, 255, 255)
+        );
+
+        button->setTextColor(
+            makeColor(238, 233, 220, 255)
+        );
+
+        button->setTextHighlightColor(
+            makeColor(255, 226, 166, 255)
+        );
+
+        button->setBackground(
+            "*#images/ui/CharSheet/HUD_CharSheet_Button_00.png"
+        );
+
+        button->setBackgroundHighlighted(
+            "*#images/ui/CharSheet/HUD_CharSheet_ButtonHigh_00.png"
+        );
+
+        button->setBackgroundActivated(
+            "*#images/ui/CharSheet/HUD_CharSheet_ButtonPress_00.png"
+        );
+
+        button->setHideGlyphs(true);
+        button->setHideKeyboardGlyphs(true);
+        button->setHideSelectors(true);
+        button->setMenuConfirmControlType(
+            Widget::MENU_CONFIRM_CONTROLLER
+        );
     }
 
     static void create(
@@ -31049,20 +31244,50 @@ namespace CustomDialogueQuestJournalUI
             );
 
         state.frame->setOwner(player);
-        state.frame->setHollow(false);
-        state.frame->setBorder(2);
-        state.frame->setColor(
-            makeColor(
-                22,
-                24,
-                29,
-                245
-            )
-        );
+        state.frame->setHollow(true);
+        state.frame->setInheritParentFrameOpacity(false);
         state.frame->setDisabled(true);
 
+        addNineSlice(
+            state.frame,
+            panelImages,
+            true
+        );
+
+        auto titleBanner =
+            state.frame->addFrame(
+                "quest journal title banner"
+            );
+
+        titleBanner->setHollow(true);
+        titleBanner->setInheritParentFrameOpacity(false);
+
+        titleBanner->addImage(
+            SDL_Rect{ 0, 0, 42, 40 },
+            0xFFFFFFFF,
+            "#*images/ui/FollowerWheel/banner-cmd_l.png",
+            "quest title banner left"
+        );
+
+        titleBanner->addImage(
+            SDL_Rect{ 0, 0, 42, 40 },
+            0xFFFFFFFF,
+            "#*images/ui/FollowerWheel/banner-cmd_r.png",
+            "quest title banner right"
+        );
+
+        auto bannerCenter =
+            titleBanner->addImage(
+                SDL_Rect{ 0, 12, 0, 28 },
+                0xFFFFFFFF,
+                "*images/ui/FollowerWheel/banner-cmd_c.png",
+                "quest title banner center"
+            );
+
+        bannerCenter->tiled = true;
+
         auto title =
-            state.frame->addField(
+            titleBanner->addField(
                 "quest journal title",
                 128
             );
@@ -31070,15 +31295,93 @@ namespace CustomDialogueQuestJournalUI
         title->setFont(
             "fonts/pixelmix.ttf#16#2"
         );
+
         title->setText(
             "QUEST JOURNAL"
         );
+
         title->setHJustify(
-            Field::justify_t::LEFT
+            Field::justify_t::CENTER
         );
+
         title->setVJustify(
             Field::justify_t::CENTER
         );
+
+        title->setTextColor(
+            makeColor(239, 215, 163, 255)
+        );
+
+        title->setOutlineColor(
+            makeColor(29, 16, 11, 255)
+        );
+
+        auto listPanel =
+            state.frame->addFrame(
+                "quest journal list panel"
+            );
+
+        listPanel->setHollow(true);
+        listPanel->setInheritParentFrameOpacity(false);
+
+        addNineSlice(
+            listPanel,
+            innerPanelImages,
+            false
+        );
+
+        /*
+         * Keep the Barony border, but make the inner panel center
+         * transparent so it cannot darken the quest buttons beneath it.
+         */
+        if ( auto center =
+                listPanel->findImage(
+                    "quest journal inner middle"
+                ) )
+        {
+            center->color =
+                makeColor(37, 32, 27, 0);
+        }
+
+        auto detailPanel =
+            state.frame->addFrame(
+                "quest journal detail panel"
+            );
+
+        detailPanel->setHollow(true);
+        detailPanel->setInheritParentFrameOpacity(false);
+
+        const std::vector<std::string> detailImages =
+        {
+            "quest detail top left",
+            "quest detail top right",
+            "quest detail top",
+            "quest detail left",
+            "quest detail right",
+            "quest detail middle",
+            "quest detail bottom left",
+            "quest detail bottom right",
+            "quest detail bottom"
+        };
+
+        addNineSlice(
+            detailPanel,
+            detailImages,
+            true
+        );
+
+        /*
+         * Keep the detail border while allowing quest title, summary,
+         * status, and objective text to remain fully visible.
+         */
+        if ( auto center =
+                detailPanel->findImage(
+                    "quest detail middle"
+                ) )
+        {
+            center->color =
+                makeColor(22, 24, 29, 0);
+        }
 
         auto closeButton =
             state.frame->addButton(
@@ -31088,12 +31391,28 @@ namespace CustomDialogueQuestJournalUI
         closeButton->setOwner(player);
         closeButton->setText("X");
         closeButton->setFont(
-            "fonts/pixelmix.ttf#16#2"
+            "fonts/pixel_maz.ttf#16#2"
+        );
+        closeButton->setColor(0xFFFFFFFF);
+        closeButton->setHighlightColor(0xFFFFFFFF);
+        closeButton->setTextHighlightColor(
+            makeColor(201, 162, 100, 255)
+        );
+        closeButton->setBackground(
+            "*#images/ui/Alchemy/Button_X_00.png"
+        );
+        closeButton->setBackgroundHighlighted(
+            "*#images/ui/Alchemy/Button_XHigh_00.png"
+        );
+        closeButton->setBackgroundActivated(
+            "*#images/ui/Alchemy/Button_XPress_00.png"
         );
         closeButton->setHideGlyphs(true);
         closeButton->setHideKeyboardGlyphs(true);
         closeButton->setHideSelectors(true);
-        closeButton->setMenuConfirmControlType(0);
+        closeButton->setMenuConfirmControlType(
+            Widget::MENU_CONFIRM_CONTROLLER
+        );
         closeButton->setCallback(
             [](Button& button)
             {
@@ -31130,10 +31449,7 @@ namespace CustomDialogueQuestJournalUI
             button->setFont(
                 "fonts/pixel_maz.ttf#16#2"
             );
-            button->setHideGlyphs(true);
-            button->setHideKeyboardGlyphs(true);
-            button->setHideSelectors(true);
-            button->setMenuConfirmControlType(0);
+            styleButton(button);
             button->setUserData(
                 reinterpret_cast<void*>(
                     static_cast<intptr_t>(tab)
@@ -31163,6 +31479,7 @@ namespace CustomDialogueQuestJournalUI
                     clickedState.selectedQuest = 0;
 
                     refresh(owner);
+                    Player::soundModuleNavigation();
                 }
             );
         }
@@ -31183,12 +31500,9 @@ namespace CustomDialogueQuestJournalUI
             button->setOwner(player);
             button->setText("");
             button->setFont(
-                "fonts/pixel_maz.ttf#16#2"
+                "fonts/pixel_maz_multiline.ttf#16#2"
             );
-            button->setHideGlyphs(true);
-            button->setHideKeyboardGlyphs(true);
-            button->setHideSelectors(true);
-            button->setMenuConfirmControlType(0);
+            styleButton(button);
             button->setUserData(
                 reinterpret_cast<void*>(
                     static_cast<intptr_t>(index)
@@ -31218,6 +31532,8 @@ namespace CustomDialogueQuestJournalUI
                     {
                         clickedState.selectedQuest =
                             index;
+
+                        Player::soundModuleNavigation();
                     }
                 }
             );
@@ -31230,7 +31546,8 @@ namespace CustomDialogueQuestJournalUI
             "quest journal summary",
             "quest journal objective heading",
             "quest journal objectives",
-            "quest journal empty"
+            "quest journal empty",
+            "quest journal help"
         };
 
         const size_t capacities[] =
@@ -31240,11 +31557,12 @@ namespace CustomDialogueQuestJournalUI
             2048,
             128,
             4096,
+            256,
             256
         };
 
         for ( size_t index = 0;
-            index < 6;
+            index < 7;
             ++index )
         {
             auto field =
@@ -31267,8 +31585,25 @@ namespace CustomDialogueQuestJournalUI
                 Field::justify_t::TOP
             );
 
+            field->setTextColor(
+                index == 1 || index == 3
+                    ? makeColor(255, 226, 166, 255)
+                    : makeColor(238, 233, 220, 255)
+            );
+
+            field->setOutlineColor(
+                makeColor(29, 16, 11, 255)
+            );
+
             field->setText("");
         }
+
+        state.frame->findField(
+            "quest journal help"
+        )->setText(
+            "Mouse: select tabs and quests    "
+            "Keyboard: arrows navigate, Enter selects, J/Esc closes"
+        );
     }
 
     static void layout(
@@ -31283,8 +31618,8 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
-        const Sint32 width = 600;
-        const Sint32 height = 410;
+        const Sint32 width = 690;
+        const Sint32 height = 468;
 
         const Sint32 cameraWidth =
             players[player]->camera_virtualWidth();
@@ -31304,19 +31639,46 @@ namespace CustomDialogueQuestJournalUI
             }
         );
 
-        auto title =
-            state.frame->findField(
-                "quest journal title"
+        Player::GUI_t::imageResizeToContainer9x9(
+            state.frame,
+            SDL_Rect{ 0, 0, width, height },
+            panelImages
+        );
+
+        auto titleBanner =
+            state.frame->findFrame(
+                "quest journal title banner"
             );
 
-        title->setSize(
+        titleBanner->setSize(
             SDL_Rect
             {
-                14,
-                8,
-                width - 60,
-                28
+                18,
+                10,
+                width - 72,
+                40
             }
+        );
+
+        titleBanner->findImage(
+            "quest title banner left"
+        )->pos =
+            SDL_Rect{ 0, 0, 42, 40 };
+
+        titleBanner->findImage(
+            "quest title banner right"
+        )->pos =
+            SDL_Rect{ width - 114, 0, 42, 40 };
+
+        titleBanner->findImage(
+            "quest title banner center"
+        )->pos =
+            SDL_Rect{ 38, 12, width - 148, 28 };
+
+        titleBanner->findField(
+            "quest journal title"
+        )->setSize(
+            SDL_Rect{ 0, 4, width - 72, 30 }
         );
 
         auto closeButton =
@@ -31327,11 +31689,54 @@ namespace CustomDialogueQuestJournalUI
         closeButton->setSize(
             SDL_Rect
             {
-                width - 38,
-                6,
+                width - 48,
+                12,
                 30,
-                28
+                30
             }
+        );
+
+        auto listPanel =
+            state.frame->findFrame(
+                "quest journal list panel"
+            );
+
+        listPanel->setSize(
+            SDL_Rect{ 16, 92, 264, 326 }
+        );
+
+        Player::GUI_t::imageResizeToContainer9x9(
+            listPanel,
+            SDL_Rect{ 0, 0, 264, 326 },
+            innerPanelImages
+        );
+
+        auto detailPanel =
+            state.frame->findFrame(
+                "quest journal detail panel"
+            );
+
+        detailPanel->setSize(
+            SDL_Rect{ 292, 92, 382, 326 }
+        );
+
+        const std::vector<std::string> detailImages =
+        {
+            "quest detail top left",
+            "quest detail top right",
+            "quest detail top",
+            "quest detail left",
+            "quest detail right",
+            "quest detail middle",
+            "quest detail bottom left",
+            "quest detail bottom right",
+            "quest detail bottom"
+        };
+
+        Player::GUI_t::imageResizeToContainer9x9(
+            detailPanel,
+            SDL_Rect{ 0, 0, 382, 326 },
+            detailImages
         );
 
         for ( Sint32 tab = 0;
@@ -31350,10 +31755,10 @@ namespace CustomDialogueQuestJournalUI
             button->setSize(
                 SDL_Rect
                 {
-                    12 + tab * 108,
-                    42,
-                    102,
-                    28
+                    18 + tab * 150,
+                    56,
+                    142,
+                    30
                 }
             );
         }
@@ -31374,10 +31779,10 @@ namespace CustomDialogueQuestJournalUI
             button->setSize(
                 SDL_Rect
                 {
-                    12,
-                    80 + index * 36,
-                    230,
-                    32
+                    26,
+                    102 + index * 38,
+                    244,
+                    34
                 }
             );
         }
@@ -31385,73 +31790,43 @@ namespace CustomDialogueQuestJournalUI
         state.frame->findField(
             "quest journal status"
         )->setSize(
-            SDL_Rect
-            {
-                260,
-                46,
-                320,
-                22
-            }
+            SDL_Rect{ 308, 106, 350, 22 }
         );
 
         state.frame->findField(
             "quest journal quest title"
         )->setSize(
-            SDL_Rect
-            {
-                260,
-                80,
-                320,
-                30
-            }
+            SDL_Rect{ 308, 136, 350, 32 }
         );
 
         state.frame->findField(
             "quest journal summary"
         )->setSize(
-            SDL_Rect
-            {
-                260,
-                112,
-                320,
-                72
-            }
+            SDL_Rect{ 308, 172, 350, 86 }
         );
 
         state.frame->findField(
             "quest journal objective heading"
         )->setSize(
-            SDL_Rect
-            {
-                260,
-                194,
-                320,
-                22
-            }
+            SDL_Rect{ 308, 266, 350, 22 }
         );
 
         state.frame->findField(
             "quest journal objectives"
         )->setSize(
-            SDL_Rect
-            {
-                260,
-                220,
-                320,
-                170
-            }
+            SDL_Rect{ 308, 294, 350, 112 }
         );
 
         state.frame->findField(
             "quest journal empty"
         )->setSize(
-            SDL_Rect
-            {
-                18,
-                92,
-                210,
-                80
-            }
+            SDL_Rect{ 36, 116, 224, 80 }
+        );
+
+        state.frame->findField(
+            "quest journal help"
+        )->setSize(
+            SDL_Rect{ 24, 432, width - 48, 22 }
         );
     }
 
@@ -31501,7 +31876,7 @@ namespace CustomDialogueQuestJournalUI
                     name.c_str()
                 );
 
-            std::string text =
+            std::string tabText =
                 std::string(
                     statusName(
                         static_cast<
@@ -31509,12 +31884,22 @@ namespace CustomDialogueQuestJournalUI
                         >(tab)
                     )
                 )
-                + " ("
-                + std::to_string(counts[tab])
-                + ")";
+                + "  "
+                + std::to_string(counts[tab]);
 
             button->setText(
-                text.c_str()
+                tabText.c_str()
+            );
+
+            const bool selected =
+                static_cast<Sint32>(
+                    state.selectedStatus
+                ) == tab;
+
+            button->setBackground(
+                selected
+                    ? "*#images/ui/CharSheet/HUD_CharSheet_ButtonPress_00.png"
+                    : "*#images/ui/CharSheet/HUD_CharSheet_Button_00.png"
             );
         }
 
@@ -31539,19 +31924,17 @@ namespace CustomDialogueQuestJournalUI
                 const auto& entry =
                     state.visibleEntries[index];
 
-                std::string text =
-                    index == state.selectedQuest
-                        ? "> "
-                        : "  ";
-
-                text +=
-                    entry.title;
-
                 button->setText(
-                    text.c_str()
+                    entry.title.c_str()
                 );
 
                 button->setDisabled(false);
+
+                button->setBackground(
+                    index == state.selectedQuest
+                        ? "*#images/ui/CharSheet/HUD_CharSheet_ButtonPress_00.png"
+                        : "*#images/ui/CharSheet/HUD_CharSheet_Button_00.png"
+                );
             }
             else
             {
@@ -31608,9 +31991,8 @@ namespace CustomDialogueQuestJournalUI
             ];
 
         std::string statusText =
-            std::string("Status: ")
-            + statusName(entry.status)
-            + "    Stage: "
+            std::string(statusName(entry.status))
+            + "    Stage "
             + std::to_string(entry.stage);
 
         if ( entry.repeatable )
@@ -31679,6 +32061,100 @@ namespace CustomDialogueQuestJournalUI
         );
     }
 
+    static void keyboardNavigation(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        if ( state.frame->isDisabled() )
+        {
+            return;
+        }
+
+        if ( keystatus[SDLK_LEFT] )
+        {
+            keystatus[SDLK_LEFT] = 0;
+
+            Sint32 tab =
+                static_cast<Sint32>(
+                    state.selectedStatus
+                );
+
+            tab =
+                (tab + 2) % 3;
+
+            state.selectedStatus =
+                static_cast<
+                    CustomDialogueQuestJournalStatus
+                >(tab);
+
+            state.selectedQuest = 0;
+            refresh(player);
+            Player::soundModuleNavigation();
+        }
+
+        if ( keystatus[SDLK_RIGHT] )
+        {
+            keystatus[SDLK_RIGHT] = 0;
+
+            Sint32 tab =
+                static_cast<Sint32>(
+                    state.selectedStatus
+                );
+
+            tab =
+                (tab + 1) % 3;
+
+            state.selectedStatus =
+                static_cast<
+                    CustomDialogueQuestJournalStatus
+                >(tab);
+
+            state.selectedQuest = 0;
+            refresh(player);
+            Player::soundModuleNavigation();
+        }
+
+        if ( keystatus[SDLK_UP]
+            && !state.visibleEntries.empty() )
+        {
+            keystatus[SDLK_UP] = 0;
+
+            state.selectedQuest =
+                (
+                    state.selectedQuest
+                    + static_cast<Sint32>(
+                        state.visibleEntries.size()
+                    )
+                    - 1
+                )
+                % static_cast<Sint32>(
+                    state.visibleEntries.size()
+                );
+
+            Player::soundModuleNavigation();
+        }
+
+        if ( keystatus[SDLK_DOWN]
+            && !state.visibleEntries.empty() )
+        {
+            keystatus[SDLK_DOWN] = 0;
+
+            state.selectedQuest =
+                (
+                    state.selectedQuest
+                    + 1
+                )
+                % static_cast<Sint32>(
+                    state.visibleEntries.size()
+                );
+
+            Player::soundModuleNavigation();
+        }
+    }
+
     static void update(
         const int player
     )
@@ -31704,16 +32180,13 @@ namespace CustomDialogueQuestJournalUI
         {
             state.keyLatch = true;
 
-            const bool opening =
-                state.frame->isDisabled();
-
-            state.frame->setDisabled(
-                !opening
-            );
-
-            if ( opening )
+            if ( state.frame->isDisabled() )
             {
-                refresh(player);
+                open(player);
+            }
+            else
+            {
+                close(player);
             }
         }
         else if ( !togglePressed )
@@ -31724,12 +32197,16 @@ namespace CustomDialogueQuestJournalUI
         if ( !state.frame->isDisabled()
             && keystatus[SDLK_ESCAPE] )
         {
+            keystatus[SDLK_ESCAPE] = 0;
             close(player);
+            return;
         }
 
+        keyboardNavigation(player);
         updateContents(player);
     }
 }
+
 
 void Player::Inventory_t::processInventory()
 {
