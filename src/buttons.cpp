@@ -50,6 +50,8 @@ button_t* but3DMode;
 button_t* butMap;
 button_t* butAttributes;
 button_t* butClearMap;
+button_t* butDialogue;
+button_t* butDialogueEditor;
 button_t* butHelp;
 button_t* butAbout;
 button_t* butEditorControls;
@@ -1616,6 +1618,27 @@ void buttonClearMapConfirm(button_t* my)
 	}
 	list_FreeAll(map.entities);
 	buttonCloseSubwindow(my);
+}
+
+
+// Dialogue menu
+
+void buttonDialogue(button_t* my)
+{
+	if ( menuVisible != 6 )
+	{
+		menuVisible = 6;
+	}
+	else
+	{
+		menuVisible = 0;
+	}
+}
+
+void buttonDialogueEditor(button_t* my)
+{
+	menuVisible = 0;
+	openQuestDialogueEditor();
 }
 
 // Help menu

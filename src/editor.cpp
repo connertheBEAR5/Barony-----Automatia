@@ -24,6 +24,7 @@
 #include <cmath>
 #include <fstream>
 #include <cctype>
+#include "json.hpp"
 #ifndef EDITOR
 #define EDITOR
 #endif
@@ -74,6 +75,720 @@ GenericGUIMenu GenericGUI[MAXPLAYERS];
 static std::string questEditorStatusMessage;
 static Uint32 questEditorStatusUntil = 0;
 static bool questEditorCreateMarkers = false;
+
+
+struct QuestDialogueEditorNodePreview
+{
+	int id = 0;
+	std::string text;
+	std::vector<std::string> choices;
+	std::vector<int> nextNodes;
+	int conditionCount = 0;
+	int actionCount = 0;
+};
+
+struct QuestDialogueEditorPreview
+{
+	std::string filename;
+	std::string questID;
+	std::string title;
+	std::string summary;
+	std::string scope;
+	bool repeatable = false;
+	bool hasOriginMarker = false;
+	int objectiveCount = 0;
+	int objectiveMarkerCount = 0;
+	std::vector<QuestDialogueEditorNodePreview> nodes;
+	std::string error;
+};
+
+static std::vector<std::string> questDialogueEditorFiles;
+static int questDialogueEditorSelectedFile = -1;
+static int questDialogueEditorSelectedNode = -1;
+static int questDialogueEditorFileScroll = 0;
+static QuestDialogueEditorPreview questDialogueEditorPreview;
+
+static void questDialogueEditorRefreshFiles()
+{
+	questDialogueEditorFiles.clear();
+
+	DIR* directory = opendir("./dialogue");
+	if ( !directory )
+	{
+		return;
+	}
+
+	for ( dirent* entry = readdir(directory);
+		entry;
+		entry = readdir(directory) )
+	{
+		const std::string name = entry->d_name;
+		if ( name.size() >= 5
+			&& name.substr(name.size() - 5) == ".json" )
+		{
+			questDialogueEditorFiles.push_back(name);
+		}
+	}
+
+	closedir(directory);
+	std::sort(
+		questDialogueEditorFiles.begin(),
+		questDialogueEditorFiles.end()
+	);
+
+	if ( questDialogueEditorSelectedFile
+		>= static_cast<int>(questDialogueEditorFiles.size()) )
+	{
+		questDialogueEditorSelectedFile = -1;
+	}
+}
+
+static int questDialogueEditorCountObjectMembers(
+	const rapidjson::Value& value
+)
+{
+	if ( !value.IsObject() )
+	{
+		return 0;
+	}
+
+	int count = 0;
+	for ( auto member = value.MemberBegin();
+		member != value.MemberEnd();
+		++member )
+	{
+		++count;
+	}
+	return count;
+}
+
+static void questDialogueEditorLoadPreview(
+	const std::string& filenameToLoad
+)
+{
+	questDialogueEditorPreview =
+		QuestDialogueEditorPreview();
+
+	questDialogueEditorPreview.filename =
+		filenameToLoad;
+
+	const std::string path =
+		"./dialogue/" + filenameToLoad;
+
+	std::ifstream input(
+		path.c_str(),
+		std::ios::in | std::ios::binary
+	);
+
+	if ( !input.is_open() )
+	{
+		questDialogueEditorPreview.error =
+			"Could not open " + path;
+		return;
+	}
+
+	std::string jsonText(
+		(std::istreambuf_iterator<char>(input)),
+		std::istreambuf_iterator<char>()
+	);
+
+	rapidjson::Document document;
+	document.Parse(jsonText.c_str());
+
+	if ( document.HasParseError()
+		|| !document.IsObject() )
+	{
+		questDialogueEditorPreview.error =
+			"JSON parse error.";
+		return;
+	}
+
+	if ( document.HasMember("quest_id")
+		&& document["quest_id"].IsString() )
+	{
+		questDialogueEditorPreview.questID =
+			document["quest_id"].GetString();
+	}
+
+	if ( document.HasMember("quest")
+		&& document["quest"].IsObject() )
+	{
+		const rapidjson::Value& quest =
+			document["quest"];
+
+		if ( quest.HasMember("title")
+			&& quest["title"].IsString() )
+		{
+			questDialogueEditorPreview.title =
+				quest["title"].GetString();
+		}
+
+		if ( quest.HasMember("summary")
+			&& quest["summary"].IsString() )
+		{
+			questDialogueEditorPreview.summary =
+				quest["summary"].GetString();
+		}
+
+		if ( quest.HasMember("scope")
+			&& quest["scope"].IsString() )
+		{
+			questDialogueEditorPreview.scope =
+				quest["scope"].GetString();
+		}
+
+		if ( quest.HasMember("repeatable")
+			&& quest["repeatable"].IsBool() )
+		{
+			questDialogueEditorPreview.repeatable =
+				quest["repeatable"].GetBool();
+		}
+
+		if ( quest.HasMember("origin")
+			&& quest["origin"].IsObject() )
+		{
+			const rapidjson::Value& origin =
+				quest["origin"];
+
+			questDialogueEditorPreview.hasOriginMarker =
+				origin.HasMember("x")
+				&& origin["x"].IsInt()
+				&& origin.HasMember("y")
+				&& origin["y"].IsInt();
+		}
+
+		if ( quest.HasMember("objectives")
+			&& quest["objectives"].IsArray() )
+		{
+			questDialogueEditorPreview.objectiveCount =
+				static_cast<int>(
+					quest["objectives"].Size()
+				);
+
+			for ( const auto& objective :
+				quest["objectives"].GetArray() )
+			{
+				if ( objective.IsObject()
+					&& objective.HasMember("map_marker")
+					&& objective["map_marker"].IsObject() )
+				{
+					++questDialogueEditorPreview
+						.objectiveMarkerCount;
+				}
+			}
+		}
+	}
+
+	if ( document.HasMember("nodes")
+		&& document["nodes"].IsArray() )
+	{
+		for ( const auto& nodeValue :
+			document["nodes"].GetArray() )
+		{
+			if ( !nodeValue.IsObject() )
+			{
+				continue;
+			}
+
+			QuestDialogueEditorNodePreview node;
+
+			if ( nodeValue.HasMember("id")
+				&& nodeValue["id"].IsInt() )
+			{
+				node.id =
+					nodeValue["id"].GetInt();
+			}
+
+			if ( nodeValue.HasMember("text")
+				&& nodeValue["text"].IsString() )
+			{
+				node.text =
+					nodeValue["text"].GetString();
+			}
+
+			if ( nodeValue.HasMember("condition") )
+			{
+				node.conditionCount +=
+					questDialogueEditorCountObjectMembers(
+						nodeValue["condition"]
+					);
+			}
+
+			if ( nodeValue.HasMember("action") )
+			{
+				node.actionCount +=
+					questDialogueEditorCountObjectMembers(
+						nodeValue["action"]
+					);
+			}
+
+			if ( nodeValue.HasMember("choices")
+				&& nodeValue["choices"].IsArray() )
+			{
+				for ( const auto& choice :
+					nodeValue["choices"].GetArray() )
+				{
+					if ( !choice.IsObject() )
+					{
+						continue;
+					}
+
+					std::string choiceText =
+						"(unnamed choice)";
+
+					if ( choice.HasMember("text")
+						&& choice["text"].IsString() )
+					{
+						choiceText =
+							choice["text"].GetString();
+					}
+
+					node.choices.push_back(choiceText);
+
+					int nextNode = -1;
+					if ( choice.HasMember("next")
+						&& choice["next"].IsInt() )
+					{
+						nextNode =
+							choice["next"].GetInt();
+					}
+					node.nextNodes.push_back(nextNode);
+
+					if ( choice.HasMember("condition") )
+					{
+						node.conditionCount +=
+							questDialogueEditorCountObjectMembers(
+								choice["condition"]
+							);
+					}
+
+					if ( choice.HasMember("action") )
+					{
+						node.actionCount +=
+							questDialogueEditorCountObjectMembers(
+								choice["action"]
+							);
+					}
+				}
+			}
+
+			questDialogueEditorPreview.nodes.push_back(node);
+		}
+	}
+
+	questDialogueEditorSelectedNode =
+		questDialogueEditorPreview.nodes.empty()
+			? -1
+			: 0;
+}
+
+void openQuestDialogueEditor()
+{
+	menuVisible = 0;
+	subwindow = 1;
+	newwindow = 38;
+	openwindow = 0;
+	savewindow = 0;
+
+	subx1 = std::max(8, xres / 2 - 390);
+	subx2 = std::min(xres - 8, xres / 2 + 390);
+	suby1 = std::max(24, yres / 2 - 270);
+	suby2 = std::min(yres - 8, yres / 2 + 270);
+
+	strcpy(subtext, "Dialogue and Quest Editor");
+
+	questDialogueEditorRefreshFiles();
+
+	if ( questDialogueEditorSelectedFile < 0
+		&& !questDialogueEditorFiles.empty() )
+	{
+		questDialogueEditorSelectedFile = 0;
+		questDialogueEditorLoadPreview(
+			questDialogueEditorFiles[0]
+		);
+	}
+
+	button_t* closeButton = newButton();
+	strcpy(closeButton->label, "Close");
+	closeButton->x = subx2 - 64;
+	closeButton->y = suby2 - 24;
+	closeButton->sizex = 56;
+	closeButton->sizey = 16;
+	closeButton->action = &buttonCloseSubwindow;
+	closeButton->visible = 1;
+	closeButton->focused = 1;
+
+	button_t* closeX = newButton();
+	strcpy(closeX->label, "X");
+	closeX->x = subx2 - 16;
+	closeX->y = suby1;
+	closeX->sizex = 16;
+	closeX->sizey = 16;
+	closeX->action = &buttonCloseSubwindow;
+	closeX->visible = 1;
+	closeX->focused = 1;
+}
+
+static void drawQuestDialogueEditor()
+{
+	const int leftX1 = subx1 + 8;
+	const int leftX2 = subx1 + 210;
+	const int treeX1 = leftX2 + 8;
+	const int treeX2 = subx2 - 238;
+	const int detailX1 = treeX2 + 8;
+	const int detailX2 = subx2 - 8;
+	const int panelY1 = suby1 + 28;
+	const int panelY2 = suby2 - 34;
+
+	drawDepressed(leftX1, panelY1, leftX2, panelY2);
+	drawDepressed(treeX1, panelY1, treeX2, panelY2);
+	drawDepressed(detailX1, panelY1, detailX2, panelY2);
+
+	printText(
+		font8x8_bmp,
+		leftX1 + 6,
+		panelY1 + 6,
+		"Dialogue JSON Files"
+	);
+
+	printText(
+		font8x8_bmp,
+		treeX1 + 6,
+		panelY1 + 6,
+		"Decision Tree"
+	);
+
+	printText(
+		font8x8_bmp,
+		detailX1 + 6,
+		panelY1 + 6,
+		"Quest / Node Details"
+	);
+
+	const int visibleFiles =
+		std::max(1, (panelY2 - panelY1 - 34) / 16);
+
+	questDialogueEditorFileScroll =
+		std::max(
+			0,
+			std::min(
+				questDialogueEditorFileScroll,
+				std::max(
+					0,
+					static_cast<int>(
+						questDialogueEditorFiles.size()
+					) - visibleFiles
+				)
+			)
+		);
+
+	for ( int row = 0;
+		row < visibleFiles;
+		++row )
+	{
+		const int index =
+			questDialogueEditorFileScroll + row;
+
+		if ( index >= static_cast<int>(
+			questDialogueEditorFiles.size()
+		) )
+		{
+			break;
+		}
+
+		const int y = panelY1 + 24 + row * 16;
+
+		if ( index == questDialogueEditorSelectedFile )
+		{
+			drawDepressed(
+				leftX1 + 4,
+				y - 2,
+				leftX2 - 4,
+				y + 12
+			);
+		}
+
+		printTextFormatted(
+			font8x8_bmp,
+			leftX1 + 8,
+			y,
+			"%s",
+			questDialogueEditorFiles[index].c_str()
+		);
+
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= leftX1 + 4
+			&& omousex < leftX2 - 4
+			&& omousey >= y - 2
+			&& omousey < y + 14 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorSelectedFile = index;
+			questDialogueEditorLoadPreview(
+				questDialogueEditorFiles[index]
+			);
+		}
+	}
+
+	if ( questDialogueEditorPreview.error.empty() )
+	{
+		int treeY = panelY1 + 26;
+
+		for ( int nodeIndex = 0;
+			nodeIndex < static_cast<int>(
+				questDialogueEditorPreview.nodes.size()
+			);
+			++nodeIndex )
+		{
+			const auto& node =
+				questDialogueEditorPreview.nodes[nodeIndex];
+
+			if ( treeY + 14 >= panelY2 )
+			{
+				break;
+			}
+
+			if ( nodeIndex == questDialogueEditorSelectedNode )
+			{
+				drawDepressed(
+					treeX1 + 4,
+					treeY - 2,
+					treeX2 - 4,
+					treeY + 12
+				);
+			}
+
+			printTextFormatted(
+				font8x8_bmp,
+				treeX1 + 8,
+				treeY,
+				"[Node %d] %.26s",
+				node.id,
+				node.text.c_str()
+			);
+
+			if ( mousestatus[SDL_BUTTON_LEFT]
+				&& omousex >= treeX1 + 4
+				&& omousex < treeX2 - 4
+				&& omousey >= treeY - 2
+				&& omousey < treeY + 14 )
+			{
+				mousestatus[SDL_BUTTON_LEFT] = 0;
+				questDialogueEditorSelectedNode =
+					nodeIndex;
+			}
+
+			treeY += 16;
+
+			for ( size_t choiceIndex = 0;
+				choiceIndex < node.choices.size();
+				++choiceIndex )
+			{
+				if ( treeY + 14 >= panelY2 )
+				{
+					break;
+				}
+
+				printTextFormattedColor(
+					font8x8_bmp,
+					treeX1 + 20,
+					treeY,
+					makeColorRGB(255, 230, 96),
+					"-> %.19s [next %d]",
+					node.choices[choiceIndex].c_str(),
+					node.nextNodes[choiceIndex]
+				);
+				treeY += 16;
+			}
+
+			treeY += 4;
+		}
+	}
+	else
+	{
+		printTextFormattedColor(
+			font8x8_bmp,
+			treeX1 + 8,
+			panelY1 + 28,
+			makeColorRGB(255, 96, 96),
+			"%s",
+			questDialogueEditorPreview.error.c_str()
+		);
+	}
+
+	int detailY = panelY1 + 26;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"File: %.24s",
+		questDialogueEditorPreview.filename.c_str()
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Quest ID: %.20s",
+		questDialogueEditorPreview.questID.c_str()
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Title: %.23s",
+		questDialogueEditorPreview.title.c_str()
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Scope: %s",
+		questDialogueEditorPreview.scope.c_str()
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Repeatable: %s",
+		questDialogueEditorPreview.repeatable
+			? "Yes"
+			: "No"
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Objectives: %d",
+		questDialogueEditorPreview.objectiveCount
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Giver marker: %s",
+		questDialogueEditorPreview.hasOriginMarker
+			? "Enabled"
+			: "Optional / Off"
+	);
+	detailY += 16;
+
+	printTextFormatted(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		"Objective markers: %d",
+		questDialogueEditorPreview.objectiveMarkerCount
+	);
+	detailY += 24;
+
+	if ( questDialogueEditorSelectedNode >= 0
+		&& questDialogueEditorSelectedNode
+			< static_cast<int>(
+				questDialogueEditorPreview.nodes.size()
+			) )
+	{
+		const auto& node =
+			questDialogueEditorPreview.nodes[
+				questDialogueEditorSelectedNode
+			];
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			makeColorRGB(128, 255, 160),
+			"Selected Node %d",
+			node.id
+		);
+		detailY += 16;
+
+		printTextFormatted(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			"Choices: %d",
+			static_cast<int>(node.choices.size())
+		);
+		detailY += 16;
+
+		printTextFormatted(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			"Conditions: %d",
+			node.conditionCount
+		);
+		detailY += 16;
+
+		printTextFormatted(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			"Actions: %d",
+			node.actionCount
+		);
+		detailY += 24;
+	}
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		makeColorRGB(255, 230, 96),
+		"Builder Categories"
+	);
+	detailY += 16;
+
+	const char* categories[] =
+	{
+		"Item checks / consume",
+		"Quest state / stage",
+		"Objectives / counters",
+		"Flags / variables",
+		"Race / class checks",
+		"Rewards / give items",
+		"NPC memory",
+		"Optional map markers"
+	};
+
+	for ( const char* category : categories )
+	{
+		if ( detailY + 12 >= panelY2 )
+		{
+			break;
+		}
+
+		printTextFormatted(
+			font8x8_bmp,
+			detailX1 + 12,
+			detailY,
+			"- %s",
+			category
+		);
+		detailY += 14;
+	}
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		subx1 + 10,
+		suby2 - 22,
+		makeColorRGB(192, 192, 192),
+		"Part 3 foundation: browser + tree preview. Editing controls come next."
+	);
+}
 
 static std::string questEditorJsonEscape(const std::string& value)
 {
@@ -1066,9 +1781,13 @@ void handleButtons(void)
 					{
 						menuVisible = 4;
 					}
-					if ( button == butHelp && menuVisible )
+					if ( button == butDialogue && menuVisible )
 					{
 						menuVisible = 5;
+					}
+					if ( button == butHelp && menuVisible )
+					{
+						menuVisible = 6;
 					}
 					if ( mousestatus[SDL_BUTTON_LEFT] )
 					{
@@ -1119,7 +1838,7 @@ void handleButtons(void)
 			}
 			else
 			{
-				if ( (button != butFile || menuVisible != 1) && (button != butEdit || menuVisible != 2) && (button != butView || menuVisible != 3) && (button != butMap || menuVisible != 4) && (button != butHelp || menuVisible != 5) )
+				if ( (button != butFile || menuVisible != 1) && (button != butEdit || menuVisible != 2) && (button != butView || menuVisible != 3) && (button != butMap || menuVisible != 4) && (button != butDialogue || menuVisible != 5) && (button != butHelp || menuVisible != 6) )
 				{
 					drawWindow(button->x, button->y, button->x + button->sizex, button->y + button->sizey);
 					printText(font8x8_bmp, button->x + (button->sizex - w) / 2, button->y + (button->sizey - h) / 2, button->label);
@@ -2171,9 +2890,17 @@ int main(int argc, char** argv)
 	button->sizey = 16;
 	button->action = &buttonMap;
 
+	button = butDialogue = newButton();
+	strcpy(button->label, "Dialogue");
+	button->x = 152;
+	button->y = 0;
+	button->sizex = 64;
+	button->sizey = 16;
+	button->action = &buttonDialogue;
+
 	button = butHelp = newButton();
 	strcpy(button->label, "Help");
-	button->x = 152;
+	button->x = 216;
 	button->y = 0;
 	button->sizex = 40;
 	button->sizey = 16;
@@ -2461,10 +3188,20 @@ int main(int argc, char** argv)
 	button->action = &buttonClearMap;
 	button->visible = 0;
 
+	// dialogue menu
+	butDialogueEditor = button = newButton();
+	strcpy(button->label, "Edit Custom Dialogue ...");
+	button->x = 168;
+	button->y = 16;
+	button->sizex = 208;
+	button->sizey = 16;
+	button->action = &buttonDialogueEditor;
+	button->visible = 0;
+
 	// help menu
 	butAbout = button = newButton();
 	strcpy(button->label, "About            F1");
-	button->x = 168;
+	button->x = 232;
 	button->y = 16;
 	button->sizex = 160;
 	button->sizey = 16;
@@ -2474,7 +3211,7 @@ int main(int argc, char** argv)
 	// controls menu
 	butEditorControls = button = newButton();
 	strcpy(button->label, "Editor Help       H");
-	button->x = 168;
+	button->x = 232;
 	button->y = 32;
 	button->sizex = 160;
 	button->sizey = 16;
@@ -2608,7 +3345,15 @@ int main(int argc, char** argv)
 			}
 			else if ( menuVisible == 5 )
 			{
-				if ((omousex > 168 + butAbout->sizex || omousex < 152 || omousey > 48 || (omousey < 32 && omousex > 192)) && mousestatus[SDL_BUTTON_LEFT])
+				if ((omousex > 168 + butDialogueEditor->sizex || omousex < 152 || omousey > 32 || (omousey < 16 && omousex > 256)) && mousestatus[SDL_BUTTON_LEFT])
+				{
+					menuVisible = 0;
+					menuDisappear = 1;
+				}
+			}
+			else if ( menuVisible == 6 )
+			{
+				if ((omousex > 232 + butAbout->sizex || omousex < 216 || omousey > 48 || (omousey < 32 && omousex > 256)) && mousestatus[SDL_BUTTON_LEFT])
 				{
 					menuVisible = 0;
 					menuDisappear = 1;
@@ -3212,7 +3957,17 @@ int main(int argc, char** argv)
 			}
 			if ( menuVisible == 5 )
 			{
-				drawWindowFancy(152, 16, 168, 48);
+				drawWindowFancy(152, 16, 168, 32);
+				butDialogueEditor->visible = 1;
+			}
+			else
+			{
+				butDialogueEditor->visible = 0;
+			}
+
+			if ( menuVisible == 6 )
+			{
+				drawWindowFancy(216, 16, 232, 48);
 				butAbout->visible = 1;
 				butEditorControls->visible = 1;
 			}
@@ -4321,274 +5076,42 @@ int main(int argc, char** argv)
 								cursorflash = ticks;
 							}
 
-							const int questCreateButtonX1 =
+							const int dialogueEditorButtonX1 =
 								dialogueFieldX2 + 4;
 
-							const int questCreateButtonY1 =
+							const int dialogueEditorButtonY1 =
 								dialogueFieldY1 - 4;
 
-							const int questCreateButtonX2 =
+							const int dialogueEditorButtonX2 =
 								subx2 - 8;
 
-							const int questCreateButtonY2 =
+							const int dialogueEditorButtonY2 =
 								dialogueFieldY2;
 
 							drawWindowFancy(
-								questCreateButtonX1,
-								questCreateButtonY1,
-								questCreateButtonX2,
-								questCreateButtonY2
+								dialogueEditorButtonX1,
+								dialogueEditorButtonY1,
+								dialogueEditorButtonX2,
+								dialogueEditorButtonY2
 							);
 
 							printTextFormattedColor(
 								font8x8_bmp,
-								questCreateButtonX1 + 6,
+								dialogueEditorButtonX1 + 4,
 								dialogueFieldY1,
 								makeColorRGB(255, 230, 96),
-								"MAKE JSON"
+								"EDIT..."
 							);
 
 							if ( mousestatus[SDL_BUTTON_LEFT]
-								&& omousex >= questCreateButtonX1
-								&& omousex < questCreateButtonX2
-								&& omousey >= questCreateButtonY1
-								&& omousey < questCreateButtonY2 )
+								&& omousex >= dialogueEditorButtonX1
+								&& omousex < dialogueEditorButtonX2
+								&& omousey >= dialogueEditorButtonY1
+								&& omousey < dialogueEditorButtonY2 )
 							{
 								mousestatus[SDL_BUTTON_LEFT] = 0;
-
-								questEditorWriteStarterJSON(
-									spriteProperties[26],
-									spriteProperties[0],
-									selectedEntity[0],
-									questEditorCreateMarkers
-								);
+								openQuestDialogueEditor();
 							}
-
-							const int questMarkerButtonX1 =
-								questCreateButtonX1;
-
-							const int questMarkerButtonY1 =
-								questCreateButtonY2 + 4;
-
-							const int questMarkerButtonX2 =
-								questCreateButtonX2;
-
-							const int questMarkerButtonY2 =
-								questMarkerButtonY1 + 16;
-
-							drawWindowFancy(
-								questMarkerButtonX1,
-								questMarkerButtonY1,
-								questMarkerButtonX2,
-								questMarkerButtonY2
-							);
-
-							printTextFormattedColor(
-								font8x8_bmp,
-								questMarkerButtonX1 + 4,
-								questMarkerButtonY1 + 4,
-								questEditorCreateMarkers
-									? makeColorRGB(255, 230, 96)
-									: makeColorRGB(192, 192, 192),
-								questEditorCreateMarkers
-									? "MARKERS: ON"
-									: "MARKERS: OFF"
-							);
-
-							if ( mousestatus[SDL_BUTTON_LEFT]
-								&& omousex >= questMarkerButtonX1
-								&& omousex < questMarkerButtonX2
-								&& omousey >= questMarkerButtonY1
-								&& omousey < questMarkerButtonY2 )
-							{
-								mousestatus[SDL_BUTTON_LEFT] = 0;
-								questEditorCreateMarkers =
-									!questEditorCreateMarkers;
-							}
-
-							if ( !questEditorStatusMessage.empty()
-								&& ticks < questEditorStatusUntil )
-							{
-								printTextFormattedColor(
-									font8x8_bmp,
-									dialogueFieldX1,
-									questMarkerButtonY2 + 6,
-									makeColorRGB(128, 255, 160),
-									questEditorStatusMessage.c_str()
-								);
-							}
-							//items for monster
-							pad_y2 = suby1 + 28 + 2 * spacing;
-							pad_x3 = 40;
-							pad_x4 = subx2 - 112;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Helm");
-							
-							//pad_y2 += spacing * 2 - 16;
-							pad_y2 += spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Amulet");
-
-							//pad_x4 += 64 * 2;
-							pad_y2 += spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 4, pad_y2, color, "Armor");
-
-							//pad_x4 -= 64;
-							//pad_y2 += spacing * 2 - 16;
-							pad_y2 += spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8 - 4, pad_y2, color, " Boots");
-
-							pad_y2 = suby1 + 28 + 2 * spacing;
-							pad_y2 += 16;
-							pad_x4 -= 64;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8 - 4, pad_y2, color, " Cloak");
-
-							pad_x4 += 64 * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Mask");
-
-							pad_x4 -= 64 * 2;
-							pad_y2 += spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Weapon");
-
-							pad_x4 += 64 * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Shield");
-
-							pad_x4 -= 64 * 2;
-							pad_y2 += spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, " Ring");
-
-							pad_x4 += 64 * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Gloves");
-
-							pad_x4 -= 64 * 2;
-
-							pad_y2 += 32 + spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Inventory");
-
-							pad_y2 += spacing * 3 + 8;
-							if ( !strcmp(spriteProperties[31], "disable") )
-							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");
-							}
-							else
-							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [ ]");
-							}
-							if ( mousestatus[SDL_BUTTON_LEFT] )
-							{
-								int checkbox_x1 = pad_x4 - 8 + strlen("Disable Miniboss: ") * 8;
-								int checkbox_x2 = checkbox_x1 + strlen("[ ]") * 8;
-								if ( omousex >= checkbox_x1 && omousey >= pad_y2 && omousex < checkbox_x2 && omousey < pad_y2 + 8 )
-								{
-									mousestatus[SDL_BUTTON_LEFT] = 0;
-									if ( !strcmp(spriteProperties[31], "disable") )
-									{
-										strcpy(spriteProperties[31], "");
-									}
-									else
-									{
-										strcpy(spriteProperties[31], "disable");
-									}
-								}
-							}
-
-							if ( editproperty <= 26 )
-							{
-								// limit of properties is twice the vertical count
-								if ( !SDL_IsTextInputActive() )
-								{
-									SDL_StartTextInput();
-									inputstr = spriteProperties[0];
-								}
-								//strncpy(nametext,inputstr,31);
-
-								// value of 0 is the name field, else the input is a number
-								if ( editproperty == 0 )
-								{
-									inputlen = 31;
-								}
-								else if ( editproperty == 26 )
-								{
-									/*
-									* Reserve one byte for null termination in Stat::customDialogueID.
-									*/
-									inputlen = 63;
-								}
-								else
-								{
-									inputlen = 4;
-								}
-								if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
-								{
-									pad_y1 = suby1 + 28 + editproperty * spacing;
-
-									if ( editproperty == 26 )
-									{
-										const int dialogueCursorX =
-											subx1
-											+ 8
-											+ static_cast<int>(
-												strlen(spriteProperties[26])
-											) * 8;
-
-										const int dialogueCursorY =
-											suby1 + 374;
-
-										/*
-										* Keep the cursor inside the visible field even when the stored ID
-										* is longer than the currently visible portion.
-										*/
-										printText(
-											font8x8_bmp,
-											std::min(
-												dialogueCursorX,
-												subx2 - 88
-											),
-											dialogueCursorY,
-											"\26"
-										);
-									}
-									else if ( editproperty == 0 )
-									{
-										printText(font8x8_bmp, pad_x1 + strlen(spriteProperties[editproperty]) * 8, pad_y1 + 16, "\26");
-									}
-									else if ( editproperty < 7 )
-									{
-										pad_y1 += spacing;
-										// left box
-										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
-									}
-									else if ( editproperty < 13 )
-									{
-										pad_y1 += spacing;
-										pad_y1 += spacing + 10;
-										// left box
-										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
-									}
-									else if ( editproperty < 19 )
-									{
-										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
-										pad_y1 += spacing;
-										// right box
-										printText(font8x8_bmp, pad_x1 + pad_x2 + (pad_x3 + 20) + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
-									}
-									else if ( editproperty < 25 )
-									{
-										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
-										pad_y1 += spacing;
-										pad_y1 += spacing + 10;
-										// right box
-										printText(font8x8_bmp, pad_x1 + pad_x2 + (pad_x3 + 20) + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
-									}
-									else if ( editproperty >= 25 )
-									{
-										pad_y1 = suby1 + 28 + (editproperty - 12) * spacing;
-										pad_y1 += spacing;
-										pad_y1 += spacing + 20;
-										// left box
-										printText(font8x8_bmp, pad_x1 + pad_x2 + strlen(spriteProperties[editproperty]) * 8, pad_y1, "\26");
-									}
-								}
-							}
-						}
 					}
 				}
 				else if ( newwindow == 3 )
@@ -10072,6 +10595,10 @@ int main(int argc, char** argv)
 							propertyPageCursorFlash(spacing);
 						}
 					}
+				}
+				else if ( newwindow == 38 )
+				{
+					drawQuestDialogueEditor();
 				}
 				else if ( newwindow == 37 )
 				{
