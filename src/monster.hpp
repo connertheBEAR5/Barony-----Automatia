@@ -1178,10 +1178,13 @@ struct CustomDialogueQuestJournalObjective
     std::string completedText;
 
     Sint32 stage = 0;
+    Sint32 current = 0;
+    Sint32 target = 1;
 
     bool optional = false;
     bool completed = false;
     bool visible = false;
+    bool hasCounter = false;
 };
 
 struct CustomDialogueQuestJournalEntry

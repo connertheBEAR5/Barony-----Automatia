@@ -102,6 +102,26 @@ bool persistentStoryQuestIsStarted(const int player, const std::string& questID)
 bool persistentStoryQuestIsAccepted(const int player, const std::string& questID);
 bool persistentStoryQuestIsCompleted(const int player, const std::string& questID);
 bool persistentStoryQuestIsFailed(const int player, const std::string& questID);
+
+bool persistentStorySetQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 value
+);
+Sint32 persistentStoryGetQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 fallbackValue = 0
+);
+bool persistentStoryAddQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 amount
+);
+
 bool persistentStorySetQuestObjectiveCompleted(
     const int player,
     const std::string& questID,

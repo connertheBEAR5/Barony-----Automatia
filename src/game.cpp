@@ -1264,6 +1264,54 @@ static std::string makePersistentPlayerQuestKey(const int player, const std::str
     return "player_" + std::to_string(player) + ":" + normalizedQuestID;
 }
 
+
+bool persistentStorySetQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 value
+)
+{
+    if ( multiplayer == CLIENT ) return false;
+    const std::string questKey = makePersistentPlayerQuestKey(player, questID);
+    const std::string variableKey = normalizePersistentStoryID(variableID);
+    if ( questKey.empty() || variableKey.empty() ) return false;
+    PersistentQuestState& quest = persistentWorldStoryState.quests[questKey];
+    quest.started = true;
+    quest.variables[variableKey] = value;
+    return true;
+}
+
+Sint32 persistentStoryGetQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 fallbackValue
+)
+{
+    const std::string questKey = makePersistentPlayerQuestKey(player, questID);
+    const std::string variableKey = normalizePersistentStoryID(variableID);
+    if ( questKey.empty() || variableKey.empty() ) return fallbackValue;
+    const auto questIt = persistentWorldStoryState.quests.find(questKey);
+    if ( questIt == persistentWorldStoryState.quests.end() ) return fallbackValue;
+    const auto variableIt = questIt->second.variables.find(variableKey);
+    return variableIt == questIt->second.variables.end()
+        ? fallbackValue : variableIt->second;
+}
+
+bool persistentStoryAddQuestVariable(
+    const int player,
+    const std::string& questID,
+    const std::string& variableID,
+    const Sint32 amount
+)
+{
+    return persistentStorySetQuestVariable(
+        player, questID, variableID,
+        persistentStoryGetQuestVariable(player, questID, variableID, 0) + amount
+    );
+}
+
 bool persistentStorySetQuestObjectiveCompleted(
     const int player,
     const std::string& questID,

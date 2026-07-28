@@ -81,6 +81,11 @@ struct CustomDialogueChoice
 	std::string addNPCVariableID;
 	Sint32 addNPCVariableAmount = 0;
 
+	std::string setQuestVariableID;
+	Sint32 setQuestVariableValue = 0;
+	std::string addQuestVariableID;
+	Sint32 addQuestVariableAmount = 0;
+
 	std::string completeObjectiveID;
 	std::string clearObjectiveID;
 	bool resetQuest = false;
@@ -212,8 +217,10 @@ struct CustomDialogueQuestObjective
     std::string id;
     std::string text;
     std::string completedText;
+    std::string progressVariable;
 
     Sint32 stage = 0;
+    Sint32 target = 1;
     bool optional = false;
 };
 
@@ -1035,6 +1042,28 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
                     objective.optional =
                         objectiveValue["optional"].GetBool();
+                }
+
+                if ( objectiveValue.HasMember("progress_variable") )
+                {
+                    if ( !objectiveValue["progress_variable"].IsString() )
+                    {
+                        return definition;
+                    }
+                    objective.progressVariable =
+                        normalizeCustomDialogueID(
+                            objectiveValue["progress_variable"].GetString()
+                        );
+                }
+
+                if ( objectiveValue.HasMember("target") )
+                {
+                    if ( !objectiveValue["target"].IsInt()
+                        || objectiveValue["target"].GetInt() <= 0 )
+                    {
+                        return definition;
+                    }
+                    objective.target = objectiveValue["target"].GetInt();
                 }
 
                 definition.questObjectives.push_back(
@@ -2296,6 +2325,40 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 							flag["value"].GetBool();
 					}
 
+					if ( choiceAction.HasMember("set_quest_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["set_quest_variable"];
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("value")
+							|| !variable["value"].IsInt() )
+						{
+							return definition;
+						}
+						choice.setQuestVariableID =
+							normalizeCustomDialogueID(variable["id"].GetString());
+						choice.setQuestVariableValue = variable["value"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("add_quest_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["add_quest_variable"];
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("amount")
+							|| !variable["amount"].IsInt() )
+						{
+							return definition;
+						}
+						choice.addQuestVariableID =
+							normalizeCustomDialogueID(variable["id"].GetString());
+						choice.addQuestVariableAmount = variable["amount"].GetInt();
+					}
+
 					if ( choiceAction.HasMember("set_world_variable") )
 					{
 						const rapidjson::Value& variable =
@@ -3284,12 +3347,42 @@ bool getCustomDialogueQuestJournalEntries(
             journalObjective.optional =
                 objective.optional;
 
-            journalObjective.completed =
+            journalObjective.target =
+                std::max<Sint32>(1, objective.target);
+
+            const bool explicitlyCompleted =
                 persistentStoryQuestObjectiveIsCompleted(
                     player,
                     definition.questID,
                     objective.id
                 );
+
+            journalObjective.current =
+                objective.progressVariable.empty()
+                    ? (explicitlyCompleted ? 1 : 0)
+                    : persistentStoryGetQuestVariable(
+                        player,
+                        definition.questID,
+                        objective.progressVariable,
+                        0
+                    );
+
+            journalObjective.current =
+                std::max<Sint32>(
+                    0,
+                    std::min(
+                        journalObjective.current,
+                        journalObjective.target
+                    )
+                );
+
+            journalObjective.hasCounter =
+                !objective.progressVariable.empty()
+                || journalObjective.target > 1;
+
+            journalObjective.completed =
+                explicitlyCompleted
+                || journalObjective.current >= journalObjective.target;
 
             /*
              * Completed objectives remain visible even after the quest
@@ -17064,6 +17157,28 @@ bool handleCustomMonsterDialogueChoice(
 				}
 			}
 		}
+	}
+
+	if ( !definition->questID.empty()
+		&& !choice.setQuestVariableID.empty() )
+	{
+		persistentStorySetQuestVariable(
+			player,
+			definition->questID,
+			choice.setQuestVariableID,
+			choice.setQuestVariableValue
+		);
+	}
+
+	if ( !definition->questID.empty()
+		&& !choice.addQuestVariableID.empty() )
+	{
+		persistentStoryAddQuestVariable(
+			player,
+			definition->questID,
+			choice.addQuestVariableID,
+			choice.addQuestVariableAmount
+		);
 	}
 
 	if ( !choice.setWorldVariableID.empty() )

@@ -4857,6 +4857,13 @@ void createUINavigation(const int player)
 
 		auto questsButtonGlyph = uiNavFrame->addImage(SDL_Rect{ 0, 0, glyphSize, glyphSize },
 			0xFFFFFFFF, "images/system/white.png", "quests button glyph")->disabled = true;
+
+		auto questsButtonHint = uiNavFrame->addField("quests button hint", 16);
+		questsButtonHint->setFont("fonts/pixel_maz.ttf#16#2");
+		questsButtonHint->setHJustify(Field::justify_t::CENTER);
+		questsButtonHint->setVJustify(Field::justify_t::TOP);
+		questsButtonHint->setTextColor(makeColor(255, 255, 255, 255));
+		questsButtonHint->setDisabled(true);
 	}
 	{
 		const int glyphSize = 32;
@@ -5398,6 +5405,7 @@ void Player::HUD_t::updateUINavigation()
 	auto skillsButtonGlyph = uiNavFrame->findImage("skills button glyph");
 	auto questsButton = uiNavFrame->findButton("quests button");
 	auto questsButtonGlyph = uiNavFrame->findImage("quests button glyph");
+	auto questsButtonHint = uiNavFrame->findField("quests button hint");
 
 	static ConsoleVariable<bool> cvar_spell_unread_blink("/spell_unread_blink", true);
 	if ( *cvar_spell_unread_blink 
@@ -5455,19 +5463,71 @@ void Player::HUD_t::updateUINavigation()
 
 	int numButtonsToShow = 2;
 
+	SDL_Rect questsButtonPos{ leftAnchorX, topAlignY + 46, buttonWidth, buttonHeight };
+	bool showQuestsButton = false;
+
 	if ( questsButton )
 	{
-		questsButton->setDisabled(false);
-		questsButton->setSize(SDL_Rect{
-			uiNavFrame->getSize().w / 2 - 49,
-			bottomAlignY + 46,
-			98,
-			38
-		});
+		questsButton->setDisabled(true);
+		questsButton->setInvisible(true);
 	}
+
 	if ( questsButtonGlyph )
 	{
 		questsButtonGlyph->disabled = true;
+	}
+
+	/*
+	 * Place the Quests button in a more convenient location:
+	 * - standard keyboard/mouse layout: directly under the Spells button
+	 * - compact/controller layouts: on the same left module column,
+	 *   under the other compact module buttons
+	 */
+	if ( questsButton )
+	{
+		const bool blockedByOtherUI =
+			GenericGUI[player.playernum].isGUIOpen()
+			|| player.GUI.isDropdownActive()
+			|| player.minimap.mapWindow
+			|| player.messageZone.logWindow
+			|| player.hud.statusFxFocusedWindowActive;
+
+		if ( inputs.bPlayerUsingKeyboardControl(player.playernum)
+			&& inputs.getVirtualMouse(player.playernum)->draw_cursor
+			&& (!player.bUseCompactGUIHeight() && !player.bUseCompactGUIWidth())
+			&& !blockedByOtherUI )
+		{
+			showQuestsButton = true;
+			questsButtonPos.x = leftAnchorX;
+			questsButtonPos.y = 78;
+		}
+		else if ( player.bUseCompactGUIHeight() || player.bUseCompactGUIWidth() )
+		{
+			if ( !player.inventoryUI.chestGUI.bOpen
+				&& !player.shopGUI.bOpen
+				&& !blockedByOtherUI )
+			{
+				showQuestsButton = true;
+				questsButtonPos.x =
+					!player.bUseCompactGUIWidth()
+						? leftAnchorX
+						: leftAlignX;
+				questsButtonPos.y = bottomAlignY + 46;
+			}
+		}
+		else if ( inputs.hasController(player.playernum) )
+		{
+			showQuestsButton = true;
+			questsButtonPos.x = leftAlignX;
+			questsButtonPos.y = bottomAlignY + 46;
+		}
+
+		if ( showQuestsButton )
+		{
+			questsButton->setDisabled(false);
+			questsButton->setInvisible(false);
+			questsButton->setSize(questsButtonPos);
+		}
 	}
 
 	for ( auto& buttonAndGlyph : allButtonsAndGlyphs )
@@ -5726,6 +5786,57 @@ void Player::HUD_t::updateUINavigation()
 				rightTriggerPressed = false;
 				button->activate();
 			}
+		}
+	}
+
+	if ( questsButtonHint )
+	{
+		questsButtonHint->setDisabled(true);
+	}
+	if ( questsButtonGlyph )
+	{
+		questsButtonGlyph->disabled = true;
+	}
+
+	if ( questsButton
+		&& !questsButton->isDisabled()
+		&& !questsButton->isInvisible() )
+	{
+		if ( inputs.hasController(player.playernum)
+			&& !inputs.bPlayerUsingKeyboardControl(player.playernum) )
+		{
+			questsButtonGlyph->path =
+				Input::inputs[player.playernum]
+					.getGlyphPathForBinding("MenuAlt2");
+			if ( auto img = Image::get(questsButtonGlyph->path.c_str()) )
+			{
+				questsButtonGlyph->pos.w = img->getWidth();
+				questsButtonGlyph->pos.h = img->getHeight();
+			}
+			questsButtonGlyph->pos.x =
+				questsButton->getSize().x
+				+ questsButton->getSize().w / 2
+				- questsButtonGlyph->pos.w / 2;
+			questsButtonGlyph->pos.y =
+				questsButton->getSize().y
+				+ questsButton->getSize().h + 2;
+			questsButtonGlyph->ontop = true;
+			questsButtonGlyph->disabled = false;
+
+			if ( Input::inputs[player.playernum].binaryToggle("MenuAlt2") )
+			{
+				Input::inputs[player.playernum].consumeBinaryToggle("MenuAlt2");
+				questsButton->activate();
+			}
+		}
+		else
+		{
+			SDL_Rect hintPos = questsButton->getSize();
+			hintPos.y += hintPos.h + 2;
+			hintPos.h = 18;
+			questsButtonHint->setSize(hintPos);
+			questsButtonHint->setText("J");
+			questsButtonHint->setDisabled(false);
 		}
 	}
 }
@@ -30943,8 +31054,25 @@ namespace CustomDialogueQuestJournalUI
         CustomDialogueQuestJournalStatus selectedStatus =
             CustomDialogueQuestJournalStatus::Active;
 
+        enum class SortMode : Sint32
+        {
+            Recommended,
+            Title,
+            Progress
+        };
+
+        enum class FilterMode : Sint32
+        {
+            All,
+            OneTime,
+            Repeatable
+        };
+
         Sint32 selectedQuest = 0;
         Sint32 scrollOffset = 0;
+
+        SortMode sortMode = SortMode::Recommended;
+        FilterMode filterMode = FilterMode::All;
 
         std::vector<CustomDialogueQuestJournalEntry>
             visibleEntries;
@@ -31092,6 +31220,69 @@ namespace CustomDialogueQuestJournalUI
         );
     }
 
+    static Sint32 completedObjectiveCount(
+        const CustomDialogueQuestJournalEntry& entry
+    )
+    {
+        Sint32 count = 0;
+        for ( const auto& objective : entry.objectives )
+        {
+            if ( objective.completed ) ++count;
+        }
+        return count;
+    }
+
+    static void applySortAndFilter(State& state)
+    {
+        state.visibleEntries.erase(
+            std::remove_if(
+                state.visibleEntries.begin(),
+                state.visibleEntries.end(),
+                [&state](const CustomDialogueQuestJournalEntry& entry)
+                {
+                    if ( state.filterMode == State::FilterMode::OneTime )
+                    {
+                        return entry.repeatable;
+                    }
+                    if ( state.filterMode == State::FilterMode::Repeatable )
+                    {
+                        return !entry.repeatable;
+                    }
+                    return false;
+                }
+            ),
+            state.visibleEntries.end()
+        );
+
+        std::stable_sort(
+            state.visibleEntries.begin(),
+            state.visibleEntries.end(),
+            [&state](
+                const CustomDialogueQuestJournalEntry& a,
+                const CustomDialogueQuestJournalEntry& b
+            )
+            {
+                if ( state.sortMode == State::SortMode::Title )
+                {
+                    return a.title < b.title;
+                }
+                if ( state.sortMode == State::SortMode::Progress )
+                {
+                    const Sint32 ac = completedObjectiveCount(a);
+                    const Sint32 bc = completedObjectiveCount(b);
+                    const Sint32 at = std::max<Sint32>(1, a.objectives.size());
+                    const Sint32 bt = std::max<Sint32>(1, b.objectives.size());
+                    const real_t ar = static_cast<real_t>(ac) / at;
+                    const real_t br = static_cast<real_t>(bc) / bt;
+                    if ( ar != br ) return ar > br;
+                    return a.title < b.title;
+                }
+                if ( a.stage != b.stage ) return a.stage > b.stage;
+                return a.title < b.title;
+            }
+        );
+    }
+
     static void refresh(
         const int player
     )
@@ -31106,6 +31297,8 @@ namespace CustomDialogueQuestJournalUI
             state.selectedStatus,
             state.visibleEntries
         );
+
+        applySortAndFilter(state);
 
         if ( state.selectedQuest < 0 )
         {
@@ -31276,6 +31469,12 @@ namespace CustomDialogueQuestJournalUI
                     ? "[x] "
                     : "[ ] ";
 
+            result +=
+                std::to_string(objective.current)
+                + "/"
+                + std::to_string(objective.target)
+                + "  ";
+
             if ( objective.optional )
             {
                 result +=
@@ -31327,7 +31526,11 @@ namespace CustomDialogueQuestJournalUI
                 break;
             }
 
-            result += "- ";
+            result += "- "
+                + std::to_string(objective.current)
+                + "/"
+                + std::to_string(objective.target)
+                + "  ";
             if ( objective.optional )
             {
                 result += "(Optional) ";
@@ -31361,11 +31564,32 @@ namespace CustomDialogueQuestJournalUI
 
         state.trackerFrame->setOwner(player);
         state.trackerFrame->setHollow(false);
-        state.trackerFrame->setBorder(2);
+        state.trackerFrame->setBorder(4);
         state.trackerFrame->setColor(
-            makeColor(22, 24, 29, 220)
+            makeColor(22, 24, 29, 236)
         );
         state.trackerFrame->setDisabled(true);
+
+        auto heading =
+            state.trackerFrame->addField(
+                "quest tracker heading",
+                64
+            );
+        heading->setFont("fonts/pixel_maz.ttf#16#2");
+        heading->setTextColor(makeColor(201, 162, 100, 255));
+        heading->setText("TRACKED QUEST");
+        heading->setHJustify(Field::justify_t::LEFT);
+        heading->setVJustify(Field::justify_t::TOP);
+
+        auto progress =
+            state.trackerFrame->addField(
+                "quest tracker progress",
+                64
+            );
+        progress->setFont("fonts/pixel_maz.ttf#16#2");
+        progress->setTextColor(makeColor(201, 162, 100, 255));
+        progress->setHJustify(Field::justify_t::RIGHT);
+        progress->setVJustify(Field::justify_t::TOP);
 
         auto title =
             state.trackerFrame->addField(
@@ -31424,8 +31648,8 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
-        const Sint32 width = 340;
-        const Sint32 height = 116;
+        const Sint32 width = 360;
+        const Sint32 height = 138;
 
         state.trackerFrame->setSize(SDL_Rect{
             players[player]->camera_virtualx2() - width - 18,
@@ -31435,16 +31659,37 @@ namespace CustomDialogueQuestJournalUI
         });
 
         state.trackerFrame->findField(
+            "quest tracker heading"
+        )->setSize(SDL_Rect{ 12, 8, width - 130, 20 });
+
+        state.trackerFrame->findField(
+            "quest tracker progress"
+        )->setSize(SDL_Rect{ width - 112, 8, 100, 20 });
+
+        state.trackerFrame->findField(
             "quest tracker title"
-        )->setSize(SDL_Rect{ 12, 8, width - 24, 26 });
+        )->setSize(SDL_Rect{ 12, 30, width - 24, 26 });
 
         state.trackerFrame->findField(
             "quest tracker objectives"
-        )->setSize(SDL_Rect{ 12, 38, width - 24, height - 46 });
+        )->setSize(SDL_Rect{ 12, 60, width - 24, height - 70 });
 
         state.trackerFrame->findField(
             "quest tracker title"
         )->setText(entry.title.c_str());
+
+        const Sint32 completedCount =
+            completedObjectiveCount(entry);
+        const Sint32 objectiveCount =
+            static_cast<Sint32>(entry.objectives.size());
+        const std::string progressText =
+            std::to_string(completedCount)
+            + "/"
+            + std::to_string(objectiveCount);
+
+        state.trackerFrame->findField(
+            "quest tracker progress"
+        )->setText(progressText.c_str());
 
         const std::string objectives =
             buildTrackerObjectiveText(entry);
@@ -31816,6 +32061,46 @@ namespace CustomDialogueQuestJournalUI
             }
         );
 
+        auto sortButton =
+            state.frame->addButton("quest journal sort");
+        sortButton->setOwner(player);
+        sortButton->setText("Sort: Recommended");
+        sortButton->setFont("fonts/pixel_maz.ttf#16#2");
+        styleButton(sortButton);
+        sortButton->setCallback(
+            [](Button& button)
+            {
+                State& state = states[button.getOwner()];
+                state.sortMode = static_cast<State::SortMode>(
+                    (static_cast<Sint32>(state.sortMode) + 1) % 3
+                );
+                state.selectedQuest = 0;
+                state.scrollOffset = 0;
+                refresh(button.getOwner());
+                Player::soundModuleNavigation();
+            }
+        );
+
+        auto filterButton =
+            state.frame->addButton("quest journal filter");
+        filterButton->setOwner(player);
+        filterButton->setText("Filter: All");
+        filterButton->setFont("fonts/pixel_maz.ttf#16#2");
+        styleButton(filterButton);
+        filterButton->setCallback(
+            [](Button& button)
+            {
+                State& state = states[button.getOwner()];
+                state.filterMode = static_cast<State::FilterMode>(
+                    (static_cast<Sint32>(state.filterMode) + 1) % 3
+                );
+                state.selectedQuest = 0;
+                state.scrollOffset = 0;
+                refresh(button.getOwner());
+                Player::soundModuleNavigation();
+            }
+        );
+
         const char* tabNames[3] =
         {
             "Active",
@@ -32003,8 +32288,8 @@ namespace CustomDialogueQuestJournalUI
         state.frame->findField(
             "quest journal help"
         )->setText(
-            "Mouse wheel / Up-Down: scroll quests    "
-            "Left-Right / LB-RB: tabs    J / B / Esc: close"
+            "Up/Down: quests  Left/Right or LB/RB: tabs  "
+            "Enter/A: track  S/X: sort  F/Y: filter  J/B/Esc: close"
         );
     }
 
@@ -32021,7 +32306,7 @@ namespace CustomDialogueQuestJournalUI
         }
 
         const Sint32 width = 690;
-        const Sint32 height = 468;
+        const Sint32 height = 510;
 
         const Sint32 cameraWidth =
             players[player]->camera_virtualWidth();
@@ -32106,6 +32391,14 @@ namespace CustomDialogueQuestJournalUI
         trackButton->setSize(
             SDL_Rect{ width - 180, 56, 160, 30 }
         );
+
+        state.frame->findButton(
+            "quest journal sort"
+        )->setSize(SDL_Rect{ 18, 422, 198, 28 });
+
+        state.frame->findButton(
+            "quest journal filter"
+        )->setSize(SDL_Rect{ 222, 422, 198, 28 });
 
         auto listPanel =
             state.frame->findFrame(
@@ -32237,13 +32530,13 @@ namespace CustomDialogueQuestJournalUI
         state.frame->findField(
             "quest journal page"
         )->setSize(
-            SDL_Rect{ 28, 400, 238, 20 }
+            SDL_Rect{ 438, 426, 220, 20 }
         );
 
         state.frame->findField(
             "quest journal help"
         )->setSize(
-            SDL_Rect{ 24, 432, width - 48, 22 }
+            SDL_Rect{ 24, 472, width - 48, 22 }
         );
     }
 
@@ -32315,6 +32608,30 @@ namespace CustomDialogueQuestJournalUI
                     : "Track Quest"
             );
         }
+
+        auto sortButton =
+            state.frame->findButton("quest journal sort");
+        auto filterButton =
+            state.frame->findButton("quest journal filter");
+
+        const char* sortNames[3] =
+        {
+            "Recommended", "Title", "Progress"
+        };
+        const char* filterNames[3] =
+        {
+            "All", "One-Time", "Repeatable"
+        };
+
+        const std::string sortLabel =
+            std::string("Sort: ")
+            + sortNames[static_cast<Sint32>(state.sortMode)];
+        const std::string filterLabel =
+            std::string("Filter: ")
+            + filterNames[static_cast<Sint32>(state.filterMode)];
+
+        sortButton->setText(sortLabel.c_str());
+        filterButton->setText(filterLabel.c_str());
 
         for ( Sint32 tab = 0;
             tab < 3;
@@ -32575,6 +32892,9 @@ namespace CustomDialogueQuestJournalUI
         bool moveUp = false;
         bool moveDown = false;
         bool closePressed = false;
+        bool trackPressed = false;
+        bool sortPressed = false;
+        bool filterPressed = false;
 
         if ( keystatus[SDLK_LEFT] )
         {
@@ -32598,6 +32918,22 @@ namespace CustomDialogueQuestJournalUI
         {
             keystatus[SDLK_DOWN] = 0;
             moveDown = true;
+        }
+
+        if ( keystatus[SDLK_RETURN] )
+        {
+            keystatus[SDLK_RETURN] = 0;
+            trackPressed = true;
+        }
+        if ( keystatus[SDLK_s] )
+        {
+            keystatus[SDLK_s] = 0;
+            sortPressed = true;
+        }
+        if ( keystatus[SDLK_f] )
+        {
+            keystatus[SDLK_f] = 0;
+            filterPressed = true;
         }
 
         /*
@@ -32684,6 +33020,22 @@ namespace CustomDialogueQuestJournalUI
                     );
                     closePressed = true;
                 }
+
+                if ( controller->binaryToggle(SDL_CONTROLLER_BUTTON_A) )
+                {
+                    controller->consumeBinaryToggle(SDL_CONTROLLER_BUTTON_A);
+                    trackPressed = true;
+                }
+                if ( controller->binaryToggle(SDL_CONTROLLER_BUTTON_X) )
+                {
+                    controller->consumeBinaryToggle(SDL_CONTROLLER_BUTTON_X);
+                    sortPressed = true;
+                }
+                if ( controller->binaryToggle(SDL_CONTROLLER_BUTTON_Y) )
+                {
+                    controller->consumeBinaryToggle(SDL_CONTROLLER_BUTTON_Y);
+                    filterPressed = true;
+                }
             }
         }
 
@@ -32691,6 +33043,22 @@ namespace CustomDialogueQuestJournalUI
         {
             close(player);
             return;
+        }
+
+        if ( trackPressed )
+        {
+            if ( auto button = state.frame->findButton("quest journal track") )
+            {
+                if ( !button->isDisabled() ) button->activate();
+            }
+        }
+        if ( sortPressed )
+        {
+            state.frame->findButton("quest journal sort")->activate();
+        }
+        if ( filterPressed )
+        {
+            state.frame->findButton("quest journal filter")->activate();
         }
 
         if ( tabLeft || tabRight )
