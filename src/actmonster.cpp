@@ -49,11 +49,17 @@ struct CustomDialogueChoice
 	Sint32 nextNode = 0;
 	bool once = false;
 
+	bool questStart = false;
 	bool questAccept = false;
 	bool questComplete = false;
+	bool questFail = false;
 	Sint32 questStage = -1;
 
 	Sint32 rewardGold = 0;
+	Sint32 removeGold = 0;
+
+	std::string removeItem;
+	Sint32 removeItemCount = 0;
 	std::string rewardItem;
 	Sint32 rewardItemCount = 0;
 
@@ -62,6 +68,38 @@ struct CustomDialogueChoice
 
 	std::string setNPCFlagID;
 	bool setNPCFlagValue = false;
+
+	std::string setWorldVariableID;
+	Sint32 setWorldVariableValue = 0;
+
+	std::string addWorldVariableID;
+	Sint32 addWorldVariableAmount = 0;
+
+	std::string setNPCVariableID;
+	Sint32 setNPCVariableValue = 0;
+
+	std::string addNPCVariableID;
+	Sint32 addNPCVariableAmount = 0;
+
+	/*
+	 * Optional condition controlling whether this choice is visible.
+	 * Choice conditions never consume items or gold; they only filter
+	 * the options sent to the local or remote player's UI.
+	 */
+	std::string conditionType;
+
+	std::string conditionItem;
+	Sint32 conditionItemCount = 1;
+
+	std::string conditionQuestID;
+	Sint32 conditionQuestStage = 0;
+
+	std::string conditionStoryID;
+	Sint32 conditionStoryValue = 0;
+	bool conditionFlagValue = true;
+
+	Sint32 conditionGoldAmount = 0;
+	std::string conditionComparison = "equals";
 };
 
 struct CustomDialogueNode
@@ -378,6 +416,167 @@ static bool consumeCustomDialoguePlayerItem(
     }
 
     return true;
+}
+
+
+static bool evaluateCustomDialogueChoiceCondition(
+	const CustomDialogueChoice& choice,
+	const int player,
+	const std::string& sourceMap,
+	const Sint32 npcPersistentID
+)
+{
+	if ( choice.conditionType.empty() )
+	{
+		return true;
+	}
+
+	if ( choice.conditionType == "has_item" )
+	{
+		ItemType itemType =
+			TOOL_TORCH;
+
+		if ( !resolveCustomDialogueItemType(
+				choice.conditionItem,
+				itemType
+			) )
+		{
+			return false;
+		}
+
+		return findCustomDialoguePlayerItem(
+			player,
+			itemType,
+			choice.conditionItemCount
+		) != nullptr;
+	}
+
+	if ( choice.conditionType == "has_gold" )
+	{
+		return stats[player]
+			&& stats[player]->GOLD
+				>= choice.conditionGoldAmount;
+	}
+
+	if ( choice.conditionType == "quest_started" )
+	{
+		return persistentStoryQuestIsStarted(
+			choice.conditionQuestID
+		);
+	}
+
+	if ( choice.conditionType == "quest_accepted" )
+	{
+		return persistentStoryQuestIsAccepted(
+			choice.conditionQuestID
+		);
+	}
+
+	if ( choice.conditionType == "quest_completed" )
+	{
+		return persistentStoryQuestIsCompleted(
+			choice.conditionQuestID
+		);
+	}
+
+	if ( choice.conditionType == "quest_failed" )
+	{
+		return persistentStoryQuestIsFailed(
+			choice.conditionQuestID
+		);
+	}
+
+	if ( choice.conditionType == "quest_stage" )
+	{
+		const Sint32 value =
+			persistentStoryGetQuestStage(
+				choice.conditionQuestID,
+				0
+			);
+
+		if ( choice.conditionComparison
+			== "not_equals" )
+		{
+			return value
+				!= choice.conditionQuestStage;
+		}
+
+		if ( choice.conditionComparison
+			== "at_least" )
+		{
+			return value
+				>= choice.conditionQuestStage;
+		}
+
+		if ( choice.conditionComparison
+			== "at_most" )
+		{
+			return value
+				<= choice.conditionQuestStage;
+		}
+
+		return value
+			== choice.conditionQuestStage;
+	}
+
+	if ( choice.conditionType == "world_flag" )
+	{
+		return persistentStoryGetWorldFlag(
+			choice.conditionStoryID
+		) == choice.conditionFlagValue;
+	}
+
+	if ( choice.conditionType == "npc_flag" )
+	{
+		return persistentStoryGetNPCFlag(
+			sourceMap,
+			npcPersistentID,
+			choice.conditionStoryID
+		) == choice.conditionFlagValue;
+	}
+
+	if ( choice.conditionType == "world_variable"
+		|| choice.conditionType == "npc_variable" )
+	{
+		const Sint32 value =
+			choice.conditionType == "world_variable"
+			? persistentStoryGetWorldVariable(
+				choice.conditionStoryID,
+				0
+			)
+			: persistentStoryGetNPCVariable(
+				sourceMap,
+				npcPersistentID,
+				choice.conditionStoryID,
+				0
+			);
+
+		if ( choice.conditionComparison
+			== "not_equals" )
+		{
+			return value
+				!= choice.conditionStoryValue;
+		}
+
+		if ( choice.conditionComparison
+			== "at_least" )
+		{
+			return value
+				>= choice.conditionStoryValue;
+		}
+
+		if ( choice.conditionComparison
+			== "at_most" )
+		{
+			return value
+				<= choice.conditionStoryValue;
+		}
+
+		return value
+			== choice.conditionStoryValue;
+	}
+
+	return false;
 }
 
 static CustomDialogueDefinition loadCustomDialogueDefinition(
@@ -1297,6 +1496,193 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						choiceValue["once"].GetBool();
 				}
 
+				if ( choiceValue.HasMember("condition") )
+				{
+					const rapidjson::Value& condition =
+						choiceValue["condition"];
+
+					if ( !condition.IsObject()
+						|| !condition.HasMember("type")
+						|| !condition["type"].IsString() )
+					{
+						printlog(
+							"[Custom Dialogue] '%s' node %d choice '%s' has an invalid condition.",
+							realPath.c_str(),
+							node.id,
+							choice.id.c_str()
+						);
+
+						return definition;
+					}
+
+					choice.conditionType =
+						normalizeCustomDialogueID(
+							condition["type"].GetString()
+						);
+
+					if ( choice.conditionType == "has_item" )
+					{
+						if ( !condition.HasMember("item")
+							|| !condition["item"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.conditionItem =
+							condition["item"].GetString();
+
+						choice.conditionItemCount = 1;
+
+						if ( condition.HasMember("count") )
+						{
+							if ( !condition["count"].IsInt()
+								|| condition["count"].GetInt() <= 0 )
+							{
+								return definition;
+							}
+
+							choice.conditionItemCount =
+								condition["count"].GetInt();
+						}
+
+						ItemType itemType =
+							TOOL_TORCH;
+
+						if ( !resolveCustomDialogueItemType(
+								choice.conditionItem,
+								itemType
+							) )
+						{
+							return definition;
+						}
+					}
+					else if ( choice.conditionType == "has_gold" )
+					{
+						if ( !condition.HasMember("amount")
+							|| !condition["amount"].IsInt()
+							|| condition["amount"].GetInt() < 0 )
+						{
+							return definition;
+						}
+
+						choice.conditionGoldAmount =
+							condition["amount"].GetInt();
+					}
+					else if ( choice.conditionType == "quest_started"
+						|| choice.conditionType == "quest_accepted"
+						|| choice.conditionType == "quest_completed"
+						|| choice.conditionType == "quest_failed" )
+					{
+						if ( !condition.HasMember("quest")
+							|| !condition["quest"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.conditionQuestID =
+							normalizeCustomDialogueID(
+								condition["quest"].GetString()
+							);
+					}
+					else if ( choice.conditionType == "quest_stage" )
+					{
+						if ( !condition.HasMember("quest")
+							|| !condition["quest"].IsString()
+							|| !condition.HasMember("stage")
+							|| !condition["stage"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.conditionQuestID =
+							normalizeCustomDialogueID(
+								condition["quest"].GetString()
+							);
+
+						choice.conditionQuestStage =
+							condition["stage"].GetInt();
+					}
+					else if ( choice.conditionType == "world_flag"
+						|| choice.conditionType == "npc_flag" )
+					{
+						if ( !condition.HasMember("id")
+							|| !condition["id"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.conditionStoryID =
+							normalizeCustomDialogueID(
+								condition["id"].GetString()
+							);
+
+						choice.conditionFlagValue = true;
+
+						if ( condition.HasMember("value") )
+						{
+							if ( !condition["value"].IsBool() )
+							{
+								return definition;
+							}
+
+							choice.conditionFlagValue =
+								condition["value"].GetBool();
+						}
+					}
+					else if ( choice.conditionType == "world_variable"
+						|| choice.conditionType == "npc_variable" )
+					{
+						if ( !condition.HasMember("id")
+							|| !condition["id"].IsString()
+							|| !condition.HasMember("value")
+							|| !condition["value"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.conditionStoryID =
+							normalizeCustomDialogueID(
+								condition["id"].GetString()
+							);
+
+						choice.conditionStoryValue =
+							condition["value"].GetInt();
+					}
+					else
+					{
+						printlog(
+							"[Custom Dialogue] '%s' node %d choice '%s' uses unsupported condition '%s'.",
+							realPath.c_str(),
+							node.id,
+							choice.id.c_str(),
+							choice.conditionType.c_str()
+						);
+
+						return definition;
+					}
+
+					if ( condition.HasMember("comparison") )
+					{
+						if ( !condition["comparison"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.conditionComparison =
+							normalizeCustomDialogueID(
+								condition["comparison"].GetString()
+							);
+					}
+
+					if ( choice.conditionComparison != "equals"
+						&& choice.conditionComparison != "not_equals"
+						&& choice.conditionComparison != "at_least"
+						&& choice.conditionComparison != "at_most" )
+					{
+						return definition;
+					}
+				}
+
 				if ( choiceValue.HasMember("action") )
 				{
 					const rapidjson::Value& choiceAction =
@@ -1312,6 +1698,17 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						);
 
 						return definition;
+					}
+
+					if ( choiceAction.HasMember("quest_start") )
+					{
+						if ( !choiceAction["quest_start"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.questStart =
+							choiceAction["quest_start"].GetBool();
 					}
 
 					if ( choiceAction.HasMember("quest_accept") )
@@ -1334,6 +1731,17 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
 						choice.questComplete =
 							choiceAction["quest_complete"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("quest_fail") )
+					{
+						if ( !choiceAction["quest_fail"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.questFail =
+							choiceAction["quest_fail"].GetBool();
 					}
 
 					if ( choiceAction.HasMember("quest_stage") )
@@ -1422,6 +1830,59 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						}
 					}
 
+					if ( choiceAction.HasMember("remove_gold") )
+					{
+						if ( !choiceAction["remove_gold"].IsInt()
+							|| choiceAction["remove_gold"].GetInt() < 0 )
+						{
+							return definition;
+						}
+
+						choice.removeGold =
+							choiceAction["remove_gold"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("remove_item") )
+					{
+						const rapidjson::Value& removeItem =
+							choiceAction["remove_item"];
+
+						if ( !removeItem.IsObject()
+							|| !removeItem.HasMember("item")
+							|| !removeItem["item"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.removeItem =
+							removeItem["item"].GetString();
+
+						choice.removeItemCount = 1;
+
+						if ( removeItem.HasMember("count") )
+						{
+							if ( !removeItem["count"].IsInt()
+								|| removeItem["count"].GetInt() <= 0 )
+							{
+								return definition;
+							}
+
+							choice.removeItemCount =
+								removeItem["count"].GetInt();
+						}
+
+						ItemType itemType =
+							TOOL_TORCH;
+
+						if ( !resolveCustomDialogueItemType(
+								choice.removeItem,
+								itemType
+							) )
+						{
+							return definition;
+						}
+					}
+
 					if ( choiceAction.HasMember("set_world_flag") )
 					{
 						const rapidjson::Value& flag =
@@ -1466,6 +1927,98 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
 						choice.setNPCFlagValue =
 							flag["value"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("set_world_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["set_world_variable"];
+
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("value")
+							|| !variable["value"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.setWorldVariableID =
+							normalizeCustomDialogueID(
+								variable["id"].GetString()
+							);
+
+						choice.setWorldVariableValue =
+							variable["value"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("add_world_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["add_world_variable"];
+
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("amount")
+							|| !variable["amount"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.addWorldVariableID =
+							normalizeCustomDialogueID(
+								variable["id"].GetString()
+							);
+
+						choice.addWorldVariableAmount =
+							variable["amount"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("set_npc_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["set_npc_variable"];
+
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("value")
+							|| !variable["value"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.setNPCVariableID =
+							normalizeCustomDialogueID(
+								variable["id"].GetString()
+							);
+
+						choice.setNPCVariableValue =
+							variable["value"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("add_npc_variable") )
+					{
+						const rapidjson::Value& variable =
+							choiceAction["add_npc_variable"];
+
+						if ( !variable.IsObject()
+							|| !variable.HasMember("id")
+							|| !variable["id"].IsString()
+							|| !variable.HasMember("amount")
+							|| !variable["amount"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.addNPCVariableID =
+							normalizeCustomDialogueID(
+								variable["id"].GetString()
+							);
+
+						choice.addNPCVariableAmount =
+							variable["amount"].GetInt();
 					}
 				}
 
@@ -14654,6 +15207,16 @@ bool handleCustomMonsterDialogue(
 				continue;
 			}
 
+			if ( !evaluateCustomDialogueChoiceCondition(
+					choice,
+					monsterclicked,
+					sourceMap,
+					my->persistentID
+				) )
+			{
+				continue;
+			}
+
 			availableChoices.push_back(choice);
 			choiceTexts.push_back(choice.text);
 		}
@@ -15101,6 +15664,72 @@ bool handleCustomMonsterDialogueChoice(
 	const CustomDialogueChoice choice =
 		pending.choices[choiceIndex];
 
+	if ( !evaluateCustomDialogueChoiceCondition(
+			choice,
+			player,
+			pending.sourceMap,
+			pending.npcPersistentID
+		) )
+	{
+		printlog(
+			"[Custom Dialogue] Rejected choice '%s' because its condition is no longer satisfied.",
+			choice.id.c_str()
+		);
+
+		pending =
+			PendingCustomDialogueChoiceState{};
+
+		return false;
+	}
+
+	if ( choice.removeGold > 0
+		&& (
+			!stats[player]
+			|| stats[player]->GOLD
+				< choice.removeGold
+		) )
+	{
+		pending =
+			PendingCustomDialogueChoiceState{};
+
+		return false;
+	}
+
+	Item* removeItemPointer = nullptr;
+
+	if ( !choice.removeItem.empty()
+		&& choice.removeItemCount > 0 )
+	{
+		ItemType itemType =
+			TOOL_TORCH;
+
+		if ( !resolveCustomDialogueItemType(
+				choice.removeItem,
+				itemType
+			) )
+		{
+			pending =
+				PendingCustomDialogueChoiceState{};
+
+			return false;
+		}
+
+		removeItemPointer =
+			findCustomDialoguePlayerItem(
+				player,
+				itemType,
+				choice.removeItemCount
+			);
+
+		if ( !removeItemPointer )
+		{
+			pending =
+				PendingCustomDialogueChoiceState{};
+
+			return false;
+		}
+	}
+
 	pending =
 		PendingCustomDialogueChoiceState{};
 
@@ -15118,6 +15747,14 @@ bool handleCustomMonsterDialogueChoice(
 
 	if ( !definition->questID.empty() )
 	{
+		if ( choice.questStart )
+		{
+			persistentStorySetQuestStarted(
+				definition->questID,
+				true
+			);
+		}
+
 		if ( choice.questAccept )
 		{
 			persistentStorySetQuestAccepted(
@@ -15141,12 +15778,78 @@ bool handleCustomMonsterDialogueChoice(
 				true
 			);
 		}
+
+		if ( choice.questFail )
+		{
+			persistentStorySetQuestFailed(
+				definition->questID,
+				true
+			);
+		}
 	}
 
 	const std::string sourceMap =
 		map.filename[0]
 			? map.filename
 			: map.name;
+
+	if ( choice.removeGold > 0
+		&& stats[player] )
+	{
+		stats[player]->GOLD -=
+			choice.removeGold;
+
+		messagePlayer(
+			player,
+			MESSAGE_INTERACTION
+				| MESSAGE_INVENTORY,
+			"You paid %d gold.",
+			choice.removeGold
+		);
+
+		if ( multiplayer == SERVER
+			&& player > 0
+			&& !client_disconnected[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			strcpy(
+				reinterpret_cast<char*>(
+					net_packet->data
+				),
+				"GOLD"
+			);
+
+			SDLNet_Write32(
+				stats[player]->GOLD,
+				&net_packet->data[4]
+			);
+
+			net_packet->address.host =
+				net_clients[player - 1].host;
+
+			net_packet->address.port =
+				net_clients[player - 1].port;
+
+			net_packet->len = 8;
+
+			sendPacketSafe(
+				net_sock,
+				-1,
+				net_packet,
+				player - 1
+			);
+		}
+	}
+
+	if ( removeItemPointer
+		&& choice.removeItemCount > 0 )
+	{
+		consumeCustomDialoguePlayerItem(
+			player,
+			removeItemPointer,
+			choice.removeItemCount
+		);
+	}
 
 	if ( choice.rewardGold > 0
 		&& stats[player] )
@@ -15255,6 +15958,51 @@ bool handleCustomMonsterDialogueChoice(
 		}
 	}
 
+	if ( !choice.setWorldVariableID.empty() )
+	{
+		persistentStorySetWorldVariable(
+			choice.setWorldVariableID,
+			choice.setWorldVariableValue
+		);
+	}
+
+	if ( !choice.addWorldVariableID.empty() )
+	{
+		persistentStoryAddWorldVariable(
+			choice.addWorldVariableID,
+			choice.addWorldVariableAmount
+		);
+	}
+
+	if ( !choice.setNPCVariableID.empty() )
+	{
+		persistentStorySetNPCVariable(
+			sourceMap,
+			npc->persistentID,
+			choice.setNPCVariableID,
+			choice.setNPCVariableValue
+		);
+	}
+
+	if ( !choice.addNPCVariableID.empty() )
+	{
+		const Sint32 currentValue =
+			persistentStoryGetNPCVariable(
+				sourceMap,
+				npc->persistentID,
+				choice.addNPCVariableID,
+				0
+			);
+
+		persistentStorySetNPCVariable(
+			sourceMap,
+			npc->persistentID,
+			choice.addNPCVariableID,
+			currentValue
+				+ choice.addNPCVariableAmount
+		);
+	}
+
 	if ( !choice.setWorldFlagID.empty() )
 	{
 		persistentStorySetWorldFlag(
@@ -15287,14 +16035,17 @@ bool handleCustomMonsterDialogueChoice(
 	);
 
 	printlog(
-		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next node=%d, gold=%d, item='%s' x%d.",
+		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next=%d, rewardGold=%d, removeGold=%d, rewardItem='%s' x%d, removeItem='%s' x%d.",
 		player,
 		choice.id.c_str(),
 		npc->persistentID,
 		choice.nextNode,
 		choice.rewardGold,
+		choice.removeGold,
 		choice.rewardItem.c_str(),
-		choice.rewardItemCount
+		choice.rewardItemCount,
+		choice.removeItem.c_str(),
+		choice.removeItemCount
 	);
 
 	Stat* npcStats =
