@@ -222,6 +222,10 @@ struct CustomDialogueQuestObjective
     Sint32 stage = 0;
     Sint32 target = 1;
     bool optional = false;
+
+    std::string markerMap;
+    Sint32 markerX = -1;
+    Sint32 markerY = -1;
 };
 
 struct CustomDialogueDefinition
@@ -237,6 +241,11 @@ struct CustomDialogueDefinition
     std::string questObjective;
     std::string questCompletedText;
     std::string questFailedText;
+
+    std::string questOriginLabel;
+    std::string questOriginMap;
+    Sint32 questOriginX = -1;
+    Sint32 questOriginY = -1;
 
     /*
      * Authored ownership and repeatability metadata.
@@ -945,6 +954,37 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         }
 
 
+        if ( quest.HasMember("origin") )
+        {
+            const rapidjson::Value& origin = quest["origin"];
+            if ( !origin.IsObject() )
+            {
+                printlog("[Custom Dialogue] '%s' quest origin must be an object.", realPath.c_str());
+                return definition;
+            }
+            if ( origin.HasMember("label") )
+            {
+                if ( !origin["label"].IsString() ) { return definition; }
+                definition.questOriginLabel = origin["label"].GetString();
+            }
+            if ( origin.HasMember("map") )
+            {
+                if ( !origin["map"].IsString() ) { return definition; }
+                definition.questOriginMap =
+                    normalizeCustomDialogueID(origin["map"].GetString());
+            }
+            if ( origin.HasMember("x") || origin.HasMember("y") )
+            {
+                if ( !origin.HasMember("x") || !origin["x"].IsInt()
+                    || !origin.HasMember("y") || !origin["y"].IsInt() )
+                {
+                    return definition;
+                }
+                definition.questOriginX = origin["x"].GetInt();
+                definition.questOriginY = origin["y"].GetInt();
+            }
+        }
+
         if ( quest.HasMember("objectives") )
         {
             const rapidjson::Value& objectives =
@@ -1064,6 +1104,31 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                         return definition;
                     }
                     objective.target = objectiveValue["target"].GetInt();
+                }
+
+                if ( objectiveValue.HasMember("map_marker") )
+                {
+                    const rapidjson::Value& marker = objectiveValue["map_marker"];
+                    if ( !marker.IsObject()
+                        || !marker.HasMember("map") || !marker["map"].IsString()
+                        || !marker.HasMember("x") || !marker["x"].IsInt()
+                        || !marker.HasMember("y") || !marker["y"].IsInt() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' quest objective '%s' has an invalid map_marker.",
+                            realPath.c_str(), objective.id.c_str()
+                        );
+                        return definition;
+                    }
+                    objective.markerMap =
+                        normalizeCustomDialogueID(marker["map"].GetString());
+                    objective.markerX = marker["x"].GetInt();
+                    objective.markerY = marker["y"].GetInt();
+                    if ( objective.markerMap.empty()
+                        || objective.markerX < 0 || objective.markerY < 0 )
+                    {
+                        return definition;
+                    }
                 }
 
                 definition.questObjectives.push_back(
@@ -3292,6 +3357,13 @@ bool getCustomDialogueQuestJournalEntries(
         entry.scope =
             definition.questScope;
 
+        entry.originLabel = definition.questOriginLabel;
+        entry.originMap = definition.questOriginMap;
+        entry.originX = definition.questOriginX;
+        entry.originY = definition.questOriginY;
+        entry.hasOriginMarker =
+            !entry.originMap.empty() && entry.originX >= 0 && entry.originY >= 0;
+
         entry.repeatable =
             definition.questRepeatable;
 
@@ -3379,6 +3451,13 @@ bool getCustomDialogueQuestJournalEntries(
             journalObjective.hasCounter =
                 !objective.progressVariable.empty()
                 || journalObjective.target > 1;
+
+            journalObjective.markerMap = objective.markerMap;
+            journalObjective.markerX = objective.markerX;
+            journalObjective.markerY = objective.markerY;
+            journalObjective.hasMapMarker =
+                !objective.markerMap.empty()
+                && objective.markerX >= 0 && objective.markerY >= 0;
 
             journalObjective.completed =
                 explicitlyCompleted

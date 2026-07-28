@@ -874,6 +874,13 @@ static std::unordered_map<
 static PersistentWorldStoryState
     persistentWorldStoryState;
 /*
+ * Explored minimap tiles retained for each visited map during the
+ * current game session. This must be declared before the session reset
+ * function, which clears it.
+ */
+static std::unordered_map<std::string, std::vector<Sint8>>
+    persistentMinimapRegistry;
+/*
  * Original map entities use positive persistent IDs.
  * Explicitly persistent runtime monsters use negative IDs.
  *
@@ -906,6 +913,8 @@ void resetPersistentWorldSession()
 
     persistentMapRemovalRegistry.clear();
 
+
+    persistentMinimapRegistry.clear();
         persistentWorldStoryState =
         PersistentWorldStoryState{};
 
@@ -1038,6 +1047,56 @@ static std::string normalizePersistentMapKey(
 
     return key;
 }
+
+static void capturePersistentMinimap()
+{
+    const std::string mapKey = getPersistentMapKey();
+    if ( mapKey.empty() || map.width <= 0 || map.height <= 0
+        || map.width > MINIMAP_MAX_DIMENSION
+        || map.height > MINIMAP_MAX_DIMENSION )
+    {
+        return;
+    }
+    std::vector<Sint8>& saved = persistentMinimapRegistry[mapKey];
+    saved.assign(static_cast<size_t>(map.width * map.height), 0);
+    for ( Sint32 y = 0; y < map.height; ++y )
+    {
+        for ( Sint32 x = 0; x < map.width; ++x )
+        {
+            saved[static_cast<size_t>(x + y * map.width)] = minimap[y][x];
+        }
+    }
+    printlog("[Persistent Minimap] Captured %zu tile(s) for '%s'.",
+        saved.size(), mapKey.c_str());
+}
+
+static void restorePersistentMinimap()
+{
+    const std::string mapKey = getPersistentMapKey();
+    if ( mapKey.empty() || map.width <= 0 || map.height <= 0
+        || map.width > MINIMAP_MAX_DIMENSION
+        || map.height > MINIMAP_MAX_DIMENSION )
+    {
+        return;
+    }
+    const auto found = persistentMinimapRegistry.find(mapKey);
+    if ( found == persistentMinimapRegistry.end()
+        || found->second.size() != static_cast<size_t>(map.width * map.height) )
+    {
+        return;
+    }
+    for ( Sint32 y = 0; y < map.height; ++y )
+    {
+        for ( Sint32 x = 0; x < map.width; ++x )
+        {
+            minimap[y][x] =
+                found->second[static_cast<size_t>(x + y * map.width)];
+        }
+    }
+    printlog("[Persistent Minimap] Restored %zu tile(s) for '%s'.",
+        found->second.size(), mapKey.c_str());
+}
+
 /*
  * Normalize a creator-defined dialogue, quest, flag, variable, choice,
  * objective, or node ID.
@@ -12459,6 +12518,7 @@ void gameLogic(void)
 					* Capture surviving mechanism properties before checking which
 					* original entities disappeared.
 					*/
+					capturePersistentMinimap();
 					capturePersistentMechanismStates();
 					capturePersistentMapRemovals();
 					int totalFloorGold = 0;
@@ -12904,6 +12964,7 @@ void gameLogic(void)
 							*/
 							applyPersistentMapRemovals();
 
+							restorePersistentMinimap();
 							if ( !verifyMapHash(
 								map.filename,
 								checkMapHash

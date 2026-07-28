@@ -17,6 +17,7 @@
 #include "../engine/audio/sound.hpp"
 #include "../menu.hpp"
 #include "../player.hpp"
+#include "../monster.hpp"
 #include "interface.hpp"
 #include "../collision.hpp"
 #include "../mod_tools.hpp"
@@ -97,6 +98,20 @@ inline real_t getMinimapZoom()
 }
 
 std::map<int, MinimapHighlight_t> minimapHighlights;
+
+static std::string normalizeQuestMarkerMapName(std::string name)
+{
+    std::replace(name.begin(), name.end(), '\\', '/');
+    const size_t slash = name.find_last_of('/');
+    if ( slash != std::string::npos ) { name = name.substr(slash + 1); }
+    std::transform(name.begin(), name.end(), name.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if ( name.length() < 4 || name.substr(name.length() - 4) != ".lmp" )
+    {
+        name += ".lmp";
+    }
+    return name;
+}
 
 void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 {
@@ -436,6 +451,49 @@ void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 		// draw
 		circle_mesh.draw(GL_TRIANGLE_FAN);
 	};
+	{
+		std::vector<CustomDialogueQuestJournalEntry> questEntries;
+		if ( getCustomDialogueQuestJournalEntries(player, questEntries) )
+		{
+			const std::string currentMap = normalizeQuestMarkerMapName(
+				map.filename[0] != '\0' ? map.filename : map.name);
+			for ( const auto& entry : questEntries )
+			{
+				if ( entry.status != CustomDialogueQuestJournalStatus::Active )
+				{
+					continue;
+				}
+				if ( entry.hasOriginMarker
+					&& normalizeQuestMarkerMapName(entry.originMap) == currentMap
+					&& entry.originX >= 0 && entry.originY >= 0
+					&& entry.originX < map.width && entry.originY < map.height )
+				{
+					drawCircleMesh(entry.originX + 0.5, entry.originY + 0.5,
+						1.0, rect, makeColor(240, 228, 66, 255));
+				}
+				for ( const auto& objective : entry.objectives )
+				{
+					if ( !objective.visible || objective.completed
+						|| !objective.hasMapMarker
+						|| normalizeQuestMarkerMapName(objective.markerMap) != currentMap
+						|| objective.markerX < 0 || objective.markerY < 0
+						|| objective.markerX >= map.width || objective.markerY >= map.height )
+					{
+						continue;
+					}
+					if ( ticks % 40 < 20 )
+					{
+						const Uint32 color = objective.optional
+							? makeColor(96, 176, 255, 255)
+							: makeColor(240, 228, 66, 255);
+						drawCircleMesh(objective.markerX + 0.5, objective.markerY + 0.5,
+							1.0, rect, color);
+					}
+				}
+			}
+		}
+	}
+
 
 	std::vector<std::pair<Uint32, std::pair<real_t, real_t>>> deathboxSkulls;
 

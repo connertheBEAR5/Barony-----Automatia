@@ -1185,6 +1185,11 @@ struct CustomDialogueQuestJournalObjective
     bool completed = false;
     bool visible = false;
     bool hasCounter = false;
+
+    std::string markerMap;
+    Sint32 markerX = -1;
+    Sint32 markerY = -1;
+    bool hasMapMarker = false;
 };
 
 struct CustomDialogueQuestJournalEntry
@@ -1199,6 +1204,12 @@ struct CustomDialogueQuestJournalEntry
     std::string failedText;
 
     std::string scope;
+
+    std::string originLabel;
+    std::string originMap;
+    Sint32 originX = -1;
+    Sint32 originY = -1;
+    bool hasOriginMarker = false;
 
     Sint32 stage = 0;
 
