@@ -53,6 +53,10 @@ struct CustomDialogueChoice
 	bool questComplete = false;
 	Sint32 questStage = -1;
 
+	Sint32 rewardGold = 0;
+	std::string rewardItem;
+	Sint32 rewardItemCount = 0;
+
 	std::string setWorldFlagID;
 	bool setWorldFlagValue = false;
 
@@ -1341,6 +1345,81 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
 						choice.questStage =
 							choiceAction["quest_stage"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("reward_gold") )
+					{
+						if ( !choiceAction["reward_gold"].IsInt()
+							|| choiceAction["reward_gold"].GetInt() < 0 )
+						{
+							printlog(
+								"[Custom Dialogue] '%s' node %d choice '%s' reward_gold must be a non-negative integer.",
+								realPath.c_str(),
+								node.id,
+								choice.id.c_str()
+							);
+
+							return definition;
+						}
+
+						choice.rewardGold =
+							choiceAction["reward_gold"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("reward_item") )
+					{
+						const rapidjson::Value& rewardItem =
+							choiceAction["reward_item"];
+
+						if ( !rewardItem.IsObject()
+							|| !rewardItem.HasMember("item")
+							|| !rewardItem["item"].IsString() )
+						{
+							printlog(
+								"[Custom Dialogue] '%s' node %d choice '%s' reward_item requires string 'item'.",
+								realPath.c_str(),
+								node.id,
+								choice.id.c_str()
+							);
+
+							return definition;
+						}
+
+						choice.rewardItem =
+							rewardItem["item"].GetString();
+
+						choice.rewardItemCount = 1;
+
+						if ( rewardItem.HasMember("count") )
+						{
+							if ( !rewardItem["count"].IsInt()
+								|| rewardItem["count"].GetInt() <= 0 )
+							{
+								return definition;
+							}
+
+							choice.rewardItemCount =
+								rewardItem["count"].GetInt();
+						}
+
+						ItemType rewardItemType =
+							POTION_HEALING;
+
+						if ( !resolveCustomDialogueRewardItemType(
+								choice.rewardItem,
+								rewardItemType
+							) )
+						{
+							printlog(
+								"[Custom Dialogue] '%s' node %d choice '%s' uses unsupported reward item '%s'.",
+								realPath.c_str(),
+								node.id,
+								choice.id.c_str(),
+								choice.rewardItem.c_str()
+							);
+
+							return definition;
+						}
 					}
 
 					if ( choiceAction.HasMember("set_world_flag") )
@@ -14451,17 +14530,12 @@ bool handleCustomMonsterDialogue(
         else if ( conditionNode.conditionType
             == "node_seen" )
         {
-            /*
-             * The persistent story registry currently has a node-seen
-             * setter but no public getter. Keep this condition disabled
-             * until the getter is added to game.cpp/game.hpp.
-             */
-            conditionResult = false;
-
-            printlog(
-                "[Custom Dialogue] node_seen condition '%s' is unavailable because no public seen-node getter exists.",
-                conditionNode.conditionSeenNodeID.c_str()
-            );
+            conditionResult =
+                persistentStoryNPCNodeWasSeen(
+                    sourceMap,
+                    my->persistentID,
+                    conditionNode.conditionSeenNodeID
+                );
         }
         else if ( conditionNode.conditionType
             == "world_flag" )
@@ -15018,6 +15092,113 @@ bool handleCustomMonsterDialogueChoice(
 			? map.filename
 			: map.name;
 
+	if ( choice.rewardGold > 0
+		&& stats[player] )
+	{
+		stats[player]->GOLD +=
+			choice.rewardGold;
+
+		messagePlayer(
+			player,
+			MESSAGE_INTERACTION
+				| MESSAGE_INVENTORY,
+			"You received %d gold.",
+			choice.rewardGold
+		);
+
+		if ( multiplayer == SERVER
+			&& player > 0
+			&& !client_disconnected[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			strcpy(
+				reinterpret_cast<char*>(
+					net_packet->data
+				),
+				"GOLD"
+			);
+
+			SDLNet_Write32(
+				stats[player]->GOLD,
+				&net_packet->data[4]
+			);
+
+			net_packet->address.host =
+				net_clients[player - 1].host;
+
+			net_packet->address.port =
+				net_clients[player - 1].port;
+
+			net_packet->len = 8;
+
+			sendPacketSafe(
+				net_sock,
+				-1,
+				net_packet,
+				player - 1
+			);
+		}
+	}
+
+	if ( !choice.rewardItem.empty()
+		&& choice.rewardItemCount > 0 )
+	{
+		ItemType rewardItemType =
+			POTION_HEALING;
+
+		if ( resolveCustomDialogueRewardItemType(
+				choice.rewardItem,
+				rewardItemType
+			) )
+		{
+			Item* createdItem =
+				newItem(
+					rewardItemType,
+					EXCELLENT,
+					0,
+					choice.rewardItemCount,
+					local_rng.rand(),
+					true,
+					nullptr
+				);
+
+			if ( createdItem )
+			{
+				Item* pickedUpItem =
+					itemPickup(
+						player,
+						createdItem
+					);
+
+				if ( pickedUpItem )
+				{
+					messagePlayer(
+						player,
+						MESSAGE_INTERACTION
+							| MESSAGE_INVENTORY,
+						Language::get(504),
+						createdItem->description()
+					);
+
+					if ( players[player]
+						&& players[player]
+							->isLocalPlayer() )
+					{
+						free(createdItem);
+					}
+					else
+					{
+						free(pickedUpItem);
+					}
+				}
+				else
+				{
+					free(createdItem);
+				}
+			}
+		}
+	}
+
 	if ( !choice.setWorldFlagID.empty() )
 	{
 		persistentStorySetWorldFlag(
@@ -15050,11 +15231,14 @@ bool handleCustomMonsterDialogueChoice(
 	);
 
 	printlog(
-		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next node=%d.",
+		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next node=%d, gold=%d, item='%s' x%d.",
 		player,
 		choice.id.c_str(),
 		npc->persistentID,
-		choice.nextNode
+		choice.nextNode,
+		choice.rewardGold,
+		choice.rewardItem.c_str(),
+		choice.rewardItemCount
 	);
 
 	Stat* npcStats =
