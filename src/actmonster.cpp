@@ -81,6 +81,10 @@ struct CustomDialogueChoice
 	std::string addNPCVariableID;
 	Sint32 addNPCVariableAmount = 0;
 
+	std::string completeObjectiveID;
+	std::string clearObjectiveID;
+	bool resetQuest = false;
+
 	/*
 	 * Optional condition controlling whether this choice is visible.
 	 * Choice conditions never consume items or gold; they only filter
@@ -100,6 +104,8 @@ struct CustomDialogueChoice
 
 	Sint32 conditionGoldAmount = 0;
 	std::string conditionComparison = "equals";
+
+	std::string conditionObjectiveID;
 };
 
 struct CustomDialogueNode
@@ -528,6 +534,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	{
 		const Sint32 value =
 			persistentStoryGetQuestStage(
+				player,
 				choice.conditionQuestID,
 				0
 			);
@@ -555,6 +562,24 @@ static bool evaluateCustomDialogueChoiceCondition(
 
 		return value
 			== choice.conditionQuestStage;
+	}
+
+	if ( choice.conditionType == "objective_completed" )
+	{
+		return persistentStoryQuestObjectiveIsCompleted(
+			player,
+			choice.conditionQuestID,
+			choice.conditionObjectiveID
+		);
+	}
+
+	if ( choice.conditionType == "objective_incomplete" )
+	{
+		return !persistentStoryQuestObjectiveIsCompleted(
+			player,
+			choice.conditionQuestID,
+			choice.conditionObjectiveID
+		);
 	}
 
 	if ( choice.conditionType == "world_flag" )
@@ -1062,16 +1087,12 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
          * Explicitly reject combinations that are authored correctly
          * but do not yet have safe runtime ownership/reset semantics.
          */
-        if ( definition.questScope != "player"
-            || definition.questRepeatable )
+        if ( definition.questScope != "player" )
         {
             printlog(
-                "[Custom Dialogue] '%s' requests scope='%s', repeatable=%s, but this runtime currently supports only scope='player' and repeatable=false.",
+                "[Custom Dialogue] '%s' requests unsupported quest scope '%s'.",
                 realPath.c_str(),
-                definition.questScope.c_str(),
-                definition.questRepeatable
-                    ? "true"
-                    : "false"
+                definition.questScope.c_str()
             );
 
             return definition;
@@ -1870,6 +1891,34 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						choice.conditionQuestStage =
 							condition["stage"].GetInt();
 					}
+					else if ( choice.conditionType == "objective_completed"
+						|| choice.conditionType == "objective_incomplete" )
+					{
+						if ( !condition.HasMember("quest")
+							|| !condition["quest"].IsString()
+							|| !condition.HasMember("objective")
+							|| !condition["objective"].IsString() )
+						{
+							return definition;
+						}
+
+						choice.conditionQuestID =
+							normalizeCustomDialogueID(
+								condition["quest"].GetString()
+							);
+
+						choice.conditionObjectiveID =
+							normalizeCustomDialogueID(
+								condition["objective"].GetString()
+							);
+
+						if ( choice.conditionQuestID.empty()
+							|| choice.conditionObjectiveID.empty() )
+						{
+							return definition;
+						}
+					}
+
 					else if ( choice.conditionType == "world_flag"
 						|| choice.conditionType == "npc_flag" )
 					{
@@ -2149,6 +2198,48 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						{
 							return definition;
 						}
+					}
+
+					if ( choiceAction.HasMember("objective_complete") )
+					{
+						if ( !choiceAction["objective_complete"].IsString() )
+						{
+							return definition;
+						}
+						choice.completeObjectiveID =
+							normalizeCustomDialogueID(
+								choiceAction["objective_complete"].GetString()
+							);
+						if ( choice.completeObjectiveID.empty() )
+						{
+							return definition;
+						}
+					}
+
+					if ( choiceAction.HasMember("objective_clear") )
+					{
+						if ( !choiceAction["objective_clear"].IsString() )
+						{
+							return definition;
+						}
+						choice.clearObjectiveID =
+							normalizeCustomDialogueID(
+								choiceAction["objective_clear"].GetString()
+							);
+						if ( choice.clearObjectiveID.empty() )
+						{
+							return definition;
+						}
+					}
+
+					if ( choiceAction.HasMember("quest_reset") )
+					{
+						if ( !choiceAction["quest_reset"].IsBool() )
+						{
+							return definition;
+						}
+						choice.resetQuest =
+							choiceAction["quest_reset"].GetBool();
 					}
 
 					if ( choiceAction.HasMember("set_world_flag") )
@@ -2824,6 +2915,228 @@ getCustomDialogueDefinition(
     return &iterator->second;
 }
 
+
+
+bool getCustomDialogueQuestJournalEntries(
+    const int player,
+    std::vector<CustomDialogueQuestJournalEntry>& entries
+)
+{
+    entries.clear();
+
+    if ( player < 0
+        || player >= MAXPLAYERS )
+    {
+        return false;
+    }
+
+    std::unordered_set<std::string>
+        addedQuestIDs;
+
+    for ( const auto& cachedDefinition :
+        customDialogueDefinitionCache )
+    {
+        const CustomDialogueDefinition& definition =
+            cachedDefinition.second;
+
+        if ( !definition.valid
+            || definition.questID.empty()
+            || addedQuestIDs.find(definition.questID)
+                != addedQuestIDs.end() )
+        {
+            continue;
+        }
+
+        const bool started =
+            persistentStoryQuestIsStarted(
+                player,
+                definition.questID
+            );
+
+        const bool accepted =
+            persistentStoryQuestIsAccepted(
+                player,
+                definition.questID
+            );
+
+        const bool completed =
+            persistentStoryQuestIsCompleted(
+                player,
+                definition.questID
+            );
+
+        const bool failed =
+            persistentStoryQuestIsFailed(
+                player,
+                definition.questID
+            );
+
+        /*
+         * A journal contains discovered quest progress rather than
+         * every authored quest definition in the cache.
+         */
+        if ( !started
+            && !accepted
+            && !completed
+            && !failed )
+        {
+            continue;
+        }
+
+        CustomDialogueQuestJournalEntry entry;
+
+        entry.dialogueID =
+            definition.dialogueID;
+
+        entry.questID =
+            definition.questID;
+
+        entry.title =
+            definition.questTitle.empty()
+                ? definition.questID
+                : definition.questTitle;
+
+        entry.summary =
+            definition.questSummary;
+
+        entry.objective =
+            definition.questObjective;
+
+        entry.completedText =
+            definition.questCompletedText;
+
+        entry.failedText =
+            definition.questFailedText;
+
+        entry.scope =
+            definition.questScope;
+
+        entry.repeatable =
+            definition.questRepeatable;
+
+        entry.stage =
+            persistentStoryGetQuestStage(
+                player,
+                definition.questID,
+                0
+            );
+
+        entry.accepted =
+            accepted;
+
+        entry.completed =
+            completed;
+
+        entry.failed =
+            failed;
+
+        if ( completed )
+        {
+            entry.status =
+                CustomDialogueQuestJournalStatus::Completed;
+        }
+        else if ( failed )
+        {
+            entry.status =
+                CustomDialogueQuestJournalStatus::Failed;
+        }
+        else
+        {
+            entry.status =
+                CustomDialogueQuestJournalStatus::Active;
+        }
+
+        for ( const CustomDialogueQuestObjective& objective :
+            definition.questObjectives )
+        {
+            CustomDialogueQuestJournalObjective journalObjective;
+
+            journalObjective.id =
+                objective.id;
+
+            journalObjective.text =
+                objective.text;
+
+            journalObjective.completedText =
+                objective.completedText;
+
+            journalObjective.stage =
+                objective.stage;
+
+            journalObjective.optional =
+                objective.optional;
+
+            journalObjective.completed =
+                persistentStoryQuestObjectiveIsCompleted(
+                    player,
+                    definition.questID,
+                    objective.id
+                );
+
+            /*
+             * Completed objectives remain visible even after the quest
+             * advances beyond their authored stage.
+             */
+            journalObjective.visible =
+                journalObjective.completed
+                || objective.stage <= entry.stage;
+
+            entry.objectives.push_back(
+                journalObjective
+            );
+        }
+
+        std::stable_sort(
+            entry.objectives.begin(),
+            entry.objectives.end(),
+            [](
+                const CustomDialogueQuestJournalObjective& first,
+                const CustomDialogueQuestJournalObjective& second
+            )
+            {
+                if ( first.stage != second.stage )
+                {
+                    return first.stage < second.stage;
+                }
+
+                if ( first.optional != second.optional )
+                {
+                    return !first.optional;
+                }
+
+                return first.text < second.text;
+            }
+        );
+
+        entries.push_back(
+            std::move(entry)
+        );
+
+        addedQuestIDs.insert(
+            definition.questID
+        );
+    }
+
+    std::stable_sort(
+        entries.begin(),
+        entries.end(),
+        [](
+            const CustomDialogueQuestJournalEntry& first,
+            const CustomDialogueQuestJournalEntry& second
+        )
+        {
+            if ( first.status != second.status )
+            {
+                return static_cast<Sint32>(first.status)
+                    < static_cast<Sint32>(second.status);
+            }
+
+            return first.title < second.title;
+        }
+    );
+
+    return true;
+}
 
 bool getCustomDialogueQuestObjectives(
     const std::string& dialogueID,
@@ -15599,6 +15912,7 @@ bool handleCustomMonsterDialogue(
 
 			if ( choice.questAccept
 				&& !definition->questID.empty()
+				&& !definition->questRepeatable
 				&& persistentStoryQuestIsCompleted(
 					monsterclicked,
 					definition->questID
@@ -16061,6 +16375,7 @@ bool handleCustomMonsterDialogueChoice(
 
 	if ( choice.questAccept
 		&& !definition->questID.empty()
+		&& !definition->questRepeatable
 		&& persistentStoryQuestIsCompleted(
 			player,
 			definition->questID
@@ -16147,6 +16462,7 @@ bool handleCustomMonsterDialogueChoice(
 	if ( choice.once )
 	{
 		persistentStorySetNPCChoiceUsed(
+			player,
 			map.filename[0]
 				? map.filename
 				: map.name,
@@ -16158,6 +16474,44 @@ bool handleCustomMonsterDialogueChoice(
 
 	if ( !definition->questID.empty() )
 	{
+		if ( choice.resetQuest )
+		{
+			if ( definition->questScope != "player"
+				|| !definition->questRepeatable )
+			{
+				printlog(
+					"[Custom Dialogue] Rejected quest_reset for quest '%s'.",
+					definition->questID.c_str()
+				);
+				return false;
+			}
+
+			persistentStoryResetPlayerQuest(
+				player,
+				definition->questID
+			);
+		}
+
+		if ( !choice.completeObjectiveID.empty() )
+		{
+			persistentStorySetQuestObjectiveCompleted(
+				player,
+				definition->questID,
+				choice.completeObjectiveID,
+				true
+			);
+		}
+
+		if ( !choice.clearObjectiveID.empty() )
+		{
+			persistentStorySetQuestObjectiveCompleted(
+				player,
+				definition->questID,
+				choice.clearObjectiveID,
+				false
+			);
+		}
+
 		if ( choice.questStart )
 		{
 			persistentStorySetQuestStarted(

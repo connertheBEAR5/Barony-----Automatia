@@ -1,0 +1,13 @@
+OBJECTIVE PROGRESS + REPEATABLE QUESTS
+
+Generated from the exact uploaded current source files.
+
+Added:
+- Per-player objective completion
+- objective_completed/objective_incomplete conditions
+- objective_complete/objective_clear actions
+- Safe player repeatable quest_reset
+- Fixed choice quest_stage to use interacting player
+- Fixed one NPC used-choice write missing player
+
+State remains session-only. Party/world scopes remain unsupported.

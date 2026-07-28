@@ -102,6 +102,21 @@ bool persistentStoryQuestIsStarted(const int player, const std::string& questID)
 bool persistentStoryQuestIsAccepted(const int player, const std::string& questID);
 bool persistentStoryQuestIsCompleted(const int player, const std::string& questID);
 bool persistentStoryQuestIsFailed(const int player, const std::string& questID);
+bool persistentStorySetQuestObjectiveCompleted(
+    const int player,
+    const std::string& questID,
+    const std::string& objectiveID,
+    const bool completed
+);
+bool persistentStoryQuestObjectiveIsCompleted(
+    const int player,
+    const std::string& questID,
+    const std::string& objectiveID
+);
+bool persistentStoryResetPlayerQuest(
+    const int player,
+    const std::string& questID
+);
 
 bool persistentStorySetQuestStage(
     const std::string& questID,

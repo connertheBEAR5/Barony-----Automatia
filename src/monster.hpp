@@ -1163,6 +1163,65 @@ bool handleCustomMonsterDialogue(
  */
 
 
+
+enum class CustomDialogueQuestJournalStatus : Sint32
+{
+    Active = 0,
+    Completed = 1,
+    Failed = 2
+};
+
+struct CustomDialogueQuestJournalObjective
+{
+    std::string id;
+    std::string text;
+    std::string completedText;
+
+    Sint32 stage = 0;
+
+    bool optional = false;
+    bool completed = false;
+    bool visible = false;
+};
+
+struct CustomDialogueQuestJournalEntry
+{
+    std::string dialogueID;
+    std::string questID;
+
+    std::string title;
+    std::string summary;
+    std::string objective;
+    std::string completedText;
+    std::string failedText;
+
+    std::string scope;
+
+    Sint32 stage = 0;
+
+    bool repeatable = false;
+    bool accepted = false;
+    bool completed = false;
+    bool failed = false;
+
+    CustomDialogueQuestJournalStatus status =
+        CustomDialogueQuestJournalStatus::Active;
+
+    std::vector<CustomDialogueQuestJournalObjective>
+        objectives;
+};
+
+/*
+ * Builds journal-ready entries for quests discovered through loaded
+ * custom-dialogue definitions.
+ *
+ * Unstarted quests are omitted. Entries are sorted by status and title.
+ */
+bool getCustomDialogueQuestJournalEntries(
+    const int player,
+    std::vector<CustomDialogueQuestJournalEntry>& entries
+);
+
 bool getCustomDialogueQuestObjectives(
     const std::string& dialogueID,
     std::vector<std::string>& objectiveIDs,

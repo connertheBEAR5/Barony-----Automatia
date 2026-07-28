@@ -1264,6 +1264,101 @@ static std::string makePersistentPlayerQuestKey(const int player, const std::str
     return "player_" + std::to_string(player) + ":" + normalizedQuestID;
 }
 
+bool persistentStorySetQuestObjectiveCompleted(
+    const int player,
+    const std::string& questID,
+    const std::string& objectiveID,
+    const bool completed
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        makePersistentPlayerQuestKey(player, questID);
+
+    const std::string objectiveKey =
+        normalizePersistentStoryID(objectiveID);
+
+    if ( questKey.empty()
+        || objectiveKey.empty() )
+    {
+        return false;
+    }
+
+    PersistentQuestState& quest =
+        persistentWorldStoryState.quests[questKey];
+
+    quest.started = true;
+
+    if ( completed )
+    {
+        quest.completedObjectives.insert(objectiveKey);
+    }
+    else
+    {
+        quest.completedObjectives.erase(objectiveKey);
+    }
+
+    return true;
+}
+
+bool persistentStoryQuestObjectiveIsCompleted(
+    const int player,
+    const std::string& questID,
+    const std::string& objectiveID
+)
+{
+    const std::string questKey =
+        makePersistentPlayerQuestKey(player, questID);
+
+    const std::string objectiveKey =
+        normalizePersistentStoryID(objectiveID);
+
+    if ( questKey.empty()
+        || objectiveKey.empty() )
+    {
+        return false;
+    }
+
+    const auto iterator =
+        persistentWorldStoryState.quests.find(questKey);
+
+    if ( iterator
+        == persistentWorldStoryState.quests.end() )
+    {
+        return false;
+    }
+
+    return
+        iterator->second.completedObjectives.find(objectiveKey)
+        != iterator->second.completedObjectives.end();
+}
+
+bool persistentStoryResetPlayerQuest(
+    const int player,
+    const std::string& questID
+)
+{
+    if ( multiplayer == CLIENT )
+    {
+        return false;
+    }
+
+    const std::string questKey =
+        makePersistentPlayerQuestKey(player, questID);
+
+    if ( questKey.empty() )
+    {
+        return false;
+    }
+
+    persistentWorldStoryState.quests.erase(questKey);
+    return true;
+}
+
 bool persistentStorySetQuestStage(const int player, const std::string& questID, const Sint32 stage)
 {
     if ( multiplayer == CLIENT ) return false;

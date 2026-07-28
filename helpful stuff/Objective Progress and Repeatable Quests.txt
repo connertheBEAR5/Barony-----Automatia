@@ -1,0 +1,59 @@
+CUSTOM DIALOGUE OBJECTIVE PROGRESS AND REPEATABLE QUESTS
+===========================================================
+
+This larger milestone adds:
+- Per-player objective completion
+- objective_completed and objective_incomplete conditions
+- objective_complete and objective_clear actions
+- Safe reset for player-repeatable quests
+
+Complete an objective:
+
+"action": {
+    "objective_complete": "find_torch"
+}
+
+Check completion:
+
+"condition": {
+    "type": "objective_completed",
+    "quest": "torch_for_the_stranger",
+    "objective": "find_torch"
+}
+
+Clear an objective:
+
+"action": {
+    "objective_clear": "find_torch"
+}
+
+Repeatable player quest:
+
+"quest": {
+    "scope": "player",
+    "repeatable": true
+}
+
+Reset only the interacting player's quest:
+
+"action": {
+    "quest_reset": true,
+    "quest_start": true,
+    "quest_accept": true,
+    "quest_stage": 1
+}
+
+The reset clears that player's:
+- started/accepted/completed/failed state
+- stage
+- completed objectives
+- quest variables
+- quest flags
+- used quest choices
+
+Other players are unaffected.
+
+Safety:
+- quest_reset is rejected unless scope is player and repeatable is true.
+- Party/world quests remain unsupported.
+- State remains session-only until save serialization.
