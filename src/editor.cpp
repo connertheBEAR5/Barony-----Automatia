@@ -22,6 +22,8 @@
 #include "mod_tools.hpp"
 #include <sys/stat.h>
 #include <cmath>
+#include <fstream>
+#include <cctype>
 #ifndef EDITOR
 #define EDITOR
 #endif
@@ -68,6 +70,270 @@ std::vector<std::pair<SDL_Surface**, std::string>> systemResourceImages; // dumm
 void initMenuOptions() {} // dummy
 int textInsertCaratPosition = -1;
 GenericGUIMenu GenericGUI[MAXPLAYERS];
+
+static std::string questEditorStatusMessage;
+static Uint32 questEditorStatusUntil = 0;
+static bool questEditorCreateMarkers = false;
+
+static std::string questEditorJsonEscape(const std::string& value)
+{
+	std::string escaped;
+	escaped.reserve(value.size() + 16);
+
+	for ( const char character : value )
+	{
+		switch ( character )
+		{
+			case '"':
+				escaped += "\\\"";
+				break;
+			case '\\':
+				escaped += "\\\\";
+				break;
+			case '\n':
+				escaped += "\\n";
+				break;
+			case '\r':
+				escaped += "\\r";
+				break;
+			default:
+				escaped += character;
+				break;
+		}
+	}
+
+	return escaped;
+}
+
+static std::string questEditorNormalizeID(const std::string& value)
+{
+	std::string result;
+	bool previousWasSeparator = false;
+
+	for ( const unsigned char character : value )
+	{
+		if ( std::isalnum(character) )
+		{
+			result += static_cast<char>(std::tolower(character));
+			previousWasSeparator = false;
+		}
+		else if ( !previousWasSeparator && !result.empty() )
+		{
+			result += '_';
+			previousWasSeparator = true;
+		}
+	}
+
+	while ( !result.empty() && result.back() == '_' )
+	{
+		result.pop_back();
+	}
+
+	return result;
+}
+
+static std::string questEditorCurrentMapFilename()
+{
+	std::string mapFilename = map.filename;
+
+	if ( mapFilename.empty() )
+	{
+		mapFilename = map.name;
+	}
+
+	const size_t slash = mapFilename.find_last_of("/\\");
+	if ( slash != std::string::npos )
+	{
+		mapFilename = mapFilename.substr(slash + 1);
+	}
+
+	if ( mapFilename.empty() )
+	{
+		mapFilename = "unnamed.lmp";
+	}
+	else if ( mapFilename.find('.') == std::string::npos )
+	{
+		mapFilename += ".lmp";
+	}
+
+	return mapFilename;
+}
+
+static bool questEditorWriteStarterJSON(
+	const char* dialogueIDText,
+	const char* giverLabelText,
+	const Entity* giverEntity,
+	const bool createMarkers
+)
+{
+	if ( !dialogueIDText || !giverEntity )
+	{
+		questEditorStatusMessage = "No NPC or dialogue ID.";
+		questEditorStatusUntil = ticks + TICKS_PER_SECOND * 4;
+		return false;
+	}
+
+	const std::string dialogueID =
+		questEditorNormalizeID(dialogueIDText);
+
+	if ( dialogueID.empty() )
+	{
+		questEditorStatusMessage = "Enter a Custom Dialogue ID first.";
+		questEditorStatusUntil = ticks + TICKS_PER_SECOND * 4;
+		return false;
+	}
+
+	std::string giverLabel =
+		giverLabelText ? giverLabelText : "";
+
+	if ( giverLabel.empty() )
+	{
+		giverLabel = "Quest Giver";
+	}
+
+	const std::string mapFilename =
+		questEditorCurrentMapFilename();
+
+	const int giverX =
+		std::max(0, static_cast<int>(floor(giverEntity->x / 16.0)));
+
+	const int giverY =
+		std::max(0, static_cast<int>(floor(giverEntity->y / 16.0)));
+
+	const std::string objectiveID =
+		dialogueID + "_objective";
+
+	const std::string path =
+		"./dialogue/" + dialogueID + ".json";
+
+	mkdir("./dialogue", 0755);
+
+	std::ofstream output(
+		path.c_str(),
+		std::ios::out | std::ios::trunc
+	);
+
+	if ( !output.is_open() )
+	{
+		questEditorStatusMessage =
+			"Could not write " + path;
+
+		questEditorStatusUntil =
+			ticks + TICKS_PER_SECOND * 5;
+
+		return false;
+	}
+
+	output
+		<< "{\n"
+		<< "  \"version\": 1,\n"
+		<< "  \"quest_id\": \""
+		<< questEditorJsonEscape(dialogueID)
+		<< "\",\n"
+		<< "  \"quest\": {\n"
+		<< "    \"title\": \"New Quest\",\n"
+		<< "    \"summary\": \"Describe the quest here.\",\n"
+		<< "    \"objective\": \"Complete the objective.\",\n"
+		<< "    \"scope\": \"player\",\n"
+		<< "    \"repeatable\": false,\n"
+		<< "    \"origin\": {\n"
+		<< "      \"label\": \""
+		<< questEditorJsonEscape(giverLabel)
+		<< "\",\n"
+		<< "      \"map\": \""
+		<< questEditorJsonEscape(mapFilename)
+		<< "\"";
+
+	if ( createMarkers )
+	{
+		output
+			<< ",\n"
+			<< "      \"x\": " << giverX << ",\n"
+			<< "      \"y\": " << giverY << "\n";
+	}
+	else
+	{
+		output << "\n";
+	}
+
+	output
+		<< "    },\n"
+		<< "    \"objectives\": [\n"
+		<< "      {\n"
+		<< "        \"id\": \""
+		<< questEditorJsonEscape(objectiveID)
+		<< "\",\n"
+		<< "        \"text\": \"Complete the objective.\",\n"
+		<< "        \"stage\": 0,\n"
+		<< "        \"optional\": false";
+
+	if ( createMarkers )
+	{
+		output
+			<< ",\n"
+			<< "        \"map_marker\": {\n"
+			<< "          \"map\": \""
+			<< questEditorJsonEscape(mapFilename)
+			<< "\",\n"
+			<< "          \"x\": " << giverX << ",\n"
+			<< "          \"y\": " << giverY << "\n"
+			<< "        }\n";
+	}
+	else
+	{
+		output << "\n";
+	}
+
+	output
+		<< "      }\n"
+		<< "    ]\n"
+		<< "  },\n"
+		<< "  \"start_node\": 0,\n"
+		<< "  \"nodes\": [\n"
+		<< "    {\n"
+		<< "      \"id\": 0,\n"
+		<< "      \"text\": \"Will you help me?\",\n"
+		<< "      \"choices\": [\n"
+		<< "        {\n"
+		<< "          \"id\": \"accept\",\n"
+		<< "          \"text\": \"I'll help.\",\n"
+		<< "          \"next\": 1,\n"
+		<< "          \"once\": true,\n"
+		<< "          \"action\": {\n"
+		<< "            \"quest_start\": true,\n"
+		<< "            \"quest_accept\": true\n"
+		<< "          }\n"
+		<< "        },\n"
+		<< "        {\n"
+		<< "          \"id\": \"decline\",\n"
+		<< "          \"text\": \"Not right now.\",\n"
+		<< "          \"next\": 0\n"
+		<< "        }\n"
+		<< "      ]\n"
+		<< "    },\n"
+		<< "    {\n"
+		<< "      \"id\": 1,\n"
+		<< "      \"text\": \"Thank you. Check your journal and map.\",\n"
+		<< "      \"next\": 1\n"
+		<< "    }\n"
+		<< "  ]\n"
+		<< "}\n";
+
+	output.close();
+
+	questEditorStatusMessage =
+		"Wrote " + path;
+
+	questEditorStatusUntil =
+		ticks + TICKS_PER_SECOND * 5;
+
+	printlog(
+		"[Quest Editor] Wrote starter quest JSON '%s'.",
+		path.c_str()
+	);
+
+	return true;
+}
 // Convert an editor map layer into Barony's entity Z coordinate.
 // Layer 0 is ground level. Higher layers use increasingly negative Z.
 static real_t spriteLayerToEntityZ(int layer)
@@ -4053,6 +4319,103 @@ int main(int argc, char** argv)
 								inputstr = spriteProperties[26];
 								editproperty = 26;
 								cursorflash = ticks;
+							}
+
+							const int questCreateButtonX1 =
+								dialogueFieldX2 + 4;
+
+							const int questCreateButtonY1 =
+								dialogueFieldY1 - 4;
+
+							const int questCreateButtonX2 =
+								subx2 - 8;
+
+							const int questCreateButtonY2 =
+								dialogueFieldY2;
+
+							drawWindowFancy(
+								questCreateButtonX1,
+								questCreateButtonY1,
+								questCreateButtonX2,
+								questCreateButtonY2
+							);
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								questCreateButtonX1 + 6,
+								dialogueFieldY1,
+								makeColorRGB(255, 230, 96),
+								"MAKE JSON"
+							);
+
+							if ( mousestatus[SDL_BUTTON_LEFT]
+								&& omousex >= questCreateButtonX1
+								&& omousex < questCreateButtonX2
+								&& omousey >= questCreateButtonY1
+								&& omousey < questCreateButtonY2 )
+							{
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+
+								questEditorWriteStarterJSON(
+									spriteProperties[26],
+									spriteProperties[0],
+									selectedEntity[0],
+									questEditorCreateMarkers
+								);
+							}
+
+							const int questMarkerButtonX1 =
+								questCreateButtonX1;
+
+							const int questMarkerButtonY1 =
+								questCreateButtonY2 + 4;
+
+							const int questMarkerButtonX2 =
+								questCreateButtonX2;
+
+							const int questMarkerButtonY2 =
+								questMarkerButtonY1 + 16;
+
+							drawWindowFancy(
+								questMarkerButtonX1,
+								questMarkerButtonY1,
+								questMarkerButtonX2,
+								questMarkerButtonY2
+							);
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								questMarkerButtonX1 + 4,
+								questMarkerButtonY1 + 4,
+								questEditorCreateMarkers
+									? makeColorRGB(255, 230, 96)
+									: makeColorRGB(192, 192, 192),
+								questEditorCreateMarkers
+									? "MARKERS: ON"
+									: "MARKERS: OFF"
+							);
+
+							if ( mousestatus[SDL_BUTTON_LEFT]
+								&& omousex >= questMarkerButtonX1
+								&& omousex < questMarkerButtonX2
+								&& omousey >= questMarkerButtonY1
+								&& omousey < questMarkerButtonY2 )
+							{
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+								questEditorCreateMarkers =
+									!questEditorCreateMarkers;
+							}
+
+							if ( !questEditorStatusMessage.empty()
+								&& ticks < questEditorStatusUntil )
+							{
+								printTextFormattedColor(
+									font8x8_bmp,
+									dialogueFieldX1,
+									questMarkerButtonY2 + 6,
+									makeColorRGB(128, 255, 160),
+									questEditorStatusMessage.c_str()
+								);
 							}
 							//items for monster
 							pad_y2 = suby1 + 28 + 2 * spacing;
