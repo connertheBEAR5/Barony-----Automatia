@@ -533,6 +533,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 	if ( choice.conditionType == "npc_flag" )
 	{
 		return persistentStoryGetNPCFlag(
+			player,
 			sourceMap,
 			npcPersistentID,
 			choice.conditionStoryID
@@ -549,6 +550,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 				0
 			)
 			: persistentStoryGetNPCVariable(
+				player,
 				sourceMap,
 				npcPersistentID,
 				choice.conditionStoryID,
@@ -14857,6 +14859,7 @@ bool handleCustomMonsterDialogue(
             );
 
             persistentStorySetNPCNode(
+                monsterclicked,
                 sourceMap,
                 my->persistentID,
                 definition->startNode
@@ -14865,6 +14868,7 @@ bool handleCustomMonsterDialogue(
 
         currentNodeID =
             persistentStoryGetNPCNode(
+                monsterclicked,
                 sourceMap,
                 my->persistentID,
                 definition->startNode
@@ -15094,6 +15098,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryNPCNodeWasSeen(
+                    monsterclicked,
                     sourceMap,
                     my->persistentID,
                     conditionNode.conditionSeenNodeID
@@ -15113,6 +15118,7 @@ bool handleCustomMonsterDialogue(
         {
             conditionResult =
                 persistentStoryGetNPCFlag(
+                    monsterclicked,
                     sourceMap,
                     my->persistentID,
                     conditionNode.conditionStoryID
@@ -15132,6 +15138,7 @@ bool handleCustomMonsterDialogue(
                     0
                 )
                 : persistentStoryGetNPCVariable(
+                    monsterclicked,
                     sourceMap,
                     my->persistentID,
                     conditionNode.conditionStoryID,
@@ -15208,6 +15215,7 @@ bool handleCustomMonsterDialogue(
 		{
 			if ( choice.once
 				&& persistentStoryNPCChoiceWasUsed(
+					monsterclicked,
 					sourceMap,
 					my->persistentID,
 					choice.id
@@ -15365,6 +15373,7 @@ bool handleCustomMonsterDialogue(
             if ( !node.setNPCFlagID.empty() )
             {
                 persistentStorySetNPCFlag(
+                    monsterclicked,
                     sourceMap,
                     my->persistentID,
                     node.setNPCFlagID,
@@ -15375,6 +15384,7 @@ bool handleCustomMonsterDialogue(
             if ( !node.setNPCVariableID.empty() )
             {
                 persistentStorySetNPCVariable(
+                    monsterclicked,
                     sourceMap,
                     my->persistentID,
                     node.setNPCVariableID,
@@ -16020,6 +16030,7 @@ bool handleCustomMonsterDialogueChoice(
 	if ( !choice.setNPCVariableID.empty() )
 	{
 		persistentStorySetNPCVariable(
+			player,
 			sourceMap,
 			npc->persistentID,
 			choice.setNPCVariableID,
@@ -16031,6 +16042,7 @@ bool handleCustomMonsterDialogueChoice(
 	{
 		const Sint32 currentValue =
 			persistentStoryGetNPCVariable(
+				player,
 				sourceMap,
 				npc->persistentID,
 				choice.addNPCVariableID,
@@ -16038,6 +16050,7 @@ bool handleCustomMonsterDialogueChoice(
 			);
 
 		persistentStorySetNPCVariable(
+			player,
 			sourceMap,
 			npc->persistentID,
 			choice.addNPCVariableID,
@@ -16057,6 +16070,7 @@ bool handleCustomMonsterDialogueChoice(
 	if ( !choice.setNPCFlagID.empty() )
 	{
 		persistentStorySetNPCFlag(
+			player,
 			sourceMap,
 			npc->persistentID,
 			choice.setNPCFlagID,
@@ -16065,6 +16079,7 @@ bool handleCustomMonsterDialogueChoice(
 	}
 
 	persistentStorySetNPCChoiceUsed(
+		player,
 		sourceMap,
 		npc->persistentID,
 		choice.id,
@@ -16072,6 +16087,7 @@ bool handleCustomMonsterDialogueChoice(
 	);
 
 	persistentStorySetNPCNode(
+		player,
 		sourceMap,
 		npc->persistentID,
 		choice.nextNode

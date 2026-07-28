@@ -1,0 +1,27 @@
+PER-PLAYER NPC DIALOGUE MEMORY
+==============================
+
+This stage separates mutable NPC conversation memory by player.
+
+Player-specific state:
+- Current dialogue node
+- Seen dialogue nodes
+- Used one-time choices
+- NPC flags
+- NPC variables
+
+Shared state:
+- The NPC's authored dialogue assignment
+- World flags and variables
+- Physical NPC persistence, death, movement, and inventory
+
+Example:
+Player 0 may have NPC 57 at node 4 with choice "accept" used,
+while Player 2 sees NPC 57 at node 0 with that choice still available.
+
+Combined with per-player quest state, every player can independently
+accept and complete a one-time quest once.
+
+Current limitation:
+The identity is still the active multiplayer slot. Permanent character
+identity belongs to the later disk-save stage.

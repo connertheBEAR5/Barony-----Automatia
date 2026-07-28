@@ -1933,6 +1933,81 @@ std::string persistentStoryGetNPCDialogue(
     return iterator->second.dialogueID;
 }
 
+
+/* Player-scoped mutable NPC dialogue memory. */
+static std::string makePersistentPlayerNPCMapNamespace(
+    const int player,
+    const std::string& mapName
+)
+{
+    if ( player < 0 || player >= MAXPLAYERS )
+    {
+        return "";
+    }
+
+    return "player_" + std::to_string(player) + "/" + mapName;
+}
+
+bool persistentStorySetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 nodeID)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStorySetNPCNode(scopedMap, persistentID, nodeID);
+}
+
+Sint32 persistentStoryGetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 fallbackNode)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return scopedMap.empty() ? fallbackNode : persistentStoryGetNPCNode(scopedMap, persistentID, fallbackNode);
+}
+
+bool persistentStorySetNPCVariable(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& variableID, const Sint32 value)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStorySetNPCVariable(scopedMap, persistentID, variableID, value);
+}
+
+Sint32 persistentStoryGetNPCVariable(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& variableID, const Sint32 fallbackValue)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return scopedMap.empty() ? fallbackValue : persistentStoryGetNPCVariable(scopedMap, persistentID, variableID, fallbackValue);
+}
+
+bool persistentStorySetNPCFlag(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& flagID, const bool enabled)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStorySetNPCFlag(scopedMap, persistentID, flagID, enabled);
+}
+
+bool persistentStoryGetNPCFlag(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& flagID)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStoryGetNPCFlag(scopedMap, persistentID, flagID);
+}
+
+bool persistentStorySetNPCChoiceUsed(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& choiceID, const bool used)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStorySetNPCChoiceUsed(scopedMap, persistentID, choiceID, used);
+}
+
+bool persistentStoryNPCChoiceWasUsed(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& choiceID)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStoryNPCChoiceWasUsed(scopedMap, persistentID, choiceID);
+}
+
+bool persistentStorySetNPCNodeSeen(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& nodeID, const bool seen)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStorySetNPCNodeSeen(scopedMap, persistentID, nodeID, seen);
+}
+
+bool persistentStoryNPCNodeWasSeen(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& nodeID)
+{
+    const std::string scopedMap = makePersistentPlayerNPCMapNamespace(player, mapName);
+    return !scopedMap.empty() && persistentStoryNPCNodeWasSeen(scopedMap, persistentID, nodeID);
+}
+
 bool persistentStorySetNPCNode(
     const std::string& mapName,
     const Sint32 persistentID,

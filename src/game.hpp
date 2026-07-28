@@ -28,6 +28,20 @@
 static const char VERSION[] = "v5.0.2";
 #else
 static const char VERSION[] = "v5.0.2";
+
+/* Player-scoped mutable NPC dialogue memory. */
+bool persistentStorySetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 nodeID);
+Sint32 persistentStoryGetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 fallbackNode);
+bool persistentStorySetNPCVariable(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& variableID, const Sint32 value);
+Sint32 persistentStoryGetNPCVariable(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& variableID, const Sint32 fallbackValue);
+bool persistentStorySetNPCFlag(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& flagID, const bool enabled);
+bool persistentStoryGetNPCFlag(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& flagID);
+bool persistentStorySetNPCChoiceUsed(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& choiceID, const bool used);
+bool persistentStoryNPCChoiceWasUsed(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& choiceID);
+bool persistentStorySetNPCNodeSeen(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& nodeID, const bool seen);
+bool persistentStoryNPCNodeWasSeen(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& nodeID);
+
+
 #endif
 #define GAME_CODE
 
