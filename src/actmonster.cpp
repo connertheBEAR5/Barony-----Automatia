@@ -42,6 +42,24 @@ float limbs[NUMMONSTERS][30][3];
  * Stage 4 supports automatic node-to-node progression. Choices,
  * conditions, and actions will be added in later stages.
  */
+struct CustomDialogueChoice
+{
+	std::string id;
+	std::string text;
+	Sint32 nextNode = 0;
+	bool once = false;
+
+	bool questAccept = false;
+	bool questComplete = false;
+	Sint32 questStage = -1;
+
+	std::string setWorldFlagID;
+	bool setWorldFlagValue = false;
+
+	std::string setNPCFlagID;
+	bool setNPCFlagValue = false;
+};
+
 struct CustomDialogueNode
 {
     Sint32 id = 0;
@@ -58,11 +76,45 @@ struct CustomDialogueNode
      * - missingItemNode is selected otherwise.
      * - consumeConditionItem removes the requested quantity on success.
      */
+    /*
+     * Optional condition evaluated before displaying this node.
+     *
+     * Supported in Stage 9:
+     * - has_item
+     * - quest_completed
+     * - quest_stage
+     * - world_flag
+     * - world_variable
+     * - npc_flag
+     * - npc_variable
+     * - quest_started
+     * - quest_accepted
+     * - quest_failed
+     * - has_gold
+     * - node_seen
+     */
+    std::string conditionType;
+
     std::string conditionItem;
     Sint32 conditionItemCount = 1;
-    Sint32 hasItemNode = 0;
-    Sint32 missingItemNode = 0;
     bool consumeConditionItem = false;
+
+    std::string conditionQuestID;
+    Sint32 conditionQuestStage = 0;
+
+    std::string conditionStoryID;
+    Sint32 conditionStoryValue = 0;
+    bool conditionFlagValue = true;
+
+    Sint32 conditionGoldAmount = 0;
+    bool consumeConditionGold = false;
+
+    std::string conditionSeenNodeID;
+
+    std::string conditionComparison = "equals";
+
+    Sint32 conditionTrueNode = 0;
+    Sint32 conditionFalseNode = 0;
 
     /*
      * Optional one-time Stage 6 quest actions.
@@ -79,6 +131,28 @@ struct CustomDialogueNode
 
     std::string rewardItem;
     Sint32 rewardItemCount = 0;
+
+    /*
+     * Stage 10 generalized persistent story actions.
+     *
+     * Empty IDs mean that action is not present.
+     */
+    std::string setWorldFlagID;
+    bool setWorldFlagValue = false;
+
+    std::string setWorldVariableID;
+    Sint32 setWorldVariableValue = 0;
+
+    std::string addWorldVariableID;
+    Sint32 addWorldVariableAmount = 0;
+
+    std::string setNPCFlagID;
+    bool setNPCFlagValue = false;
+
+    std::string setNPCVariableID;
+    Sint32 setNPCVariableValue = 0;
+
+	std::vector<CustomDialogueChoice> choices;
 };
 
 /*
@@ -110,6 +184,21 @@ static std::unordered_map<
     std::string,
     CustomDialogueDefinition
 > customDialogueDefinitionCache;
+
+struct PendingCustomDialogueChoiceState
+{
+	bool active = false;
+	Uint32 npcUID = 0;
+	Sint32 npcPersistentID = 0;
+	std::string sourceMap;
+	std::string dialogueID;
+	Sint32 nodeID = 0;
+	std::vector<CustomDialogueChoice> choices;
+};
+
+static PendingCustomDialogueChoiceState
+	pendingCustomDialogueChoices[MAXPLAYERS];
+
 /*
  * Normalize an editor-authored dialogue ID before using it as a file
  * name or cache key.
@@ -654,8 +743,8 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 nodeValue["next"].GetInt();
         }
 
-        node.hasItemNode = node.id;
-        node.missingItemNode = node.id;
+        node.conditionTrueNode = node.id;
+        node.conditionFalseNode = node.id;
 
         if ( nodeValue.HasMember("condition") )
         {
@@ -675,12 +764,431 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 return definition;
             }
 
-            const std::string conditionType =
+            node.conditionType =
                 normalizeCustomDialogueID(
                     condition["type"].GetString()
                 );
 
-            if ( conditionType != "has_item" )
+            if ( node.conditionType == "has_item" )
+            {
+                if ( !condition.HasMember("item")
+                    || !condition["item"].IsString()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d has_item condition requires string 'item' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionItem =
+                    condition["item"].GetString();
+
+                ItemType resolvedItemType =
+                    TOOL_TORCH;
+
+                if ( !resolveCustomDialogueItemType(
+                        node.conditionItem,
+                        resolvedItemType
+                    ) )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d references unsupported condition item '%s'.",
+                        realPath.c_str(),
+                        node.id,
+                        node.conditionItem.c_str()
+                    );
+
+                    return definition;
+                }
+
+                node.conditionItemCount = 1;
+
+                if ( condition.HasMember("count") )
+                {
+                    if ( !condition["count"].IsInt()
+                        || condition["count"].GetInt() <= 0 )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d condition count must be a positive integer.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.conditionItemCount =
+                        condition["count"].GetInt();
+                }
+
+                if ( condition.HasMember("consume") )
+                {
+                    if ( !condition["consume"].IsBool() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d condition 'consume' must be Boolean.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.consumeConditionItem =
+                        condition["consume"].GetBool();
+                }
+            }
+            else if ( node.conditionType == "quest_completed" )
+            {
+                if ( !condition.HasMember("quest")
+                    || !condition["quest"].IsString()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d quest_completed condition requires string 'quest' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionQuestID =
+                    normalizeCustomDialogueID(
+                        condition["quest"].GetString()
+                    );
+
+                if ( node.conditionQuestID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty condition quest ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+            else if ( node.conditionType == "quest_stage" )
+            {
+                if ( !condition.HasMember("quest")
+                    || !condition["quest"].IsString()
+                    || !condition.HasMember("stage")
+                    || !condition["stage"].IsInt()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d quest_stage condition requires quest, stage, and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionQuestID =
+                    normalizeCustomDialogueID(
+                        condition["quest"].GetString()
+                    );
+
+                node.conditionQuestStage =
+                    condition["stage"].GetInt();
+
+                if ( node.conditionQuestID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty condition quest ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                if ( condition.HasMember("comparison") )
+                {
+                    if ( !condition["comparison"].IsString() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d condition comparison must be a string.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.conditionComparison =
+                        normalizeCustomDialogueID(
+                            condition["comparison"].GetString()
+                        );
+                }
+
+                if ( node.conditionComparison != "equals"
+                    && node.conditionComparison != "at_least"
+                    && node.conditionComparison != "at_most" )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d uses unsupported quest-stage comparison '%s'.",
+                        realPath.c_str(),
+                        node.id,
+                        node.conditionComparison.c_str()
+                    );
+
+                    return definition;
+                }
+            }
+            else if ( node.conditionType == "quest_started"
+                || node.conditionType == "quest_accepted"
+                || node.conditionType == "quest_failed" )
+            {
+                if ( !condition.HasMember("quest")
+                    || !condition["quest"].IsString()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d quest-state condition requires string 'quest' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionQuestID =
+                    normalizeCustomDialogueID(
+                        condition["quest"].GetString()
+                    );
+
+                if ( node.conditionQuestID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty quest-state condition ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+            else if ( node.conditionType == "has_gold" )
+            {
+                if ( !condition.HasMember("amount")
+                    || !condition["amount"].IsInt()
+                    || condition["amount"].GetInt() < 0
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d has_gold condition requires non-negative integer 'amount' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionGoldAmount =
+                    condition["amount"].GetInt();
+
+                if ( condition.HasMember("consume") )
+                {
+                    if ( !condition["consume"].IsBool() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d has_gold 'consume' must be Boolean.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.consumeConditionGold =
+                        condition["consume"].GetBool();
+                }
+            }
+            else if ( node.conditionType == "node_seen" )
+            {
+                if ( !condition.HasMember("node")
+                    || !condition["node"].IsString()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d node_seen condition requires string 'node' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionSeenNodeID =
+                    normalizeCustomDialogueID(
+                        condition["node"].GetString()
+                    );
+
+                if ( node.conditionSeenNodeID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty node_seen ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+            else if ( node.conditionType == "world_flag"
+                || node.conditionType == "npc_flag" )
+            {
+                if ( !condition.HasMember("id")
+                    || !condition["id"].IsString()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d flag condition requires string 'id' and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionStoryID =
+                    normalizeCustomDialogueID(
+                        condition["id"].GetString()
+                    );
+
+                if ( node.conditionStoryID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty flag condition ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionFlagValue = true;
+
+                if ( condition.HasMember("value") )
+                {
+                    if ( !condition["value"].IsBool() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d flag condition 'value' must be Boolean.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.conditionFlagValue =
+                        condition["value"].GetBool();
+                }
+            }
+            else if ( node.conditionType == "world_variable"
+                || node.conditionType == "npc_variable" )
+            {
+                if ( !condition.HasMember("id")
+                    || !condition["id"].IsString()
+                    || !condition.HasMember("value")
+                    || !condition["value"].IsInt()
+                    || !condition.HasMember("true_node")
+                    || !condition["true_node"].IsInt()
+                    || !condition.HasMember("false_node")
+                    || !condition["false_node"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d variable condition requires string 'id', integer 'value', and integer true/false nodes.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.conditionStoryID =
+                    normalizeCustomDialogueID(
+                        condition["id"].GetString()
+                    );
+
+                node.conditionStoryValue =
+                    condition["value"].GetInt();
+
+                if ( node.conditionStoryID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty variable condition ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                if ( condition.HasMember("comparison") )
+                {
+                    if ( !condition["comparison"].IsString() )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d variable comparison must be a string.",
+                            realPath.c_str(),
+                            node.id
+                        );
+
+                        return definition;
+                    }
+
+                    node.conditionComparison =
+                        normalizeCustomDialogueID(
+                            condition["comparison"].GetString()
+                        );
+                }
+
+                if ( node.conditionComparison != "equals"
+                    && node.conditionComparison != "not_equals"
+                    && node.conditionComparison != "at_least"
+                    && node.conditionComparison != "at_most" )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d uses unsupported variable comparison '%s'.",
+                        realPath.c_str(),
+                        node.id,
+                        node.conditionComparison.c_str()
+                    );
+
+                    return definition;
+                }
+            }
+            else
             {
                 printlog(
                     "[Custom Dialogue] '%s' node %d uses unsupported condition type '%s'.",
@@ -692,85 +1200,200 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 return definition;
             }
 
-            if ( !condition.HasMember("item")
-                || !condition["item"].IsString()
-                || !condition.HasMember("has_item_node")
-                || !condition["has_item_node"].IsInt()
-                || !condition.HasMember("missing_item_node")
-                || !condition["missing_item_node"].IsInt() )
-            {
-                printlog(
-                    "[Custom Dialogue] '%s' node %d item condition requires string 'item' and integer branch nodes.",
-                    realPath.c_str(),
-                    node.id
-                );
+            node.conditionTrueNode =
+                condition["true_node"].GetInt();
 
-                return definition;
-            }
+            node.conditionFalseNode =
+                condition["false_node"].GetInt();
+        }
 
-            node.conditionItem =
-                condition["item"].GetString();
+        if ( nodeValue.HasMember("choices") )
+        {
+			const rapidjson::Value& choices =
+				nodeValue["choices"];
 
-            ItemType resolvedItemType =
-                TOOL_TORCH;
+			if ( !choices.IsArray() )
+			{
+				printlog(
+					"[Custom Dialogue] '%s' node %d field 'choices' must be an array.",
+					realPath.c_str(),
+					node.id
+				);
 
-            if ( !resolveCustomDialogueItemType(
-                    node.conditionItem,
-                    resolvedItemType
-                ) )
-            {
-                printlog(
-                    "[Custom Dialogue] '%s' node %d references unsupported item '%s'.",
-                    realPath.c_str(),
-                    node.id,
-                    node.conditionItem.c_str()
-                );
+				return definition;
+			}
 
-                return definition;
-            }
+			for ( rapidjson::SizeType choiceIndex = 0;
+				choiceIndex < choices.Size();
+				++choiceIndex )
+			{
+				const rapidjson::Value& choiceValue =
+					choices[choiceIndex];
 
-            node.conditionItemCount = 1;
+				if ( !choiceValue.IsObject()
+					|| !choiceValue.HasMember("id")
+					|| !choiceValue["id"].IsString()
+					|| !choiceValue.HasMember("text")
+					|| !choiceValue["text"].IsString()
+					|| !choiceValue.HasMember("next")
+					|| !choiceValue["next"].IsInt() )
+				{
+					printlog(
+						"[Custom Dialogue] '%s' node %d choice index %u requires string id/text and integer next.",
+						realPath.c_str(),
+						node.id,
+						static_cast<unsigned int>(
+							choiceIndex
+						)
+					);
 
-            if ( condition.HasMember("count") )
-            {
-                if ( !condition["count"].IsInt()
-                    || condition["count"].GetInt() <= 0 )
-                {
-                    printlog(
-                        "[Custom Dialogue] '%s' node %d condition count must be a positive integer.",
-                        realPath.c_str(),
-                        node.id
-                    );
+					return definition;
+				}
 
-                    return definition;
-                }
+				CustomDialogueChoice choice;
 
-                node.conditionItemCount =
-                    condition["count"].GetInt();
-            }
+				choice.id =
+					normalizeCustomDialogueID(
+						choiceValue["id"].GetString()
+					);
 
-            node.hasItemNode =
-                condition["has_item_node"].GetInt();
+				choice.text =
+					choiceValue["text"].GetString();
 
-            node.missingItemNode =
-                condition["missing_item_node"].GetInt();
+				choice.nextNode =
+					choiceValue["next"].GetInt();
 
-            if ( condition.HasMember("consume") )
-            {
-                if ( !condition["consume"].IsBool() )
-                {
-                    printlog(
-                        "[Custom Dialogue] '%s' node %d condition 'consume' must be Boolean.",
-                        realPath.c_str(),
-                        node.id
-                    );
+				if ( choice.id.empty()
+					|| choice.text.empty() )
+				{
+					printlog(
+						"[Custom Dialogue] '%s' node %d contains an empty choice ID or text.",
+						realPath.c_str(),
+						node.id
+					);
 
-                    return definition;
-                }
+					return definition;
+				}
 
-                node.consumeConditionItem =
-                    condition["consume"].GetBool();
-            }
+				if ( choiceValue.HasMember("once") )
+				{
+					if ( !choiceValue["once"].IsBool() )
+					{
+						printlog(
+							"[Custom Dialogue] '%s' node %d choice '%s' field 'once' must be Boolean.",
+							realPath.c_str(),
+							node.id,
+							choice.id.c_str()
+						);
+
+						return definition;
+					}
+
+					choice.once =
+						choiceValue["once"].GetBool();
+				}
+
+				if ( choiceValue.HasMember("action") )
+				{
+					const rapidjson::Value& choiceAction =
+						choiceValue["action"];
+
+					if ( !choiceAction.IsObject() )
+					{
+						printlog(
+							"[Custom Dialogue] '%s' node %d choice '%s' action must be an object.",
+							realPath.c_str(),
+							node.id,
+							choice.id.c_str()
+						);
+
+						return definition;
+					}
+
+					if ( choiceAction.HasMember("quest_accept") )
+					{
+						if ( !choiceAction["quest_accept"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.questAccept =
+							choiceAction["quest_accept"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("quest_complete") )
+					{
+						if ( !choiceAction["quest_complete"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.questComplete =
+							choiceAction["quest_complete"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("quest_stage") )
+					{
+						if ( !choiceAction["quest_stage"].IsInt() )
+						{
+							return definition;
+						}
+
+						choice.questStage =
+							choiceAction["quest_stage"].GetInt();
+					}
+
+					if ( choiceAction.HasMember("set_world_flag") )
+					{
+						const rapidjson::Value& flag =
+							choiceAction["set_world_flag"];
+
+						if ( !flag.IsObject()
+							|| !flag.HasMember("id")
+							|| !flag["id"].IsString()
+							|| !flag.HasMember("value")
+							|| !flag["value"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.setWorldFlagID =
+							normalizeCustomDialogueID(
+								flag["id"].GetString()
+							);
+
+						choice.setWorldFlagValue =
+							flag["value"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("set_npc_flag") )
+					{
+						const rapidjson::Value& flag =
+							choiceAction["set_npc_flag"];
+
+						if ( !flag.IsObject()
+							|| !flag.HasMember("id")
+							|| !flag["id"].IsString()
+							|| !flag.HasMember("value")
+							|| !flag["value"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.setNPCFlagID =
+							normalizeCustomDialogueID(
+								flag["id"].GetString()
+							);
+
+						choice.setNPCFlagValue =
+							flag["value"].GetBool();
+					}
+				}
+
+				node.choices.push_back(
+					std::move(choice)
+				);
+			}
         }
 
         if ( nodeValue.HasMember("action") )
@@ -936,6 +1559,206 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 }
             }
 
+            if ( action.HasMember("set_world_flag") )
+            {
+                const rapidjson::Value& worldFlag =
+                    action["set_world_flag"];
+
+                if ( !worldFlag.IsObject()
+                    || !worldFlag.HasMember("id")
+                    || !worldFlag["id"].IsString()
+                    || !worldFlag.HasMember("value")
+                    || !worldFlag["value"].IsBool() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d set_world_flag requires string 'id' and Boolean 'value'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.setWorldFlagID =
+                    normalizeCustomDialogueID(
+                        worldFlag["id"].GetString()
+                    );
+
+                node.setWorldFlagValue =
+                    worldFlag["value"].GetBool();
+
+                if ( node.setWorldFlagID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty world flag ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+
+            if ( action.HasMember("set_world_variable") )
+            {
+                const rapidjson::Value& worldVariable =
+                    action["set_world_variable"];
+
+                if ( !worldVariable.IsObject()
+                    || !worldVariable.HasMember("id")
+                    || !worldVariable["id"].IsString()
+                    || !worldVariable.HasMember("value")
+                    || !worldVariable["value"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d set_world_variable requires string 'id' and integer 'value'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.setWorldVariableID =
+                    normalizeCustomDialogueID(
+                        worldVariable["id"].GetString()
+                    );
+
+                node.setWorldVariableValue =
+                    worldVariable["value"].GetInt();
+
+                if ( node.setWorldVariableID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty world variable ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+
+            if ( action.HasMember("add_world_variable") )
+            {
+                const rapidjson::Value& worldVariable =
+                    action["add_world_variable"];
+
+                if ( !worldVariable.IsObject()
+                    || !worldVariable.HasMember("id")
+                    || !worldVariable["id"].IsString()
+                    || !worldVariable.HasMember("amount")
+                    || !worldVariable["amount"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d add_world_variable requires string 'id' and integer 'amount'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.addWorldVariableID =
+                    normalizeCustomDialogueID(
+                        worldVariable["id"].GetString()
+                    );
+
+                node.addWorldVariableAmount =
+                    worldVariable["amount"].GetInt();
+
+                if ( node.addWorldVariableID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty world variable ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+
+            if ( action.HasMember("set_npc_flag") )
+            {
+                const rapidjson::Value& npcFlag =
+                    action["set_npc_flag"];
+
+                if ( !npcFlag.IsObject()
+                    || !npcFlag.HasMember("id")
+                    || !npcFlag["id"].IsString()
+                    || !npcFlag.HasMember("value")
+                    || !npcFlag["value"].IsBool() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d set_npc_flag requires string 'id' and Boolean 'value'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.setNPCFlagID =
+                    normalizeCustomDialogueID(
+                        npcFlag["id"].GetString()
+                    );
+
+                node.setNPCFlagValue =
+                    npcFlag["value"].GetBool();
+
+                if ( node.setNPCFlagID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty NPC flag ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+
+            if ( action.HasMember("set_npc_variable") )
+            {
+                const rapidjson::Value& npcVariable =
+                    action["set_npc_variable"];
+
+                if ( !npcVariable.IsObject()
+                    || !npcVariable.HasMember("id")
+                    || !npcVariable["id"].IsString()
+                    || !npcVariable.HasMember("value")
+                    || !npcVariable["value"].IsInt() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d set_npc_variable requires string 'id' and integer 'value'.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+
+                node.setNPCVariableID =
+                    normalizeCustomDialogueID(
+                        npcVariable["id"].GetString()
+                    );
+
+                node.setNPCVariableValue =
+                    npcVariable["value"].GetInt();
+
+                if ( node.setNPCVariableID.empty() )
+                {
+                    printlog(
+                        "[Custom Dialogue] '%s' node %d contains an empty NPC variable ID.",
+                        realPath.c_str(),
+                        node.id
+                    );
+
+                    return definition;
+                }
+            }
+
             if ( (
                     node.questAccept
                     || node.questComplete
@@ -1009,22 +1832,40 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
             return definition;
         }
 
-        if ( !node.conditionItem.empty()
+        if ( !node.conditionType.empty()
             && (
-                definition.nodes.find(node.hasItemNode)
+                definition.nodes.find(node.conditionTrueNode)
                     == definition.nodes.end()
-                || definition.nodes.find(node.missingItemNode)
+                || definition.nodes.find(node.conditionFalseNode)
                     == definition.nodes.end()
             ) )
         {
             printlog(
-                "[Custom Dialogue] '%s' node %d has an item-condition branch pointing to a missing node.",
+                "[Custom Dialogue] '%s' node %d has a condition branch pointing to a missing node.",
                 realPath.c_str(),
                 node.id
             );
 
             return definition;
         }
+
+		for ( const CustomDialogueChoice& choice :
+			node.choices )
+		{
+			if ( definition.nodes.find(choice.nextNode)
+				== definition.nodes.end() )
+			{
+				printlog(
+					"[Custom Dialogue] '%s' node %d choice '%s' points to missing node %d.",
+					realPath.c_str(),
+					node.id,
+					choice.id.c_str(),
+					choice.nextNode
+				);
+
+				return definition;
+			}
+		}
     }
 
     definition.valid = true;
@@ -13437,65 +14278,263 @@ bool handleCustomMonsterDialogue(
     }
 
     /*
-     * Stage 5 conditions redirect before the selected dialogue is
-     * displayed. This allows a waiting node to branch directly to a
-     * success line as soon as the player owns the required item.
+     * Conditions redirect before the selected dialogue is displayed.
      */
-    if ( !nodeIterator->second.conditionItem.empty() )
+    if ( !nodeIterator->second.conditionType.empty() )
     {
-        ItemType conditionItemType =
-            TOOL_TORCH;
+        const CustomDialogueNode& conditionNode =
+            nodeIterator->second;
 
-        if ( !resolveCustomDialogueItemType(
-                nodeIterator->second.conditionItem,
-                conditionItemType
-            ) )
+        bool conditionResult = false;
+
+        if ( conditionNode.conditionType == "has_item" )
         {
-            printlog(
-                "[Custom Dialogue] Dialogue '%s' node %d could not resolve item '%s' at runtime.",
-                definition->dialogueID.c_str(),
-                nodeIterator->second.id,
-                nodeIterator->second.conditionItem.c_str()
-            );
+            ItemType conditionItemType =
+                TOOL_TORCH;
 
-            return true;
-        }
-
-        Item* matchingItem =
-            findCustomDialoguePlayerItem(
-                monsterclicked,
-                conditionItemType,
-                nodeIterator->second.conditionItemCount
-            );
-
-        Sint32 selectedNodeID =
-            matchingItem
-                ? nodeIterator->second.hasItemNode
-                : nodeIterator->second.missingItemNode;
-
-        if ( matchingItem
-            && nodeIterator->second.consumeConditionItem )
-        {
-            if ( !consumeCustomDialoguePlayerItem(
-                    monsterclicked,
-                    matchingItem,
-                    nodeIterator->second.conditionItemCount
+            if ( !resolveCustomDialogueItemType(
+                    conditionNode.conditionItem,
+                    conditionItemType
                 ) )
             {
                 printlog(
-                    "[Custom Dialogue] Failed to consume %d '%s' item(s) from player %d.",
-                    nodeIterator->second.conditionItemCount,
-                    nodeIterator->second.conditionItem.c_str(),
-                    monsterclicked
+                    "[Custom Dialogue] Dialogue '%s' node %d could not resolve item '%s' at runtime.",
+                    definition->dialogueID.c_str(),
+                    conditionNode.id,
+                    conditionNode.conditionItem.c_str()
                 );
 
-                selectedNodeID =
-                    nodeIterator->second.missingItemNode;
+                return true;
+            }
+
+            Item* matchingItem =
+                findCustomDialoguePlayerItem(
+                    monsterclicked,
+                    conditionItemType,
+                    conditionNode.conditionItemCount
+                );
+
+            conditionResult =
+                matchingItem != nullptr;
+
+            if ( conditionResult
+                && conditionNode.consumeConditionItem )
+            {
+                if ( !consumeCustomDialoguePlayerItem(
+                        monsterclicked,
+                        matchingItem,
+                        conditionNode.conditionItemCount
+                    ) )
+                {
+                    printlog(
+                        "[Custom Dialogue] Failed to consume %d '%s' item(s) from player %d.",
+                        conditionNode.conditionItemCount,
+                        conditionNode.conditionItem.c_str(),
+                        monsterclicked
+                    );
+
+                    conditionResult = false;
+                }
+            }
+        }
+        else if ( conditionNode.conditionType
+            == "quest_completed" )
+        {
+            conditionResult =
+                persistentStoryQuestIsCompleted(
+                    conditionNode.conditionQuestID
+                );
+        }
+        else if ( conditionNode.conditionType
+            == "quest_stage" )
+        {
+            const Sint32 questStage =
+                persistentStoryGetQuestStage(
+                    conditionNode.conditionQuestID,
+                    0
+                );
+
+            if ( conditionNode.conditionComparison
+                == "at_least" )
+            {
+                conditionResult =
+                    questStage
+                    >= conditionNode.conditionQuestStage;
+            }
+            else if ( conditionNode.conditionComparison
+                == "at_most" )
+            {
+                conditionResult =
+                    questStage
+                    <= conditionNode.conditionQuestStage;
+            }
+            else
+            {
+                conditionResult =
+                    questStage
+                    == conditionNode.conditionQuestStage;
+            }
+        }
+
+        else if ( conditionNode.conditionType
+            == "quest_started" )
+        {
+            conditionResult =
+                persistentStoryQuestIsStarted(
+                    conditionNode.conditionQuestID
+                );
+        }
+        else if ( conditionNode.conditionType
+            == "quest_accepted" )
+        {
+            conditionResult =
+                persistentStoryQuestIsAccepted(
+                    conditionNode.conditionQuestID
+                );
+        }
+        else if ( conditionNode.conditionType
+            == "quest_failed" )
+        {
+            conditionResult =
+                persistentStoryQuestIsFailed(
+                    conditionNode.conditionQuestID
+                );
+        }
+        else if ( conditionNode.conditionType
+            == "has_gold" )
+        {
+            conditionResult =
+                stats[monsterclicked]
+                && stats[monsterclicked]->GOLD
+                    >= conditionNode.conditionGoldAmount;
+
+            if ( conditionResult
+                && conditionNode.consumeConditionGold )
+            {
+                stats[monsterclicked]->GOLD -=
+                    conditionNode.conditionGoldAmount;
+
+                if ( multiplayer == SERVER
+                    && monsterclicked > 0
+                    && !client_disconnected[monsterclicked]
+                    && !players[monsterclicked]->isLocalPlayer() )
+                {
+                    strcpy(
+                        reinterpret_cast<char*>(
+                            net_packet->data
+                        ),
+                        "GOLD"
+                    );
+
+                    SDLNet_Write32(
+                        stats[monsterclicked]->GOLD,
+                        &net_packet->data[4]
+                    );
+
+                    net_packet->address.host =
+                        net_clients[monsterclicked - 1].host;
+
+                    net_packet->address.port =
+                        net_clients[monsterclicked - 1].port;
+
+                    net_packet->len = 8;
+
+                    sendPacketSafe(
+                        net_sock,
+                        -1,
+                        net_packet,
+                        monsterclicked - 1
+                    );
+                }
+            }
+        }
+        else if ( conditionNode.conditionType
+            == "node_seen" )
+        {
+            /*
+             * The persistent story registry currently has a node-seen
+             * setter but no public getter. Keep this condition disabled
+             * until the getter is added to game.cpp/game.hpp.
+             */
+            conditionResult = false;
+
+            printlog(
+                "[Custom Dialogue] node_seen condition '%s' is unavailable because no public seen-node getter exists.",
+                conditionNode.conditionSeenNodeID.c_str()
+            );
+        }
+        else if ( conditionNode.conditionType
+            == "world_flag" )
+        {
+            conditionResult =
+                persistentStoryGetWorldFlag(
+                    conditionNode.conditionStoryID
+                )
+                == conditionNode.conditionFlagValue;
+        }
+        else if ( conditionNode.conditionType
+            == "npc_flag" )
+        {
+            conditionResult =
+                persistentStoryGetNPCFlag(
+                    sourceMap,
+                    my->persistentID,
+                    conditionNode.conditionStoryID
+                )
+                == conditionNode.conditionFlagValue;
+        }
+        else if ( conditionNode.conditionType
+            == "world_variable"
+            || conditionNode.conditionType
+                == "npc_variable" )
+        {
+            const Sint32 storyValue =
+                conditionNode.conditionType
+                    == "world_variable"
+                ? persistentStoryGetWorldVariable(
+                    conditionNode.conditionStoryID,
+                    0
+                )
+                : persistentStoryGetNPCVariable(
+                    sourceMap,
+                    my->persistentID,
+                    conditionNode.conditionStoryID,
+                    0
+                );
+
+            if ( conditionNode.conditionComparison
+                == "not_equals" )
+            {
+                conditionResult =
+                    storyValue
+                    != conditionNode.conditionStoryValue;
+            }
+            else if ( conditionNode.conditionComparison
+                == "at_least" )
+            {
+                conditionResult =
+                    storyValue
+                    >= conditionNode.conditionStoryValue;
+            }
+            else if ( conditionNode.conditionComparison
+                == "at_most" )
+            {
+                conditionResult =
+                    storyValue
+                    <= conditionNode.conditionStoryValue;
+            }
+            else
+            {
+                conditionResult =
+                    storyValue
+                    == conditionNode.conditionStoryValue;
             }
         }
 
         currentNodeID =
-            selectedNodeID;
+            conditionResult
+                ? conditionNode.conditionTrueNode
+                : conditionNode.conditionFalseNode;
 
         nodeIterator =
             definition->nodes.find(
@@ -13522,6 +14561,74 @@ bool handleCustomMonsterDialogue(
 
     const CustomDialogueNode& node =
         nodeIterator->second;
+
+	if ( !node.choices.empty() )
+	{
+		std::vector<CustomDialogueChoice> availableChoices;
+		std::vector<std::string> choiceTexts;
+
+		for ( const CustomDialogueChoice& choice :
+			node.choices )
+		{
+			if ( choice.once
+				&& persistentStoryNPCChoiceWasUsed(
+					sourceMap,
+					my->persistentID,
+					choice.id
+				) )
+			{
+				continue;
+			}
+
+			availableChoices.push_back(choice);
+			choiceTexts.push_back(choice.text);
+		}
+
+		if ( !availableChoices.empty() )
+		{
+			PendingCustomDialogueChoiceState& pending =
+				pendingCustomDialogueChoices[
+					monsterclicked
+				];
+
+			pending.active = true;
+			pending.npcUID = my->getUID();
+			pending.npcPersistentID =
+				my->persistentID;
+			pending.sourceMap = sourceMap;
+			pending.dialogueID =
+				definition->dialogueID;
+			pending.nodeID = node.id;
+			pending.choices =
+				availableChoices;
+
+			players[monsterclicked]
+				->worldUI
+				.worldTooltipDialogue
+				.createDialogueChoiceTooltip(
+					my->getUID(),
+					Player::WorldUI_t
+						::WorldTooltipDialogue_t
+						::DIALOGUE_NPC,
+					node.text,
+					choiceTexts
+				);
+
+			if ( multiplayer != CLIENT
+				&& my->persistentID > 0 )
+			{
+				persistentStorySetNPCNodeSeen(
+					sourceMap,
+					my->persistentID,
+					"node_"
+						+ std::to_string(node.id),
+					true
+				);
+			}
+
+			return true;
+		}
+	}
 
     players[monsterclicked]
         ->worldUI
@@ -13569,6 +14676,50 @@ bool handleCustomMonsterDialogue(
                 persistentStorySetQuestCompleted(
                     definition->questID,
                     true
+                );
+            }
+
+            if ( !node.setWorldFlagID.empty() )
+            {
+                persistentStorySetWorldFlag(
+                    node.setWorldFlagID,
+                    node.setWorldFlagValue
+                );
+            }
+
+            if ( !node.setWorldVariableID.empty() )
+            {
+                persistentStorySetWorldVariable(
+                    node.setWorldVariableID,
+                    node.setWorldVariableValue
+                );
+            }
+
+            if ( !node.addWorldVariableID.empty() )
+            {
+                persistentStoryAddWorldVariable(
+                    node.addWorldVariableID,
+                    node.addWorldVariableAmount
+                );
+            }
+
+            if ( !node.setNPCFlagID.empty() )
+            {
+                persistentStorySetNPCFlag(
+                    sourceMap,
+                    my->persistentID,
+                    node.setNPCFlagID,
+                    node.setNPCFlagValue
+                );
+            }
+
+            if ( !node.setNPCVariableID.empty() )
+            {
+                persistentStorySetNPCVariable(
+                    sourceMap,
+                    my->persistentID,
+                    node.setNPCVariableID,
+                    node.setNPCVariableValue
                 );
             }
 
@@ -13718,13 +14869,18 @@ bool handleCustomMonsterDialogue(
             );
 
             printlog(
-                "[Custom Dialogue] Applied one-time action '%s' for quest '%s' at node %d; gold reward=%d, item reward='%s' x%d.",
+                "[Custom Dialogue] Applied action '%s' at node %d: quest='%s', gold=%d, item='%s' x%d, worldFlag='%s', setWorldVar='%s', addWorldVar='%s', npcFlag='%s', npcVar='%s'.",
                 node.actionID.c_str(),
-                definition->questID.c_str(),
                 node.id,
+                definition->questID.c_str(),
                 node.rewardGold,
                 node.rewardItem.c_str(),
-                node.rewardItemCount
+                node.rewardItemCount,
+                node.setWorldFlagID.c_str(),
+                node.setWorldVariableID.c_str(),
+                node.addWorldVariableID.c_str(),
+                node.setNPCFlagID.c_str(),
+                node.setNPCVariableID.c_str()
             );
         }
     }
@@ -13759,6 +14915,163 @@ bool handleCustomMonsterDialogue(
 
     return true;
 }
+
+bool handleCustomMonsterDialogueChoice(
+	int player,
+	Uint32 npcUID,
+	int choiceIndex
+)
+{
+	if ( player < 0
+		|| player >= MAXPLAYERS )
+	{
+		return false;
+	}
+
+	PendingCustomDialogueChoiceState& pending =
+		pendingCustomDialogueChoices[player];
+
+	if ( !pending.active
+		|| pending.npcUID != npcUID
+		|| choiceIndex < 0
+		|| choiceIndex
+			>= static_cast<int>(
+				pending.choices.size()
+			) )
+	{
+		return false;
+	}
+
+	Entity* npc =
+		uidToEntity(npcUID);
+
+	if ( !npc
+		|| npc->persistentID
+			!= pending.npcPersistentID )
+	{
+		pending =
+			PendingCustomDialogueChoiceState{};
+
+		return false;
+	}
+
+	const CustomDialogueDefinition* definition =
+		getCustomDialogueDefinition(
+			pending.dialogueID
+		);
+
+	if ( !definition )
+	{
+		pending =
+			PendingCustomDialogueChoiceState{};
+
+		return false;
+	}
+
+	const CustomDialogueChoice choice =
+		pending.choices[choiceIndex];
+
+	pending =
+		PendingCustomDialogueChoiceState{};
+
+	if ( choice.once )
+	{
+		persistentStorySetNPCChoiceUsed(
+			map.filename[0]
+				? map.filename
+				: map.name,
+			npc->persistentID,
+			choice.id,
+			true
+		);
+	}
+
+	if ( !definition->questID.empty() )
+	{
+		if ( choice.questAccept )
+		{
+			persistentStorySetQuestAccepted(
+				definition->questID,
+				true
+			);
+		}
+
+		if ( choice.questStage >= 0 )
+		{
+			persistentStorySetQuestStage(
+				definition->questID,
+				choice.questStage
+			);
+		}
+
+		if ( choice.questComplete )
+		{
+			persistentStorySetQuestCompleted(
+				definition->questID,
+				true
+			);
+		}
+	}
+
+	const std::string sourceMap =
+		map.filename[0]
+			? map.filename
+			: map.name;
+
+	if ( !choice.setWorldFlagID.empty() )
+	{
+		persistentStorySetWorldFlag(
+			choice.setWorldFlagID,
+			choice.setWorldFlagValue
+		);
+	}
+
+	if ( !choice.setNPCFlagID.empty() )
+	{
+		persistentStorySetNPCFlag(
+			sourceMap,
+			npc->persistentID,
+			choice.setNPCFlagID,
+			choice.setNPCFlagValue
+		);
+	}
+
+	persistentStorySetNPCChoiceUsed(
+		sourceMap,
+		npc->persistentID,
+		choice.id,
+		true
+	);
+
+	persistentStorySetNPCNode(
+		sourceMap,
+		npc->persistentID,
+		choice.nextNode
+	);
+
+	printlog(
+		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next node=%d.",
+		player,
+		choice.id.c_str(),
+		npc->persistentID,
+		choice.nextNode
+	);
+
+	Stat* npcStats =
+		npc->getStats();
+
+	if ( npcStats )
+	{
+		return handleCustomMonsterDialogue(
+			player,
+			npc,
+			npcStats
+		);
+	}
+
+	return true;
+}
+
 bool handleMonsterChatter(int monsterclicked, bool ringconflict, char namesays[64], Entity* my, Stat* myStats)
 {
 	if ( !my )

@@ -41642,6 +41642,10 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::deactivate()
 	dialogueStringLength = 0;
 	dialogueStrFull = "";
 	dialogueStrCurrent = "";
+	customChoiceActive = false;
+	customChoiceSelected = 0;
+	customChoiceBaseText.clear();
+	customChoiceTexts.clear();
 	int langEntry = 0;
 	DialogueType_t dialogueType = DIALOGUE_NONE;
 	if ( dialogueTooltipSurface )
@@ -41699,6 +41703,116 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::updateWorldCoordinat
 	}
 }
 
+
+void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::rebuildCustomChoiceText()
+{
+	if ( !customChoiceActive )
+	{
+		return;
+	}
+
+	customChoiceSelected = std::max(
+		0,
+		std::min(
+			customChoiceSelected,
+			static_cast<int>(customChoiceTexts.size()) - 1
+		)
+	);
+
+	dialogueStrFull = customChoiceBaseText;
+
+	for ( size_t index = 0;
+		index < customChoiceTexts.size();
+		++index )
+	{
+		dialogueStrFull += "\n";
+
+		dialogueStrFull +=
+			static_cast<int>(index) == customChoiceSelected
+				? "> "
+				: "  ";
+
+		dialogueStrFull +=
+			std::to_string(index + 1)
+			+ ". "
+			+ customChoiceTexts[index];
+	}
+
+	dialogueStringLength = dialogueStrFull.size();
+	dialogueStrCurrent = dialogueStrFull;
+
+	if ( !dialogueField )
+	{
+		dialogueField = new Field(1024);
+		dialogueField->setFont("fonts/pixel_maz_multiline.ttf#16");
+	}
+
+	dialogueField->setText(dialogueStrFull.c_str());
+
+	auto& setting =
+		WorldDialogueSettings_t::settings[dialogueType];
+
+	dialogueField->setSize(
+		SDL_Rect{
+			0,
+			0,
+			setting.maxWidth,
+			0
+		}
+	);
+
+	dialogueField->reflowTextToFit(0);
+
+	const int numLines =
+		dialogueField->getNumTextLines();
+
+	if ( Font* actualFont =
+			Font::get(dialogueField->getFont()) )
+	{
+		const int textHeight =
+			numLines
+			* actualFont->height(true)
+			+ 16;
+
+		if ( auto textGet =
+				Text::get(
+					dialogueField->getLongestLine().c_str(),
+					dialogueField->getFont(),
+					dialogueField->getTextColor(),
+					dialogueField->getOutlineColor()
+				) )
+		{
+			dialogueField->setSize(
+				SDL_Rect{
+					0,
+					0,
+					static_cast<int>(
+						textGet->getWidth()
+					) + 16,
+					textHeight
+				}
+			);
+		}
+		else
+		{
+			dialogueField->setSize(
+				SDL_Rect{
+					0,
+					0,
+					setting.maxWidth,
+					textHeight
+				}
+			);
+		}
+	}
+
+	expiryTicks =
+		setting.baseTicksToDisplay
+		+ TICKS_PER_SECOND * 30;
+
+	blitDialogueTooltip();
+}
+
 void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::update()
 {
 	if ( !init )
@@ -41714,6 +41828,70 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::update()
 	if ( client_disconnected[player] )
 	{
 		active = false;
+	}
+
+	if ( customChoiceActive
+		&& active
+		&& player == clientnum
+		&& !customChoiceTexts.empty() )
+	{
+		bool changedSelection = false;
+
+		if ( Input::inputs[player].consumeBinaryToggle("MenuUp") )
+		{
+			customChoiceSelected =
+				(
+					customChoiceSelected
+					+ static_cast<int>(
+						customChoiceTexts.size()
+					)
+					- 1
+				)
+				% static_cast<int>(
+					customChoiceTexts.size()
+				);
+
+			changedSelection = true;
+		}
+		else if ( Input::inputs[player].consumeBinaryToggle("MenuDown") )
+		{
+			customChoiceSelected =
+				(
+					customChoiceSelected
+					+ 1
+				)
+				% static_cast<int>(
+					customChoiceTexts.size()
+				);
+
+			changedSelection = true;
+		}
+
+		if ( changedSelection )
+		{
+			rebuildCustomChoiceText();
+		}
+
+		if ( Input::inputs[player].consumeBinaryToggle("MenuConfirm")
+			|| Input::inputs[player].consumeBinaryToggle("MenuLeftClick") )
+		{
+			const Uint32 selectedParent =
+				parent;
+
+			const int selectedChoice =
+				customChoiceSelected;
+
+			customChoiceActive = false;
+			active = false;
+
+			handleCustomMonsterDialogueChoice(
+				player,
+				selectedParent,
+				selectedChoice
+			);
+
+			return;
+		}
 	}
 
 	Entity* parentEnt = uidToEntity(parent);
@@ -41957,6 +42135,55 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::createDialogueTooltip(Uint32 uid
 			}
 		}
 		d->dialogueField->setText(d->dialogueStrFull.c_str());
+	}
+}
+
+
+void Player::WorldUI_t::WorldTooltipDialogue_t::createDialogueChoiceTooltip(
+	Uint32 uid,
+	Player::WorldUI_t::WorldTooltipDialogue_t::DialogueType_t type,
+	const std::string& message,
+	const std::vector<std::string>& choices
+)
+{
+	/*
+	 * Choice interaction is currently local/host UI. Remote-client
+	 * transport is intentionally deferred to the dedicated multiplayer
+	 * validation stage.
+	 */
+	if ( multiplayer == SERVER
+		&& player.playernum != clientnum )
+	{
+		createDialogueTooltip(
+			uid,
+			type,
+			"%s",
+			message.c_str()
+		);
+
+		return;
+	}
+
+	createDialogueTooltip(
+		uid,
+		type,
+		"%s",
+		message.c_str()
+	);
+
+	Dialogue_t* dialogue =
+		&playerDialogue;
+
+	dialogue->customChoiceActive =
+		!choices.empty();
+
+	dialogue->customChoiceSelected = 0;
+	dialogue->customChoiceBaseText = message;
+	dialogue->customChoiceTexts = choices;
+
+	if ( dialogue->customChoiceActive )
+	{
+		dialogue->rebuildCustomChoiceText();
 	}
 }
 

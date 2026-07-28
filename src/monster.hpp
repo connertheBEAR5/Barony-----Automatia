@@ -1157,6 +1157,15 @@ bool handleCustomMonsterDialogue(
     Entity* my,
     Stat* myStats
 );
+/*
+ * Called by the local dialogue UI after the player confirms one of the
+ * currently displayed custom dialogue choices.
+ */
+bool handleCustomMonsterDialogueChoice(
+	int player,
+	Uint32 npcUID,
+	int choiceIndex
+);
 // monster custom NPC chatter
 bool handleMonsterChatter(int monsterclicked, bool ringconflict, char namesays[64], Entity* my, Stat* myStats);
 // check qty of a certain creature race alive on a map

@@ -2061,8 +2061,22 @@ public:
 				size_t dialogueStringLength = 0;
 				std::string dialogueStrFull = "";
 				std::string dialogueStrCurrent = "";
+
+				/*
+				 * Custom NPC dialogue choices.
+				 *
+				 * The visible choice strings are local UI state. The selected
+				 * index is sent back to actmonster.cpp for authoritative
+				 * validation and persistent story updates.
+				 */
+				bool customChoiceActive = false;
+				int customChoiceSelected = 0;
+				std::string customChoiceBaseText = "";
+				std::vector<std::string> customChoiceTexts;
+
 				void deactivate();
 				void update();
+				void rebuildCustomChoiceText();
 				DialogueType_t dialogueType = DIALOGUE_NONE;
 				SDL_Surface* blitDialogueTooltip();
 				SDL_Surface* dialogueTooltipSurface = nullptr;
@@ -2094,6 +2108,12 @@ public:
 			~WorldTooltipDialogue_t() {};
 			void update();
 			void createDialogueTooltip(Uint32 uid, DialogueType_t type, char const * const message, ...);
+			void createDialogueChoiceTooltip(
+				Uint32 uid,
+				DialogueType_t type,
+				const std::string& message,
+				const std::vector<std::string>& choices
+			);
 			struct WorldDialogueSettings_t
 			{
 				struct Setting_t
