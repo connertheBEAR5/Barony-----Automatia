@@ -31088,6 +31088,14 @@ namespace CustomDialogueQuestJournalUI
         bool snapshotsInitialized = false;
 
         std::string trackedQuestID;
+
+        /*
+         * Journal widgets are children of gameUIFrame[player].
+         * That UI root, or its children, may be rebuilt during a map
+         * transition. Never trust cached child pointers until they are
+         * reacquired from the current root.
+         */
+        Frame* owningGameUIFrame = nullptr;
         Frame* trackerFrame = nullptr;
 
         bool keyLatch = false;
@@ -31095,6 +31103,35 @@ namespace CustomDialogueQuestJournalUI
     };
 
     static State states[MAXPLAYERS];
+
+    static void synchronizeFrames(
+        const int player
+    )
+    {
+        State& state = states[player];
+        Frame* currentRoot = gameUIFrame[player];
+
+        if ( !currentRoot )
+        {
+            state.owningGameUIFrame = nullptr;
+            state.frame = nullptr;
+            state.trackerFrame = nullptr;
+            return;
+        }
+
+        /*
+         * Reacquire children by name from the current, known-valid UI
+         * root. This is safe even when an old cached child pointer was
+         * deleted during a map transition.
+         */
+        state.owningGameUIFrame = currentRoot;
+        state.frame = currentRoot->findFrame(
+            "custom dialogue quest journal"
+        );
+        state.trackerFrame = currentRoot->findFrame(
+            "custom dialogue quest tracker"
+        );
+    }
 
     static const std::vector<std::string> panelImages =
     {
@@ -31550,6 +31587,8 @@ namespace CustomDialogueQuestJournalUI
 
     static void createTracker(const int player)
     {
+        synchronizeFrames(player);
+
         State& state = states[player];
 
         if ( state.trackerFrame || !gameUIFrame[player] )
@@ -31705,6 +31744,8 @@ namespace CustomDialogueQuestJournalUI
         const int player
     )
     {
+        synchronizeFrames(player);
+
         State& state =
             states[player];
 
@@ -31731,6 +31772,8 @@ namespace CustomDialogueQuestJournalUI
         const int player
     )
     {
+        synchronizeFrames(player);
+
         State& state =
             states[player];
 
@@ -31806,6 +31849,8 @@ namespace CustomDialogueQuestJournalUI
         const int player
     )
     {
+        synchronizeFrames(player);
+
         State& state =
             states[player];
 
@@ -33132,6 +33177,7 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
+        synchronizeFrames(player);
         create(player);
         layout(player);
 
