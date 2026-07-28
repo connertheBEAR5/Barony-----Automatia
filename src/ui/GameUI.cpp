@@ -30906,10 +30906,20 @@ namespace CustomDialogueQuestJournalUI
             CustomDialogueQuestJournalStatus::Active;
 
         Sint32 selectedQuest = 0;
+        Sint32 scrollOffset = 0;
 
         std::vector<CustomDialogueQuestJournalEntry>
             visibleEntries;
 
+        /*
+         * Runtime-only journal update snapshots. These prevent an
+         * existing quest from producing a notification on first scan,
+         * then report later stage/status/objective changes.
+         */
+        std::unordered_map<std::string, std::string>
+            questSnapshots;
+
+        bool snapshotsInitialized = false;
         bool keyLatch = false;
         bool openedStatusScreen = false;
     };
@@ -31072,6 +31082,137 @@ namespace CustomDialogueQuestJournalUI
                         state.visibleEntries.size()
                     ) - 1;
         }
+
+        if ( state.visibleEntries.empty() )
+        {
+            state.scrollOffset = 0;
+            return;
+        }
+
+        if ( state.selectedQuest < state.scrollOffset )
+        {
+            state.scrollOffset =
+                state.selectedQuest;
+        }
+
+        if ( state.selectedQuest
+            >= state.scrollOffset + MAX_VISIBLE_QUESTS )
+        {
+            state.scrollOffset =
+                state.selectedQuest
+                - MAX_VISIBLE_QUESTS
+                + 1;
+        }
+
+        const Sint32 maximumOffset =
+            std::max(
+                0,
+                static_cast<Sint32>(
+                    state.visibleEntries.size()
+                ) - MAX_VISIBLE_QUESTS
+            );
+
+        state.scrollOffset =
+            std::max(
+                0,
+                std::min(
+                    state.scrollOffset,
+                    maximumOffset
+                )
+            );
+    }
+
+    static std::string buildQuestSnapshot(
+        const CustomDialogueQuestJournalEntry& entry
+    )
+    {
+        std::string snapshot =
+            std::to_string(
+                static_cast<Sint32>(
+                    entry.status
+                )
+            )
+            + ":"
+            + std::to_string(entry.stage)
+            + ":"
+            + (entry.accepted ? "1" : "0")
+            + ":"
+            + (entry.completed ? "1" : "0")
+            + ":"
+            + (entry.failed ? "1" : "0");
+
+        for ( const auto& objective :
+            entry.objectives )
+        {
+            snapshot +=
+                "|"
+                + objective.id
+                + "="
+                + (
+                    objective.completed
+                        ? "1"
+                        : "0"
+                );
+        }
+
+        return snapshot;
+    }
+
+    static void updateNotifications(
+        const int player
+    )
+    {
+        State& state =
+            states[player];
+
+        std::vector<CustomDialogueQuestJournalEntry>
+            entries;
+
+        if ( !getCustomDialogueQuestJournalEntries(
+                player,
+                entries
+            ) )
+        {
+            return;
+        }
+
+        std::unordered_map<std::string, std::string>
+            currentSnapshots;
+
+        for ( const auto& entry :
+            entries )
+        {
+            currentSnapshots[entry.questID] =
+                buildQuestSnapshot(entry);
+
+            if ( state.snapshotsInitialized )
+            {
+                const auto previous =
+                    state.questSnapshots.find(
+                        entry.questID
+                    );
+
+                if ( previous
+                        == state.questSnapshots.end()
+                    || previous->second
+                        != currentSnapshots[entry.questID] )
+                {
+                    messagePlayer(
+                        player,
+                        MESSAGE_INVENTORY,
+                        "Quest updated: %s",
+                        entry.title.c_str()
+                    );
+
+                    Player::soundModuleNavigation();
+                }
+            }
+        }
+
+        state.questSnapshots =
+            std::move(currentSnapshots);
+
+        state.snapshotsInitialized = true;
     }
 
     static std::string buildObjectiveText(
@@ -31477,6 +31618,7 @@ namespace CustomDialogueQuestJournalUI
                         >(selectedTab);
 
                     clickedState.selectedQuest = 0;
+                    clickedState.scrollOffset = 0;
 
                     refresh(owner);
                     Player::soundModuleNavigation();
@@ -31524,15 +31666,20 @@ namespace CustomDialogueQuestJournalUI
                     State& clickedState =
                         states[owner];
 
-                    if ( index >= 0
-                        && index
+                    const Sint32 absoluteIndex =
+                        clickedState.scrollOffset
+                        + index;
+
+                    if ( absoluteIndex >= 0
+                        && absoluteIndex
                             < static_cast<Sint32>(
                                 clickedState.visibleEntries.size()
                             ) )
                     {
                         clickedState.selectedQuest =
-                            index;
+                            absoluteIndex;
 
+                        refresh(owner);
                         Player::soundModuleNavigation();
                     }
                 }
@@ -31547,6 +31694,7 @@ namespace CustomDialogueQuestJournalUI
             "quest journal objective heading",
             "quest journal objectives",
             "quest journal empty",
+            "quest journal page",
             "quest journal help"
         };
 
@@ -31558,11 +31706,12 @@ namespace CustomDialogueQuestJournalUI
             128,
             4096,
             256,
+            128,
             256
         };
 
         for ( size_t index = 0;
-            index < 7;
+            index < 8;
             ++index )
         {
             auto field =
@@ -31601,8 +31750,8 @@ namespace CustomDialogueQuestJournalUI
         state.frame->findField(
             "quest journal help"
         )->setText(
-            "Mouse: select tabs and quests    "
-            "Keyboard: arrows navigate, Enter selects, J/Esc closes"
+            "Mouse wheel / Up-Down: scroll quests    "
+            "Left-Right / LB-RB: tabs    J / B / Esc: close"
         );
     }
 
@@ -31824,6 +31973,12 @@ namespace CustomDialogueQuestJournalUI
         );
 
         state.frame->findField(
+            "quest journal page"
+        )->setSize(
+            SDL_Rect{ 28, 400, 238, 20 }
+        );
+
+        state.frame->findField(
             "quest journal help"
         )->setSize(
             SDL_Rect{ 24, 432, width - 48, 22 }
@@ -31916,13 +32071,19 @@ namespace CustomDialogueQuestJournalUI
                     name.c_str()
                 );
 
-            if ( index
+            const Sint32 absoluteIndex =
+                state.scrollOffset
+                + index;
+
+            if ( absoluteIndex
                 < static_cast<Sint32>(
                     state.visibleEntries.size()
                 ) )
             {
                 const auto& entry =
-                    state.visibleEntries[index];
+                    state.visibleEntries[
+                        absoluteIndex
+                    ];
 
                 button->setText(
                     entry.title.c_str()
@@ -31931,7 +32092,7 @@ namespace CustomDialogueQuestJournalUI
                 button->setDisabled(false);
 
                 button->setBackground(
-                    index == state.selectedQuest
+                    absoluteIndex == state.selectedQuest
                         ? "*#images/ui/CharSheet/HUD_CharSheet_ButtonPress_00.png"
                         : "*#images/ui/CharSheet/HUD_CharSheet_Button_00.png"
                 );
@@ -31941,6 +32102,44 @@ namespace CustomDialogueQuestJournalUI
                 button->setText("");
                 button->setDisabled(true);
             }
+        }
+
+        auto pageField =
+            state.frame->findField(
+                "quest journal page"
+            );
+
+        if ( state.visibleEntries.size()
+                > MAX_VISIBLE_QUESTS )
+        {
+            const Sint32 first =
+                state.scrollOffset + 1;
+
+            const Sint32 last =
+                std::min(
+                    state.scrollOffset
+                        + MAX_VISIBLE_QUESTS,
+                    static_cast<Sint32>(
+                        state.visibleEntries.size()
+                    )
+                );
+
+            const std::string pageText =
+                std::to_string(first)
+                + "-"
+                + std::to_string(last)
+                + " of "
+                + std::to_string(
+                    state.visibleEntries.size()
+                );
+
+            pageField->setText(
+                pageText.c_str()
+            );
+        }
+        else
+        {
+            pageField->setText("");
         }
 
         auto emptyField =
@@ -32061,7 +32260,7 @@ namespace CustomDialogueQuestJournalUI
         );
     }
 
-    static void keyboardNavigation(
+    static void navigation(
         const int player
     )
     {
@@ -32073,39 +32272,140 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
+        bool tabLeft = false;
+        bool tabRight = false;
+        bool moveUp = false;
+        bool moveDown = false;
+        bool closePressed = false;
+
         if ( keystatus[SDLK_LEFT] )
         {
             keystatus[SDLK_LEFT] = 0;
-
-            Sint32 tab =
-                static_cast<Sint32>(
-                    state.selectedStatus
-                );
-
-            tab =
-                (tab + 2) % 3;
-
-            state.selectedStatus =
-                static_cast<
-                    CustomDialogueQuestJournalStatus
-                >(tab);
-
-            state.selectedQuest = 0;
-            refresh(player);
-            Player::soundModuleNavigation();
+            tabLeft = true;
         }
 
         if ( keystatus[SDLK_RIGHT] )
         {
             keystatus[SDLK_RIGHT] = 0;
+            tabRight = true;
+        }
 
+        if ( keystatus[SDLK_UP] )
+        {
+            keystatus[SDLK_UP] = 0;
+            moveUp = true;
+        }
+
+        if ( keystatus[SDLK_DOWN] )
+        {
+            keystatus[SDLK_DOWN] = 0;
+            moveDown = true;
+        }
+
+        /*
+         * Mouse wheel changes the selected quest and automatically
+         * scrolls the list to keep it visible.
+         */
+        if ( mousestatus[SDL_BUTTON_WHEELUP] )
+        {
+            mousestatus[SDL_BUTTON_WHEELUP] = 0;
+            moveUp = true;
+        }
+
+        if ( mousestatus[SDL_BUTTON_WHEELDOWN] )
+        {
+            mousestatus[SDL_BUTTON_WHEELDOWN] = 0;
+            moveDown = true;
+        }
+
+        if ( inputs.hasController(player) )
+        {
+            GameController* controller =
+                inputs.getController(player);
+
+            if ( controller )
+            {
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_LEFT
+                    )
+                    || controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_LEFT
+                    );
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_LEFTSHOULDER
+                    );
+                    tabLeft = true;
+                }
+
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_RIGHT
+                    )
+                    || controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_RIGHT
+                    );
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER
+                    );
+                    tabRight = true;
+                }
+
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_UP
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_UP
+                    );
+                    moveUp = true;
+                }
+
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_DOWN
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_DPAD_DOWN
+                    );
+                    moveDown = true;
+                }
+
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_B
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_B
+                    );
+                    closePressed = true;
+                }
+            }
+        }
+
+        if ( closePressed )
+        {
+            close(player);
+            return;
+        }
+
+        if ( tabLeft || tabRight )
+        {
             Sint32 tab =
                 static_cast<Sint32>(
                     state.selectedStatus
                 );
 
             tab =
-                (tab + 1) % 3;
+                tabLeft
+                    ? (tab + 2) % 3
+                    : (tab + 1) % 3;
 
             state.selectedStatus =
                 static_cast<
@@ -32113,15 +32413,15 @@ namespace CustomDialogueQuestJournalUI
                 >(tab);
 
             state.selectedQuest = 0;
+            state.scrollOffset = 0;
+
             refresh(player);
             Player::soundModuleNavigation();
         }
 
-        if ( keystatus[SDLK_UP]
+        if ( moveUp
             && !state.visibleEntries.empty() )
         {
-            keystatus[SDLK_UP] = 0;
-
             state.selectedQuest =
                 (
                     state.selectedQuest
@@ -32134,14 +32434,13 @@ namespace CustomDialogueQuestJournalUI
                     state.visibleEntries.size()
                 );
 
+            refresh(player);
             Player::soundModuleNavigation();
         }
 
-        if ( keystatus[SDLK_DOWN]
+        if ( moveDown
             && !state.visibleEntries.empty() )
         {
-            keystatus[SDLK_DOWN] = 0;
-
             state.selectedQuest =
                 (
                     state.selectedQuest
@@ -32151,6 +32450,7 @@ namespace CustomDialogueQuestJournalUI
                     state.visibleEntries.size()
                 );
 
+            refresh(player);
             Player::soundModuleNavigation();
         }
     }
@@ -32202,7 +32502,8 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
-        keyboardNavigation(player);
+        updateNotifications(player);
+        navigation(player);
         updateContents(player);
     }
 }
