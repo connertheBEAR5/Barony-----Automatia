@@ -3520,10 +3520,27 @@ void openQuestDialogueEditor()
 	openwindow = 0;
 	savewindow = 0;
 
-	subx1 = std::max(8, xres / 2 - 390);
-	subx2 = std::min(xres - 8, xres / 2 + 390);
-	suby1 = std::max(24, yres / 2 - 270);
-	suby2 = std::min(yres - 8, yres / 2 + 270);
+	const int desiredHalfWidth =
+		std::max(390, std::min(560, xres / 2 - 20));
+	const int desiredHalfHeight =
+		std::max(270, std::min(360, yres / 2 - 28));
+
+	subx1 = std::max(
+		8,
+		xres / 2 - desiredHalfWidth
+	);
+	subx2 = std::min(
+		xres - 8,
+		xres / 2 + desiredHalfWidth
+	);
+	suby1 = std::max(
+		24,
+		yres / 2 - desiredHalfHeight
+	);
+	suby2 = std::min(
+		yres - 8,
+		yres / 2 + desiredHalfHeight
+	);
 
 	strcpy(subtext, "Dialogue and Quest Editor");
 
@@ -3561,24 +3578,143 @@ void openQuestDialogueEditor()
 
 static void drawQuestDialogueEditor()
 {
-	const int leftX1 = subx1 + 8;
-	const int leftX2 = subx1 + 210;
-	const int treeX1 = leftX2 + 8;
-	const int treeX2 = subx2 - 238;
-	const int detailX1 = treeX2 + 8;
-	const int detailX2 = subx2 - 8;
+	const int contentX1 = subx1 + 8;
+	const int contentX2 = subx2 - 8;
 	const int panelY1 = suby1 + 24;
 	const int panelY2 = suby2 - 34;
+	const int panelGap = 6;
+	const int characterWidth = 8;
+
+	int longestFilenameCharacters =
+		static_cast<int>(
+			strlen("Dialogue JSON Files")
+		);
+
+	for ( const std::string& filename :
+		questDialogueEditorFiles )
+	{
+		longestFilenameCharacters =
+			std::max(
+				longestFilenameCharacters,
+				static_cast<int>(filename.size())
+			);
+	}
+
+	int longestDetailCharacters =
+		static_cast<int>(
+			strlen("Quest / Node Details")
+		);
+
+	const std::string detailWidthSamples[] =
+	{
+		"File: " + questDialogueEditorPreview.filename,
+		"Quest ID: " + questDialogueEditorPreview.questID,
+		"Title: " + questDialogueEditorPreview.title,
+		"Scope: " + questDialogueEditorPreview.scope,
+		"Giver marker: Follow NPC",
+		"NPC persistent ID: "
+			+ std::to_string(
+				questDialogueEditorPreview.originNPCPersistentID
+			)
+	};
+
+	for ( const std::string& sample :
+		detailWidthSamples )
+	{
+		longestDetailCharacters =
+			std::max(
+				longestDetailCharacters,
+				static_cast<int>(sample.size())
+			);
+	}
+
+	const int minimumFileListWidth = 132;
+	const int maximumFileListWidth = 236;
+	const int minimumToolboxWidth = 202;
+	const int minimumDetailWidth = 210;
+	const int maximumDetailWidth = 300;
+	const int minimumTreeWidth = 205;
+
+	int fileListWidth =
+		std::max(
+			minimumFileListWidth,
+			std::min(
+				maximumFileListWidth,
+				longestFilenameCharacters
+					* characterWidth + 20
+			)
+		);
+
+	const int toolboxWidth =
+		minimumToolboxWidth;
+
+	int detailWidth =
+		std::max(
+			minimumDetailWidth,
+			std::min(
+				maximumDetailWidth,
+				longestDetailCharacters
+					* characterWidth + 20
+			)
+		);
+
+	const int availableWidth =
+		contentX2 - contentX1;
+
+	int requestedWidth =
+		fileListWidth
+		+ toolboxWidth
+		+ detailWidth
+		+ minimumTreeWidth
+		+ panelGap * 3;
+
+	if ( requestedWidth > availableWidth )
+	{
+		int overflow =
+			requestedWidth - availableWidth;
+
+		const int detailReduction =
+			std::min(
+				overflow,
+				detailWidth - minimumDetailWidth
+			);
+
+		detailWidth -= detailReduction;
+		overflow -= detailReduction;
+
+		const int fileReduction =
+			std::min(
+				overflow,
+				fileListWidth - minimumFileListWidth
+			);
+
+		fileListWidth -= fileReduction;
+	}
+
+	const int fileX1 = contentX1;
+	const int fileX2 = fileX1 + fileListWidth;
+
+	const int leftX1 = fileX2 + panelGap;
+	const int leftX2 = leftX1 + toolboxWidth;
+
+	const int detailX2 = contentX2;
+	const int detailX1 = detailX2 - detailWidth;
+
+	const int treeX1 = leftX2 + panelGap;
+	const int treeX2 = detailX1 - panelGap;
+
 	const int toolboxX1 = leftX1 + 6;
 	const int toolboxX2 = leftX2 - 6;
 	const int toolboxY1 = panelY1 + 22;
 	const int toolboxButtonWidth =
 		(toolboxX2 - toolboxX1 - 4) / 2;
 	const int toolboxRowHeight = 19;
-	const int fileListTitleY = panelY1 + 300;
-	const int fileListY1 = fileListTitleY + 18;
+
+	const int fileListTitleY = panelY1 + 6;
+	const int fileListY1 = panelY1 + 24;
 
 	drawDepressed(leftX1, panelY1, leftX2, panelY2);
+	drawDepressed(fileX1, panelY1, fileX2, panelY2);
 	drawDepressed(treeX1, panelY1, treeX2, panelY2);
 	drawDepressed(detailX1, panelY1, detailX2, panelY2);
 
@@ -3617,6 +3753,204 @@ static void drawQuestDialogueEditor()
 			}
 
 			return false;
+		};
+
+	auto dialogueEditorClippedText =
+		[characterWidth](
+			const std::string& value,
+			const int availablePixels
+		) -> std::string
+		{
+			const int maximumCharacters =
+				std::max(
+					0,
+					availablePixels / characterWidth
+				);
+
+			if ( static_cast<int>(value.size())
+				<= maximumCharacters )
+			{
+				return value;
+			}
+
+			if ( maximumCharacters <= 3 )
+			{
+				return value.substr(
+					0,
+					maximumCharacters
+				);
+			}
+
+			return value.substr(
+				0,
+				maximumCharacters - 3
+			) + "...";
+		};
+
+	auto dialogueEditorWrappedLines =
+		[characterWidth](
+			const std::string& value,
+			const int availablePixels,
+			const int maximumLines
+		) -> std::vector<std::string>
+		{
+			std::vector<std::string> lines;
+
+			const int maximumCharacters =
+				std::max(
+					1,
+					availablePixels / characterWidth
+				);
+
+			std::string current;
+			std::string word;
+
+			auto flushWord =
+				[
+					&lines,
+					&current,
+					&word,
+					maximumCharacters,
+					maximumLines
+				]()
+				{
+					if ( word.empty()
+						|| static_cast<int>(lines.size())
+							>= maximumLines )
+					{
+						word.clear();
+						return;
+					}
+
+					while ( static_cast<int>(word.size())
+						> maximumCharacters
+						&& static_cast<int>(lines.size())
+							< maximumLines )
+					{
+						if ( !current.empty() )
+						{
+							lines.push_back(current);
+							current.clear();
+						}
+
+						lines.push_back(
+							word.substr(
+								0,
+								maximumCharacters
+							)
+						);
+
+						word.erase(
+							0,
+							maximumCharacters
+						);
+					}
+
+					if ( static_cast<int>(lines.size())
+						>= maximumLines )
+					{
+						word.clear();
+						return;
+					}
+
+					if ( current.empty() )
+					{
+						current = word;
+					}
+					else if ( static_cast<int>(
+						current.size()
+						+ 1
+						+ word.size()
+					) <= maximumCharacters )
+					{
+						current += " " + word;
+					}
+					else
+					{
+						lines.push_back(current);
+						current = word;
+					}
+
+					word.clear();
+				};
+
+			for ( const char character : value )
+			{
+				if ( character == '\n' )
+				{
+					flushWord();
+
+					if ( !current.empty()
+						&& static_cast<int>(lines.size())
+							< maximumLines )
+					{
+						lines.push_back(current);
+						current.clear();
+					}
+
+					continue;
+				}
+
+				if ( character == ' '
+					|| character == '	' )
+				{
+					flushWord();
+				}
+				else
+				{
+					word.push_back(character);
+				}
+			}
+
+			flushWord();
+
+			if ( !current.empty()
+				&& static_cast<int>(lines.size())
+					< maximumLines )
+			{
+				lines.push_back(current);
+			}
+
+			if ( lines.empty() )
+			{
+				lines.push_back("");
+			}
+
+			return lines;
+		};
+
+	auto dialogueEditorDrawWrappedText =
+		[
+			&dialogueEditorWrappedLines
+		](
+			const int x,
+			int& y,
+			const int width,
+			const std::string& value,
+			const int maximumLines,
+			const Uint32 color
+		)
+		{
+			const std::vector<std::string> lines =
+				dialogueEditorWrappedLines(
+					value,
+					width,
+					maximumLines
+				);
+
+			for ( const std::string& line : lines )
+			{
+				printTextFormattedColor(
+					font8x8_bmp,
+					x,
+					y,
+					color,
+					"%s",
+					line.c_str()
+				);
+
+				y += 12;
+			}
 		};
 
 	printText(
@@ -3965,7 +4299,7 @@ static void drawQuestDialogueEditor()
 
 	printText(
 		font8x8_bmp,
-		leftX1 + 6,
+		fileX1 + 6,
 		fileListTitleY,
 		"Dialogue JSON Files"
 	);
@@ -4024,24 +4358,30 @@ static void drawQuestDialogueEditor()
 		if ( index == questDialogueEditorSelectedFile )
 		{
 			drawDepressed(
-				leftX1 + 4,
+				fileX1 + 4,
 				y - 2,
-				leftX2 - 4,
+				fileX2 - 4,
 				y + 12
 			);
 		}
 
+		const std::string clippedFilename =
+			dialogueEditorClippedText(
+				questDialogueEditorFiles[index],
+				fileX2 - fileX1 - 16
+			);
+
 		printTextFormatted(
 			font8x8_bmp,
-			leftX1 + 8,
+			fileX1 + 8,
 			y,
 			"%s",
-			questDialogueEditorFiles[index].c_str()
+			clippedFilename.c_str()
 		);
 
 		if ( mousestatus[SDL_BUTTON_LEFT]
-			&& omousex >= leftX1 + 4
-			&& omousex < leftX2 - 4
+			&& omousex >= fileX1 + 4
+			&& omousex < fileX2 - 4
 			&& omousey >= y - 2
 			&& omousey < y + 14 )
 		{
@@ -4081,14 +4421,32 @@ static void drawQuestDialogueEditor()
 				);
 			}
 
-			printTextFormatted(
-				font8x8_bmp,
-				treeX1 + 8,
-				treeY,
-				"[Node %d] %.26s",
-				node.id,
-				node.text.c_str()
-			);
+			const std::string nodeLabel =
+				"[Node "
+				+ std::to_string(node.id)
+				+ "] "
+				+ node.text;
+
+			const std::vector<std::string> nodeLines =
+				dialogueEditorWrappedLines(
+					nodeLabel,
+					treeX2 - treeX1 - 16,
+					3
+				);
+
+			for ( const std::string& line :
+				nodeLines )
+			{
+				printTextFormatted(
+					font8x8_bmp,
+					treeX1 + 8,
+					treeY,
+					"%s",
+					line.c_str()
+				);
+
+				treeY += 12;
+			}
 
 			if ( mousestatus[SDL_BUTTON_LEFT]
 				&& omousex >= treeX1 + 4
@@ -4102,7 +4460,7 @@ static void drawQuestDialogueEditor()
 				questDialogueEditorSelectedChoice = -1;
 			}
 
-			treeY += 16;
+			treeY += 4;
 
 			for ( size_t choiceIndex = 0;
 				choiceIndex < node.choices.size();
@@ -4126,15 +4484,36 @@ static void drawQuestDialogueEditor()
 					);
 				}
 
-				printTextFormattedColor(
-					font8x8_bmp,
-					treeX1 + 20,
-					treeY,
-					makeColorRGB(255, 230, 96),
-					"-> %.19s [next %d]",
-					node.choices[choiceIndex].c_str(),
-					node.nextNodes[choiceIndex]
-				);
+				const std::string choiceLabel =
+					"-> "
+					+ node.choices[choiceIndex]
+					+ " [next "
+					+ std::to_string(
+						node.nextNodes[choiceIndex]
+					)
+					+ "]";
+
+				const std::vector<std::string> choiceLines =
+					dialogueEditorWrappedLines(
+						choiceLabel,
+						treeX2 - treeX1 - 28,
+						3
+					);
+
+				for ( const std::string& line :
+					choiceLines )
+				{
+					printTextFormattedColor(
+						font8x8_bmp,
+						treeX1 + 20,
+						treeY,
+						makeColorRGB(255, 230, 96),
+						"%s",
+						line.c_str()
+					);
+
+					treeY += 12;
+				}
 
 				if ( mousestatus[SDL_BUTTON_LEFT]
 					&& omousex >= treeX1 + 16
@@ -4149,10 +4528,10 @@ static void drawQuestDialogueEditor()
 						static_cast<int>(choiceIndex);
 				}
 
-				treeY += 16;
+				treeY += 2;
 			}
 
-			treeY += 4;
+			treeY += 6;
 		}
 	}
 	else
@@ -4182,8 +4561,11 @@ static void drawQuestDialogueEditor()
 		font8x8_bmp,
 		detailX1 + 8,
 		detailY,
-		"Quest ID: %.20s",
-		questDialogueEditorPreview.questID.c_str()
+		"Quest ID: %s",
+		dialogueEditorClippedText(
+			questDialogueEditorPreview.questID,
+			detailX2 - detailX1 - 80
+		).c_str()
 	);
 	detailY += 16;
 
@@ -4195,6 +4577,25 @@ static void drawQuestDialogueEditor()
 		questDialogueEditorPreview.title.c_str()
 	);
 	detailY += 16;
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		detailX1 + 8,
+		detailY,
+		makeColorRGB(255, 230, 96),
+		"Summary:"
+	);
+	detailY += 12;
+
+	dialogueEditorDrawWrappedText(
+		detailX1 + 12,
+		detailY,
+		detailX2 - detailX1 - 24,
+		questDialogueEditorPreview.summary,
+		6,
+		makeColorRGB(224, 224, 224)
+	);
+	detailY += 6;
 
 	printTextFormatted(
 		font8x8_bmp,
@@ -4319,6 +4720,25 @@ static void drawQuestDialogueEditor()
 		);
 		detailY += 16;
 
+		printTextFormattedColor(
+			font8x8_bmp,
+			detailX1 + 8,
+			detailY,
+			makeColorRGB(255, 230, 96),
+			"Node text:"
+		);
+		detailY += 12;
+
+		dialogueEditorDrawWrappedText(
+			detailX1 + 12,
+			detailY,
+			detailX2 - detailX1 - 24,
+			node.text,
+			5,
+			makeColorRGB(224, 224, 224)
+		);
+		detailY += 6;
+
 		printTextFormatted(
 			font8x8_bmp,
 			detailX1 + 8,
@@ -4365,6 +4785,31 @@ static void drawQuestDialogueEditor()
 				questDialogueEditorChoiceActionName().c_str()
 			);
 			detailY += 24;
+
+			if ( questDialogueEditorSelectedChoice
+				< static_cast<int>(node.choices.size()) )
+			{
+				printTextFormattedColor(
+					font8x8_bmp,
+					detailX1 + 8,
+					detailY,
+					makeColorRGB(255, 230, 96),
+					"Choice text:"
+				);
+				detailY += 12;
+
+				dialogueEditorDrawWrappedText(
+					detailX1 + 12,
+					detailY,
+					detailX2 - detailX1 - 24,
+					node.choices[
+						questDialogueEditorSelectedChoice
+					],
+					5,
+					makeColorRGB(255, 230, 96)
+				);
+				detailY += 6;
+			}
 		}
 	}
 
@@ -4425,7 +4870,7 @@ static void drawQuestDialogueEditor()
 			subx1 + 10,
 			suby2 - 22,
 			makeColorRGB(192, 192, 192),
-			"Tools are grouped on the left; files are listed below the toolbox."
+			"Long summaries, node text, and choices wrap across multiple readable lines."
 		);
 	}
 }

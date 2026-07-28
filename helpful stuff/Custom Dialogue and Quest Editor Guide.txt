@@ -44,15 +44,20 @@ Example:
 
 Open an NPC's sprite properties and use the custom-dialogue EDIT button.
 
-The editor has three main areas:
+The editor has four separate columns:
 
-    Left:
-        Vertical toolbox and JSON file list.
+    JSON Files:
+        The far-left file list. Keeping it separate prevents filenames
+        from overlapping buttons.
 
-    Center:
-        Dialogue decision tree, nodes, choices, and next-node links.
+    Toolbox:
+        Vertical paired controls immediately to the right of the file
+        list.
 
-    Right:
+    Decision Tree:
+        Dialogue nodes, choices, and next-node links.
+
+    Quest / Node Details:
         Quest metadata, selected node details, conditions, and actions.
 
 
@@ -498,3 +503,36 @@ The editor still needs expanded controls for:
 - confirmation prompts,
 - scrolling details panel,
 - improved visual graph layout.
+
+
+
+Dynamic column sizing
+---------------------
+The editor measures current filenames and quest metadata when drawing
+the window:
+
+- JSON Files grows for the longest filename.
+- Toolbox keeps enough width for paired controls.
+- Quest / Node Details grows for longer metadata.
+- Decision Tree receives the remaining width.
+
+Columns have minimum and maximum sizes so the complete editor stays
+inside the subwindow. Text that is still too long is shortened with
+"..." rather than overflowing into another column.
+
+
+
+Multiline readability
+---------------------
+The dialogue editor uses more of the available screen and wraps long
+text instead of only clipping it.
+
+- Quest summaries are displayed across multiple lines.
+- Selected node text is shown in full in the details panel.
+- Selected choice text is shown across multiple lines.
+- Decision-tree node and choice labels wrap to several lines.
+- Extremely long text remains safely contained inside its panel.
+
+The full JSON value is preserved when editing even when only part of it
+fits inside the small toolbox input bar. The right-side details panel is
+the readable multiline preview.
