@@ -1222,6 +1222,26 @@ bool getCustomDialogueQuestJournalEntries(
     std::vector<CustomDialogueQuestJournalEntry>& entries
 );
 
+
+bool getCustomDialogueQuestJournalEntriesByStatus(
+    const int player,
+    const CustomDialogueQuestJournalStatus status,
+    std::vector<CustomDialogueQuestJournalEntry>& entries
+);
+
+bool getCustomDialogueQuestJournalCounts(
+    const int player,
+    Sint32& activeCount,
+    Sint32& completedCount,
+    Sint32& failedCount
+);
+
+bool getCustomDialogueQuestJournalEntry(
+    const int player,
+    const std::string& questID,
+    CustomDialogueQuestJournalEntry& result
+);
+
 bool getCustomDialogueQuestObjectives(
     const std::string& dialogueID,
     std::vector<std::string>& objectiveIDs,

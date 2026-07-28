@@ -267,6 +267,14 @@ static std::unordered_map<
     CustomDialogueDefinition
 > customDialogueDefinitionCache;
 
+/*
+ * Quest-manifest loading is attempted once per active process.
+ * The manifest preloads authored dialogue definitions so the journal
+ * does not depend on which NPC happened to be opened first.
+ */
+static bool customDialogueQuestManifestLoadAttempted = false;
+static bool customDialogueQuestManifestLoaded = false;
+
 struct PendingCustomDialogueChoiceState
 {
 	bool active = false;
@@ -2917,12 +2925,222 @@ getCustomDialogueDefinition(
 
 
 
+
+static bool preloadCustomDialogueQuestManifest()
+{
+    if ( customDialogueQuestManifestLoadAttempted )
+    {
+        return customDialogueQuestManifestLoaded;
+    }
+
+    customDialogueQuestManifestLoadAttempted = true;
+
+    const std::string relativeManifestPath =
+        "dialogue/quests.json";
+
+    const std::string dataManifestPath =
+        "data/dialogue/quests.json";
+
+    std::string realPath;
+
+    if ( const char* realDirectory =
+            PHYSFS_getRealDir(
+                relativeManifestPath.c_str()
+            ) )
+    {
+        realPath = realDirectory;
+
+        if ( !realPath.empty()
+            && realPath.back() != '/'
+            && realPath.back() != '\\' )
+        {
+            realPath += PHYSFS_getDirSeparator();
+        }
+
+        realPath += relativeManifestPath;
+    }
+    else if ( const char* realDirectory =
+            PHYSFS_getRealDir(
+                dataManifestPath.c_str()
+            ) )
+    {
+        realPath = realDirectory;
+
+        if ( !realPath.empty()
+            && realPath.back() != '/'
+            && realPath.back() != '\\' )
+        {
+            realPath += PHYSFS_getDirSeparator();
+        }
+
+        realPath += dataManifestPath;
+    }
+    else
+    {
+        const std::string datadirRoot =
+            datadir && datadir[0]
+                ? datadir
+                : "./";
+
+        const std::string directRelativePath =
+            datadirRoot
+            + "/dialogue/quests.json";
+
+        const std::string directDataPath =
+            datadirRoot
+            + "/data/dialogue/quests.json";
+
+        File* testFile =
+            FileIO::open(
+                directRelativePath.c_str(),
+                "rb"
+            );
+
+        if ( testFile )
+        {
+            FileIO::close(testFile);
+            realPath = directRelativePath;
+        }
+        else
+        {
+            testFile =
+                FileIO::open(
+                    directDataPath.c_str(),
+                    "rb"
+                );
+
+            if ( testFile )
+            {
+                FileIO::close(testFile);
+                realPath = directDataPath;
+            }
+        }
+    }
+
+    if ( realPath.empty() )
+    {
+        printlog(
+            "[Custom Dialogue] Quest manifest not found; journal will use already-loaded definitions."
+        );
+
+        return false;
+    }
+
+    File* file =
+        FileIO::open(
+            realPath.c_str(),
+            "rb"
+        );
+
+    if ( !file )
+    {
+        printlog(
+            "[Custom Dialogue] Quest manifest could not be opened: '%s'.",
+            realPath.c_str()
+        );
+
+        return false;
+    }
+
+    constexpr size_t maximumFileLength =
+        64 * 1024;
+
+    char buffer[maximumFileLength + 1];
+
+    const size_t bytesRead =
+        file->read(
+            buffer,
+            sizeof(char),
+            maximumFileLength
+        );
+
+    FileIO::close(file);
+
+    if ( bytesRead == 0 )
+    {
+        printlog(
+            "[Custom Dialogue] Quest manifest '%s' is empty.",
+            realPath.c_str()
+        );
+
+        return false;
+    }
+
+    buffer[bytesRead] = '\0';
+
+    rapidjson::Document document;
+    document.Parse(buffer);
+
+    if ( document.HasParseError()
+        || !document.IsObject()
+        || !document.HasMember("version")
+        || !document["version"].IsInt()
+        || document["version"].GetInt() != 1
+        || !document.HasMember("dialogues")
+        || !document["dialogues"].IsArray() )
+    {
+        printlog(
+            "[Custom Dialogue] Quest manifest '%s' is invalid.",
+            realPath.c_str()
+        );
+
+        return false;
+    }
+
+    const rapidjson::Value& dialogues =
+        document["dialogues"];
+
+    size_t validDefinitions = 0;
+
+    for ( rapidjson::SizeType index = 0;
+        index < dialogues.Size();
+        ++index )
+    {
+        if ( !dialogues[index].IsString() )
+        {
+            printlog(
+                "[Custom Dialogue] Quest manifest entry %u is not a string.",
+                static_cast<unsigned int>(index)
+            );
+
+            continue;
+        }
+
+        const std::string dialogueID =
+            normalizeCustomDialogueID(
+                dialogues[index].GetString()
+            );
+
+        if ( dialogueID.empty() )
+        {
+            continue;
+        }
+
+        if ( getCustomDialogueDefinition(dialogueID) )
+        {
+            ++validDefinitions;
+        }
+    }
+
+    customDialogueQuestManifestLoaded = true;
+
+    printlog(
+        "[Custom Dialogue] Quest manifest loaded %zu valid dialogue definition(s) from '%s'.",
+        validDefinitions,
+        realPath.c_str()
+    );
+
+    return true;
+}
+
 bool getCustomDialogueQuestJournalEntries(
     const int player,
     std::vector<CustomDialogueQuestJournalEntry>& entries
 )
 {
     entries.clear();
+
+    preloadCustomDialogueQuestManifest();
 
     if ( player < 0
         || player >= MAXPLAYERS )
@@ -3136,6 +3354,126 @@ bool getCustomDialogueQuestJournalEntries(
     );
 
     return true;
+}
+
+
+bool getCustomDialogueQuestJournalEntriesByStatus(
+    const int player,
+    const CustomDialogueQuestJournalStatus status,
+    std::vector<CustomDialogueQuestJournalEntry>& entries
+)
+{
+    std::vector<CustomDialogueQuestJournalEntry>
+        allEntries;
+
+    entries.clear();
+
+    if ( !getCustomDialogueQuestJournalEntries(
+            player,
+            allEntries
+        ) )
+    {
+        return false;
+    }
+
+    for ( CustomDialogueQuestJournalEntry& entry :
+        allEntries )
+    {
+        if ( entry.status == status )
+        {
+            entries.push_back(
+                std::move(entry)
+            );
+        }
+    }
+
+    return true;
+}
+
+bool getCustomDialogueQuestJournalCounts(
+    const int player,
+    Sint32& activeCount,
+    Sint32& completedCount,
+    Sint32& failedCount
+)
+{
+    activeCount = 0;
+    completedCount = 0;
+    failedCount = 0;
+
+    std::vector<CustomDialogueQuestJournalEntry>
+        entries;
+
+    if ( !getCustomDialogueQuestJournalEntries(
+            player,
+            entries
+        ) )
+    {
+        return false;
+    }
+
+    for ( const CustomDialogueQuestJournalEntry& entry :
+        entries )
+    {
+        switch ( entry.status )
+        {
+            case CustomDialogueQuestJournalStatus::Active:
+                ++activeCount;
+                break;
+
+            case CustomDialogueQuestJournalStatus::Completed:
+                ++completedCount;
+                break;
+
+            case CustomDialogueQuestJournalStatus::Failed:
+                ++failedCount;
+                break;
+        }
+    }
+
+    return true;
+}
+
+bool getCustomDialogueQuestJournalEntry(
+    const int player,
+    const std::string& rawQuestID,
+    CustomDialogueQuestJournalEntry& result
+)
+{
+    const std::string questID =
+        normalizeCustomDialogueID(
+            rawQuestID
+        );
+
+    if ( questID.empty() )
+    {
+        return false;
+    }
+
+    std::vector<CustomDialogueQuestJournalEntry>
+        entries;
+
+    if ( !getCustomDialogueQuestJournalEntries(
+            player,
+            entries
+        ) )
+    {
+        return false;
+    }
+
+    for ( CustomDialogueQuestJournalEntry& entry :
+        entries )
+    {
+        if ( entry.questID == questID )
+        {
+            result =
+                std::move(entry);
+
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool getCustomDialogueQuestObjectives(
