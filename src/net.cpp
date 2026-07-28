@@ -4064,52 +4064,6 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		spawnDamageGib(uidToEntity(uid), dmg, gib, displayType);
 	}},
 
-	// custom dialogue choice selected by a remote client
-	{'CDSL', []() {
-		if ( multiplayer != SERVER
-			|| net_packet->len < 10 )
-		{
-			return;
-		}
-
-		const int player =
-			static_cast<int>(
-				net_packet->data[4]
-			);
-
-		if ( player <= 0
-			|| player >= MAXPLAYERS
-			|| client_disconnected[player]
-			|| players[player]->isLocalPlayer() )
-		{
-			return;
-		}
-
-		const Uint32 npcUID =
-			SDLNet_Read32(
-				&net_packet->data[5]
-			);
-
-		const int choiceIndex =
-			static_cast<int>(
-				net_packet->data[9]
-			);
-
-		if ( !handleCustomMonsterDialogueChoice(
-				player,
-				npcUID,
-				choiceIndex
-			) )
-		{
-			printlog(
-				"[Custom Dialogue] Host rejected player %d choice index %d for NPC UID %u.",
-				player,
-				choiceIndex,
-				npcUID
-			);
-		}
-	}},
-
 	// ping
 	{'PING', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1117), (SDL_GetTicks() - pingtime));
@@ -8324,6 +8278,89 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	{'KPAL', [](){
 	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
 		client_keepalive[player] = ticks;
+	}},
+
+	// custom dialogue choice selected by a remote client
+	{'CDSL', []() {
+		if ( multiplayer != SERVER
+			|| net_packet->len != 10 )
+		{
+			printlog(
+				"[Custom Dialogue] Rejected malformed CDSL packet length %d.",
+				net_packet->len
+			);
+			return;
+		}
+
+		const int player =
+			static_cast<int>(
+				net_packet->data[4]
+			);
+
+		if ( player <= 0
+			|| player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| !players[player]
+			|| players[player]->isLocalPlayer() )
+		{
+			printlog(
+				"[Custom Dialogue] Rejected CDSL packet with invalid remote player slot %d.",
+				player
+			);
+			return;
+		}
+
+		/*
+		 * For direct-IP/LAN games, verify that the claimed player slot
+		 * matches the UDP endpoint assigned when that client joined.
+		 */
+		if ( directConnect
+			&& (
+				net_packet->address.host
+					!= net_clients[player - 1].host
+				|| net_packet->address.port
+					!= net_clients[player - 1].port
+			) )
+		{
+			printlog(
+				"[Custom Dialogue] Rejected CDSL packet whose endpoint does not match player %d.",
+				player
+			);
+			return;
+		}
+
+		const Uint32 npcUID =
+			SDLNet_Read32(
+				&net_packet->data[5]
+			);
+
+		const int choiceIndex =
+			static_cast<int>(
+				net_packet->data[9]
+			);
+
+		if ( handleCustomMonsterDialogueChoice(
+				player,
+				npcUID,
+				choiceIndex
+			) )
+		{
+			printlog(
+				"[Custom Dialogue] Host accepted player %d choice index %d for NPC UID %u.",
+				player,
+				choiceIndex,
+				npcUID
+			);
+		}
+		else
+		{
+			printlog(
+				"[Custom Dialogue] Host rejected player %d choice index %d for NPC UID %u.",
+				player,
+				choiceIndex,
+				npcUID
+			);
+		}
 	}},
 
 	// ping
