@@ -4561,20 +4561,6 @@ void createHotbar(const int player)
 {
     auto& hotbar_t = players[player]->hotbar;
 
-    if ( hotbar_t.hotbarFrame
-        && !hotbar_t.hotbarFrame->findImage(
-            "magic hotbar card edge"
-        ) )
-    {
-        auto magicCardEdge =
-            hotbar_t.hotbarFrame->addImage(
-                SDL_Rect{ 0, 0, 432, 10 },
-                makeColor(145, 80, 210, 190),
-                "images/system/white.png",
-                "magic hotbar card edge"
-            );
-        magicCardEdge->disabled = false;
-    }
     if ( !hotbar_t.hotbarFrame )
     {
         return;
@@ -5533,8 +5519,8 @@ void Player::HUD_t::updateUINavigation()
         else if ( inputs.hasController(player.playernum) )
         {
             showQuestsButton = true;
-            questsButtonPos.x = leftAlignX;
-            questsButtonPos.y = bottomAlignY + 46;
+            questsButtonPos.x = leftAnchorX;
+            questsButtonPos.y = topAlignY + 54;
         }
 
         if ( showQuestsButton )
@@ -31109,6 +31095,10 @@ namespace CustomDialogueQuestJournalUI
         bool openedStatusScreen = false;
     };
 
+    static void synchronizeCachedFrames(
+        const int player
+    );
+
     static State states[MAXPLAYERS];
 
     /*
@@ -31206,6 +31196,22 @@ namespace CustomDialogueQuestJournalUI
         "quest journal inner bottom right",
         "quest journal inner bottom"
     };
+
+    static bool isOpen(
+        const int player
+    )
+    {
+        if ( player < 0
+            || player >= MAXPLAYERS )
+        {
+            return false;
+        }
+
+        synchronizeCachedFrames(player);
+
+        return states[player].frame
+            && !states[player].frame->isDisabled();
+    }
 
     static const char* statusName(
         const CustomDialogueQuestJournalStatus status
@@ -33341,14 +33347,27 @@ void Player::Inventory_t::processInventory()
 
     bool tooltipWasDisabled = tooltipFrame->isDisabled();
 
-    updateInventory();
+    const bool questJournalOpen =
+        CustomDialogueQuestJournalUI::isOpen(
+            player.playernum
+        );
 
-    player.shopGUI.updateShop();
-
-    if ( tooltipWasDisabled && !tooltipFrame->isDisabled() )
+    if ( !questJournalOpen )
     {
-        tooltipFrame->setOpacity(0.0);
+        updateInventory();
+        player.shopGUI.updateShop();
+
+        if ( tooltipWasDisabled
+            && !tooltipFrame->isDisabled() )
+        {
+            tooltipFrame->setOpacity(0.0);
+        }
     }
+    else
+    {
+        tooltipFrame->setDisabled(true);
+    }
+
     CustomDialogueQuestJournalUI::update(player.playernum);
 
 }
@@ -36896,10 +36915,44 @@ void Player::Hotbar_t::updateHotbar()
         "/magic_hotbar_toggle_mode",
         false
     );
-    static ConsoleVariable<bool> cvar_magic_hotbar_purple_tint(
-        "/magic_hotbar_purple_tint",
-        true
-    );
+    bool inventoryMagicHotbarSwapPressed = false;
+
+    if ( !player.shootmode
+        && player.entity
+        && !player.ghost.isActive() )
+    {
+        if ( inputs.hasController(player.playernum) )
+        {
+            if ( GameController* controller =
+                inputs.getController(player.playernum) )
+            {
+                if ( controller->binaryToggle(
+                        SDL_CONTROLLER_BUTTON_RIGHTSTICK
+                    ) )
+                {
+                    controller->consumeBinaryToggle(
+                        SDL_CONTROLLER_BUTTON_RIGHTSTICK
+                    );
+                    inventoryMagicHotbarSwapPressed = true;
+                }
+            }
+        }
+
+        if ( Input::inputs[player.playernum].binaryToggle(
+                "Magic Hotbar"
+            ) )
+        {
+            Input::inputs[player.playernum].consumeBinaryToggle(
+                "Magic Hotbar"
+            );
+            inventoryMagicHotbarSwapPressed = true;
+        }
+
+        if ( inventoryMagicHotbarSwapPressed )
+        {
+            setMagicHotbarActive(!magicHotbarActive, true);
+        }
+    }
 
     if ( player.shootmode
         && player.entity
@@ -36940,7 +36993,9 @@ void Player::Hotbar_t::updateHotbar()
             magicHotbarToggleLatched = false;
         }
     }
-    else
+    else if ( player.shootmode
+        || !player.entity
+        || player.ghost.isActive() )
     {
         magicHotbarToggleLatched = false;
         setMagicHotbarActive(false, true);
@@ -37039,26 +37094,6 @@ void Player::Hotbar_t::updateHotbar()
     const int hotbarCentreX = (hotbarFrame->getSize().w / 2) + *cvar_hotbar_splitscreen_center_x;
     int hotbarCentreXLeft = hotbarCentreX - 148 + (bCompactView ? hotbarCompactOffsetX : compactDisableLeftRightOffsetX);
     int hotbarCentreXRight = hotbarCentreX + 148 - (bCompactView ? hotbarCompactOffsetX : compactDisableLeftRightOffsetX);
-    if ( auto magicCardEdge =
-        hotbarFrame->findImage("magic hotbar card edge") )
-    {
-        magicCardEdge->disabled = false;
-        magicCardEdge->pos.w =
-            useHotbarFaceMenu ? 432 : 480;
-        magicCardEdge->pos.h = 10;
-        magicCardEdge->pos.x =
-            hotbarCentreX - magicCardEdge->pos.w / 2;
-        magicCardEdge->pos.y =
-            hotbarStartY2
-            - 7
-            - static_cast<int>(
-                8.0 * magicHotbarCardAnimation
-            );
-        magicCardEdge->color =
-            magicHotbarActive
-                ? makeColor(190, 105, 255, 235)
-                : makeColor(120, 70, 170, 170);
-    }
     hotbarStartY1 += animHide * abs(getHotbarStartY1());
     hotbarStartY2 += animHide * abs(getHotbarStartY1());
 
@@ -37207,31 +37242,14 @@ void Player::Hotbar_t::updateHotbar()
 
         if ( auto img = slot->findImage("slot img") ) // apply any opacity from config
         {
-            Uint8 r = 255;
-            Uint8 g = 255;
-            Uint8 b = 255;
-            Uint8 a = hotbarSlotOpacity;
-
             const bool lockedMagicSlot =
                 magicHotbarActive
                 && num < 9
                 && !isMagicHotbarSlotUnlocked(num);
 
-            if ( magicHotbarActive
-                && *cvar_magic_hotbar_purple_tint )
-            {
-                r = lockedMagicSlot ? 72 : 190;
-                g = lockedMagicSlot ? 58 : 128;
-                b = lockedMagicSlot ? 88 : 255;
-            }
-            else if ( lockedMagicSlot )
-            {
-                r = 70;
-                g = 70;
-                b = 70;
-            }
-
-            img->color = makeColor(r, g, b, a);
+            img->color = lockedMagicSlot
+                ? makeColor(70, 70, 70, hotbarSlotOpacity)
+                : makeColor(255, 255, 255, hotbarSlotOpacity);
         }
         if ( highlightSlotImg )
         {

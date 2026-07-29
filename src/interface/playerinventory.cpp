@@ -3162,7 +3162,10 @@ void releaseChestItem(const int player)
 			playSound(139, 64); // click sound
 		}
 	}
-	else if ( itemCategory(selectedItem) == SPELL_CAT || mouseInInventory || mouseInChest )
+	else if ( (itemCategory(selectedItem) == SPELL_CAT
+			&& !players[player]->hotbar.magicHotbarActive)
+		|| mouseInInventory
+		|| mouseInChest )
 	{
 		//Outside inventory. Spells can't be dropped.
 		//If mouseInInventory, we dropped onto a slot frame area and the item should return to where it was
@@ -3179,6 +3182,16 @@ void releaseChestItem(const int player)
 		hotbar_slot_t* slot = getCurrentHotbarUnderMouse(player, &slotNum);
 		if ( slot )
 		{
+			if ( players[player]->hotbar.magicHotbarActive
+				&& itemCategory(selectedItem) != SPELL_CAT )
+			{
+				selectedItem = nullptr;
+				inputs.getUIInteraction(player)->selectedItemFromChest = 0;
+				toggleclick = false;
+				playSoundPlayer(player, 90, 64);
+				return;
+			}
+
 			//Add item to hotbar.
 			int oldItemQty = 0;
 			int destItemQty = 0;
