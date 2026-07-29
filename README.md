@@ -1,38 +1,65 @@
-![Linux-CI_fmod_steam](https://github.com/TurningWheel/Barony/workflows/Linux-CI_fmod_steam/badge.svg) ![Linux-CI_fmod_steam_eos](https://github.com/TurningWheel/Barony/workflows/Linux-CI_fmod_steam_eos/badge.svg)
+# Barony Automatia
 
-# Update - 3rd October 2023
+Barony Automatia is a custom Barony source-code project focused on expanding the map editor, persistent-world support, custom map travel, dialogue and quest tools, controller usability, and additional gameplay systems.
 
-The current 'develop' branch contains in-development features for our latest update. For bugfixes + PRs, open them against 'master'.
+## Main Features
 
-# Compilation Instructions
+- Up to 32 map layers
+- New layered-map format with compatibility for older maps
+- Two-way custom exits with persistent destination IDs
+- Persistent entity IDs generated on map save
+- Session-based persistent world changes across map travel
+- Persistent destructible decorations and mechanisms
+- Custom NPC dialogue and quest systems
+- Branching choices, requirements, and NPC actions
+- Enemy squads and named elite enemies
+- Configurable map fog
+- Improved editor 3D camera controls and decoration previews
+- Progressive nine-slot magic hotbar
+- Controller and keyboard/mouse magic-hotbar support
+- Pit warning, voluntary falling, blind falling, and knockback falling
+- Held-orb lighting
+- Custom multiplayer travel behavior
 
-The compilation instructions can be found in [INSTALL.md](INSTALL.md)
+## Current Development Status
 
-# Open-source Announcement Letter
+Most major editor, travel, persistence, dialogue, and gameplay foundations are implemented.
 
-Well here it is, as promised: the open source release of Barony. Keep in mind you still need a purchased copy of Barony to play this. I'd recommend that you thumb through all of the included text files to get a feeling of other things you'll need to build the game and check out the included licenses as well.
+Still experimental or incomplete:
 
-Many thanks go to Ciprian Elies for his original contributions to the game code, as well as for the build systems, config files, and support libraries that he developed for the project over the years. In the future, he plans to head up development on some new stuff for Barony, so keep an eye out for that.
+- Flame-specific editor culling remains unfinished
+- Temporary diagnostic logging still needs cleanup
+- Cross-session and cross-map global quest checks require a dedicated save system
+- Wider regression testing is still required
 
-This project was a first for both of us in many ways and it shows. Since all of the original code was written in C and hastily converted to C++ in the past few months, experienced C++ programmers may be horrified at some of the kludge we had to write to get some of the more basic systems working properly. There's not a lot of module organization either since I didn't understand how to properly write projects that scale when I started the code three years ago. Prepare to deal with lots of global variables that get used all over the project indiscriminately.
+## Building
 
-Despite the project's shortcomings, I'm reasonably proud of how the end product turned out. Writing good games is about more than just writing good code, though I guarantee we'll be taking all of the lessons learned from Barony into our next project.
+Typical Linux build commands:
 
-I'm not sure how many people will be interested in working on this, and it may take a while for anything substantial to get going here, but I'd be pleased to see some coordinated efforts take place on this code sometime in the coming years.
+```bash
+cmake --build build --target barony -j1
+cmake --build build --target editor -j1
+```
 
-Some project ideas:
+## Documentation
 
- * Add an extra hard mode to the game.
- * Add a dungeon with infinite levels.
- * Create a dedicated server.
- * Multithread the packet handler.
- * Multithread the entity logic.
- * Add script support for entities and items.
- * Add persistent levels and servers.
- * Add fully 3D physics and world geometry.
- * Renovate the OpenGL code to a modern standard.
+A detailed player and map-maker guide is included at:
 
-Have fun,
+```text
+helpful stuff/Barony Automatia Complete Features Guide.txt
+```
 
-Sheridan
-June 27th 2016
+It explains how the custom features work, how they are used, current limitations, multiplayer notes, and development status without describing the C++ implementation.
+
+## Compatibility Notes
+
+- New maps default to the expanded layered format.
+- Older Barony maps remain loadable and default to three layers.
+- Some custom properties require newer Automatia map versions.
+- Automatia-specific maps may not work correctly in an unmodified Barony build.
+- Persistent-world state is primarily session-based unless a feature explicitly saves into a normal game save.
+- Custom multiplayer features should be tested with both host and client.
+
+## License
+
+Barony Automatia is based on the Barony source project. And is open sourced. 

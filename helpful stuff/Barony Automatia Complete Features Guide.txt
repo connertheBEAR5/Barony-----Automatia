@@ -1,0 +1,729 @@
+BARONY AUTOMATIA COMPLETE FEATURES GUIDE
+========================================
+
+PURPOSE
+-------
+
+This guide explains the custom features in Barony Automatia from the viewpoint
+of players, map makers, and campaign creators.
+
+It explains what each feature does, how it is intended to be used, important
+limitations, multiplayer notes, and current status.
+
+It does not explain the internal C++ implementation.
+
+
+======================================================================
+1. EXPANDED 32-LAYER MAPS
+======================================================================
+
+Status: Implemented and working.
+
+Automatia maps can use up to 32 tile layers instead of the original three.
+
+This supports:
+
+- Taller rooms
+- Multi-level structures
+- Bridges
+- Overhead decorations
+- Deep pits
+- Towers
+- Vertical terrain
+- More detailed environments
+
+New maps default to 32 layers.
+
+Older Barony maps remain supported. They load with their original three layers,
+with empty air available above them.
+
+Limitations:
+
+- Maps using layers above the original range require an Automatia-compatible
+  build.
+- Flame-specific visibility and culling still require more work.
+- Broad regression testing across original maps is still planned.
+
+
+======================================================================
+2. AUTOMATIA MAP FORMAT
+======================================================================
+
+Status: Implemented.
+
+Newer map versions save additional Automatia properties such as:
+
+- Layer count
+- Persistent IDs
+- Custom exit IDs
+- Additional mechanism properties
+- Special power-crystal settings
+
+Older Barony map formats are detected and loaded automatically.
+
+
+======================================================================
+3. CUSTOM TWO-WAY MAP EXITS
+======================================================================
+
+Status: Implemented and multiplayer-tested.
+
+Each custom exit has:
+
+- This Exit ID
+- Destination Exit ID
+
+When used, the destination map finds the matching ID and places the party at
+that exit.
+
+This allows:
+
+- Two-way travel
+- Multiple entrances to one map
+- Nonlinear campaigns
+- Returning to earlier areas
+- Consistent arrival positions
+
+Multiplayer:
+
+- The host controls travel.
+- Clients arrive with the host instead of returning to Player Start.
+
+Limitations:
+
+- Both maps must use correct matching IDs.
+- Duplicate or incorrect IDs can send players to the wrong entrance.
+
+
+======================================================================
+4. PERSISTENT ENTITY IDS
+======================================================================
+
+Status: Implemented.
+
+Persistent entities receive stable IDs when the map is saved.
+
+The first save assigns missing IDs. Later saves keep the same IDs.
+
+These IDs allow the game to remember whether a particular object was:
+
+- Destroyed
+- Activated
+- Used
+- Opened
+- Disabled
+- Changed
+
+Map-maker note:
+
+Save the map after placing new persistent objects before testing persistence.
+
+
+======================================================================
+5. SESSION-BASED PERSISTENT WORLD
+======================================================================
+
+Status: Implemented for many entity types.
+
+When players leave a map and return during the same session, many changes remain
+instead of resetting.
+
+Examples:
+
+- Destroyed decorations stay destroyed
+- Used mechanisms retain their state
+- Broken crystals stay broken
+- Traps remember whether they fired
+- Furniture remembers destruction
+- Some tile changes remain applied
+
+Current limitation:
+
+Persistence is mainly session-based. A full global cross-session world-save
+system is still planned.
+
+
+======================================================================
+6. PERSISTENT DECORATIONS AND FURNITURE
+======================================================================
+
+Status: Implemented.
+
+Supported examples include:
+
+- Decorative objects
+- Collider decorations
+- Tables
+- Chairs
+- Power crystals
+- Special furniture
+
+Known limitation:
+
+Randomly generated chairs or attached items may still return depending on how
+the original entity creates them.
+
+
+======================================================================
+7. PERSISTENT DOORS
+======================================================================
+
+Status: Implemented with an accepted limitation.
+
+Destroyed doors remain destroyed after leaving and returning.
+
+Limitation:
+
+The frame may disappear with the door. Preserving the frame caused rotation and
+collision problems, so the safer behavior was kept.
+
+
+======================================================================
+8. POWER CRYSTALS
+======================================================================
+
+Status: Implemented.
+
+Power crystals can remember:
+
+- Destruction
+- Orientation
+- Activation state
+- Whether circuit power is required
+
+A crystal can begin inactive and activate only after receiving circuit power.
+
+These extra properties require a newer Automatia map version.
+
+
+======================================================================
+9. TRAPS AND BOULDERS
+======================================================================
+
+Status: Implemented.
+
+The system can remember:
+
+- Trap activation
+- Whether a boulder trap fired
+- Spawned boulder state
+
+Known limitation:
+
+Some directional traps with certain refire values may fire one extra time after
+leaving and returning.
+
+
+======================================================================
+10. SIGNAL TIMERS AND CONTROLLERS
+======================================================================
+
+Status: Implemented.
+
+Signal timers and controllers can restore persistent mechanism state.
+
+Useful for:
+
+- Permanent switches
+- Multi-map puzzles
+- One-time events
+- Persistent doors and devices
+
+
+======================================================================
+11. BELLS
+======================================================================
+
+Status: Implemented with a loot limitation.
+
+Bells remember their destroyed or used state.
+
+Known limitation:
+
+Scrap created when a bell breaks may duplicate after returning. The long-term
+fix is tied to dynamic dropped-item persistence.
+
+
+======================================================================
+12. SINKS AND FOUNTAINS
+======================================================================
+
+Status: Implemented.
+
+Supported sinks and fountains remember their used or changed state when the
+party leaves and returns.
+
+
+======================================================================
+13. FIREPLACES AND SPECIAL FURNITURE
+======================================================================
+
+Status: Implemented.
+
+Examples include:
+
+- Fireplaces
+- Arcane beds
+- Arcane chairs
+- Other supported special furniture
+
+
+======================================================================
+14. WALL LOCKS AND TILE CHANGES
+======================================================================
+
+Status: Partially implemented and still being tested.
+
+Planned or active areas include:
+
+- Wall locks
+- Persistent tile changes
+- Wall builders
+- Wall busters
+- Permanent puzzle changes
+
+
+======================================================================
+15. PEDESTALS, SOCKETS, AND RECEPTORS
+======================================================================
+
+Status: Part of the persistence roadmap.
+
+These systems are intended to remember:
+
+- Inserted items
+- Activation
+- Puzzle completion
+- Permanent power state
+
+
+======================================================================
+16. CHESTS, CONTAINERS, AND SHOPKEEPERS
+======================================================================
+
+Status: Continuing roadmap work.
+
+The goal is for containers and merchants to remember meaningful changes such
+as removed items or altered inventory.
+
+Dynamic dropped-item persistence is still a later stage.
+
+
+======================================================================
+17. CUSTOM NPC DIALOGUE
+======================================================================
+
+Status: Major foundations implemented.
+
+Map creators can define NPC dialogue from the editor.
+
+Supported ideas include:
+
+- Custom text
+- Multiple responses
+- Branching conversations
+- Requirement checks
+- Persistent choices
+- Quest conditions
+- Actions after dialogue
+
+Example choices:
+
+- Yes, what is it?
+- Maybe, for a price.
+- No.
+
+
+======================================================================
+18. DIALOGUE REQUIREMENTS
+======================================================================
+
+Status: Implemented in the dialogue foundation.
+
+Dialogue can check conditions such as:
+
+- Whether the player has an item
+- Whether a monster is dead
+- Whether a previous choice was made
+- Whether a local quest condition is complete
+- Whether a persistent object changed state
+
+Cross-map and cross-session checks still need a larger global save system.
+
+
+======================================================================
+19. DIALOGUE ACTIONS
+======================================================================
+
+Status: Implemented in stages.
+
+After dialogue, an NPC may:
+
+- Move toward coordinates
+- Activate a mechanism
+- Send power to remote coordinates
+- Change persistent dialogue state
+- Advance a quest
+- Trigger another local event
+
+
+======================================================================
+20. QUEST JOURNAL
+======================================================================
+
+Status: Implemented and receiving controller polish.
+
+Features include:
+
+- Quest list
+- Quest-state display
+- Controller navigation
+- Journal close behavior
+- Inventory cursor locking while the journal is open
+
+Controller behavior:
+
+- Journal navigation takes priority
+- The inventory cursor is locked underneath
+- First B closes the journal
+- Another B can then close inventory normally
+
+The Quest shortcut should not override an inventory-item action when an item is
+focused.
+
+
+======================================================================
+21. ENEMY SQUADS AND NAMED ELITES
+======================================================================
+
+Status: Implemented.
+
+Map creators can organize enemies into squads and create named elite enemies.
+
+Uses include:
+
+- Boss escorts
+- Coordinated encounters
+- Elite patrols
+- Quest targets
+- Named minibosses
+
+
+======================================================================
+22. CONFIGURABLE MAP FOG
+======================================================================
+
+Status: Implemented.
+
+Maps can use custom fog settings for:
+
+- Caves
+- Outdoor fields
+- Magical areas
+- Dungeons
+- Horror-style environments
+
+
+======================================================================
+23. EDITOR 3D CAMERA
+======================================================================
+
+Status: Implemented.
+
+Controls:
+
+- Q or Page Up: move upward
+- E or Page Down: move downward
+- Shift: move faster
+- Home: reset vertical position
+
+This makes tall 32-layer maps easier to inspect.
+
+
+======================================================================
+24. EDITOR DECORATION PREVIEWS
+======================================================================
+
+Status: Implemented for selected decoration types.
+
+The intended 3D editor display uses models for:
+
+- Floor decorations
+- Collider decorations
+
+Other entities remain flat editor sprites.
+
+Temporary editor lights may illuminate active layers. These lights are not
+saved into the map.
+
+
+======================================================================
+25. HELD-ORB LIGHTING
+======================================================================
+
+Status: Implemented.
+
+Supported held magical orbs produce light around the player.
+
+
+======================================================================
+26. PROGRESSIVE MAGIC HOTBAR
+======================================================================
+
+Status: Implemented and under active testing.
+
+Players have a separate nine-slot bar intended for spell items.
+
+The bar references actual spell items in inventory.
+
+Inventory behavior:
+
+- Dropping a spell invalidates its assignment
+- Selling a spell invalidates its assignment
+- Losing a spell prevents casting it
+- Moving it inside inventory should retain the assignment
+- A new run should begin without old assignments
+
+Unlocked slots:
+
+The highest single magic-school proficiency is divided by 10, capped at nine.
+
+Examples:
+
+- Highest school 30: 3 slots
+- Highest school 50: 5 slots
+- Highest school 90: 9 slots
+
+The schools do not add together. There is no Wizard-class bonus.
+
+Keyboard and mouse:
+
+- Slots 1 through 9 are displayed
+- The Magic Hotbar action is rebindable
+- Default key is 0
+- The layout is straight and centered
+
+Controller gameplay:
+
+- D-pad Down activates the magic bar
+- X, Y, and B select groups of three
+- Shoulder buttons cycle inside the group
+- Releasing the group button uses or prepares the spell through normal Barony
+  behavior
+
+Controller inventory:
+
+- Right Stick Click switches bars
+- D-pad Down does not switch bars
+- Spell items may be assigned to magic slots
+- Non-spell items are rejected
+
+Visuals:
+
+The original Barony slot texture remains visible with a purple viewing tint on
+the magic bar.
+
+Current limitations:
+
+- Save/load persistence needs final verification
+- More controller, inventory, and multiplayer edge-case testing is needed
+
+
+======================================================================
+27. PIT WARNING AND FALLING
+======================================================================
+
+Status: Implemented and under testing.
+
+Sighted players:
+
+- Approaching a pit causes warning screen shake
+- Continuing to push into the pit for about 1.5 seconds permits falling
+- Moving away resets the timer
+- Warning shake lasts about 2.5 seconds
+
+Blind or blindfolded players:
+
+Blind players can enter pits according to the blind-pit behavior without the
+normal sighted protection.
+
+Forced movement:
+
+Knockback can push a non-levitating player into a pit immediately.
+
+Levitation:
+
+Levitating players remain protected from normal pit falling.
+
+Recommended testing:
+
+- Keyboard
+- Controller
+- Knockback arrows
+- Monster attacks
+- Host and client
+- Blindness
+- Blindfolds
+- Levitation
+
+
+======================================================================
+28. MULTIPLAYER
+======================================================================
+
+Status: Major systems have received LAN testing.
+
+Tested areas include:
+
+- Custom map travel
+- Host/client destination spawning
+- Persistent-world synchronization
+- Mechanism synchronization
+
+The host remains authoritative for most world-state changes.
+
+Every campaign should be tested with at least one host and one client.
+
+
+======================================================================
+29. PERSISTENCE ROADMAP
+======================================================================
+
+The broader persistence list includes:
+
+- Destructible decorations
+- Tables and chairs
+- Power crystals
+- Traps
+- Signal timers and controllers
+- Bells
+- Sinks and fountains
+- Fireplaces
+- Arcane furniture
+- Wall locks
+- Persistent tile changes
+- Wall builders and busters
+- Pedestals, sockets, and receptors
+- Chests and containers
+- Shopkeepers
+
+After the basic list, the major goal is dynamic entities, including dropped
+items remaining after map travel.
+
+
+======================================================================
+30. MASS SPRITE SELECTION
+======================================================================
+
+Status: Planned.
+
+The editor should eventually support selecting multiple sprites and copying or
+pasting them:
+
+- On the same layer
+- Across different layers
+
+
+======================================================================
+31. IMPORTANT LIMITATIONS
+======================================================================
+
+Still unfinished or experimental:
+
+- Flame-specific editor culling
+- Temporary diagnostic-log cleanup
+- Dynamic dropped-item persistence
+- Global cross-session quest state
+- Cross-map global dialogue checks
+- Full magic-hotbar save verification
+- Broad multiplayer regression testing
+- Full testing of every original entity on 32-layer maps
+- Some random spawned objects may return
+- Some scrap may duplicate
+
+
+======================================================================
+32. RECOMMENDED TESTING CHECKLIST
+======================================================================
+
+Maps:
+
+- Create and save a 32-layer map
+- Reopen it
+- Open an older three-layer map
+- Test tiles above layer three
+
+Travel:
+
+- Test every exit in both directions
+- Test multiple entrances
+- Test host and client
+
+Persistence:
+
+- Destroy supported objects
+- Leave and return
+- Repeat in multiplayer
+
+Dialogue and quests:
+
+- Test every branch
+- Test missing-item requirements
+- Test monster-death requirements
+- Confirm journal navigation does not activate inventory items
+
+Magic hotbar:
+
+- Assign multiple spells
+- Switch bars repeatedly
+- Drop and sell assigned spells
+- Rearrange inventory
+- Test keyboard and controller
+- Test every unlocked-slot count
+
+Pits:
+
+- Stop before the timer completes
+- Hold movement for more than 1.5 seconds
+- Test blindness and blindfolds
+- Test levitation
+- Test knockback
+- Test multiplayer
+
+
+======================================================================
+33. STATUS SUMMARY
+======================================================================
+
+Complete or mostly complete:
+
+- 32-layer maps
+- New map versions
+- Custom two-way exits
+- Persistent entity IDs
+- Major session-persistence foundation
+- Many persistent mechanisms
+- Dialogue and quest foundations
+- Enemy squads and named elites
+- Configurable fog
+- Editor vertical camera
+- Decoration previews
+- Held-orb lighting
+- Progressive magic-hotbar foundation
+- Pit warning and falling foundation
+
+Active testing or polish:
+
+- Magic-hotbar edge cases
+- Controller Quest priority
+- Pit knockback behavior
+- Multiplayer regression testing
+- Documentation and cleanup
+
+Planned:
+
+- Dynamic dropped-item persistence
+- Full global world-save system
+- Cross-session quest state
+- Mass sprite copy/paste
+- Flame-specific culling improvements
