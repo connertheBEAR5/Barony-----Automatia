@@ -36969,7 +36969,13 @@ void Player::Hotbar_t::updateHotbar()
             }
         }
 
-        if ( Input::inputs[player.playernum].binaryToggle(
+        const bool keyboardMouseInventoryInput =
+            !inputs.getVirtualMouse(
+                player.playernum
+            )->lastMovementFromController;
+
+        if ( keyboardMouseInventoryInput
+            && Input::inputs[player.playernum].binaryToggle(
                 "Magic Hotbar"
             ) )
         {
@@ -37185,6 +37191,10 @@ void Player::Hotbar_t::updateHotbar()
             current_hotbar = unlockedSlots - 1;
         }
     }
+    else if ( current_hotbar >= 9 )
+    {
+        current_hotbar = 8;
+    }
 
     auto highlightSlot = hotbarFrame->findFrame("hotbar highlight");
     auto highlightSlotImg = highlightSlot->findImage("highlight img");
@@ -37249,21 +37259,21 @@ void Player::Hotbar_t::updateHotbar()
     // position the slots
     for ( int num = 0; num < NUM_HOTBAR_SLOTS; ++num )
     {
-        if ( hotbar[num].item != 0 )
+        if ( slots()[num].item != 0 )
         {
-            if ( Item* item = uidToItem(hotbar[num].item) )
+            if ( Item* item = uidToItem(slots()[num].item) )
             {
-                if ( hotbar[num].item == hotbar[num].lastItem.uid
-                    && hotbar[num].lastItem.status > BROKEN
+                if ( slots()[num].item == slots()[num].lastItem.uid
+                    && slots()[num].lastItem.status > BROKEN
                     && item->status == BROKEN )
                 {
                     // de-hotbar newly broken stuff
-                    hotbar[num].item = 0;
-                    hotbar[num].resetLastItem();
+                    slots()[num].item = 0;
+                    slots()[num].resetLastItem();
                 }
                 else
                 {
-                    hotbar[num].storeLastItem(item);
+                    slots()[num].storeLastItem(item);
                 }
             }
         }
@@ -37308,8 +37318,7 @@ void Player::Hotbar_t::updateHotbar()
         assert(glyph);
         glyph->disabled = true;
 
-        if ( num == 9
-            && (useHotbarFaceMenu || magicHotbarActive) )
+        if ( num == 9 )
         {
             slot->setDisabled(true);
         }
@@ -37552,7 +37561,7 @@ void Player::Hotbar_t::updateHotbar()
             auto binding = Input::inputs[player.playernum].input(slotstr.c_str());
             std::string inputName = hotbarSlotBindingText(player.playernum, num, binding);
 
-            if ( magicHotbarActive && num == 9 )
+            if ( num == 9 )
             {
                 slot->setDisabled(true);
                 slot_text->setDisabled(true);
@@ -37560,18 +37569,14 @@ void Player::Hotbar_t::updateHotbar()
                 continue;
             }
 
-            const int displayedSlotCount =
-                magicHotbarActive ? 9 : NUM_HOTBAR_SLOTS;
-            const int midpoint = displayedSlotCount / 2;
-
-            if ( num < midpoint )
-            {
-                pos.x -= pos.w * (midpoint - num);
-            }
-            else
-            {
-                pos.x += pos.w * (num - midpoint);
-            }
+            /*
+             * Keyboard and mouse use nine centered slots for both
+             * the normal and magic hotbars. Slot 0 is intentionally
+             * hidden because it is not a usable assignment slot.
+             */
+            pos.x = hotbarCentreX
+                - (9 * pos.w) / 2
+                + num * pos.w;
 
             if ( inputName == "" )
             {
@@ -37609,7 +37614,7 @@ void Player::Hotbar_t::updateHotbar()
             }
         }
 
-        Item* hotbarItem = uidToItem(hotbar[num].item);
+        Item* hotbarItem = uidToItem(slots()[num].item);
         slotItem->setUserData(nullptr);
         if ( hotbarItem && hotbarItem->type == SPELL_ITEM )
         {

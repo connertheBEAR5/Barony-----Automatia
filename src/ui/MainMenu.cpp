@@ -340,6 +340,7 @@ namespace MainMenu {
                 {"Hotbar Up / Select", "Mouse2", "ButtonY", emptyBinding},
 #endif
                 {"Hotbar Down / Cancel", hiddenBinding, emptyBinding, emptyBinding},
+                {"Magic Hotbar", "0", emptyBinding, emptyBinding},
                 {"Interact Tooltip Next", "R", "ButtonB", emptyBinding },
                 {"Interact Tooltip Prev", emptyBinding, emptyBinding, emptyBinding },
                 {"Expand Inventory Tooltip", "X", hiddenBinding, emptyBinding },

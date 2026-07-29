@@ -2359,7 +2359,20 @@ public:
 			}
 		}
 
-		auto& slots() { return hotbar; };
+		auto& slots()
+		{
+			return magicHotbarActive
+				? magic_hotbar
+				: hotbar;
+		}
+		const auto& slots() const
+		{
+			return magicHotbarActive
+				? magic_hotbar
+				: hotbar;
+		}
+		auto& normalSlots() { return hotbar; };
+		const auto& normalSlots() const { return hotbar; };
 		auto& magicSlots() { return magic_hotbar; };
 		const auto& magicSlots() const { return magic_hotbar; };
 		auto& slotsAlternate(int alternate) { return hotbar_alternate[alternate]; };

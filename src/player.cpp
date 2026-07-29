@@ -5214,19 +5214,25 @@ void Player::Hotbar_t::setMagicHotbarActive(
 	{
 		validateMagicHotbar();
 		normalHotbarSelectedSlot = current_hotbar;
-		std::swap(hotbar, magic_hotbar);
-		current_hotbar = std::max(
-			0,
-			std::min(
-				getUnlockedMagicHotbarSlots() - 1,
-				magicHotbarSelectedSlot
+		magicHotbarActive = true;
+
+		const int unlockedSlots =
+			getUnlockedMagicHotbarSlots();
+
+		current_hotbar = unlockedSlots > 0
+			? std::max(
+				0,
+				std::min(
+					unlockedSlots - 1,
+					magicHotbarSelectedSlot
+				)
 			)
-		);
+			: 0;
 	}
 	else
 	{
 		magicHotbarSelectedSlot = current_hotbar;
-		std::swap(hotbar, magic_hotbar);
+		magicHotbarActive = false;
 		current_hotbar = std::max(
 			0,
 			std::min(
@@ -5235,8 +5241,6 @@ void Player::Hotbar_t::setMagicHotbarActive(
 			)
 		);
 	}
-
-	magicHotbarActive = active;
 
 	if ( cancelSelection )
 	{
