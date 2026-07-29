@@ -6141,6 +6141,87 @@ void playerDebugTests(Entity* my)
 #endif
 }
 
+static const char* playerHeldOrbLightFromItem(
+	const Item* item
+)
+{
+	if ( !item )
+	{
+		return nullptr;
+	}
+
+	switch ( item->type )
+	{
+		case ARTIFACT_ORB_BLUE:
+			return "orb_blue";
+		case ARTIFACT_ORB_RED:
+			return "orb_red";
+		case ARTIFACT_ORB_PURPLE:
+			return "orb_purple";
+		case ARTIFACT_ORB_GREEN:
+			return "orb_green";
+		default:
+			break;
+	}
+
+	return nullptr;
+}
+
+static const char* playerHeldOrbLightFromSprite(
+	const int sprite
+)
+{
+	if ( sprite == items[ARTIFACT_ORB_BLUE].index )
+	{
+		return "orb_blue";
+	}
+	if ( sprite == items[ARTIFACT_ORB_RED].index )
+	{
+		return "orb_red";
+	}
+	if ( sprite == items[ARTIFACT_ORB_PURPLE].index )
+	{
+		return "orb_purple";
+	}
+	if ( sprite == items[ARTIFACT_ORB_GREEN].index )
+	{
+		return "orb_green";
+	}
+
+	return nullptr;
+}
+
+static const char* playerHeldOrbLightFromRenderedLimbs(
+	Entity* player
+)
+{
+	if ( !player )
+	{
+		return nullptr;
+	}
+
+	for ( node_t* node = player->children.first;
+		node;
+		node = node->next )
+	{
+		Entity* limb =
+			static_cast<Entity*>(node->element);
+
+		if ( !limb || limb->flags[INVISIBLE] )
+		{
+			continue;
+		}
+
+		if ( const char* light =
+			playerHeldOrbLightFromSprite(limb->sprite) )
+		{
+			return light;
+		}
+	}
+
+	return nullptr;
+}
+
 void actPlayer(Entity* my)
 {
 	if (!my)
@@ -10459,8 +10540,33 @@ void actPlayer(Entity* my)
 		equipmentBonus += 2;
 	}
 	const int fociCastRange = -2;
+
+	const char* heldOrbLight = nullptr;
+
+	if ( !players[PLAYER_NUM]->isLocalPlayer()
+		&& multiplayer == CLIENT )
+	{
+		heldOrbLight =
+			playerHeldOrbLightFromRenderedLimbs(my);
+	}
+	else if ( showEquipment
+		&& isHumanoid
+		&& stats[PLAYER_NUM]->weapon )
+	{
+		heldOrbLight =
+			playerHeldOrbLightFromItem(
+				stats[PLAYER_NUM]->weapon
+			);
+	}
+
 	if (!intro && *cvar_playerLight) {
         if (!players[PLAYER_NUM]->isLocalPlayer() && multiplayer == CLIENT) {
+			if ( heldOrbLight )
+			{
+				light_type = heldOrbLight;
+			}
+			else
+			{
             switch (PLAYER_TORCH) {
             default: break;
             case 1:
@@ -10524,8 +10630,13 @@ void actPlayer(Entity* my)
 				}
 				break;
             }
+			}
         } else { // multiplayer != CLIENT
-            if (stats[PLAYER_NUM]->shield && showEquipment && isHumanoid) {
+			if ( heldOrbLight )
+			{
+				light_type = heldOrbLight;
+			}
+            else if (stats[PLAYER_NUM]->shield && showEquipment && isHumanoid) {
                 if (stats[PLAYER_NUM]->shield->type == TOOL_TORCH) {
                     light_type = "player_torch";
                     if (stats[PLAYER_NUM]->defending) {
@@ -10688,7 +10799,7 @@ void actPlayer(Entity* my)
 		{
 			my->light = addLight(my->x / 16, my->y / 16, "magic_foci_idle_red");
 		}
-        else if (!my->light) {
+        else if ( !my->light && light_type ) {
             my->light = addLight(my->x / 16, my->y / 16, light_type, range_bonus, ambientLight ? PLAYER_NUM + 1 : 0);
         }
     }
