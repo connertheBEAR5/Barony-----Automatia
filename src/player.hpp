@@ -2245,6 +2245,7 @@ public:
 
 	class Hotbar_t {
 		std::array<hotbar_slot_t, NUM_HOTBAR_SLOTS> hotbar;
+		std::array<hotbar_slot_t, NUM_HOTBAR_SLOTS> magic_hotbar;
 		std::array<std::array<hotbar_slot_t, NUM_HOTBAR_SLOTS>, NUM_HOTBAR_ALTERNATES> hotbar_alternate;
 		Player& player;
 	public:
@@ -2260,6 +2261,12 @@ public:
 		Frame* hotbarFrame = nullptr;
 		real_t selectedSlotAnimateCurrentValue = 0.0;
 		bool isInteractable = false;
+
+		bool magicHotbarActive = false;
+		bool magicHotbarToggleLatched = false;
+		int normalHotbarSelectedSlot = 0;
+		int magicHotbarSelectedSlot = 0;
+		real_t magicHotbarCardAnimation = 0.0;
 
 		struct Cursor_t
 		{
@@ -2333,10 +2340,17 @@ public:
 			{
 				hotbarShapeshiftInit[j] = false;
 			}
+			magicHotbarActive = false;
+			magicHotbarToggleLatched = false;
+			normalHotbarSelectedSlot = 0;
+			magicHotbarSelectedSlot = 0;
+			magicHotbarCardAnimation = 0.0;
 			for ( int i = 0; i < NUM_HOTBAR_SLOTS; ++i )
 			{
 				hotbar[i].item = 0;
 				hotbar[i].resetLastItem();
+				magic_hotbar[i].item = 0;
+				magic_hotbar[i].resetLastItem();
 				for ( int j = 0; j < NUM_HOTBAR_ALTERNATES; ++j )
 				{
 					hotbar_alternate[j][i].item = 0;
@@ -2346,9 +2360,15 @@ public:
 		}
 
 		auto& slots() { return hotbar; };
+		auto& magicSlots() { return magic_hotbar; };
+		const auto& magicSlots() const { return magic_hotbar; };
 		auto& slotsAlternate(int alternate) { return hotbar_alternate[alternate]; };
 		auto& slotsAlternate() { return hotbar_alternate; }
 		void selectHotbarSlot(int slot);
+		int getUnlockedMagicHotbarSlots() const;
+		bool isMagicHotbarSlotUnlocked(int slot) const;
+		void validateMagicHotbar();
+		void setMagicHotbarActive(bool active, bool cancelSelection = true);
 		void initFaceButtonHotbar();
 		FaceMenuGroup getFaceMenuGroupForSlot(int hotbarSlot);
 		void processHotbar();

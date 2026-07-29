@@ -5135,6 +5135,116 @@ void Player::Hotbar_t::selectHotbarSlot(int slot)
 	player.GUI.activateModule(GUI_t::MODULE_HOTBAR);
 }
 
+int Player::Hotbar_t::getUnlockedMagicHotbarSlots() const
+{
+	if ( player.playernum < 0
+		|| player.playernum >= MAXPLAYERS
+		|| !stats[player.playernum] )
+	{
+		return 0;
+	}
+
+	const int highestMagicSkill =
+		std::max(
+			stats[player.playernum]->getProficiency(PRO_SORCERY),
+			std::max(
+				stats[player.playernum]->getProficiency(PRO_MYSTICISM),
+				stats[player.playernum]->getProficiency(PRO_THAUMATURGY)
+			)
+		);
+
+	return std::max(
+		0,
+		std::min(
+			9,
+			highestMagicSkill / 10
+		)
+	);
+}
+
+bool Player::Hotbar_t::isMagicHotbarSlotUnlocked(int slot) const
+{
+	return slot >= 0
+		&& slot < getUnlockedMagicHotbarSlots();
+}
+
+void Player::Hotbar_t::validateMagicHotbar()
+{
+	for ( int slot = 0; slot < 9; ++slot )
+	{
+		hotbar_slot_t& magicSlot = magic_hotbar[slot];
+
+		if ( magicSlot.item == 0 )
+		{
+			continue;
+		}
+
+		Item* item = uidToItem(magicSlot.item);
+		if ( !item || itemCategory(item) != SPELL_CAT )
+		{
+			magicSlot.item = 0;
+			magicSlot.resetLastItem();
+			continue;
+		}
+
+		magicSlot.storeLastItem(item);
+	}
+
+	magic_hotbar[9].item = 0;
+	magic_hotbar[9].resetLastItem();
+}
+
+void Player::Hotbar_t::setMagicHotbarActive(
+	bool active,
+	bool cancelSelection
+)
+{
+	if ( magicHotbarActive == active )
+	{
+		if ( cancelSelection
+			&& !active )
+		{
+			faceMenuButtonHeld = GROUP_NONE;
+			faceMenuQuickCast = false;
+		}
+		return;
+	}
+
+	if ( active )
+	{
+		validateMagicHotbar();
+		normalHotbarSelectedSlot = current_hotbar;
+		std::swap(hotbar, magic_hotbar);
+		current_hotbar = std::max(
+			0,
+			std::min(
+				getUnlockedMagicHotbarSlots() - 1,
+				magicHotbarSelectedSlot
+			)
+		);
+	}
+	else
+	{
+		magicHotbarSelectedSlot = current_hotbar;
+		std::swap(hotbar, magic_hotbar);
+		current_hotbar = std::max(
+			0,
+			std::min(
+				static_cast<int>(NUM_HOTBAR_SLOTS) - 1,
+				normalHotbarSelectedSlot
+			)
+		);
+	}
+
+	magicHotbarActive = active;
+
+	if ( cancelSelection )
+	{
+		faceMenuButtonHeld = GROUP_NONE;
+		faceMenuQuickCast = false;
+	}
+}
+
 void Player::Hotbar_t::initFaceButtonHotbar()
 {
 	faceButtonTopYPosition = yres;
