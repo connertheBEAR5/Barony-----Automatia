@@ -46,6 +46,7 @@ static ConsoleVariable<float> cvar_calloutStartZLimit("/callout_start_z_limit", 
 static ConsoleVariable<float> cvar_followerStartZ("/follower_start_z", -2.5);
 static ConsoleVariable<float> cvar_followerMoveTo("/follower_moveto_z", 0.1);
 static ConsoleVariable<float> cvar_followerStartZLimit("/follower_start_z_limit", 7.5);
+static Uint32 sightedPitWarningShakeTicks[MAXPLAYERS] = { 0 };
 
 /*-------------------------------------------------------------------------------
 
@@ -6222,6 +6223,73 @@ static const char* playerHeldOrbLightFromRenderedLimbs(
 	return nullptr;
 }
 
+static bool playerMovementWouldEnterMissingFloor(
+	Entity* player,
+	const real_t moveX,
+	const real_t moveY
+)
+{
+	if ( !player )
+	{
+		return false;
+	}
+
+	const real_t targetX = player->x + moveX;
+	const real_t targetY = player->y + moveY;
+
+	const int minTileX =
+		static_cast<int>(
+			floor(
+				(targetX - player->sizex) / 16.0
+			)
+		);
+	const int maxTileX =
+		static_cast<int>(
+			floor(
+				(targetX + player->sizex) / 16.0
+			)
+		);
+	const int minTileY =
+		static_cast<int>(
+			floor(
+				(targetY - player->sizey) / 16.0
+			)
+		);
+	const int maxTileY =
+		static_cast<int>(
+			floor(
+				(targetY + player->sizey) / 16.0
+			)
+		);
+
+	for ( int x = minTileX; x <= maxTileX; ++x )
+	{
+		for ( int y = minTileY; y <= maxTileY; ++y )
+		{
+			if ( x < 0
+				|| x >= map.width
+				|| y < 0
+				|| y >= map.height )
+			{
+				continue;
+			}
+
+			const int floorTile =
+				map.tiles[
+					y * MAPLAYERS
+					+ x * MAPLAYERS * map.height
+				];
+
+			if ( !floorTile )
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 void actPlayer(Entity* my)
 {
 	if (!my)
@@ -9295,6 +9363,67 @@ void actPlayer(Entity* my)
 		levitating = isLevitating(stats[PLAYER_NUM]);
 		players[PLAYER_NUM]->mechanics.previouslyLevitating = levitating;
 
+		if ( !levitating
+			&& stats[PLAYER_NUM]->HP > 0
+			&& stats[PLAYER_NUM]->getEffectActive(EFF_BLIND) )
+		{
+			const int pitX =
+				std::min(
+					std::max(
+						0,
+						static_cast<int>(
+							floor(my->x / 16.0)
+						)
+					),
+					static_cast<int>(map.width) - 1
+				);
+
+			const int pitY =
+				std::min(
+					std::max(
+						0,
+						static_cast<int>(
+							floor(my->y / 16.0)
+						)
+					),
+					static_cast<int>(map.height) - 1
+				);
+
+			const int floorTile =
+				map.tiles[
+					pitY * MAPLAYERS
+					+ pitX * MAPLAYERS * map.height
+				];
+
+			if ( !floorTile )
+			{
+				my->setObituary(
+					Language::get(3010)
+				);
+				stats[PLAYER_NUM]->killer =
+					KilledBy::BOTTOMLESS_PIT;
+
+				if ( multiplayer != CLIENT )
+				{
+					Compendium_t::Events_t::eventUpdateWorld(
+						PLAYER_NUM,
+						Compendium_t::CPDM_PITS_DEATHS,
+						"pits",
+						1
+					);
+				}
+
+				stats[PLAYER_NUM]->HP = 0;
+
+				if ( stats[PLAYER_NUM]->type
+					== AUTOMATON )
+				{
+					my->playerAutomatonDeathCounter =
+						TICKS_PER_SECOND * 5;
+				}
+			}
+		}
+
 		if ( levitating )
 		{
 			my->z -= 1; // floating
@@ -11592,6 +11721,51 @@ void actPlayer(Entity* my)
 		// move
 		if ( noclip == false )
 		{
+			const bool sightedPitAttempt =
+				players[PLAYER_NUM]->isLocalPlayer()
+				&& !levitating
+				&& stats[PLAYER_NUM]->HP > 0
+				&& !stats[PLAYER_NUM]->getEffectActive(EFF_BLIND)
+				&& (
+					fabs(PLAYER_VELX) > 0.001
+					|| fabs(PLAYER_VELY) > 0.001
+				)
+				&& playerMovementWouldEnterMissingFloor(
+					my,
+					PLAYER_VELX,
+					PLAYER_VELY
+				);
+
+			if ( sightedPitAttempt )
+			{
+				sightedPitWarningShakeTicks[PLAYER_NUM] =
+					TICKS_PER_SECOND * 2;
+			}
+
+			if ( sightedPitWarningShakeTicks[PLAYER_NUM] > 0 )
+			{
+				--sightedPitWarningShakeTicks[PLAYER_NUM];
+
+				if ( ticks % 4 == 0 )
+				{
+					const real_t shakeDirection =
+						(
+							(
+								sightedPitWarningShakeTicks[
+									PLAYER_NUM
+								]
+								/ 4
+							) % 2
+						)
+						? 1.0
+						: -1.0;
+
+					cameravars[PLAYER_NUM].shakex +=
+						0.025 * shakeDirection;
+					cameravars[PLAYER_NUM].shakey += 2;
+				}
+			}
+
 			// perform collision detection
 			dist = clipMove(&my->x, &my->y, PLAYER_VELX, PLAYER_VELY, my);
 

@@ -541,6 +541,10 @@ bool entityInsideSomething(Entity* entity)
 	return false;
 }
 
+static ConsoleVariable<bool> cvar_blind_players_fall_into_pits(
+	"/blind_players_fall_into_pits",
+	true
+);
 static ConsoleVariable<float> cvar_linetrace_smallcollision("/linetrace_smallcollision", 4.0);
 bool useSmallCollision(Entity& my, Stat& myStats, Entity& your, Stat& yourStats)
 {
@@ -976,6 +980,13 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 	{
 		levitating = isLevitating(stats);
 	}
+
+	const bool blindPlayerCanEnterMissingFloor =
+		*cvar_blind_players_fall_into_pits
+		&& my->behavior == &actPlayer
+		&& stats
+		&& stats->getEffectActive(EFF_BLIND);
+
 	bool isMonster = false;
 	if ( my )
 	{
@@ -1117,10 +1128,34 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 						return 0;
 					}
 	
-					if ( !levitating && (!map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height] 
-						|| (((swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] && !waterWalking) 
-							|| (lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] && !lavaWalking))
-							&& isMonster)) )
+					const int floorTile =
+						map.tiles[
+							y * MAPLAYERS
+							+ x * MAPLAYERS * map.height
+						];
+
+					const bool blockedByMissingFloor =
+						!floorTile
+						&& !blindPlayerCanEnterMissingFloor;
+
+					const bool blockedMonsterLiquid =
+						(
+							(
+								swimmingtiles[floorTile]
+								&& !waterWalking
+							)
+							|| (
+								lavatiles[floorTile]
+								&& !lavaWalking
+							)
+						)
+						&& isMonster;
+
+					if ( !levitating
+						&& (
+							blockedByMissingFloor
+							|| blockedMonsterLiquid
+						) )
 					{
 						// no floor
 						hit.x = x * 16 + 8;
