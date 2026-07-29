@@ -47,6 +47,7 @@ button_t* butHoverText;
 button_t* butViewSprites;
 button_t* butGrid;
 button_t* but3DMode;
+button_t* but3DModels;
 button_t* butMap;
 button_t* butAttributes;
 button_t* butClearMap;
@@ -1207,6 +1208,11 @@ void buttonGrid(button_t* my)
 void button3DMode(button_t* my)
 {
 	mode3d = (mode3d == false);
+}
+
+void button3DModels(button_t* my)
+{
+	editor3DModelsEnabled = !editor3DModelsEnabled;
 }
 
 void buttonHoverText(button_t* my)

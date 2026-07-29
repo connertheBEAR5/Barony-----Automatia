@@ -87,6 +87,7 @@ int roomSelectBottomLayer = 0;
 int roomSelectTopLayer = 0;
 int roomSelectStage = 0;
 bool roomClipboardReady = false;
+bool editor3DModelsEnabled = true;
 int roomClipboardWidth = 0;
 int roomClipboardHeight = 0;
 int roomClipboardDepth = 0;
@@ -94,6 +95,17 @@ int roomClipboardEntityCount = 0;
 
 static map_t roomClipboardMap;
 static list_t roomClipboardEntityList = { nullptr, nullptr };
+
+enum RoomCopyContentMode
+{
+	ROOM_COPY_BOTH = 0,
+	ROOM_COPY_TILES,
+	ROOM_COPY_SPRITES
+};
+
+static int roomCopyContentMode = ROOM_COPY_BOTH;
+static bool roomClipboardHasTiles = false;
+static bool roomClipboardHasSprites = false;
 
 void roomSelectResetSelection()
 {
@@ -10177,6 +10189,8 @@ static void clearRoomClipboard()
 	roomClipboardMap.numLayers = 0;
 
 	roomClipboardReady = false;
+	roomClipboardHasTiles = false;
+	roomClipboardHasSprites = false;
 	roomClipboardWidth = 0;
 	roomClipboardHeight = 0;
 	roomClipboardDepth = 0;
@@ -10269,148 +10283,144 @@ void editorRoomCopySelection()
 	roomClipboardMap.numLayers = roomClipboardDepth;
 	roomClipboardMap.entities = &roomClipboardEntityList;
 
-	const size_t tileCount =
-		static_cast<size_t>(roomClipboardWidth)
-		* static_cast<size_t>(roomClipboardHeight)
-		* MAPLAYERS;
+	roomClipboardHasTiles =
+		roomCopyContentMode == ROOM_COPY_BOTH
+		|| roomCopyContentMode == ROOM_COPY_TILES;
+	roomClipboardHasSprites =
+		roomCopyContentMode == ROOM_COPY_BOTH
+		|| roomCopyContentMode == ROOM_COPY_SPRITES;
 
-	roomClipboardMap.tiles =
-		static_cast<Sint32*>(
-			malloc(sizeof(Sint32) * tileCount)
+	if ( roomClipboardHasTiles )
+	{
+		const size_t tileCount =
+			static_cast<size_t>(roomClipboardWidth)
+			* static_cast<size_t>(roomClipboardHeight)
+			* MAPLAYERS;
+
+		roomClipboardMap.tiles =
+			static_cast<Sint32*>(
+				malloc(sizeof(Sint32) * tileCount)
+			);
+
+		if ( !roomClipboardMap.tiles )
+		{
+			clearRoomClipboard();
+			return;
+		}
+
+		memset(
+			roomClipboardMap.tiles,
+			0,
+			sizeof(Sint32) * tileCount
 		);
 
-	if ( !roomClipboardMap.tiles )
-	{
-		clearRoomClipboard();
-		return;
-	}
-
-	memset(
-		roomClipboardMap.tiles,
-		0,
-		sizeof(Sint32) * tileCount
-	);
-
-	for ( int localX = 0;
-		localX < roomClipboardWidth;
-		++localX )
-	{
-		for ( int localY = 0;
-			localY < roomClipboardHeight;
-			++localY )
+		for ( int localX = 0; localX < roomClipboardWidth; ++localX )
 		{
-			for ( int localLayer = 0;
-				localLayer < roomClipboardDepth;
-				++localLayer )
+			for ( int localY = 0; localY < roomClipboardHeight; ++localY )
 			{
-				const int sourceLayer =
-					roomSelectBottomLayer + localLayer;
+				for ( int localLayer = 0; localLayer < roomClipboardDepth; ++localLayer )
+				{
+					const int sourceLayer =
+						roomSelectBottomLayer + localLayer;
 
-				const int sourceIndex =
-					sourceLayer
-					+ (selectedarea_y1 + localY)
-						* MAPLAYERS
-					+ (selectedarea_x1 + localX)
-						* MAPLAYERS
-						* map.height;
+					const int sourceIndex =
+						sourceLayer
+						+ (selectedarea_y1 + localY) * MAPLAYERS
+						+ (selectedarea_x1 + localX)
+							* MAPLAYERS * map.height;
 
-				const int destinationIndex =
-					localLayer
-					+ localY * MAPLAYERS
-					+ localX
-						* MAPLAYERS
-						* roomClipboardHeight;
+					const int destinationIndex =
+						localLayer
+						+ localY * MAPLAYERS
+						+ localX
+							* MAPLAYERS * roomClipboardHeight;
 
-				/*
-				 * Air is copied deliberately. It must carve out the
-				 * destination so interiors, windows, and doorways
-				 * remain exact.
-				 */
-				roomClipboardMap.tiles[destinationIndex] =
-					map.tiles[sourceIndex];
+					/*
+					 * Air is copied deliberately so empty interior
+					 * spaces and openings carve the destination.
+					 */
+					roomClipboardMap.tiles[destinationIndex] =
+						map.tiles[sourceIndex];
+				}
 			}
 		}
 	}
 
 	roomClipboardEntityCount = 0;
 
-	for ( node_t* node = map.entities->first;
-		node;
-		node = node->next )
+	if ( roomClipboardHasSprites )
 	{
-		Entity* source =
-			static_cast<Entity*>(node->element);
-
-		if ( !source )
+		for ( node_t* node = map.entities->first;
+			node;
+			node = node->next )
 		{
-			continue;
-		}
+			Entity* source =
+				static_cast<Entity*>(node->element);
 
-		const int sourceLayer =
-			entityZToSpriteLayer(source->z);
-		const int sourceTileX =
-			static_cast<int>(source->x / 16);
-		const int sourceTileY =
-			static_cast<int>(source->y / 16);
+			if ( !source )
+			{
+				continue;
+			}
 
-		if ( sourceTileX < selectedarea_x1
-			|| sourceTileX > selectedarea_x2
-			|| sourceTileY < selectedarea_y1
-			|| sourceTileY > selectedarea_y2
-			|| sourceLayer < roomSelectBottomLayer
-			|| sourceLayer > roomSelectTopLayer )
-		{
-			continue;
-		}
+			const int sourceLayer =
+				entityZToSpriteLayer(source->z);
+			const int sourceTileX =
+				static_cast<int>(source->x / 16);
+			const int sourceTileY =
+				static_cast<int>(source->y / 16);
 
-		Entity* snapshot =
-			newEntity(
-				source->sprite,
-				0,
-				&roomClipboardEntityList,
-				nullptr
+			if ( sourceTileX < selectedarea_x1
+				|| sourceTileX > selectedarea_x2
+				|| sourceTileY < selectedarea_y1
+				|| sourceTileY > selectedarea_y2
+				|| sourceLayer < roomSelectBottomLayer
+				|| sourceLayer > roomSelectTopLayer )
+			{
+				continue;
+			}
+
+			Entity* snapshot =
+				newEntity(
+					source->sprite,
+					0,
+					&roomClipboardEntityList,
+					nullptr
+				);
+
+			if ( !snapshot )
+			{
+				continue;
+			}
+
+			setSpriteAttributes(
+				snapshot,
+				source,
+				source
 			);
 
-		if ( !snapshot )
-		{
-			continue;
+			snapshot->x =
+				source->x - selectedarea_x1 * 16;
+			snapshot->y =
+				source->y - selectedarea_y1 * 16;
+			snapshot->z =
+				spriteLayerToEntityZ(
+					sourceLayer - roomSelectBottomLayer
+				);
+			snapshot->persistentID = 0;
+
+			++roomClipboardEntityCount;
 		}
-
-		setSpriteAttributes(
-			snapshot,
-			source,
-			source
-		);
-
-		snapshot->x =
-			source->x
-			- selectedarea_x1 * 16;
-		snapshot->y =
-			source->y
-			- selectedarea_y1 * 16;
-		snapshot->z =
-			spriteLayerToEntityZ(
-				sourceLayer
-				- roomSelectBottomLayer
-			);
-
-		/*
-		 * Pasted copies must receive fresh persistent IDs on the
-		 * next save instead of colliding with the source room.
-		 */
-		snapshot->persistentID = 0;
-
-		++roomClipboardEntityCount;
 	}
 
-	roomClipboardReady = true;
+	roomClipboardReady =
+		roomClipboardHasTiles
+		|| roomClipboardHasSprites;
 	roomSelectStage = 3;
 }
 
 void editorRoomBeginPaste()
 {
-	if ( !roomClipboardReady
-		|| !roomClipboardMap.tiles )
+	if ( !roomClipboardReady )
 	{
 		return;
 	}
@@ -10434,146 +10444,131 @@ void editorRoomPlaceClipboard(
 	int destinationBottomLayer
 )
 {
-	if ( !roomClipboardReady
-		|| !roomClipboardMap.tiles )
+	if ( !roomClipboardReady )
 	{
 		return;
 	}
 
 	makeUndo();
 
-	for ( int localX = 0;
-		localX < roomClipboardWidth;
-		++localX )
+	if ( roomClipboardHasTiles
+		&& roomClipboardMap.tiles )
 	{
-		for ( int localY = 0;
-			localY < roomClipboardHeight;
-			++localY )
+		for ( int localX = 0; localX < roomClipboardWidth; ++localX )
 		{
-			const int destinationTileX =
-				destinationX + localX;
-			const int destinationTileY =
-				destinationY + localY;
-
-			if ( destinationTileX < 0
-				|| destinationTileX
-					>= static_cast<int>(map.width)
-				|| destinationTileY < 0
-				|| destinationTileY
-					>= static_cast<int>(map.height) )
+			for ( int localY = 0; localY < roomClipboardHeight; ++localY )
 			{
-				continue;
-			}
+				const int destinationTileX =
+					destinationX + localX;
+				const int destinationTileY =
+					destinationY + localY;
 
-			for ( int localLayer = 0;
-				localLayer < roomClipboardDepth;
-				++localLayer )
-			{
-				const int destinationLayer =
-					destinationBottomLayer
-					+ localLayer;
-
-				if ( destinationLayer < 0
-					|| destinationLayer >= MAPLAYERS
-					|| destinationLayer
-						>= static_cast<int>(map.numLayers) )
+				if ( destinationTileX < 0
+					|| destinationTileX >= static_cast<int>(map.width)
+					|| destinationTileY < 0
+					|| destinationTileY >= static_cast<int>(map.height) )
 				{
 					continue;
 				}
 
-				const int sourceIndex =
-					localLayer
-					+ localY * MAPLAYERS
-					+ localX
-						* MAPLAYERS
-						* roomClipboardHeight;
+				for ( int localLayer = 0;
+					localLayer < roomClipboardDepth;
+					++localLayer )
+				{
+					const int destinationLayer =
+						destinationBottomLayer + localLayer;
 
-				const int destinationIndex =
-					destinationLayer
-					+ destinationTileY
-						* MAPLAYERS
-					+ destinationTileX
-						* MAPLAYERS
-						* map.height;
+					if ( destinationLayer < 0
+						|| destinationLayer >= MAPLAYERS
+						|| destinationLayer
+							>= static_cast<int>(map.numLayers) )
+					{
+						continue;
+					}
 
-				/*
-				 * Do not skip zero. Air is part of the copied room
-				 * and intentionally carves the destination.
-				 */
-				map.tiles[destinationIndex] =
-					roomClipboardMap.tiles[sourceIndex];
+					const int sourceIndex =
+						localLayer
+						+ localY * MAPLAYERS
+						+ localX
+							* MAPLAYERS * roomClipboardHeight;
+
+					const int destinationIndex =
+						destinationLayer
+						+ destinationTileY * MAPLAYERS
+						+ destinationTileX
+							* MAPLAYERS * map.height;
+
+					map.tiles[destinationIndex] =
+						roomClipboardMap.tiles[sourceIndex];
+				}
 			}
 		}
 	}
 
-	for ( node_t* node =
-			roomClipboardEntityList.first;
-		node;
-		node = node->next )
+	if ( roomClipboardHasSprites )
 	{
-		Entity* snapshot =
-			static_cast<Entity*>(node->element);
-
-		if ( !snapshot )
+		for ( node_t* node =
+				roomClipboardEntityList.first;
+			node;
+			node = node->next )
 		{
-			continue;
-		}
+			Entity* snapshot =
+				static_cast<Entity*>(node->element);
 
-		const int localLayer =
-			entityZToSpriteLayer(snapshot->z);
-		const int destinationLayer =
-			destinationBottomLayer + localLayer;
+			if ( !snapshot )
+			{
+				continue;
+			}
 
-		const int destinationTileX =
-			destinationX
-				+ static_cast<int>(snapshot->x / 16);
-		const int destinationTileY =
-			destinationY
-				+ static_cast<int>(snapshot->y / 16);
+			const int localLayer =
+				entityZToSpriteLayer(snapshot->z);
+			const int destinationLayer =
+				destinationBottomLayer + localLayer;
+			const int destinationTileX =
+				destinationX
+					+ static_cast<int>(snapshot->x / 16);
+			const int destinationTileY =
+				destinationY
+					+ static_cast<int>(snapshot->y / 16);
 
-		if ( destinationTileX < 0
-			|| destinationTileX
-				>= static_cast<int>(map.width)
-			|| destinationTileY < 0
-			|| destinationTileY
-				>= static_cast<int>(map.height)
-			|| destinationLayer < 0
-			|| destinationLayer
-				>= static_cast<int>(map.numLayers) )
-		{
-			continue;
-		}
+			if ( destinationTileX < 0
+				|| destinationTileX >= static_cast<int>(map.width)
+				|| destinationTileY < 0
+				|| destinationTileY >= static_cast<int>(map.height)
+				|| destinationLayer < 0
+				|| destinationLayer
+					>= static_cast<int>(map.numLayers) )
+			{
+				continue;
+			}
 
-		Entity* pastedEntity =
-			newEntity(
-				snapshot->sprite,
-				0,
-				map.entities,
-				nullptr
+			Entity* pastedEntity =
+				newEntity(
+					snapshot->sprite,
+					0,
+					map.entities,
+					nullptr
+				);
+
+			if ( !pastedEntity )
+			{
+				continue;
+			}
+
+			setSpriteAttributes(
+				pastedEntity,
+				snapshot,
+				snapshot
 			);
 
-		if ( !pastedEntity )
-		{
-			continue;
+			pastedEntity->x =
+				destinationX * 16 + snapshot->x;
+			pastedEntity->y =
+				destinationY * 16 + snapshot->y;
+			pastedEntity->z =
+				spriteLayerToEntityZ(destinationLayer);
+			pastedEntity->persistentID = 0;
 		}
-
-		setSpriteAttributes(
-			pastedEntity,
-			snapshot,
-			snapshot
-		);
-
-		pastedEntity->x =
-			destinationX * 16
-			+ snapshot->x;
-		pastedEntity->y =
-			destinationY * 16
-			+ snapshot->y;
-		pastedEntity->z =
-			spriteLayerToEntityZ(
-				destinationLayer
-			);
-		pastedEntity->persistentID = 0;
 	}
 
 	pasting = false;
@@ -10582,11 +10577,9 @@ void editorRoomPlaceClipboard(
 	selectedarea_x1 = destinationX;
 	selectedarea_y1 = destinationY;
 	selectedarea_x2 =
-		destinationX
-			+ roomClipboardWidth - 1;
+		destinationX + roomClipboardWidth - 1;
 	selectedarea_y2 =
-		destinationY
-			+ roomClipboardHeight - 1;
+		destinationY + roomClipboardHeight - 1;
 	roomSelectBottomLayer =
 		destinationBottomLayer;
 	roomSelectTopLayer =
@@ -10609,64 +10602,77 @@ void editorRoomDeleteSelection()
 	normalizeRoomSelection();
 	makeUndo();
 
-	for ( int x = selectedarea_x1;
-		x <= selectedarea_x2;
-		++x )
+	const bool deleteTiles =
+		roomCopyContentMode == ROOM_COPY_BOTH
+		|| roomCopyContentMode == ROOM_COPY_TILES;
+	const bool deleteSprites =
+		roomCopyContentMode == ROOM_COPY_BOTH
+		|| roomCopyContentMode == ROOM_COPY_SPRITES;
+
+	if ( deleteTiles )
 	{
-		for ( int y = selectedarea_y1;
-			y <= selectedarea_y2;
-			++y )
+		for ( int x = selectedarea_x1;
+			x <= selectedarea_x2;
+			++x )
 		{
-			for ( int layer = roomSelectBottomLayer;
-				layer <= roomSelectTopLayer;
-				++layer )
+			for ( int y = selectedarea_y1;
+				y <= selectedarea_y2;
+				++y )
 			{
-				map.tiles[
-					layer
-					+ y * MAPLAYERS
-					+ x * MAPLAYERS * map.height
-				] = 0;
+				for ( int layer = roomSelectBottomLayer;
+					layer <= roomSelectTopLayer;
+					++layer )
+				{
+					map.tiles[
+						layer
+						+ y * MAPLAYERS
+						+ x * MAPLAYERS * map.height
+					] = 0;
+				}
 			}
 		}
 	}
 
-	node_t* next = nullptr;
-
-	for ( node_t* node = map.entities->first;
-		node;
-		node = next )
+	if ( deleteSprites )
 	{
-		next = node->next;
+		node_t* next = nullptr;
 
-		Entity* entity =
-			static_cast<Entity*>(node->element);
-
-		if ( !entity )
+		for ( node_t* node = map.entities->first;
+			node;
+			node = next )
 		{
-			continue;
-		}
+			next = node->next;
 
-		const int entityLayer =
-			entityZToSpriteLayer(entity->z);
-		const int entityX =
-			static_cast<int>(entity->x / 16);
-		const int entityY =
-			static_cast<int>(entity->y / 16);
+			Entity* entity =
+				static_cast<Entity*>(node->element);
 
-		if ( entityX >= selectedarea_x1
-			&& entityX <= selectedarea_x2
-			&& entityY >= selectedarea_y1
-			&& entityY <= selectedarea_y2
-			&& entityLayer >= roomSelectBottomLayer
-			&& entityLayer <= roomSelectTopLayer )
-		{
-			if ( selectedEntity[0] == entity )
+			if ( !entity )
 			{
-				selectedEntity[0] = nullptr;
-				lastSelectedEntity[0] = nullptr;
+				continue;
 			}
 
-			list_RemoveNode(node);
+			const int entityLayer =
+				entityZToSpriteLayer(entity->z);
+			const int entityX =
+				static_cast<int>(entity->x / 16);
+			const int entityY =
+				static_cast<int>(entity->y / 16);
+
+			if ( entityX >= selectedarea_x1
+				&& entityX <= selectedarea_x2
+				&& entityY >= selectedarea_y1
+				&& entityY <= selectedarea_y2
+				&& entityLayer >= roomSelectBottomLayer
+				&& entityLayer <= roomSelectTopLayer )
+			{
+				if ( selectedEntity[0] == entity )
+				{
+					selectedEntity[0] = nullptr;
+					lastSelectedEntity[0] = nullptr;
+				}
+
+				list_RemoveNode(node);
+			}
 		}
 	}
 
@@ -12868,10 +12874,19 @@ int main(int argc, char** argv)
 	button->action = &button3DMode;
 	button->visible = 0;
 
+	but3DModels = button = newButton();
+	strcpy(button->label, "3D Models");
+	button->x = 96;
+	button->y = 112;
+	button->sizex = 152;
+	button->sizey = 16;
+	button->action = &button3DModels;
+	button->visible = 0;
+
 	butHoverText = button = newButton();
 	strcpy(button->label, "Hover Text  Ctrl+H");
 	button->x = 96;
-	button->y = 112;
+	button->y = 128;
 	button->sizex = 152;
 	button->sizey = 16;
 	button->action = &buttonHoverText;
@@ -13374,6 +13389,7 @@ int main(int argc, char** argv)
 				}
 				if ( pasting
 					&& roomClipboardReady
+					&& roomClipboardHasTiles
 					&& roomClipboardMap.tiles )
 				{
 					for ( int previewLayer = 0;
@@ -13554,7 +13570,8 @@ int main(int argc, char** argv)
 					}
 
 					const bool hasEditorPreviewModel =
-						(isFloorDecoration
+						editor3DModelsEnabled
+						&& (isFloorDecoration
 							|| isColliderDecoration)
 						&& editor3DModelIndex >= 0
 						&& static_cast<Uint32>(
@@ -13906,6 +13923,27 @@ int main(int argc, char** argv)
 					const int buttonX = xres - 120;
 					const int buttonWidth = 108;
 
+					const char* copyModeLabel =
+						roomCopyContentMode == ROOM_COPY_TILES
+							? "COPY: TILES"
+							: (
+								roomCopyContentMode == ROOM_COPY_SPRITES
+									? "COPY: SPRITES"
+									: "COPY: BOTH"
+							);
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							copyModeLabel
+						) )
+					{
+						roomCopyContentMode =
+							(roomCopyContentMode + 1) % 3;
+					}
+
+					panelY += 23;
+
 					if ( roomPanelButton(
 							buttonX,
 							buttonWidth,
@@ -14166,7 +14204,7 @@ int main(int argc, char** argv)
 			}
 			if ( menuVisible == 3 )
 			{
-				drawWindowFancy(80, 16, 96, 128);
+				drawWindowFancy(80, 16, 96, 144);
 				butToolbox->visible = 1;
 				butStatusBar->visible = 1;
 				butAllLayers->visible = 1;
@@ -14174,6 +14212,7 @@ int main(int argc, char** argv)
 				butViewSprites->visible = 1;
 				butGrid->visible = 1;
 				but3DMode->visible = 1;
+				but3DModels->visible = 1;
 				if ( statusbar )
 				{
 					printText(font8x8_bmp, 84, 20, "x");
@@ -14198,9 +14237,13 @@ int main(int argc, char** argv)
 				{
 					printText(font8x8_bmp, 84, 100, "x");
 				}
-				if ( hovertext )
+				if ( editor3DModelsEnabled )
 				{
 					printText(font8x8_bmp, 84, 116, "x");
+				}
+				if ( hovertext )
+				{
+					printText(font8x8_bmp, 84, 132, "x");
 				}
 			}
 			else
@@ -14212,6 +14255,7 @@ int main(int argc, char** argv)
 				butViewSprites->visible = 0;
 				butGrid->visible = 0;
 				but3DMode->visible = 0;
+				but3DModels->visible = 0;
 			}
 			if ( menuVisible == 4 )
 			{
