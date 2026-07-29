@@ -33,36 +33,7 @@ bool secretDoorwayHasSpawned = false;   // Only one per entire run
 bool secretDoorwayOnThisFloor = false;
 void actSecretAutomatiaExit(Entity* my);
 // ==================== END SECRET DOORWAY GLOBALS ====================
-/*
- * Authored monster fields stored in existing serialized MISC_FLAGS.
- */
-static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
-static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
-static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
-static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
-
-static const char* authoredElitePresetSpecialNPCID(const int preset)
-{
-	switch ( preset )
-	{
-		case 1:
-			return "algernon";
-		case 2:
-			return "funny bones";
-		case 3:
-			return "potato king";
-		case 4:
-			return "thumpus";
-		case 5:
-			return "bram kindly";
-		case 6:
-			return "johann";
-		case 7:
-			return "merlin";
-		default:
-			return nullptr;
-	}
-}
+static constexpr Uint8 MAP_FOG_STORAGE_MARKER = 0xA5;
 
 int startfloor = 0;
 BaronyRNG map_rng;
@@ -8073,31 +8044,6 @@ void assignActions(map_t* map)
 					}
 
 					std::string checkName = myStats->name;
-
-					const int authoredElitePreset =
-						myStats->MISC_FLAGS[
-							STAT_FLAG_AUTHORED_ELITE_PRESET
-						];
-
-					if ( const char* specialNPCID =
-							authoredElitePresetSpecialNPCID(
-								authoredElitePreset
-							) )
-					{
-						checkName =
-							std::string("$npc=")
-							+ specialNPCID;
-
-						strncpy(
-							myStats->name,
-							checkName.c_str(),
-							sizeof(myStats->name) - 1
-						);
-						myStats->name[
-							sizeof(myStats->name) - 1
-						] = '\0';
-					}
-
 					if ( checkName.find(".json") != std::string::npos )
 					{
 						monsterCurveCustomManager.createMonsterFromFile(entity, myStats, checkName, monsterType);
@@ -11576,12 +11522,45 @@ bool map_t::tileHasAttribute(int x, int y, int layer, Uint32 attribute)
 
 void map_t::setMapHDRSettings()
 {
-	if ( !strncmp(map.filename, "fortress", 8) )
+	const Uint32 packedFogSettings =
+		static_cast<Uint32>(flags[MAP_FLAG_GENBYTES5]);
+	const Uint32 packedFogColor =
+		static_cast<Uint32>(flags[MAP_FLAG_GENBYTES6]);
+	const Uint8 fogMarker =
+		static_cast<Uint8>((packedFogSettings >> 24) & 0xFF);
+
+	*cvar_hdrBrightness = defaultBrightness;
+	*cvar_hdrLimitLow = defaultLimitLow;
+
+	if ( fogMarker == MAP_FOG_STORAGE_MARKER )
 	{
-		*cvar_hdrBrightness = defaultBrightness;
+		const float fogDistance =
+			static_cast<float>((packedFogSettings >> 16) & 0xFF) * 16.0f;
+		const float fogDensity =
+			static_cast<float>((packedFogSettings >> 8) & 0xFF) / 255.0f;
+		const float fogRed =
+			static_cast<float>((packedFogColor >> 24) & 0xFF) / 255.0f;
+		const float fogGreen =
+			static_cast<float>((packedFogColor >> 16) & 0xFF) / 255.0f;
+		const float fogBlue =
+			static_cast<float>((packedFogColor >> 8) & 0xFF) / 255.0f;
+
+		*cvar_fogColor =
+		{
+			fogRed,
+			fogGreen,
+			fogBlue,
+			fogDensity
+		};
+		*cvar_fogDistance = std::max(16.0f, fogDistance);
+		return;
+	}
+
+	if ( !strncmp(filename, "fortress", 8) )
+	{
 		if ( !*MainMenu::cvar_hdrEnabled )
 		{
-			*cvar_fogColor = { 0.7, 0.7f, 0.7f, 1.0f };
+			*cvar_fogColor = { 0.7f, 0.7f, 0.7f, 1.0f };
 		}
 		else
 		{
@@ -11592,9 +11571,7 @@ void map_t::setMapHDRSettings()
 	}
 	else
 	{
-		*cvar_hdrBrightness = defaultBrightness;
 		*cvar_fogColor = { 0.0f, 0.0f, 0.0f, 1.0f };
 		*cvar_fogDistance = 0.0f;
-		*cvar_hdrLimitLow = defaultLimitLow;
 	}
 }

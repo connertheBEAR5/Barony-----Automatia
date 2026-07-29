@@ -53,6 +53,14 @@ real_t prev_x = 0;
 real_t prev_y = 0;
 bool duplicatedSprite = false;
 int game = 0;
+
+/* Per-map fog editor fields packed into MAP_FLAG_GENBYTES5/6. */
+char mapFogEnabledText[4] = "[ ]";
+char mapFogDistanceText[8] = "384";
+char mapFogDensityText[4] = "255";
+char mapFogRedText[4] = "180";
+char mapFogGreenText[4] = "180";
+char mapFogBlueText[4] = "180";
 // function prototypes
 Uint32 timerCallback(Uint32 interval, void* param);
 bool handleEvents(void);
@@ -13320,6 +13328,71 @@ int main(int argc, char** argv)
 					printText(font8x8_bmp, start_x2, start_y + pad_y1, "Disable Hunger Loss:");
 					printText(font8x8_bmp, start_x3, start_y + pad_y1, mapflagtext[MAP_FLAG_DISABLEHUNGER]);
 
+					const int fogPanelX = subx1 + 8;
+					const int fogPanelY = suby1 + 356;
+					const int fogFieldX = fogPanelX + 104;
+
+					printTextFormattedColor(
+						font8x8_bmp,
+						fogPanelX,
+						fogPanelY,
+						makeColorRGB(120, 220, 255),
+						"Custom Map Fog"
+					);
+					printText(font8x8_bmp, fogPanelX, fogPanelY + 18, "Enabled:");
+					printText(font8x8_bmp, fogFieldX, fogPanelY + 18, mapFogEnabledText);
+
+					const char* fogLabels[5] =
+					{
+						"Distance:",
+						"Density:",
+						"Red:",
+						"Green:",
+						"Blue:"
+					};
+					char* fogValues[5] =
+					{
+						mapFogDistanceText,
+						mapFogDensityText,
+						mapFogRedText,
+						mapFogGreenText,
+						mapFogBlueText
+					};
+
+					for ( int fogIndex = 0; fogIndex < 5; ++fogIndex )
+					{
+						const int fogY = fogPanelY + 36 + fogIndex * 18;
+						printText(font8x8_bmp, fogPanelX, fogY, fogLabels[fogIndex]);
+						drawDepressed(fogFieldX - 4, fogY - 4, fogFieldX + 60, fogY + 12);
+						printText(font8x8_bmp, fogFieldX, fogY, fogValues[fogIndex]);
+					}
+
+					printTextFormattedColor(
+						font8x8_bmp,
+						fogPanelX + 180,
+						fogPanelY + 18,
+						makeColorRGB(180, 180, 180),
+						"Distance: 16-4080 world units"
+					);
+					printTextFormattedColor(
+						font8x8_bmp,
+						fogPanelX + 180,
+						fogPanelY + 36,
+						makeColorRGB(180, 180, 180),
+						"Density/R/G/B: 0-255"
+					);
+					printTextFormattedColor(
+						font8x8_bmp,
+						fogPanelX + 180,
+						fogPanelY + 54,
+						makeColorRGB(
+							std::clamp(atoi(mapFogRedText), 0, 255),
+							std::clamp(atoi(mapFogGreenText), 0, 255),
+							std::clamp(atoi(mapFogBlueText), 0, 255)
+						),
+						"Fog color preview"
+					);
+
 					start_y = suby2 - 44;
 					pad_y1 = 0;
 					printText(font8x8_bmp, subx1 + 8, start_y + pad_y1, "Map Width:");
@@ -13604,6 +13677,46 @@ int main(int argc, char** argv)
 							cursorflash = ticks;
 						}
 
+						const int fogClickX = subx1 + 112;
+						const int fogClickY = suby1 + 356;
+						if ( omousex >= fogClickX
+							&& omousex < fogClickX + 32
+							&& omousey >= fogClickY + 14
+							&& omousey < fogClickY + 32 )
+						{
+							if ( !strncmp(mapFogEnabledText, "[x]", 3) )
+							{
+								strcpy(mapFogEnabledText, "[ ]");
+							}
+							else
+							{
+								strcpy(mapFogEnabledText, "[x]");
+							}
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+						}
+
+						char* fogClickValues[5] =
+						{
+							mapFogDistanceText,
+							mapFogDensityText,
+							mapFogRedText,
+							mapFogGreenText,
+							mapFogBlueText
+						};
+						for ( int fogIndex = 0; fogIndex < 5; ++fogIndex )
+						{
+							const int fogY = fogClickY + 36 + fogIndex * 18;
+							if ( omousex >= fogClickX - 4
+								&& omousex < fogClickX + 60
+								&& omousey >= fogY - 4
+								&& omousey < fogY + 12 )
+							{
+								inputstr = fogClickValues[fogIndex];
+								editproperty = 15 + fogIndex;
+								cursorflash = ticks;
+							}
+						}
+
 						if ( omousex >= subx1 + 104 && omousey >= suby2 - 48 && omousex < subx1 + 168 && omousey < suby2 - 32 )
 						{
 							inputstr = widthtext;
@@ -13828,6 +13941,34 @@ int main(int argc, char** argv)
 						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 						{
 							printText(font8x8_bmp, subx1 + 108 + strlen(mapflagtext[MAP_FLAG_PERIMETER_GAP]) * 8, start_y + pad_y1, "\26");
+						}
+					}
+					if ( editproperty >= 15 && editproperty <= 19 )
+					{
+						char* fogEditValues[5] =
+						{
+							mapFogDistanceText,
+							mapFogDensityText,
+							mapFogRedText,
+							mapFogGreenText,
+							mapFogBlueText
+						};
+						const int fogIndex = editproperty - 15;
+						if ( !SDL_IsTextInputActive() )
+						{
+							SDL_StartTextInput();
+							inputstr = fogEditValues[fogIndex];
+						}
+						inputlen = fogIndex == 0 ? 4 : 3;
+						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							const int fogCursorY = suby1 + 392 + fogIndex * 18;
+							printText(
+								font8x8_bmp,
+								subx1 + 112 + strlen(fogEditValues[fogIndex]) * 8,
+								fogCursorY,
+								"\26"
+							);
 						}
 					}
 				}

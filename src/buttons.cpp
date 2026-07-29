@@ -83,6 +83,15 @@ button_t* butItemX;
 
 bool exitFromItemWindow = false;
 
+extern char mapFogEnabledText[4];
+extern char mapFogDistanceText[8];
+extern char mapFogDensityText[4];
+extern char mapFogRedText[4];
+extern char mapFogGreenText[4];
+extern char mapFogBlueText[4];
+
+static constexpr Uint8 MAP_FOG_STORAGE_MARKER = 0xA5;
+
 static void updateMapNames()
 {
 	DIR* dir;
@@ -330,6 +339,34 @@ void buttonNew(button_t* my)
 	snprintf(mapflagtext[MAP_FLAG_GENDECORATIONMIN], 4, "%d", (map.flags[MAP_FLAG_GENBYTES2] >> 8) & static_cast<int>(0xFF));
 	snprintf(mapflagtext[MAP_FLAG_GENDECORATIONMAX], 4, "%d", (map.flags[MAP_FLAG_GENBYTES2] >> 0) & static_cast<int>(0xFF));
 	snprintf(mapflagtext[MAP_FLAG_PERIMETER_GAP], 4, "%d", (map.flags[MAP_FLAG_GENBYTES4] >> 0) & static_cast<int>(0xFF));
+
+	const Uint32 packedFogSettings =
+		static_cast<Uint32>(map.flags[MAP_FLAG_GENBYTES5]);
+	const Uint32 packedFogColor =
+		static_cast<Uint32>(map.flags[MAP_FLAG_GENBYTES6]);
+	const Uint8 fogMarker =
+		static_cast<Uint8>((packedFogSettings >> 24) & 0xFF);
+
+	if ( fogMarker == MAP_FOG_STORAGE_MARKER )
+	{
+		strcpy(mapFogEnabledText, "[x]");
+		const int fogDistance =
+			std::max(1, static_cast<int>((packedFogSettings >> 16) & 0xFF)) * 16;
+		snprintf(mapFogDistanceText, sizeof(mapFogDistanceText), "%d", fogDistance);
+		snprintf(mapFogDensityText, sizeof(mapFogDensityText), "%u", (packedFogSettings >> 8) & 0xFF);
+		snprintf(mapFogRedText, sizeof(mapFogRedText), "%u", (packedFogColor >> 24) & 0xFF);
+		snprintf(mapFogGreenText, sizeof(mapFogGreenText), "%u", (packedFogColor >> 16) & 0xFF);
+		snprintf(mapFogBlueText, sizeof(mapFogBlueText), "%u", (packedFogColor >> 8) & 0xFF);
+	}
+	else
+	{
+		strcpy(mapFogEnabledText, "[ ]");
+		strcpy(mapFogDistanceText, "384");
+		strcpy(mapFogDensityText, "255");
+		strcpy(mapFogRedText, "180");
+		strcpy(mapFogGreenText, "180");
+		strcpy(mapFogBlueText, "180");
+	}
 	if ( (map.flags[MAP_FLAG_GENBYTES3] >> 24) & static_cast<int>(0xFF) )
 	{
 		strcpy(mapflagtext[MAP_FLAG_DISABLEDIGGING], "[x]");
@@ -1250,6 +1287,34 @@ void buttonAttributes(button_t* my)
 	snprintf(mapflagtext[MAP_FLAG_GENDECORATIONMIN], 4, "%d", (map.flags[MAP_FLAG_GENBYTES2] >> 8) & static_cast<int>(0xFF));
 	snprintf(mapflagtext[MAP_FLAG_GENDECORATIONMAX], 4, "%d", (map.flags[MAP_FLAG_GENBYTES2] >> 0) & static_cast<int>(0xFF));
 	snprintf(mapflagtext[MAP_FLAG_PERIMETER_GAP], 4, "%d", (map.flags[MAP_FLAG_GENBYTES4] >> 0) & static_cast<int>(0xFF));
+
+	const Uint32 packedFogSettings =
+		static_cast<Uint32>(map.flags[MAP_FLAG_GENBYTES5]);
+	const Uint32 packedFogColor =
+		static_cast<Uint32>(map.flags[MAP_FLAG_GENBYTES6]);
+	const Uint8 fogMarker =
+		static_cast<Uint8>((packedFogSettings >> 24) & 0xFF);
+
+	if ( fogMarker == MAP_FOG_STORAGE_MARKER )
+	{
+		strcpy(mapFogEnabledText, "[x]");
+		const int fogDistance =
+			std::max(1, static_cast<int>((packedFogSettings >> 16) & 0xFF)) * 16;
+		snprintf(mapFogDistanceText, sizeof(mapFogDistanceText), "%d", fogDistance);
+		snprintf(mapFogDensityText, sizeof(mapFogDensityText), "%u", (packedFogSettings >> 8) & 0xFF);
+		snprintf(mapFogRedText, sizeof(mapFogRedText), "%u", (packedFogColor >> 24) & 0xFF);
+		snprintf(mapFogGreenText, sizeof(mapFogGreenText), "%u", (packedFogColor >> 16) & 0xFF);
+		snprintf(mapFogBlueText, sizeof(mapFogBlueText), "%u", (packedFogColor >> 8) & 0xFF);
+	}
+	else
+	{
+		strcpy(mapFogEnabledText, "[ ]");
+		strcpy(mapFogDistanceText, "384");
+		strcpy(mapFogDensityText, "255");
+		strcpy(mapFogRedText, "180");
+		strcpy(mapFogGreenText, "180");
+		strcpy(mapFogBlueText, "180");
+	}
 	if ( (map.flags[MAP_FLAG_GENBYTES3] >> 24) & static_cast<int>(0xFF) )
 	{
 		strcpy(mapflagtext[MAP_FLAG_DISABLEDIGGING], "[x]");
@@ -1339,10 +1404,10 @@ void buttonAttributes(button_t* my)
 	menuVisible = 0;
 	subwindow = 1;
 	newwindow = 1;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 200;
-	suby2 = yres / 2 + 200;
+	subx1 = std::max(16, xres / 2 - 300);
+	subx2 = std::min(xres - 16, xres / 2 + 300);
+	suby1 = std::max(16, yres / 2 - 280);
+	suby2 = std::min(yres - 16, yres / 2 + 280);
 	strcpy(subtext, "Map properties:");
 
 	button = newButton();
@@ -1486,6 +1551,31 @@ void buttonAttributesConfirm(button_t* my)
 	if ( atoi(mapflagtext[MAP_FLAG_PERIMETER_GAP]) >= 0 )
 	{
 		map.flags[MAP_FLAG_GENBYTES4] |= 0xFF & (atoi(mapflagtext[MAP_FLAG_PERIMETER_GAP]) << 0); // store in fourth leftmost byte.
+	}
+
+	map.flags[MAP_FLAG_GENBYTES5] = 0;
+	map.flags[MAP_FLAG_GENBYTES6] = 0;
+	if ( !strncmp(mapFogEnabledText, "[x]", 3) )
+	{
+		const int fogDistanceUnits =
+			std::clamp(atoi(mapFogDistanceText) / 16, 1, 255);
+		const int fogDensity =
+			std::clamp(atoi(mapFogDensityText), 0, 255);
+		const int fogRed =
+			std::clamp(atoi(mapFogRedText), 0, 255);
+		const int fogGreen =
+			std::clamp(atoi(mapFogGreenText), 0, 255);
+		const int fogBlue =
+			std::clamp(atoi(mapFogBlueText), 0, 255);
+
+		map.flags[MAP_FLAG_GENBYTES5] =
+			(static_cast<Uint32>(MAP_FOG_STORAGE_MARKER) << 24)
+			| (static_cast<Uint32>(fogDistanceUnits) << 16)
+			| (static_cast<Uint32>(fogDensity) << 8);
+		map.flags[MAP_FLAG_GENBYTES6] =
+			(static_cast<Uint32>(fogRed) << 24)
+			| (static_cast<Uint32>(fogGreen) << 16)
+			| (static_cast<Uint32>(fogBlue) << 8);
 	}
 
 	if ( !strncmp(mapflagtext[MAP_FLAG_DISABLETRAPS], "[x]", 3) )
