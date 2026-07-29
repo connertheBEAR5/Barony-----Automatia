@@ -288,8 +288,14 @@ void buttonBrush(button_t* my)
 
 void buttonSelect(button_t* my)
 {
+	if ( selectedTool == 3 )
+	{
+		roomSelectResetSelection();
+		return;
+	}
+
 	selectedTool = 3;
-	selectedarea = false;
+	roomSelectResetSelection();
 }
 
 void buttonFill(button_t* my)
@@ -1059,41 +1065,13 @@ void buttonCut(button_t* my)
 void buttonCopy(button_t* my)
 {
 	menuVisible = 0;
-	int x, y;
-
-	// copy the selected tiles
-	if (selectedarea && !pasting)
-	{
-		copymap.width = selectedarea_x2 - selectedarea_x1 + 1;
-		copymap.height = selectedarea_y2 - selectedarea_y1 + 1;
-		if ( copymap.tiles != NULL )
-		{
-			free(copymap.tiles);
-		}
-		copymap.tiles = (Sint32*) malloc(sizeof(Sint32) * copymap.width * copymap.height * MAPLAYERS);
-		memset(copymap.tiles, 0, sizeof(Sint32)*copymap.width * copymap.height * MAPLAYERS);
-		for ( x = 0; x < copymap.width; x++ )
-		{
-			for ( y = 0; y < copymap.height; y++ )
-			{
-				copymap.tiles[drawlayer + y * MAPLAYERS + x * MAPLAYERS * copymap.height] = map.tiles[drawlayer + (y + selectedarea_y1) * MAPLAYERS + (x + selectedarea_x1) * MAPLAYERS * map.height];
-			}
-		}
-		copymap.name[0] = drawlayer;
-	}
-	selectedarea = false;
+	editorRoomCopySelection();
 }
 
 void buttonPaste(button_t* my)
 {
 	menuVisible = 0;
-
-	// paste the selected tiles
-	if ( copymap.tiles != NULL )
-	{
-		pasting = true;
-		selectedarea = false;
-	}
+	editorRoomBeginPaste();
 }
 
 void buttonDelete(button_t* my)
@@ -1108,18 +1086,9 @@ void buttonDelete(button_t* my)
 		selectedEntity[0] = NULL;
 		lastSelectedEntity[0] = NULL;
 	}
-	if (selectedarea)
+	if ( selectedarea )
 	{
-		// delete all selected tiles
-		int x, y;
-		for ( x = selectedarea_x1; x <= selectedarea_x2; x++ )
-		{
-			for ( y = selectedarea_y1; y <= selectedarea_y2; y++ )
-			{
-				map.tiles[drawlayer + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
-			}
-		}
-		selectedarea = false;
+		editorRoomDeleteSelection();
 	}
 }
 

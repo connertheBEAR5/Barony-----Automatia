@@ -133,6 +133,23 @@ extern bool pasting;
 extern map_t copymap;
 extern list_t undolist;
 
+/* Automatia cuboid room selection / clipboard. */
+extern int roomSelectBottomLayer;
+extern int roomSelectTopLayer;
+extern int roomSelectStage;
+extern bool roomClipboardReady;
+extern int roomClipboardWidth;
+extern int roomClipboardHeight;
+extern int roomClipboardDepth;
+extern int roomClipboardEntityCount;
+
+void editorRoomCopySelection();
+void editorRoomBeginPaste();
+void editorRoomDeleteSelection();
+void editorRoomPlaceClipboard(int destinationX, int destinationY, int destinationBottomLayer);
+void editorRoomCancelPaste();
+void roomSelectResetSelection();
+
 // fps
 extern bool showfps;
 extern real_t t, ot, frameval[AVERAGEFRAMES];

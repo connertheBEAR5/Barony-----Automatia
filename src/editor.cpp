@@ -70,6 +70,146 @@ void mainLogic(void);
 std::vector<Entity*> groupedEntities;
 bool moveSelectionNegativeX = false;
 bool moveSelectionNegativeY = false;
+
+/*
+ * Automatia cuboid room-selection state.
+ *
+ * Stage:
+ *   0 = click top-left
+ *   1 = click bottom-right
+ *   2 = area selected
+ *   3 = ready to paste
+ *   4 = placing room
+ *   5 = room placed
+ *   6 = area deleted
+ */
+int roomSelectBottomLayer = 0;
+int roomSelectTopLayer = 0;
+int roomSelectStage = 0;
+bool roomClipboardReady = false;
+int roomClipboardWidth = 0;
+int roomClipboardHeight = 0;
+int roomClipboardDepth = 0;
+int roomClipboardEntityCount = 0;
+
+static map_t roomClipboardMap;
+static list_t roomClipboardEntityList = { nullptr, nullptr };
+
+enum RoomSelectEditField
+{
+	ROOM_FIELD_NONE = -1,
+	ROOM_FIELD_TOP_LEFT_X = 0,
+	ROOM_FIELD_TOP_LEFT_Y,
+	ROOM_FIELD_BOTTOM_RIGHT_X,
+	ROOM_FIELD_BOTTOM_RIGHT_Y,
+	ROOM_FIELD_BOTTOM_LAYER,
+	ROOM_FIELD_TOP_LAYER
+};
+
+static int roomSelectEditingField = ROOM_FIELD_NONE;
+static char roomSelectEditBuffer[16] = "";
+static bool roomSelectManualMode = false;
+
+static int* roomSelectFieldValue(const int field)
+{
+	switch ( field )
+	{
+		case ROOM_FIELD_TOP_LEFT_X:
+			return &selectedarea_x1;
+		case ROOM_FIELD_TOP_LEFT_Y:
+			return &selectedarea_y1;
+		case ROOM_FIELD_BOTTOM_RIGHT_X:
+			return &selectedarea_x2;
+		case ROOM_FIELD_BOTTOM_RIGHT_Y:
+			return &selectedarea_y2;
+		case ROOM_FIELD_BOTTOM_LAYER:
+			return &roomSelectBottomLayer;
+		case ROOM_FIELD_TOP_LAYER:
+			return &roomSelectTopLayer;
+		default:
+			return nullptr;
+	}
+}
+
+static int roomSelectFieldMaximum(const int field)
+{
+	switch ( field )
+	{
+		case ROOM_FIELD_TOP_LEFT_X:
+		case ROOM_FIELD_BOTTOM_RIGHT_X:
+			return std::max(0, static_cast<int>(map.width) - 1);
+		case ROOM_FIELD_TOP_LEFT_Y:
+		case ROOM_FIELD_BOTTOM_RIGHT_Y:
+			return std::max(0, static_cast<int>(map.height) - 1);
+		case ROOM_FIELD_BOTTOM_LAYER:
+		case ROOM_FIELD_TOP_LAYER:
+			return std::max(0, static_cast<int>(map.numLayers) - 1);
+		default:
+			return 0;
+	}
+}
+
+static void roomSelectCommitEditingField()
+{
+	int* value = roomSelectFieldValue(roomSelectEditingField);
+
+	if ( value )
+	{
+		const int parsed = roomSelectEditBuffer[0]
+			? atoi(roomSelectEditBuffer)
+			: 0;
+
+		*value = std::max(
+			0,
+			std::min(
+				roomSelectFieldMaximum(roomSelectEditingField),
+				parsed
+			)
+		);
+	}
+
+	roomSelectEditingField = ROOM_FIELD_NONE;
+	roomSelectEditBuffer[0] = 0;
+	SDL_StopTextInput();
+}
+
+static void roomSelectBeginEditingField(const int field)
+{
+	roomSelectEditingField = field;
+	int* value = roomSelectFieldValue(field);
+
+	snprintf(
+		roomSelectEditBuffer,
+		sizeof(roomSelectEditBuffer),
+		"%d",
+		value ? *value : 0
+	);
+
+	SDL_StartTextInput();
+}
+
+void roomSelectResetSelection()
+{
+	if ( pasting )
+	{
+		editorRoomCancelPaste();
+	}
+
+	selectedarea_x1 = 0;
+	selectedarea_y1 = 0;
+	selectedarea_x2 = 0;
+	selectedarea_y2 = 0;
+	roomSelectBottomLayer = 0;
+	roomSelectTopLayer = 0;
+	roomSelectStage = 0;
+	selectedarea = false;
+	selectingspace = false;
+	groupedEntities.clear();
+	roomSelectEditingField = ROOM_FIELD_NONE;
+	roomSelectEditBuffer[0] = 0;
+	roomSelectManualMode = false;
+	SDL_StopTextInput();
+}
 std::vector<std::string> mapNames;
 std::list<std::string> modFolderNames;
 std::string physfs_saveDirectory = BASE_DATA_DIR;
@@ -10115,6 +10255,547 @@ static int entityZToSpriteLayer(real_t z)
 
 	return std::max(0, std::min(layer, MAPLAYERS - 1));
 }
+
+static void clearRoomClipboard()
+{
+	if ( roomClipboardMap.tiles )
+	{
+		free(roomClipboardMap.tiles);
+		roomClipboardMap.tiles = nullptr;
+	}
+
+	list_FreeAll(&roomClipboardEntityList);
+	roomClipboardEntityList.first = nullptr;
+	roomClipboardEntityList.last = nullptr;
+
+	roomClipboardMap.entities = &roomClipboardEntityList;
+	roomClipboardMap.width = 0;
+	roomClipboardMap.height = 0;
+	roomClipboardMap.numLayers = 0;
+
+	roomClipboardReady = false;
+	roomClipboardWidth = 0;
+	roomClipboardHeight = 0;
+	roomClipboardDepth = 0;
+	roomClipboardEntityCount = 0;
+}
+
+static void normalizeRoomSelection()
+{
+	const int oldX1 = selectedarea_x1;
+	const int oldY1 = selectedarea_y1;
+
+	selectedarea_x1 =
+		std::max(
+			0,
+			std::min(
+				std::min(oldX1, selectedarea_x2),
+				static_cast<int>(map.width) - 1
+			)
+		);
+	selectedarea_x2 =
+		std::max(
+			0,
+			std::min(
+				std::max(oldX1, selectedarea_x2),
+				static_cast<int>(map.width) - 1
+			)
+		);
+
+	selectedarea_y1 =
+		std::max(
+			0,
+			std::min(
+				std::min(oldY1, selectedarea_y2),
+				static_cast<int>(map.height) - 1
+			)
+		);
+	selectedarea_y2 =
+		std::max(
+			0,
+			std::min(
+				std::max(oldY1, selectedarea_y2),
+				static_cast<int>(map.height) - 1
+			)
+		);
+
+	const int oldBottom = roomSelectBottomLayer;
+	roomSelectBottomLayer =
+		std::max(
+			0,
+			std::min(
+				std::min(oldBottom, roomSelectTopLayer),
+				std::max(
+					0,
+					static_cast<int>(map.numLayers) - 1
+				)
+			)
+		);
+	roomSelectTopLayer =
+		std::max(
+			roomSelectBottomLayer,
+			std::min(
+				std::max(oldBottom, roomSelectTopLayer),
+				std::max(
+					0,
+					static_cast<int>(map.numLayers) - 1
+				)
+			)
+		);
+}
+
+void editorRoomCopySelection()
+{
+	if ( !selectedarea || pasting )
+	{
+		return;
+	}
+
+	normalizeRoomSelection();
+	clearRoomClipboard();
+
+	roomClipboardWidth =
+		selectedarea_x2 - selectedarea_x1 + 1;
+	roomClipboardHeight =
+		selectedarea_y2 - selectedarea_y1 + 1;
+	roomClipboardDepth =
+		roomSelectTopLayer - roomSelectBottomLayer + 1;
+
+	roomClipboardMap.width = roomClipboardWidth;
+	roomClipboardMap.height = roomClipboardHeight;
+	roomClipboardMap.numLayers = roomClipboardDepth;
+	roomClipboardMap.entities = &roomClipboardEntityList;
+
+	const size_t tileCount =
+		static_cast<size_t>(roomClipboardWidth)
+		* static_cast<size_t>(roomClipboardHeight)
+		* MAPLAYERS;
+
+	roomClipboardMap.tiles =
+		static_cast<Sint32*>(
+			malloc(sizeof(Sint32) * tileCount)
+		);
+
+	if ( !roomClipboardMap.tiles )
+	{
+		clearRoomClipboard();
+		return;
+	}
+
+	memset(
+		roomClipboardMap.tiles,
+		0,
+		sizeof(Sint32) * tileCount
+	);
+
+	for ( int localX = 0;
+		localX < roomClipboardWidth;
+		++localX )
+	{
+		for ( int localY = 0;
+			localY < roomClipboardHeight;
+			++localY )
+		{
+			for ( int localLayer = 0;
+				localLayer < roomClipboardDepth;
+				++localLayer )
+			{
+				const int sourceLayer =
+					roomSelectBottomLayer + localLayer;
+
+				const int sourceIndex =
+					sourceLayer
+					+ (selectedarea_y1 + localY)
+						* MAPLAYERS
+					+ (selectedarea_x1 + localX)
+						* MAPLAYERS
+						* map.height;
+
+				const int destinationIndex =
+					localLayer
+					+ localY * MAPLAYERS
+					+ localX
+						* MAPLAYERS
+						* roomClipboardHeight;
+
+				/*
+				 * Air is copied deliberately. It must carve out the
+				 * destination so interiors, windows, and doorways
+				 * remain exact.
+				 */
+				roomClipboardMap.tiles[destinationIndex] =
+					map.tiles[sourceIndex];
+			}
+		}
+	}
+
+	roomClipboardEntityCount = 0;
+
+	for ( node_t* node = map.entities->first;
+		node;
+		node = node->next )
+	{
+		Entity* source =
+			static_cast<Entity*>(node->element);
+
+		if ( !source )
+		{
+			continue;
+		}
+
+		const int sourceLayer =
+			entityZToSpriteLayer(source->z);
+		const int sourceTileX =
+			static_cast<int>(source->x / 16);
+		const int sourceTileY =
+			static_cast<int>(source->y / 16);
+
+		if ( sourceTileX < selectedarea_x1
+			|| sourceTileX > selectedarea_x2
+			|| sourceTileY < selectedarea_y1
+			|| sourceTileY > selectedarea_y2
+			|| sourceLayer < roomSelectBottomLayer
+			|| sourceLayer > roomSelectTopLayer )
+		{
+			continue;
+		}
+
+		Entity* snapshot =
+			newEntity(
+				source->sprite,
+				0,
+				&roomClipboardEntityList,
+				nullptr
+			);
+
+		if ( !snapshot )
+		{
+			continue;
+		}
+
+		setSpriteAttributes(
+			snapshot,
+			source,
+			source
+		);
+
+		snapshot->x =
+			source->x
+			- selectedarea_x1 * 16;
+		snapshot->y =
+			source->y
+			- selectedarea_y1 * 16;
+		snapshot->z =
+			spriteLayerToEntityZ(
+				sourceLayer
+				- roomSelectBottomLayer
+			);
+
+		/*
+		 * Pasted copies must receive fresh persistent IDs on the
+		 * next save instead of colliding with the source room.
+		 */
+		snapshot->persistentID = 0;
+
+		++roomClipboardEntityCount;
+	}
+
+	roomClipboardReady = true;
+	roomSelectStage = 3;
+}
+
+void editorRoomBeginPaste()
+{
+	if ( !roomClipboardReady
+		|| !roomClipboardMap.tiles )
+	{
+		return;
+	}
+
+	pasting = true;
+	selectedarea = false;
+	selectingspace = false;
+	roomSelectStage = 4;
+}
+
+void editorRoomCancelPaste()
+{
+	pasting = false;
+	roomSelectStage =
+		roomClipboardReady ? 3 : 0;
+}
+
+void editorRoomPlaceClipboard(
+	int destinationX,
+	int destinationY,
+	int destinationBottomLayer
+)
+{
+	if ( !roomClipboardReady
+		|| !roomClipboardMap.tiles )
+	{
+		return;
+	}
+
+	makeUndo();
+
+	for ( int localX = 0;
+		localX < roomClipboardWidth;
+		++localX )
+	{
+		for ( int localY = 0;
+			localY < roomClipboardHeight;
+			++localY )
+		{
+			const int destinationTileX =
+				destinationX + localX;
+			const int destinationTileY =
+				destinationY + localY;
+
+			if ( destinationTileX < 0
+				|| destinationTileX
+					>= static_cast<int>(map.width)
+				|| destinationTileY < 0
+				|| destinationTileY
+					>= static_cast<int>(map.height) )
+			{
+				continue;
+			}
+
+			for ( int localLayer = 0;
+				localLayer < roomClipboardDepth;
+				++localLayer )
+			{
+				const int destinationLayer =
+					destinationBottomLayer
+					+ localLayer;
+
+				if ( destinationLayer < 0
+					|| destinationLayer >= MAPLAYERS
+					|| destinationLayer
+						>= static_cast<int>(map.numLayers) )
+				{
+					continue;
+				}
+
+				const int sourceIndex =
+					localLayer
+					+ localY * MAPLAYERS
+					+ localX
+						* MAPLAYERS
+						* roomClipboardHeight;
+
+				const int destinationIndex =
+					destinationLayer
+					+ destinationTileY
+						* MAPLAYERS
+					+ destinationTileX
+						* MAPLAYERS
+						* map.height;
+
+				/*
+				 * Do not skip zero. Air is part of the copied room
+				 * and intentionally carves the destination.
+				 */
+				map.tiles[destinationIndex] =
+					roomClipboardMap.tiles[sourceIndex];
+			}
+		}
+	}
+
+	for ( node_t* node =
+			roomClipboardEntityList.first;
+		node;
+		node = node->next )
+	{
+		Entity* snapshot =
+			static_cast<Entity*>(node->element);
+
+		if ( !snapshot )
+		{
+			continue;
+		}
+
+		const int localLayer =
+			entityZToSpriteLayer(snapshot->z);
+		const int destinationLayer =
+			destinationBottomLayer + localLayer;
+
+		const int destinationTileX =
+			destinationX
+				+ static_cast<int>(snapshot->x / 16);
+		const int destinationTileY =
+			destinationY
+				+ static_cast<int>(snapshot->y / 16);
+
+		if ( destinationTileX < 0
+			|| destinationTileX
+				>= static_cast<int>(map.width)
+			|| destinationTileY < 0
+			|| destinationTileY
+				>= static_cast<int>(map.height)
+			|| destinationLayer < 0
+			|| destinationLayer
+				>= static_cast<int>(map.numLayers) )
+		{
+			continue;
+		}
+
+		Entity* pastedEntity =
+			newEntity(
+				snapshot->sprite,
+				0,
+				map.entities,
+				nullptr
+			);
+
+		if ( !pastedEntity )
+		{
+			continue;
+		}
+
+		setSpriteAttributes(
+			pastedEntity,
+			snapshot,
+			snapshot
+		);
+
+		pastedEntity->x =
+			destinationX * 16
+			+ snapshot->x;
+		pastedEntity->y =
+			destinationY * 16
+			+ snapshot->y;
+		pastedEntity->z =
+			spriteLayerToEntityZ(
+				destinationLayer
+			);
+		pastedEntity->persistentID = 0;
+	}
+
+	pasting = false;
+	roomSelectStage = 5;
+
+	selectedarea_x1 = destinationX;
+	selectedarea_y1 = destinationY;
+	selectedarea_x2 =
+		destinationX
+			+ roomClipboardWidth - 1;
+	selectedarea_y2 =
+		destinationY
+			+ roomClipboardHeight - 1;
+	roomSelectBottomLayer =
+		destinationBottomLayer;
+	roomSelectTopLayer =
+		std::min(
+			MAPLAYERS - 1,
+			destinationBottomLayer
+				+ roomClipboardDepth - 1
+		);
+	selectedarea = true;
+	reselectEntityGroup();
+}
+
+void editorRoomDeleteSelection()
+{
+	if ( !selectedarea )
+	{
+		return;
+	}
+
+	normalizeRoomSelection();
+	makeUndo();
+
+	for ( int x = selectedarea_x1;
+		x <= selectedarea_x2;
+		++x )
+	{
+		for ( int y = selectedarea_y1;
+			y <= selectedarea_y2;
+			++y )
+		{
+			for ( int layer = roomSelectBottomLayer;
+				layer <= roomSelectTopLayer;
+				++layer )
+			{
+				map.tiles[
+					layer
+					+ y * MAPLAYERS
+					+ x * MAPLAYERS * map.height
+				] = 0;
+			}
+		}
+	}
+
+	node_t* next = nullptr;
+
+	for ( node_t* node = map.entities->first;
+		node;
+		node = next )
+	{
+		next = node->next;
+
+		Entity* entity =
+			static_cast<Entity*>(node->element);
+
+		if ( !entity )
+		{
+			continue;
+		}
+
+		const int entityLayer =
+			entityZToSpriteLayer(entity->z);
+		const int entityX =
+			static_cast<int>(entity->x / 16);
+		const int entityY =
+			static_cast<int>(entity->y / 16);
+
+		if ( entityX >= selectedarea_x1
+			&& entityX <= selectedarea_x2
+			&& entityY >= selectedarea_y1
+			&& entityY <= selectedarea_y2
+			&& entityLayer >= roomSelectBottomLayer
+			&& entityLayer <= roomSelectTopLayer )
+		{
+			if ( selectedEntity[0] == entity )
+			{
+				selectedEntity[0] = nullptr;
+				lastSelectedEntity[0] = nullptr;
+			}
+
+			list_RemoveNode(node);
+		}
+	}
+
+	groupedEntities.clear();
+	selectedarea = false;
+	roomSelectStage = 6;
+}
+
+static const char* roomSelectStageText()
+{
+	switch ( roomSelectStage )
+	{
+		case 0:
+			return roomSelectManualMode
+				? "Enter Selection"
+				: "Click and Drag";
+		case 1:
+			return "Dragging Area";
+		case 2:
+			return "Area Selected";
+		case 3:
+			return "Ready to Paste";
+		case 4:
+			return "Click to Place";
+		case 5:
+			return "Room Placed";
+		case 6:
+			return "Area Deleted";
+		default:
+			return "Select Area";
+	}
+}
 void actGib(Entity* my) {} // dummy for draw.cpp
 void actHudArm(Entity* my) {} // dummy for draw.cpp
 void actHudWeapon(Entity* my) {} // dummy for draw.cpp
@@ -11024,6 +11705,66 @@ bool handleEvents(void)
 
 	while ( SDL_PollEvent(&event) )   // poll SDL events
 	{
+		if ( roomSelectEditingField != ROOM_FIELD_NONE )
+		{
+			if ( event.type == SDL_TEXTINPUT )
+			{
+				for ( const char* character = event.text.text;
+					*character;
+					++character )
+				{
+					if ( *character >= '0'
+						&& *character <= '9'
+						&& strlen(roomSelectEditBuffer)
+							< sizeof(roomSelectEditBuffer) - 1 )
+					{
+						const size_t length =
+							strlen(roomSelectEditBuffer);
+						roomSelectEditBuffer[length] =
+							*character;
+						roomSelectEditBuffer[length + 1] = 0;
+					}
+				}
+				continue;
+			}
+
+			if ( event.type == SDL_KEYDOWN )
+			{
+				if ( event.key.keysym.sym == SDLK_BACKSPACE )
+				{
+					const size_t length =
+						strlen(roomSelectEditBuffer);
+					if ( length > 0 )
+					{
+						roomSelectEditBuffer[length - 1] = 0;
+					}
+					continue;
+				}
+
+				if ( event.key.keysym.sym == SDLK_RETURN
+					|| event.key.keysym.sym == SDLK_KP_ENTER
+					|| event.key.keysym.sym == SDLK_TAB )
+				{
+					roomSelectCommitEditingField();
+					continue;
+				}
+
+				if ( event.key.keysym.sym == SDLK_ESCAPE )
+				{
+					roomSelectEditingField = ROOM_FIELD_NONE;
+					roomSelectEditBuffer[0] = 0;
+					SDL_StopTextInput();
+					continue;
+				}
+			}
+
+			if ( event.type == SDL_MOUSEBUTTONDOWN
+				&& event.button.button == SDL_BUTTON_LEFT )
+			{
+				roomSelectCommitEditingField();
+			}
+		}
+
 		// Global events
 		switch ( event.type )
 		{
@@ -12651,49 +13392,73 @@ int main(int argc, char** argv)
 							}
 							else if ( selectedTool == 3 )	// Process Select Tool functionality
 							{
-								if ( selectingspace == false )
+								if ( !roomSelectManualMode )
 								{
-									if ( drawx >= 0 && drawy >= 0 && drawx < map.width && drawy < map.height )
+									if ( !selectingspace )
 									{
-										selectingspace = true;
-										selectedarea_x1 = drawx;
-										selectedarea_x2 = drawx;
-										selectedarea_y1 = drawy;
-										selectedarea_y2 = drawy;
-										selectedarea = true;
+										if ( drawx >= 0
+											&& drawy >= 0
+											&& drawx < static_cast<int>(map.width)
+											&& drawy < static_cast<int>(map.height) )
+										{
+											selectingspace = true;
+											selectedarea_x1 = drawx;
+											selectedarea_x2 = drawx;
+											selectedarea_y1 = drawy;
+											selectedarea_y2 = drawy;
+											roomSelectBottomLayer = drawlayer;
+											roomSelectTopLayer = drawlayer;
+											selectedarea = true;
+											roomSelectStage = 1;
+										}
+										else
+										{
+											selectedarea = false;
+										}
 									}
 									else
 									{
-										selectedarea = false;
-									}
-								}
-								else
-								{
-									if ( drawx < odrawx )
-									{
-										selectedarea_x1 = std::min<unsigned int>(std::max(0, drawx), map.width - 1); //TODO: Why are int and unsigned int being compared?
-										selectedarea_x2 = std::min<unsigned int>(std::max(0, odrawx), map.width - 1); //TODO: Why are int and unsigned int being compared?
-									}
-									else
-									{
-										selectedarea_x1 = std::min<unsigned int>(std::max(0, odrawx), map.width - 1); //TODO: Why are int and unsigned int being compared?
-										selectedarea_x2 = std::min<unsigned int>(std::max(0, drawx), map.width - 1); //TODO: Why are int and unsigned int being compared?
-									}
-									if ( drawy < odrawy )
-									{
-										selectedarea_y1 = std::min<unsigned int>(std::max(0, drawy), map.height - 1); //TODO: Why are int and unsigned int being compared?
-										selectedarea_y2 = std::min<unsigned int>(std::max(0, odrawy), map.height - 1); //TODO: Why are int and unsigned int being compared?
-									}
-									else
-									{
-										selectedarea_y1 = std::min<unsigned int>(std::max(0, odrawy), map.height - 1); //TODO: Why are int and unsigned int being compared?
-										selectedarea_y2 = std::min<unsigned int>(std::max(0, drawy), map.height - 1); //TODO: Why are int and unsigned int being compared?
-									}
-									if ( map.entities->first != nullptr && viewsprites && allowediting )
-									{
-										reselectEntityGroup();
-										moveSelectionNegativeX = false;
-										moveSelectionNegativeY = false;
+										selectedarea_x1 = std::max(
+											0,
+											std::min(
+												std::min(odrawx, drawx),
+												static_cast<int>(map.width) - 1
+											)
+										);
+										selectedarea_x2 = std::max(
+											0,
+											std::min(
+												std::max(odrawx, drawx),
+												static_cast<int>(map.width) - 1
+											)
+										);
+										selectedarea_y1 = std::max(
+											0,
+											std::min(
+												std::min(odrawy, drawy),
+												static_cast<int>(map.height) - 1
+											)
+										);
+										selectedarea_y2 = std::max(
+											0,
+											std::min(
+												std::max(odrawy, drawy),
+												static_cast<int>(map.height) - 1
+											)
+										);
+
+										roomSelectBottomLayer = drawlayer;
+										roomSelectTopLayer = drawlayer;
+										roomSelectStage = 1;
+
+										if ( map.entities->first
+											&& viewsprites
+											&& allowediting )
+										{
+											reselectEntityGroup();
+											moveSelectionNegativeX = false;
+											moveSelectionNegativeY = false;
+										}
 									}
 								}
 							}
@@ -12707,34 +13472,38 @@ int main(int argc, char** argv)
 						}
 						else
 						{
-							// pasting from copymap
-							mousestatus[SDL_BUTTON_LEFT] = false;
-							for ( x = 0; x < copymap.width; x++ )
-							{
-								for ( y = 0; y < copymap.height; y++ )
-								{
-									if ( drawx + x >= 0 && drawx + x < map.width && drawy + y >= 0 && drawy + y < map.height )
-									{
-										z = copymap.name[0] + y * MAPLAYERS + x * MAPLAYERS * copymap.height;
-										if ( copymap.tiles[z] )
-										{
-											map.tiles[drawlayer + (drawy + y)*MAPLAYERS + (drawx + x)*MAPLAYERS * map.height] = copymap.tiles[z];
-										}
-									}
-								}
-							}
-							pasting = false;
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+							editorRoomPlaceClipboard(
+								drawx,
+								drawy,
+								drawlayer
+							);
 						}
 					}
 				}
 				else if ( !mousestatus[SDL_BUTTON_LEFT] )
 				{
+					if ( selectedTool == 3
+						&& selectingspace
+						&& !roomSelectManualMode
+						&& selectedarea )
+					{
+						normalizeRoomSelection();
+						roomSelectStage = 2;
+						reselectEntityGroup();
+					}
+
 					selectingspace = false;
 					savedundo = false;
 				}
 				if ( mousestatus[SDL_BUTTON_RIGHT] && selectedEntity[0] == NULL )
 				{
-					if ( selectedTool != 3 )
+					if ( pasting )
+					{
+						mousestatus[SDL_BUTTON_RIGHT] = 0;
+						editorRoomCancelPaste();
+					}
+					else if ( selectedTool != 3 )
 					{
 						if ( drawx >= 0 && drawx < map.width && drawy >= 0 && drawy < map.height )
 						{
@@ -12766,9 +13535,37 @@ int main(int argc, char** argv)
 				{
 					drawLayer(camx, camy, drawlayer, &map);
 				}
-				if ( pasting )
+				if ( pasting
+					&& roomClipboardReady
+					&& roomClipboardMap.tiles )
 				{
-					drawLayer(camx - (drawx << TEXTUREPOWER), camy - (drawy << TEXTUREPOWER), copymap.name[0], &copymap);
+					for ( int previewLayer = 0;
+						previewLayer < roomClipboardDepth;
+						++previewLayer )
+					{
+						drawLayer(
+							camx - (drawx << TEXTUREPOWER),
+							camy - (drawy << TEXTUREPOWER),
+							previewLayer,
+							&roomClipboardMap
+						);
+					}
+
+					SDL_Rect previewBounds;
+					previewBounds.x =
+						(drawx << TEXTUREPOWER) - camx;
+					previewBounds.y =
+						(drawy << TEXTUREPOWER) - camy;
+					previewBounds.w =
+						roomClipboardWidth << TEXTUREPOWER;
+					previewBounds.h =
+						roomClipboardHeight << TEXTUREPOWER;
+
+					drawRect(
+						&previewBounds,
+						makeColorRGB(0, 255, 255),
+						160
+					);
 				}
 				if ( selectedarea )
 				{
@@ -13074,6 +13871,436 @@ int main(int argc, char** argv)
 				}
 				drawEditormap(camx, camy);
 
+				if ( selectedTool == 3 )
+				{
+					const int panelX = xres - 122;
+					const int valueX = xres - 56;
+					int panelY = 310;
+
+					printText(
+						font8x8_bmp,
+						xres - 104,
+						292,
+						"SELECT AREA"
+					);
+
+					auto drawValueField =
+						[
+							&panelY,
+							panelX,
+							valueX
+						](
+							const char* label,
+							const int value,
+							const int field
+						)
+						{
+							printText(
+								font8x8_bmp,
+								panelX,
+								panelY + 4,
+								label
+							);
+
+							drawDepressed(
+								valueX,
+								panelY,
+								xres - 8,
+								panelY + 16
+							);
+
+							if ( roomSelectEditingField == field )
+							{
+								printText(
+									font8x8_bmp,
+									valueX + 4,
+									panelY + 4,
+									roomSelectEditBuffer
+								);
+							}
+							else
+							{
+								printTextFormatted(
+									font8x8_bmp,
+									valueX + 4,
+									panelY + 4,
+									"%d",
+									value
+								);
+							}
+
+							if ( roomSelectManualMode
+								&& mousestatus[SDL_BUTTON_LEFT]
+								&& omousex >= valueX
+								&& omousex < xres - 8
+								&& omousey >= panelY
+								&& omousey < panelY + 16 )
+							{
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+								roomSelectBeginEditingField(field);
+							}
+
+							panelY += 20;
+						};
+
+					drawValueField(
+						"TL X",
+						selectedarea_x1,
+						ROOM_FIELD_TOP_LEFT_X
+					);
+					drawValueField(
+						"TL Y",
+						selectedarea_y1,
+						ROOM_FIELD_TOP_LEFT_Y
+					);
+					drawValueField(
+						"BR X",
+						selectedarea_x2,
+						ROOM_FIELD_BOTTOM_RIGHT_X
+					);
+					drawValueField(
+						"BR Y",
+						selectedarea_y2,
+						ROOM_FIELD_BOTTOM_RIGHT_Y
+					);
+
+					auto drawLayerField =
+						[
+							&panelY,
+							panelX
+						](
+							const char* label,
+							int& value
+						)
+						{
+							printText(
+								font8x8_bmp,
+								panelX,
+								panelY + 4,
+								label
+							);
+
+							const int minusX = xres - 68;
+							const int layerValueX = xres - 50;
+							const int plusX = xres - 24;
+
+							drawWindowFancy(
+								minusX,
+								panelY,
+								minusX + 16,
+								panelY + 16
+							);
+							printText(
+								font8x8_bmp,
+								minusX + 5,
+								panelY + 4,
+								"-"
+							);
+
+							drawWindowFancy(
+								plusX,
+								panelY,
+								plusX + 16,
+								panelY + 16
+							);
+							printText(
+								font8x8_bmp,
+								plusX + 5,
+								panelY + 4,
+								"+"
+							);
+
+							drawDepressed(
+								layerValueX,
+								panelY,
+								layerValueX + 24,
+								panelY + 16
+							);
+
+							const int field =
+								&value == &roomSelectBottomLayer
+									? ROOM_FIELD_BOTTOM_LAYER
+									: ROOM_FIELD_TOP_LAYER;
+
+							if ( roomSelectEditingField == field )
+							{
+								printText(
+									font8x8_bmp,
+									layerValueX + 3,
+									panelY + 4,
+									roomSelectEditBuffer
+								);
+							}
+							else
+							{
+								printTextFormatted(
+									font8x8_bmp,
+									layerValueX + 3,
+									panelY + 4,
+									"%d",
+									value
+								);
+							}
+
+							if ( mousestatus[SDL_BUTTON_LEFT]
+								&& omousey >= panelY
+								&& omousey < panelY + 16 )
+							{
+								if ( roomSelectManualMode
+									&& omousex >= layerValueX
+									&& omousex < layerValueX + 24 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									roomSelectBeginEditingField(field);
+								}
+								else if ( omousex >= minusX
+									&& omousex < minusX + 16 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									value =
+										std::max(0, value - 1);
+									roomSelectStage = 2;
+								}
+								else if ( omousex >= plusX
+									&& omousex < plusX + 16 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									value =
+										std::min(
+											std::max(
+												0,
+												static_cast<int>(
+													map.numLayers
+												) - 1
+											),
+											value + 1
+										);
+									roomSelectStage = 2;
+								}
+							}
+
+							panelY += 20;
+						};
+
+					drawLayerField(
+						"Bottom",
+						roomSelectBottomLayer
+					);
+					drawLayerField(
+						"Top",
+						roomSelectTopLayer
+					);
+
+					if ( roomSelectBottomLayer
+						> roomSelectTopLayer )
+					{
+						std::swap(
+							roomSelectBottomLayer,
+							roomSelectTopLayer
+						);
+					}
+
+					auto roomPanelButton =
+						[
+							&panelY
+						](
+							const int x,
+							const int width,
+							const char* label
+						) -> bool
+						{
+							drawWindowFancy(
+								x,
+								panelY,
+								x + width,
+								panelY + 18
+							);
+
+							printText(
+								font8x8_bmp,
+								x + 4,
+								panelY + 5,
+								label
+							);
+
+							if ( mousestatus[SDL_BUTTON_LEFT]
+								&& omousex >= x
+								&& omousex < x + width
+								&& omousey >= panelY
+								&& omousey < panelY + 18 )
+							{
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+								return true;
+							}
+
+							return false;
+						};
+
+					const int buttonX = xres - 120;
+					const int buttonWidth = 108;
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							roomSelectManualMode
+								? "MODE: MANUAL"
+								: "MODE: DRAG"
+						) )
+					{
+						if ( roomSelectEditingField
+							!= ROOM_FIELD_NONE )
+						{
+							roomSelectCommitEditingField();
+						}
+
+						roomSelectManualMode = !roomSelectManualMode;
+						selectingspace = false;
+						roomSelectStage =
+							roomSelectManualMode && selectedarea
+								? 2
+								: 0;
+					}
+
+					panelY += 23;
+
+					const int stageButtonWidth = 52;
+
+					if ( roomPanelButton(
+							buttonX,
+							stageButtonWidth,
+							"BACK"
+						) )
+					{
+						if ( roomSelectEditingField
+							!= ROOM_FIELD_NONE )
+						{
+							roomSelectCommitEditingField();
+						}
+
+						roomSelectStage =
+							std::max(0, roomSelectStage - 1);
+
+						if ( roomSelectStage == 0 )
+						{
+							selectedarea = false;
+							selectingspace = false;
+						}
+					}
+
+					drawWindowFancy(
+						buttonX + 56,
+						panelY,
+						buttonX + 108,
+						panelY + 18
+					);
+					printText(
+						font8x8_bmp,
+						buttonX + 66,
+						panelY + 5,
+						"NEXT"
+					);
+
+					if ( mousestatus[SDL_BUTTON_LEFT]
+						&& omousex >= buttonX + 56
+						&& omousex < buttonX + 108
+						&& omousey >= panelY
+						&& omousey < panelY + 18 )
+					{
+						mousestatus[SDL_BUTTON_LEFT] = 0;
+
+						if ( roomSelectEditingField
+							!= ROOM_FIELD_NONE )
+						{
+							roomSelectCommitEditingField();
+						}
+
+						roomSelectStage =
+							std::min(4, roomSelectStage + 1);
+
+						if ( roomSelectStage >= 2 )
+						{
+							selectedarea = true;
+							normalizeRoomSelection();
+							reselectEntityGroup();
+						}
+
+						if ( roomSelectStage == 4
+							&& roomClipboardReady )
+						{
+							editorRoomBeginPaste();
+						}
+					}
+
+					panelY += 23;
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							"COPY"
+						) )
+					{
+						editorRoomCopySelection();
+					}
+
+					panelY += 23;
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							"PASTE"
+						) )
+					{
+						editorRoomBeginPaste();
+					}
+
+					panelY += 23;
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							"DELETE"
+						) )
+					{
+						editorRoomDeleteSelection();
+					}
+
+					panelY += 26;
+
+					printText(
+						font8x8_bmp,
+						panelX,
+						panelY,
+						"Stage:"
+					);
+					printText(
+						font8x8_bmp,
+						panelX,
+						panelY + 12,
+						roomSelectStageText()
+					);
+
+					if ( roomClipboardReady )
+					{
+						printTextFormatted(
+							font8x8_bmp,
+							panelX,
+							panelY + 32,
+							"%dx%dx%d",
+							roomClipboardWidth,
+							roomClipboardHeight,
+							roomClipboardDepth
+						);
+						printTextFormatted(
+							font8x8_bmp,
+							panelX,
+							panelY + 44,
+							"Sprites: %d",
+							roomClipboardEntityCount
+						);
+					}
+				}
+				else
+				{
 				// draw selected tile / hovering tile
 				pos.x = xres - 48;
 				pos.y = 320;
@@ -13210,6 +14437,7 @@ int main(int argc, char** argv)
 				else
 				{
 					printText(font8x8_bmp, xres - 100, pos.y + 40, "UNLOCKED");
+				}
 				}
 			}
 			if ( statusbar )
@@ -21300,6 +22528,12 @@ int main(int argc, char** argv)
 						button3DMode(NULL);
 					}
 				}
+				if ( pasting && keystatus[SDLK_ESCAPE] )
+				{
+					keystatus[SDLK_ESCAPE] = 0;
+					editorRoomCancelPaste();
+				}
+
 				if ( keystatus[SDLK_LALT] || keystatus[SDLK_RALT] )
 				{
 					if ( keystatus[SDLK_f] )
@@ -21945,9 +23179,18 @@ void reselectEntityGroup()
 			continue;
 		}
 
-		// Hidden sprites on other Z layers must not be included
-		// in the editor's group selection.
-		if ( entityZToSpriteLayer(entity->z) != drawlayer )
+		const int entityLayer =
+			entityZToSpriteLayer(entity->z);
+
+		if ( selectedTool == 3 )
+		{
+			if ( entityLayer < roomSelectBottomLayer
+				|| entityLayer > roomSelectTopLayer )
+			{
+				continue;
+			}
+		}
+		else if ( entityLayer != drawlayer )
 		{
 			continue;
 		}
