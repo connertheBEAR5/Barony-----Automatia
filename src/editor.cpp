@@ -12847,36 +12847,35 @@ int main(int argc, char** argv)
 						);
 
 					/*
-					 * Only authored decoration categories should appear as
-					 * voxel models in the editor's 3D preview. Gameplay
-					 * entities such as monsters, items, mechanisms, traps,
-					 * and exits remain flat editor sprites.
+					 * Only floor decorations and collider decorations use
+					 * voxel models in the editor's 3D preview. Every other
+					 * editor entity remains a flat sprite.
 					 *
-					 * 12 = furniture
 					 * 13 = floor decoration
+					 * 27 = collider decoration
 					 */
-					const bool isFurnitureDecoration =
-						editorSpriteType == 12;
 					const bool isFloorDecoration =
 						editorSpriteType == 13;
+					const bool isColliderDecoration =
+						editorSpriteType == 27;
 
 					int editor3DModelIndex =
 						entity->sprite;
 
 					if ( isFloorDecoration )
 					{
-						/*
-						 * A floor-decoration sprite is only a placement
-						 * placeholder. The selected .vox model is stored in
-						 * floorDecorationModel.
-						 */
 						editor3DModelIndex =
 							entity->floorDecorationModel;
 					}
+					else if ( isColliderDecoration )
+					{
+						editor3DModelIndex =
+							entity->colliderDecorationModel;
+					}
 
-					const bool hasEditorDecorationModel =
-						(isFurnitureDecoration
-							|| isFloorDecoration)
+					const bool hasEditorPreviewModel =
+						(isFloorDecoration
+							|| isColliderDecoration)
 						&& editor3DModelIndex >= 0
 						&& static_cast<Uint32>(
 							editor3DModelIndex
@@ -12886,34 +12885,44 @@ int main(int argc, char** argv)
 						) != modelFileNames.end();
 
 					entity->flags[SPRITE] =
-						!hasEditorDecorationModel;
+						!hasEditorPreviewModel;
 
-					if ( hasEditorDecorationModel )
+					if ( hasEditorPreviewModel )
 					{
 						entity->sprite =
 							editor3DModelIndex;
 
-						if ( isFloorDecoration )
+						if ( isFloorDecoration
+							|| isColliderDecoration )
 						{
-							entity->z +=
-								7.5
-								- entity->floorDecorationHeightOffset
-									* 0.25;
-							entity->x +=
-								entity->floorDecorationXOffset
-								* 0.25;
-							entity->y +=
-								entity->floorDecorationYOffset
-								* 0.25;
+							const Sint32 heightOffset =
+								isFloorDecoration
+									? entity->floorDecorationHeightOffset
+									: entity->colliderDecorationHeightOffset;
+							const Sint32 xOffset =
+								isFloorDecoration
+									? entity->floorDecorationXOffset
+									: entity->colliderDecorationXOffset;
+							const Sint32 yOffset =
+								isFloorDecoration
+									? entity->floorDecorationYOffset
+									: entity->colliderDecorationYOffset;
 
 							int decorationRotation =
-								entity->floorDecorationRotation;
+								isFloorDecoration
+									? entity->floorDecorationRotation
+									: entity->colliderDecorationRotation;
+
+							entity->z +=
+								7.5
+								- heightOffset * 0.25;
+							entity->x +=
+								xOffset * 0.25;
+							entity->y +=
+								yOffset * 0.25;
 
 							if ( decorationRotation < 0 )
 							{
-								/*
-								 * Keep random rotation stable while previewing.
-								 */
 								decorationRotation = 0;
 							}
 
