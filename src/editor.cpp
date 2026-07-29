@@ -10130,6 +10130,29 @@ int errorArr[12] =
 	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
+/*
+ * Authored enemy squad and named-elite fields.
+ *
+ * These values deliberately use currently serialized Stat::MISC_FLAGS
+ * slots so the current LMPV4.6 monster record does not change size.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
+enum AuthoredSquadOptions : int
+{
+	AUTHORED_SQUAD_ROLE_MASK = 0x3,
+	AUTHORED_SQUAD_ROLE_NONE = 0,
+	AUTHORED_SQUAD_ROLE_LEADER = 1,
+	AUTHORED_SQUAD_ROLE_MEMBER = 2,
+	AUTHORED_SQUAD_FOLLOW_LEADER = 1 << 2,
+	AUTHORED_SQUAD_ASSIST = 1 << 3,
+	AUTHORED_SQUAD_SHARED_ALERT = 1 << 4,
+	AUTHORED_SQUAD_WAKE_TOGETHER = 1 << 5
+};
+
 char monsterPropertyNames[14][16] = 
 {
 	"Name:",
@@ -14150,6 +14173,97 @@ int main(int argc, char** argv)
 								mousestatus[SDL_BUTTON_LEFT] = 0;
 								openQuestDialogueEditor();
 							}
+
+							const char* authoredMonsterLabels[4] =
+							{
+								"Squad ID:",
+								"Squad Options:",
+								"Elite Preset:",
+								"Defeat ID:"
+							};
+
+							const char* authoredMonsterHelp[4] =
+							{
+								"0 none",
+								"role 1/2 + bits 4,8,16,32",
+								"0 normal, 1-7 named",
+								"numeric quest/squad tag"
+							};
+
+							const int authoredFieldX1 =
+								subx1 + 8;
+							const int authoredFieldX2 =
+								subx1 + 120;
+							const int authoredHelpX =
+								subx1 + 132;
+							const int authoredStartY =
+								dialogueFieldY2 + 18;
+
+							for ( int authoredIndex = 0;
+								authoredIndex < 4;
+								++authoredIndex )
+							{
+								const int propertyIndex =
+									27 + authoredIndex;
+								const int fieldY =
+									authoredStartY
+									+ authoredIndex * 22;
+
+								printTextFormattedColor(
+									font8x8_bmp,
+									authoredFieldX1,
+									fieldY,
+									makeColorRGB(255, 255, 255),
+									authoredMonsterLabels[
+										authoredIndex
+									]
+								);
+
+								drawDepressed(
+									authoredFieldX2 - 4,
+									fieldY - 4,
+									authoredFieldX2 + 64,
+									fieldY + 12
+								);
+
+								printText(
+									font8x8_bmp,
+									authoredFieldX2,
+									fieldY,
+									spriteProperties[propertyIndex]
+								);
+
+								printTextFormattedColor(
+									font8x8_bmp,
+									authoredHelpX + 60,
+									fieldY,
+									makeColorRGB(160, 200, 255),
+									authoredMonsterHelp[
+										authoredIndex
+									]
+								);
+
+								if ( mousestatus[SDL_BUTTON_LEFT]
+									&& omousex
+										>= authoredFieldX2 - 4
+									&& omousex
+										< authoredFieldX2 + 64
+									&& omousey >= fieldY - 4
+									&& omousey < fieldY + 12 )
+								{
+									mousestatus[
+										SDL_BUTTON_LEFT
+									] = 0;
+									inputstr =
+										spriteProperties[
+											propertyIndex
+										];
+									editproperty =
+										propertyIndex;
+									cursorflash = ticks;
+								}
+							}
+
 							//items for monster
 							pad_y2 = suby1 + 28 + 2 * spacing;
 							pad_x3 = 40;
@@ -14223,7 +14337,7 @@ int main(int argc, char** argv)
 								}
 							}
 
-							if ( editproperty <= 26 )
+							if ( editproperty <= 30 )
 							{
 								// limit of properties is twice the vertical count
 								if ( !SDL_IsTextInputActive() )
@@ -14245,6 +14359,11 @@ int main(int argc, char** argv)
 									*/
 									inputlen = 63;
 								}
+								else if ( editproperty >= 27
+									&& editproperty <= 30 )
+								{
+									inputlen = 9;
+								}
 								else
 								{
 									inputlen = 4;
@@ -14253,7 +14372,34 @@ int main(int argc, char** argv)
 								{
 									pad_y1 = suby1 + 28 + editproperty * spacing;
 
-									if ( editproperty == 26 )
+									if ( editproperty >= 27
+										&& editproperty <= 30 )
+									{
+										const int authoredIndex =
+											editproperty - 27;
+										const int authoredCursorX =
+											subx1
+											+ 120
+											+ static_cast<int>(
+												strlen(
+													spriteProperties[
+														editproperty
+													]
+												)
+											) * 8;
+										const int authoredCursorY =
+											suby1
+											+ 408
+											+ authoredIndex * 22;
+
+										printText(
+											font8x8_bmp,
+											authoredCursorX,
+											authoredCursorY,
+											"\26"
+										);
+									}
+									else if ( editproperty == 26 )
 									{
 										const int dialogueCursorX =
 											subx1

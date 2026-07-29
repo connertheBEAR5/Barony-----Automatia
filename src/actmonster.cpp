@@ -36,6 +36,26 @@
 #include <utility>
 #include "json.hpp"
 float limbs[NUMMONSTERS][30][3];
+
+/*
+ * Authored squad fields stored in existing serialized MISC_FLAGS.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
+enum AuthoredSquadOptions : int
+{
+	AUTHORED_SQUAD_ROLE_MASK = 0x3,
+	AUTHORED_SQUAD_ROLE_NONE = 0,
+	AUTHORED_SQUAD_ROLE_LEADER = 1,
+	AUTHORED_SQUAD_ROLE_MEMBER = 2,
+	AUTHORED_SQUAD_FOLLOW_LEADER = 1 << 2,
+	AUTHORED_SQUAD_ASSIST = 1 << 3,
+	AUTHORED_SQUAD_SHARED_ALERT = 1 << 4,
+	AUTHORED_SQUAD_WAKE_TOGETHER = 1 << 5
+};
 /*
  * One node in an authored custom-dialogue graph.
  *
@@ -6551,6 +6571,254 @@ void monsterAnimate(Entity* my, Stat* myStats, double dist)
 	}
 }
 
+static Entity* authoredSquadFindLeader(
+	Entity* member,
+	Stat* memberStats
+)
+{
+	if ( !member
+		|| !memberStats
+		|| !map.creatures )
+	{
+		return nullptr;
+	}
+
+	const int squadID =
+		memberStats->MISC_FLAGS[
+			STAT_FLAG_AUTHORED_SQUAD_ID
+		];
+
+	if ( squadID <= 0 )
+	{
+		return nullptr;
+	}
+
+	for ( node_t* node = map.creatures->first;
+		node;
+		node = node->next )
+	{
+		Entity* candidate =
+			static_cast<Entity*>(node->element);
+
+		if ( !candidate
+			|| candidate == member
+			|| candidate->behavior != &actMonster )
+		{
+			continue;
+		}
+
+		Stat* candidateStats =
+			candidate->getStats();
+
+		if ( !candidateStats
+			|| candidateStats->HP <= 0
+			|| candidateStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_SQUAD_ID
+			] != squadID )
+		{
+			continue;
+		}
+
+		const int candidateRole =
+			candidateStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_SQUAD_OPTIONS
+			] & AUTHORED_SQUAD_ROLE_MASK;
+
+		if ( candidateRole
+			== AUTHORED_SQUAD_ROLE_LEADER )
+		{
+			return candidate;
+		}
+	}
+
+	return nullptr;
+}
+
+static void authoredSquadUpdate(
+	Entity* member,
+	Stat* memberStats
+)
+{
+	if ( multiplayer == CLIENT
+		|| !member
+		|| !memberStats
+		|| memberStats->HP <= 0
+		|| !map.creatures )
+	{
+		return;
+	}
+
+	const int squadID =
+		memberStats->MISC_FLAGS[
+			STAT_FLAG_AUTHORED_SQUAD_ID
+		];
+	const int options =
+		memberStats->MISC_FLAGS[
+			STAT_FLAG_AUTHORED_SQUAD_OPTIONS
+		];
+
+	if ( squadID <= 0
+		|| options <= 0 )
+	{
+		return;
+	}
+
+	Entity* sharedTarget =
+		uidToEntity(member->monsterTarget);
+
+	if ( !sharedTarget
+		&& (
+			options & AUTHORED_SQUAD_ASSIST
+			|| options
+				& AUTHORED_SQUAD_SHARED_ALERT
+		) )
+	{
+		for ( node_t* node = map.creatures->first;
+			node;
+			node = node->next )
+		{
+			Entity* squadmate =
+				static_cast<Entity*>(node->element);
+
+			if ( !squadmate
+				|| squadmate == member
+				|| squadmate->behavior != &actMonster )
+			{
+				continue;
+			}
+
+			Stat* squadmateStats =
+				squadmate->getStats();
+
+			if ( !squadmateStats
+				|| squadmateStats->HP <= 0
+				|| squadmateStats->MISC_FLAGS[
+					STAT_FLAG_AUTHORED_SQUAD_ID
+				] != squadID )
+			{
+				continue;
+			}
+
+			Entity* squadmateTarget =
+				uidToEntity(
+					squadmate->monsterTarget
+				);
+
+			if ( squadmateTarget
+				&& member->checkEnemy(
+					squadmateTarget
+				) )
+			{
+				sharedTarget =
+					squadmateTarget;
+				break;
+			}
+		}
+	}
+
+	if ( sharedTarget
+		&& (
+			options
+				& AUTHORED_SQUAD_SHARED_ALERT
+			|| options
+				& AUTHORED_SQUAD_WAKE_TOGETHER
+			|| options
+				& AUTHORED_SQUAD_ASSIST
+		) )
+	{
+		for ( node_t* node = map.creatures->first;
+			node;
+			node = node->next )
+		{
+			Entity* squadmate =
+				static_cast<Entity*>(node->element);
+
+			if ( !squadmate
+				|| squadmate == member
+				|| squadmate->behavior != &actMonster )
+			{
+				continue;
+			}
+
+			Stat* squadmateStats =
+				squadmate->getStats();
+
+			if ( !squadmateStats
+				|| squadmateStats->HP <= 0
+				|| squadmateStats->MISC_FLAGS[
+					STAT_FLAG_AUTHORED_SQUAD_ID
+				] != squadID )
+			{
+				continue;
+			}
+
+			const int squadmateOptions =
+				squadmateStats->MISC_FLAGS[
+					STAT_FLAG_AUTHORED_SQUAD_OPTIONS
+				];
+
+			if ( !(squadmateOptions
+					& AUTHORED_SQUAD_ASSIST)
+				&& !(squadmateOptions
+					& AUTHORED_SQUAD_SHARED_ALERT)
+				&& !(squadmateOptions
+					& AUTHORED_SQUAD_WAKE_TOGETHER) )
+			{
+				continue;
+			}
+
+			if ( squadmate->monsterTarget
+				!= sharedTarget->getUID() )
+			{
+				squadmate->monsterAcquireAttackTarget(
+					*sharedTarget,
+					MONSTER_STATE_PATH
+				);
+			}
+		}
+	}
+
+	const int role =
+		options & AUTHORED_SQUAD_ROLE_MASK;
+
+	if ( role == AUTHORED_SQUAD_ROLE_MEMBER
+		&& options
+			& AUTHORED_SQUAD_FOLLOW_LEADER
+		&& member->monsterTarget == 0
+		&& member->monsterState
+			!= MONSTER_STATE_ATTACK )
+	{
+		Entity* leader =
+			authoredSquadFindLeader(
+				member,
+				memberStats
+			);
+
+		if ( leader )
+		{
+			const real_t distance =
+				entityDist(member, leader);
+
+			if ( distance > 48.0 )
+			{
+				member->monsterTargetX =
+					leader->x;
+				member->monsterTargetY =
+					leader->y;
+				member->monsterState =
+					MONSTER_STATE_PATH;
+			}
+			else if ( distance < 28.0
+				&& member->monsterState
+					== MONSTER_STATE_PATH )
+			{
+				member->monsterState =
+					MONSTER_STATE_WAIT;
+			}
+		}
+	}
+}
+
 void actMonster(Entity* my)
 {
 	if (!my)
@@ -6855,6 +7123,15 @@ void actMonster(Entity* my)
 	}
 	myStats->defending = false;
 	myStats->sneaking = 0;
+
+	if ( ticks % 10
+		== my->getUID() % 10 )
+	{
+		authoredSquadUpdate(
+			my,
+			myStats
+		);
+	}
 
 	// levitation
 	bool levitating = isLevitating(myStats);

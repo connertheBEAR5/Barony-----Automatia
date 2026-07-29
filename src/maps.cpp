@@ -33,6 +33,37 @@ bool secretDoorwayHasSpawned = false;   // Only one per entire run
 bool secretDoorwayOnThisFloor = false;
 void actSecretAutomatiaExit(Entity* my);
 // ==================== END SECRET DOORWAY GLOBALS ====================
+/*
+ * Authored monster fields stored in existing serialized MISC_FLAGS.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
+static const char* authoredElitePresetSpecialNPCID(const int preset)
+{
+	switch ( preset )
+	{
+		case 1:
+			return "algernon";
+		case 2:
+			return "funny bones";
+		case 3:
+			return "potato king";
+		case 4:
+			return "thumpus";
+		case 5:
+			return "bram kindly";
+		case 6:
+			return "johann";
+		case 7:
+			return "merlin";
+		default:
+			return nullptr;
+	}
+}
+
 int startfloor = 0;
 BaronyRNG map_rng;
 BaronyRNG map_server_rng;
@@ -8042,6 +8073,31 @@ void assignActions(map_t* map)
 					}
 
 					std::string checkName = myStats->name;
+
+					const int authoredElitePreset =
+						myStats->MISC_FLAGS[
+							STAT_FLAG_AUTHORED_ELITE_PRESET
+						];
+
+					if ( const char* specialNPCID =
+							authoredElitePresetSpecialNPCID(
+								authoredElitePreset
+							) )
+					{
+						checkName =
+							std::string("$npc=")
+							+ specialNPCID;
+
+						strncpy(
+							myStats->name,
+							checkName.c_str(),
+							sizeof(myStats->name) - 1
+						);
+						myStats->name[
+							sizeof(myStats->name) - 1
+						] = '\0';
+					}
+
 					if ( checkName.find(".json") != std::string::npos )
 					{
 						monsterCurveCustomManager.createMonsterFromFile(entity, myStats, checkName, monsterType);

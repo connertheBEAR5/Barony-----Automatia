@@ -83,6 +83,15 @@ button_t* butItemX;
 
 bool exitFromItemWindow = false;
 
+/*
+ * Must match the authored monster MISC_FLAGS layout used by editor.cpp,
+ * maps.cpp, and actmonster.cpp.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
 static void updateMapNames()
 {
 	DIR* dir;
@@ -3429,6 +3438,32 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						tmpSpriteStats->customDialogueID[
 							sizeof(tmpSpriteStats->customDialogueID) - 1
 						] = '\0';
+
+						tmpSpriteStats->MISC_FLAGS[
+							STAT_FLAG_AUTHORED_SQUAD_ID
+						] = std::max(
+							0,
+							atoi(spriteProperties[27])
+						);
+						tmpSpriteStats->MISC_FLAGS[
+							STAT_FLAG_AUTHORED_SQUAD_OPTIONS
+						] = std::max(
+							0,
+							atoi(spriteProperties[28])
+						);
+						tmpSpriteStats->MISC_FLAGS[
+							STAT_FLAG_AUTHORED_ELITE_PRESET
+						] = std::max(
+							0,
+							atoi(spriteProperties[29])
+						);
+						tmpSpriteStats->MISC_FLAGS[
+							STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID
+						] = std::max(
+							0,
+							atoi(spriteProperties[30])
+						);
+
 						if ( !strcmp(spriteProperties[31], "disable") )
 						{
 							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] = 1;
@@ -4251,8 +4286,8 @@ void initMonsterPropertiesWindow()
     newwindow = 2;
     subx1 = xres / 2 - 200;
     subx2 = xres / 2 + 200;
-    suby1 = yres / 2 - 220;
-    suby2 = yres / 2 + 220;
+    suby1 = yres / 2 - 300;
+    suby2 = yres / 2 + 300;
 	strcpy(subtext, "Sprite properties: ");
 	strcat(subtext, spriteEditorNameStrings[selectedEntity[0]->sprite]);
 }
@@ -4299,6 +4334,40 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 		spriteProperties[26][
 			sizeof(spriteProperties[26]) - 1
 		] = '\0';
+
+		snprintf(
+			spriteProperties[27],
+			sizeof(spriteProperties[27]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_SQUAD_ID
+			]
+		);
+		snprintf(
+			spriteProperties[28],
+			sizeof(spriteProperties[28]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_SQUAD_OPTIONS
+			]
+		);
+		snprintf(
+			spriteProperties[29],
+			sizeof(spriteProperties[29]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_ELITE_PRESET
+			]
+		);
+		snprintf(
+			spriteProperties[30],
+			sizeof(spriteProperties[30]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[
+				STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID
+			]
+		);
+
 		if ( tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] == 0 )
 		{
 			strcpy(spriteProperties[31], "");
