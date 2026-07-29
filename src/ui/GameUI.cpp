@@ -5824,7 +5824,38 @@ void Player::HUD_t::updateUINavigation()
             questsButtonGlyph->ontop = true;
             questsButtonGlyph->disabled = false;
 
-            if ( Input::inputs[player.playernum].binaryToggle("MenuAlt2") )
+            bool controllerItemFocused = false;
+
+            if ( stats[player.playernum]
+                && player.GUI.activeModule
+                    == Player::GUI_t::MODULE_INVENTORY )
+            {
+                const int focusedX =
+                    player.inventoryUI.getSelectedSlotX();
+                const int focusedY =
+                    player.inventoryUI.getSelectedSlotY();
+
+                for ( node_t* node =
+                        stats[player.playernum]->inventory.first;
+                    node;
+                    node = node->next )
+                {
+                    Item* focusedItem =
+                        static_cast<Item*>(node->element);
+
+                    if ( focusedItem
+                        && focusedItem->x == focusedX
+                        && focusedItem->y == focusedY )
+                    {
+                        controllerItemFocused = true;
+                        break;
+                    }
+                }
+            }
+
+            if ( Input::inputs[player.playernum].binaryToggle("MenuAlt2")
+                && !controllerItemFocused
+                && !inputs.getUIInteraction(player.playernum)->selectedItem )
             {
                 Input::inputs[player.playernum].consumeBinaryToggle("MenuAlt2");
                 questsButton->activate();
@@ -37247,9 +37278,21 @@ void Player::Hotbar_t::updateHotbar()
                 && num < 9
                 && !isMagicHotbarSlotUnlocked(num);
 
-            img->color = lockedMagicSlot
-                ? makeColor(70, 70, 70, hotbarSlotOpacity)
-                : makeColor(255, 255, 255, hotbarSlotOpacity);
+            if ( magicHotbarActive )
+            {
+                img->color = lockedMagicSlot
+                    ? makeColor(72, 52, 86, hotbarSlotOpacity)
+                    : makeColor(198, 142, 255, hotbarSlotOpacity);
+            }
+            else
+            {
+                img->color = makeColor(
+                    255,
+                    255,
+                    255,
+                    hotbarSlotOpacity
+                );
+            }
         }
         if ( highlightSlotImg )
         {
@@ -37265,7 +37308,8 @@ void Player::Hotbar_t::updateHotbar()
         assert(glyph);
         glyph->disabled = true;
 
-        if ( useHotbarFaceMenu && num == 9 )
+        if ( num == 9
+            && (useHotbarFaceMenu || magicHotbarActive) )
         {
             slot->setDisabled(true);
         }
@@ -37508,14 +37552,25 @@ void Player::Hotbar_t::updateHotbar()
             auto binding = Input::inputs[player.playernum].input(slotstr.c_str());
             std::string inputName = hotbarSlotBindingText(player.playernum, num, binding);
 
-            const unsigned int midpoint = NUM_HOTBAR_SLOTS / 2;
+            if ( magicHotbarActive && num == 9 )
+            {
+                slot->setDisabled(true);
+                slot_text->setDisabled(true);
+                glyph->disabled = true;
+                continue;
+            }
+
+            const int displayedSlotCount =
+                magicHotbarActive ? 9 : NUM_HOTBAR_SLOTS;
+            const int midpoint = displayedSlotCount / 2;
+
             if ( num < midpoint )
             {
-                pos.x -= (pos.w) * (midpoint - num);
+                pos.x -= pos.w * (midpoint - num);
             }
             else
             {
-                pos.x += (pos.w) * (num - midpoint);
+                pos.x += pos.w * (num - midpoint);
             }
 
             if ( inputName == "" )

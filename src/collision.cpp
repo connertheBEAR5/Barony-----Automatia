@@ -541,6 +541,8 @@ bool entityInsideSomething(Entity* entity)
 	return false;
 }
 
+bool playerAllowedToEnterPit[MAXPLAYERS] = { false };
+
 static ConsoleVariable<bool> cvar_blind_players_fall_into_pits(
 	"/blind_players_fall_into_pits",
 	true
@@ -981,11 +983,20 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 		levitating = isLevitating(stats);
 	}
 
-	const bool blindPlayerCanEnterMissingFloor =
-		*cvar_blind_players_fall_into_pits
-		&& my->behavior == &actPlayer
+	const bool playerCanEnterMissingFloor =
+		my->behavior == &actPlayer
 		&& stats
-		&& stats->getEffectActive(EFF_BLIND);
+		&& (
+			(
+				*cvar_blind_players_fall_into_pits
+				&& stats->getEffectActive(EFF_BLIND)
+			)
+			|| (
+				my->skill[2] >= 0
+				&& my->skill[2] < MAXPLAYERS
+				&& playerAllowedToEnterPit[my->skill[2]]
+			)
+		);
 
 	bool isMonster = false;
 	if ( my )
@@ -1136,7 +1147,7 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 
 					const bool blockedByMissingFloor =
 						!floorTile
-						&& !blindPlayerCanEnterMissingFloor;
+						&& !playerCanEnterMissingFloor;
 
 					const bool blockedMonsterLiquid =
 						(

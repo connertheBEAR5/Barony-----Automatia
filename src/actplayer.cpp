@@ -47,6 +47,8 @@ static ConsoleVariable<float> cvar_followerStartZ("/follower_start_z", -2.5);
 static ConsoleVariable<float> cvar_followerMoveTo("/follower_moveto_z", 0.1);
 static ConsoleVariable<float> cvar_followerStartZLimit("/follower_start_z_limit", 7.5);
 static Uint32 sightedPitWarningShakeTicks[MAXPLAYERS] = { 0 };
+static Uint32 sightedPitPushTicks[MAXPLAYERS] = { 0 };
+extern bool playerAllowedToEnterPit[MAXPLAYERS];
 
 /*-------------------------------------------------------------------------------
 
@@ -9364,8 +9366,7 @@ void actPlayer(Entity* my)
 		players[PLAYER_NUM]->mechanics.previouslyLevitating = levitating;
 
 		if ( !levitating
-			&& stats[PLAYER_NUM]->HP > 0
-			&& stats[PLAYER_NUM]->getEffectActive(EFF_BLIND) )
+			&& stats[PLAYER_NUM]->HP > 0 )
 		{
 			const int pitX =
 				std::min(
@@ -11736,11 +11737,39 @@ void actPlayer(Entity* my)
 					PLAYER_VELY
 				);
 
+			const bool forcedPitMovement =
+				!levitating
+				&& stats[PLAYER_NUM]->HP > 0
+				&& my->monsterKnockbackVelocity > 0.001;
+
 			if ( sightedPitAttempt )
 			{
+				sightedPitPushTicks[PLAYER_NUM] =
+					std::min<Uint32>(
+						sightedPitPushTicks[PLAYER_NUM] + 1,
+						TICKS_PER_SECOND * 3
+					);
+
 				sightedPitWarningShakeTicks[PLAYER_NUM] =
-					TICKS_PER_SECOND * 2;
+					std::max<Uint32>(
+						sightedPitWarningShakeTicks[PLAYER_NUM],
+						TICKS_PER_SECOND * 5 / 2
+					);
 			}
+			else
+			{
+				sightedPitPushTicks[PLAYER_NUM] = 0;
+			}
+
+			/*
+			 * Blind-player pit permission is handled directly in
+			 * collision.cpp. This runtime override is only for the
+			 * new sustained-push and forced-knockback cases.
+			 */
+			playerAllowedToEnterPit[PLAYER_NUM] =
+				forcedPitMovement
+				|| sightedPitPushTicks[PLAYER_NUM]
+					>= TICKS_PER_SECOND * 3 / 2;
 
 			if ( sightedPitWarningShakeTicks[PLAYER_NUM] > 0 )
 			{
@@ -11768,6 +11797,7 @@ void actPlayer(Entity* my)
 
 			// perform collision detection
 			dist = clipMove(&my->x, &my->y, PLAYER_VELX, PLAYER_VELY, my);
+			playerAllowedToEnterPit[PLAYER_NUM] = false;
 
 			if ( multiplayer != CLIENT && !intro )
 			{
@@ -12069,7 +12099,11 @@ void actPlayer(Entity* my)
 				my->y = my->new_y;
 			}
 
+			playerAllowedToEnterPit[PLAYER_NUM] =
+				!levitating
+				&& my->monsterKnockbackVelocity > 0.001;
 			dist = clipMove(&my->x, &my->y, PLAYER_VELX, PLAYER_VELY, my);
+			playerAllowedToEnterPit[PLAYER_NUM] = false;
 
 			if ( multiplayer != CLIENT && !intro )
 			{
