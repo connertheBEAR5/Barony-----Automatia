@@ -31096,6 +31096,76 @@ namespace CustomDialogueQuestJournalUI
 
     static State states[MAXPLAYERS];
 
+    /*
+     * The normal Barony UI tree is destroyed and rebuilt by operations
+     * such as Restart Game. The journal State objects are static, so
+     * their cached Frame pointers otherwise survive after the frames
+     * themselves have been deleted.
+     *
+     * Never dereference a cached journal pointer until it has been
+     * compared with the frame currently owned by gameUIFrame[player].
+     */
+    static void synchronizeCachedFrames(
+        const int player
+    )
+    {
+        if ( player < 0
+            || player >= MAXPLAYERS )
+        {
+            return;
+        }
+
+        State& state =
+            states[player];
+
+        Frame* currentJournal = nullptr;
+        Frame* currentTracker = nullptr;
+
+        if ( gameUIFrame[player] )
+        {
+            currentJournal =
+                gameUIFrame[player]->findFrame(
+                    "custom dialogue quest journal"
+                );
+
+            currentTracker =
+                gameUIFrame[player]->findFrame(
+                    "custom dialogue quest tracker"
+                );
+        }
+
+        const bool journalChanged =
+            state.frame != currentJournal;
+
+        const bool trackerChanged =
+            state.trackerFrame != currentTracker;
+
+        if ( !journalChanged
+            && !trackerChanged )
+        {
+            return;
+        }
+
+        state.frame = currentJournal;
+        state.trackerFrame = currentTracker;
+
+        /*
+         * Reset only runtime UI caches. Persistent quest data remains in
+         * the custom dialogue story registry and will be queried again.
+         */
+        state.visibleEntries.clear();
+        state.questSnapshots.clear();
+        state.snapshotsInitialized = false;
+
+        state.selectedQuest = 0;
+        state.scrollOffset = 0;
+
+        state.trackedQuestID.clear();
+
+        state.keyLatch = false;
+        state.openedStatusScreen = false;
+    }
+
     static const std::vector<std::string> panelImages =
     {
         "quest journal panel top left",
@@ -31550,6 +31620,8 @@ namespace CustomDialogueQuestJournalUI
 
     static void createTracker(const int player)
     {
+        synchronizeCachedFrames(player);
+
         State& state = states[player];
 
         if ( state.trackerFrame || !gameUIFrame[player] )
@@ -31806,6 +31878,8 @@ namespace CustomDialogueQuestJournalUI
         const int player
     )
     {
+        synchronizeCachedFrames(player);
+
         State& state =
             states[player];
 
@@ -33147,11 +33221,18 @@ namespace CustomDialogueQuestJournalUI
             return;
         }
 
+        synchronizeCachedFrames(player);
         create(player);
-        layout(player);
 
         State& state =
             states[player];
+
+        if ( !state.frame )
+        {
+            return;
+        }
+
+        layout(player);
 
         const bool togglePressed =
             keystatus[SDLK_j] != 0;
@@ -33201,7 +33282,17 @@ void openCustomDialogueQuestJournalUI(
         return;
     }
 
+    CustomDialogueQuestJournalUI::synchronizeCachedFrames(
+        player
+    );
+
     CustomDialogueQuestJournalUI::create(player);
+
+    if ( !CustomDialogueQuestJournalUI::states[player].frame )
+    {
+        return;
+    }
+
     CustomDialogueQuestJournalUI::layout(player);
     CustomDialogueQuestJournalUI::open(player);
 }

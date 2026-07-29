@@ -869,3 +869,18 @@ references, stages, amounts, or variable values.
 
 This is intentionally guided: the editor shows what is selected, what
 will be written, and what is already attached to each choice.
+
+
+PART 17: BUTTON TOOLTIPS AND SAFE STATIC MARKERS
+================================================
+
+Hover over any dialogue-editor button. The bottom status line now shows
+what that exact control changes. Normal success and error messages still
+take priority.
+
+GIVER MARKER no longer writes tile 0,0 when nothing is selected. In that
+case the marker is turned off and the editor reports the reason.
+
+Quest-completed checks already exist. Use NEXT CONDITION until Quest
+Completed is selected, then set Condition Reference to the other quest's
+quest_id.

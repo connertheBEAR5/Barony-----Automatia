@@ -1303,31 +1303,38 @@ static bool questDialogueEditorCycleGiverMarker()
 	}
 	else
 	{
+		if ( !selectedEntity[0] )
+		{
+			quest.RemoveMember("origin");
+
+			questDialogueEditorSetMessage(
+				"No entity selected; giver marker turned off instead of using tile 0,0."
+			);
+
+			return questDialogueEditorSaveDocument();
+		}
+
 		const int markerX =
-			selectedEntity[0]
-				? std::max(
-					0,
-					static_cast<int>(
-						floor(
-							selectedEntity[0]->x
-							/ 16.0
-						)
+			std::max(
+				0,
+				static_cast<int>(
+					floor(
+						selectedEntity[0]->x
+						/ 16.0
 					)
 				)
-				: 0;
+			);
 
 		const int markerY =
-			selectedEntity[0]
-				? std::max(
-					0,
-					static_cast<int>(
-						floor(
-							selectedEntity[0]->y
-							/ 16.0
-						)
+			std::max(
+				0,
+				static_cast<int>(
+					floor(
+						selectedEntity[0]->y
+						/ 16.0
 					)
 				)
-				: 0;
+			);
 
 		origin.AddMember(
 			"x",
@@ -5651,6 +5658,106 @@ void openQuestDialogueEditor()
 	closeX->focused = 1;
 }
 
+
+static std::string questDialogueEditorButtonTooltip(
+	const std::string& label
+)
+{
+	static const std::unordered_map<
+		std::string,
+		std::string
+	> tooltips =
+	{
+		{ "NEW", "Create a new dialogue JSON with one starter node and an empty quest." },
+		{ "SAVE", "Write the current dialogue and quest changes to the selected JSON file." },
+		{ "RELOAD", "Discard the in-memory copy and reload the selected JSON from disk." },
+		{ "RENAME", "Rename the selected dialogue file and update the selected NPC dialogue ID." },
+		{ "+NODE", "Add a new dialogue node with a unique numeric node ID." },
+		{ "-NODE", "Delete the selected node when nothing still links to it." },
+		{ "+CHOICE", "Add a player response to the selected dialogue node." },
+		{ "-CHOICE", "Delete the currently selected player response." },
+		{ "NEXT>", "Change the selected choice destination to the next dialogue node." },
+		{ "ONCE", "Allow the selected choice to be used only once by this player for this NPC." },
+		{ "+OBJECT", "Add a new quest objective." },
+		{ "-OBJECT", "Delete the selected quest objective." },
+		{ "OPTIONAL", "Toggle whether the selected objective is optional." },
+		{ "OBJ MARK", "Toggle a map marker for the selected objective using the selected entity position." },
+		{ "CAT<", "Move to the previous editing category." },
+		{ "CAT>", "Move to the next editing category." },
+		{ "FIELD<", "Move to the previous editable field in the current category." },
+		{ "FIELD>", "Move to the next editable field in the current category." },
+		{ "EDIT", "Begin typing a new value for the selected field." },
+		{ "APPLY", "Apply the typed field value and save it into the dialogue document." },
+		{ "NEXT CONDITION", "Cycle condition templates, including checking whether another quest is completed." },
+		{ "CLEAR ACTION", "Remove the entire action object from the selected choice." },
+		{ "ACTION <", "Show the previous guided action group." },
+		{ "ACTION >", "Show the next guided action group." },
+		{ "COMPARE", "Cycle equals, not-equals, at-least, and at-most comparisons." },
+		{ "SCOPE", "Cycle quest ownership scope. Player scope is currently supported at runtime." },
+		{ "COND ITEM", "Cycle the item used by the selected item requirement." },
+		{ "REWARD", "Cycle the selected reward-item preset." },
+		{ "REMOVE ITEM", "Toggle or edit the selected choice item-removal action." },
+		{ "REMOVE GOLD", "Toggle or edit the selected choice gold-removal action." },
+		{ "RECRUIT", "Toggle the action that recruits the NPC." },
+		{ "REPEAT", "Toggle whether the quest metadata marks the quest repeatable." },
+		{ "GIVER MARKER", "Cycle marker modes: off, static at the selected entity tile, or follow a persistent NPC." },
+		{ "USE SELECTED NPC", "Bind the quest giver to the selected NPC's real persistent ID and current map." },
+		{ "CLEAR GIVER", "Remove the dynamic quest-giver NPC binding." },
+		{ "EDIT CHOICE", "Jump directly to editing the selected choice text." },
+		{ "VALIDATE", "Check the current JSON structure and report the first exact problem." },
+		{ "DUP FILE", "Create and select a uniquely named copy of the current dialogue file." },
+		{ "DEL FILE", "Delete the selected dialogue file after confirmation." },
+		{ "ITEM <", "Select the previous Barony item ID." },
+		{ "ITEM >", "Select the next Barony item ID." },
+		{ "QTY -", "Decrease the guided item quantity." },
+		{ "QTY +", "Increase the guided item quantity." },
+		{ "GOLD -10", "Decrease the guided gold amount by 10." },
+		{ "GOLD +10", "Increase the guided gold amount by 10." },
+		{ "EFFECT <", "Select the previous Barony status effect." },
+		{ "EFFECT >", "Select the next Barony status effect." },
+		{ "TIME -", "Reduce the selected status duration by five seconds." },
+		{ "TIME +", "Increase the selected status duration by five seconds." },
+		{ "POWER -", "Reduce the selected status strength." },
+		{ "POWER +", "Increase the selected status strength." },
+		{ "START QUEST", "Mark the current quest as started when this choice is used." },
+		{ "ACCEPT QUEST", "Mark the current quest as accepted when this choice is used." },
+		{ "COMPLETE", "Mark the current quest as completed when this choice is used." },
+		{ "FAIL QUEST", "Mark the current quest as failed when this choice is used." },
+		{ "RESET QUEST", "Reset the current quest when this choice is used." },
+		{ "SET STAGE", "Set the current quest stage to the guided value." },
+		{ "GIVE GOLD", "Give the player the displayed Gold amount." },
+		{ "GIVE ITEM", "Give the player the displayed item and quantity." },
+		{ "TAKE GOLD", "Remove the displayed Gold amount from the player." },
+		{ "TAKE ITEM", "Remove the displayed item and quantity from the player." },
+		{ "FINISH OBJ", "Mark the selected objective as completed." },
+		{ "CLEAR OBJ", "Clear the selected objective's completed state." },
+		{ "WORLD FLAG", "Create a persistent world flag action." },
+		{ "NPC FLAG", "Create a persistent NPC-local flag action." },
+		{ "SET WORLD", "Set a persistent world variable." },
+		{ "ADD WORLD", "Add to a persistent world variable." },
+		{ "SET NPC", "Set a persistent variable belonging to this NPC." },
+		{ "ADD NPC", "Add to a persistent NPC variable." },
+		{ "SET QUEST", "Set a persistent variable belonging to this quest." },
+		{ "ADD QUEST", "Add to a persistent quest variable." },
+		{ "RECRUIT NPC", "Recruit the dialogue NPC as a follower." },
+		{ "EMPTY ACTION", "Create an empty action object for advanced fields." },
+		{ "APPLY STATUS", "Apply the displayed status effect, duration, and strength." },
+		{ "CLEAR STATUS", "Remove the displayed status effect from the player." }
+	};
+
+	const auto found =
+		tooltips.find(label);
+
+	if ( found != tooltips.end() )
+	{
+		return found->second;
+	}
+
+	return "Use "
+		+ label
+		+ " to change the currently selected dialogue or quest element.";
+}
+
 static void drawQuestDialogueEditor()
 {
 	const int contentX1 = subx1 + 8;
@@ -5793,8 +5900,12 @@ static void drawQuestDialogueEditor()
 	drawDepressed(treeX1, panelY1, treeX2, panelY2);
 	drawDepressed(detailX1, panelY1, detailX2, panelY2);
 
+	std::string hoveredDialogueEditorTooltip;
+
 	auto dialogueEditorButton =
-		[](
+		[
+			&hoveredDialogueEditorTooltip
+		](
 			const int x,
 			const int y,
 			const int width,
@@ -5817,8 +5928,22 @@ static void drawQuestDialogueEditor()
 				label
 			);
 
+			const bool hovered =
+				omousex >= x
+				&& omousex < x + width
+				&& omousey >= y
+				&& omousey < y + height;
+
+			if ( hovered )
+			{
+				hoveredDialogueEditorTooltip =
+					questDialogueEditorButtonTooltip(
+						label
+					);
+			}
+
 			if ( mousestatus[SDL_BUTTON_LEFT]
-				&& omousex >= x
+				&& hovered
 				&& omousex < x + width
 				&& omousey >= y
 				&& omousey < y + height )
@@ -7458,6 +7583,23 @@ static void drawQuestDialogueEditor()
 			questDialogueEditorMessage.c_str()
 		);
 	}
+	else if ( !hoveredDialogueEditorTooltip.empty() )
+	{
+		const std::string footerTooltip =
+			dialogueEditorClippedText(
+				hoveredDialogueEditorTooltip,
+				subx2 - subx1 - 20
+			);
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			subx1 + 10,
+			suby2 - 22,
+			makeColorRGB(255, 230, 96),
+			"%s",
+			footerTooltip.c_str()
+		);
+	}
 	else
 	{
 		printTextFormattedColor(
@@ -7465,7 +7607,7 @@ static void drawQuestDialogueEditor()
 			subx1 + 10,
 			suby2 - 22,
 			makeColorRGB(192, 192, 192),
-			"Long summaries, node text, and choices wrap across multiple readable lines."
+			"Hover over any button for a guided explanation."
 		);
 	}
 }
