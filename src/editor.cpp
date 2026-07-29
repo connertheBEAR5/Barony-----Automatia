@@ -968,6 +968,368 @@ static bool questDialogueEditorAddChoice()
 	return questDialogueEditorSaveDocument();
 }
 
+
+static std::string questDialogueEditorUniqueChoiceID(
+	const rapidjson::Value& choices,
+	const std::string& base
+)
+{
+	std::string candidate =
+		base.empty()
+			? "choice_copy"
+			: base + "_copy";
+
+	int suffix = 2;
+
+	auto exists =
+		[
+			&choices
+		](
+			const std::string& id
+		)
+		{
+			if ( !choices.IsArray() )
+			{
+				return false;
+			}
+
+			for ( const rapidjson::Value& choice :
+				choices.GetArray() )
+			{
+				if ( choice.IsObject()
+					&& choice.HasMember("id")
+					&& choice["id"].IsString()
+					&& id == choice["id"].GetString() )
+				{
+					return true;
+				}
+			}
+
+			return false;
+		};
+
+	while ( exists(candidate) )
+	{
+		candidate =
+			(base.empty()
+				? "choice_copy"
+				: base + "_copy")
+			+ "_"
+			+ std::to_string(suffix++);
+	}
+
+	return candidate;
+}
+
+static bool questDialogueEditorDuplicateSelectedChoice()
+{
+	rapidjson::Value* node =
+		questDialogueEditorSelectedNodeValue();
+
+	if ( !node
+		|| !node->IsObject()
+		|| !node->HasMember("choices")
+		|| !(*node)["choices"].IsArray()
+		|| questDialogueEditorSelectedChoice < 0
+		|| questDialogueEditorSelectedChoice
+			>= static_cast<int>(
+				(*node)["choices"].Size()
+			) )
+	{
+		questDialogueEditorSetMessage(
+			"Select a choice first."
+		);
+		return false;
+	}
+
+	rapidjson::Value& choices =
+		(*node)["choices"];
+
+	auto& allocator =
+		questDialogueEditorDocument.GetAllocator();
+
+	const rapidjson::Value& original =
+		choices[
+			static_cast<rapidjson::SizeType>(
+				questDialogueEditorSelectedChoice
+			)
+		];
+
+	rapidjson::Value duplicate(
+		original,
+		allocator
+	);
+
+	std::string originalID = "choice";
+
+	if ( original.HasMember("id")
+		&& original["id"].IsString() )
+	{
+		originalID = original["id"].GetString();
+	}
+
+	const std::string copiedID =
+		questDialogueEditorUniqueChoiceID(
+			choices,
+			originalID
+		);
+
+	if ( duplicate.HasMember("id") )
+	{
+		duplicate["id"].SetString(
+			copiedID.c_str(),
+			allocator
+		);
+	}
+	else
+	{
+		rapidjson::Value id;
+		id.SetString(
+			copiedID.c_str(),
+			allocator
+		);
+		duplicate.AddMember(
+			"id",
+			id,
+			allocator
+		);
+	}
+
+	const rapidjson::SizeType insertIndex =
+		static_cast<rapidjson::SizeType>(
+			questDialogueEditorSelectedChoice + 1
+		);
+
+	choices.PushBack(
+		rapidjson::Value(),
+		allocator
+	);
+
+	for ( rapidjson::SizeType index =
+			choices.Size() - 1;
+		index > insertIndex;
+		--index )
+	{
+		choices[index].Swap(
+			choices[index - 1]
+		);
+	}
+
+	choices[insertIndex].Swap(duplicate);
+
+	questDialogueEditorSelectedChoice =
+		static_cast<int>(insertIndex);
+
+	questDialogueEditorSetMessage(
+		"Duplicated choice as "
+		+ copiedID
+		+ "."
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorMoveSelectedChoice(
+	const int direction
+)
+{
+	rapidjson::Value* node =
+		questDialogueEditorSelectedNodeValue();
+
+	if ( !node
+		|| !node->IsObject()
+		|| !node->HasMember("choices")
+		|| !(*node)["choices"].IsArray()
+		|| questDialogueEditorSelectedChoice < 0 )
+	{
+		questDialogueEditorSetMessage(
+			"Select a choice first."
+		);
+		return false;
+	}
+
+	rapidjson::Value& choices =
+		(*node)["choices"];
+
+	const int destination =
+		questDialogueEditorSelectedChoice
+		+ direction;
+
+	if ( destination < 0
+		|| destination
+			>= static_cast<int>(choices.Size()) )
+	{
+		questDialogueEditorSetMessage(
+			"Choice is already at that edge."
+		);
+		return false;
+	}
+
+	choices[
+		static_cast<rapidjson::SizeType>(
+			questDialogueEditorSelectedChoice
+		)
+	].Swap(
+		choices[
+			static_cast<rapidjson::SizeType>(
+				destination
+			)
+		]
+	);
+
+	questDialogueEditorSelectedChoice =
+		destination;
+
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorDuplicateSelectedNode()
+{
+	if ( !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray()
+		|| questDialogueEditorSelectedNode < 0
+		|| questDialogueEditorSelectedNode
+			>= static_cast<int>(
+				questDialogueEditorDocument[
+					"nodes"
+				].Size()
+			) )
+	{
+		questDialogueEditorSetMessage(
+			"Select a node first."
+		);
+		return false;
+	}
+
+	rapidjson::Value& nodes =
+		questDialogueEditorDocument["nodes"];
+
+	int nextID = 0;
+
+	for ( const rapidjson::Value& node :
+		nodes.GetArray() )
+	{
+		if ( node.IsObject()
+			&& node.HasMember("id")
+			&& node["id"].IsInt() )
+		{
+			nextID =
+				std::max(
+					nextID,
+					node["id"].GetInt() + 1
+				);
+		}
+	}
+
+	auto& allocator =
+		questDialogueEditorDocument.GetAllocator();
+
+	const rapidjson::Value& original =
+		nodes[
+			static_cast<rapidjson::SizeType>(
+				questDialogueEditorSelectedNode
+			)
+		];
+
+	rapidjson::Value duplicate(
+		original,
+		allocator
+	);
+
+	if ( duplicate.HasMember("id") )
+	{
+		duplicate["id"].SetInt(nextID);
+	}
+	else
+	{
+		duplicate.AddMember(
+			"id",
+			nextID,
+			allocator
+		);
+	}
+
+	if ( duplicate.HasMember("next")
+		&& duplicate["next"].IsInt()
+		&& original.HasMember("id")
+		&& original["id"].IsInt()
+		&& duplicate["next"].GetInt()
+			== original["id"].GetInt() )
+	{
+		duplicate["next"].SetInt(nextID);
+	}
+
+	if ( duplicate.HasMember("choices")
+		&& duplicate["choices"].IsArray() )
+	{
+		int copiedChoice = 1;
+
+		for ( rapidjson::Value& choice :
+			duplicate["choices"].GetArray() )
+		{
+			if ( !choice.IsObject() )
+			{
+				continue;
+			}
+
+			const std::string choiceID =
+				"node_"
+				+ std::to_string(nextID)
+				+ "_choice_"
+				+ std::to_string(copiedChoice++);
+
+			if ( choice.HasMember("id") )
+			{
+				choice["id"].SetString(
+					choiceID.c_str(),
+					allocator
+				);
+			}
+			else
+			{
+				rapidjson::Value id;
+				id.SetString(
+					choiceID.c_str(),
+					allocator
+				);
+				choice.AddMember(
+					"id",
+					id,
+					allocator
+				);
+			}
+
+			if ( choice.HasMember("next")
+				&& choice["next"].IsInt()
+				&& original.HasMember("id")
+				&& original["id"].IsInt()
+				&& choice["next"].GetInt()
+					== original["id"].GetInt() )
+			{
+				choice["next"].SetInt(nextID);
+			}
+		}
+	}
+
+	nodes.PushBack(
+		duplicate,
+		allocator
+	);
+
+	questDialogueEditorSelectedNode =
+		static_cast<int>(nodes.Size()) - 1;
+	questDialogueEditorSelectedChoice = -1;
+
+	questDialogueEditorSetMessage(
+		"Duplicated node as ID "
+		+ std::to_string(nextID)
+		+ "."
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
 static bool questDialogueEditorDeleteChoice()
 {
 	rapidjson::Value* node =
@@ -1664,6 +2026,214 @@ static bool questDialogueEditorAddObjective()
 	return questDialogueEditorSaveDocument();
 }
 
+
+static std::string questDialogueEditorUniqueObjectiveID(
+	const rapidjson::Value& objectives,
+	const std::string& base
+)
+{
+	std::string candidate =
+		base.empty()
+			? "objective_copy"
+			: base + "_copy";
+
+	int suffix = 2;
+
+	auto exists =
+		[
+			&objectives
+		](
+			const std::string& id
+		)
+		{
+			for ( const rapidjson::Value& objective :
+				objectives.GetArray() )
+			{
+				if ( objective.IsObject()
+					&& objective.HasMember("id")
+					&& objective["id"].IsString()
+					&& id == objective["id"].GetString() )
+				{
+					return true;
+				}
+			}
+
+			return false;
+		};
+
+	while ( exists(candidate) )
+	{
+		candidate =
+			(base.empty()
+				? "objective_copy"
+				: base + "_copy")
+			+ "_"
+			+ std::to_string(suffix++);
+	}
+
+	return candidate;
+}
+
+static bool questDialogueEditorDuplicateSelectedObjective()
+{
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest
+		|| !quest->HasMember("objectives")
+		|| !(*quest)["objectives"].IsArray()
+		|| questDialogueEditorSelectedObjective < 0
+		|| questDialogueEditorSelectedObjective
+			>= static_cast<int>(
+				(*quest)["objectives"].Size()
+			) )
+	{
+		questDialogueEditorSetMessage(
+			"Select an objective first."
+		);
+		return false;
+	}
+
+	rapidjson::Value& objectives =
+		(*quest)["objectives"];
+
+	auto& allocator =
+		questDialogueEditorDocument.GetAllocator();
+
+	const rapidjson::Value& original =
+		objectives[
+			static_cast<rapidjson::SizeType>(
+				questDialogueEditorSelectedObjective
+			)
+		];
+
+	rapidjson::Value duplicate(
+		original,
+		allocator
+	);
+
+	std::string originalID = "objective";
+
+	if ( original.HasMember("id")
+		&& original["id"].IsString() )
+	{
+		originalID = original["id"].GetString();
+	}
+
+	const std::string copiedID =
+		questDialogueEditorUniqueObjectiveID(
+			objectives,
+			originalID
+		);
+
+	if ( duplicate.HasMember("id") )
+	{
+		duplicate["id"].SetString(
+			copiedID.c_str(),
+			allocator
+		);
+	}
+	else
+	{
+		rapidjson::Value id;
+		id.SetString(
+			copiedID.c_str(),
+			allocator
+		);
+		duplicate.AddMember(
+			"id",
+			id,
+			allocator
+		);
+	}
+
+	const rapidjson::SizeType insertIndex =
+		static_cast<rapidjson::SizeType>(
+			questDialogueEditorSelectedObjective + 1
+		);
+
+	objectives.PushBack(
+		rapidjson::Value(),
+		allocator
+	);
+
+	for ( rapidjson::SizeType index =
+			objectives.Size() - 1;
+		index > insertIndex;
+		--index )
+	{
+		objectives[index].Swap(
+			objectives[index - 1]
+		);
+	}
+
+	objectives[insertIndex].Swap(duplicate);
+
+	questDialogueEditorSelectedObjective =
+		static_cast<int>(insertIndex);
+
+	questDialogueEditorSetMessage(
+		"Duplicated objective as "
+		+ copiedID
+		+ "."
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorMoveSelectedObjective(
+	const int direction
+)
+{
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest
+		|| !quest->HasMember("objectives")
+		|| !(*quest)["objectives"].IsArray()
+		|| questDialogueEditorSelectedObjective < 0 )
+	{
+		questDialogueEditorSetMessage(
+			"Select an objective first."
+		);
+		return false;
+	}
+
+	rapidjson::Value& objectives =
+		(*quest)["objectives"];
+
+	const int destination =
+		questDialogueEditorSelectedObjective
+		+ direction;
+
+	if ( destination < 0
+		|| destination
+			>= static_cast<int>(objectives.Size()) )
+	{
+		questDialogueEditorSetMessage(
+			"Objective is already at that edge."
+		);
+		return false;
+	}
+
+	objectives[
+		static_cast<rapidjson::SizeType>(
+			questDialogueEditorSelectedObjective
+		)
+	].Swap(
+		objectives[
+			static_cast<rapidjson::SizeType>(
+				destination
+			)
+		]
+	);
+
+	questDialogueEditorSelectedObjective =
+		destination;
+
+	return questDialogueEditorSaveDocument();
+}
+
 static bool questDialogueEditorDeleteObjective()
 {
 	rapidjson::Value* quest =
@@ -1779,32 +2349,19 @@ static bool questDialogueEditorToggleObjectiveMarker()
 		allocator
 	);
 
-	const int x =
-		selectedEntity[0]
-			? std::max(
-				0,
-				static_cast<int>(
-					floor(
-						selectedEntity[0]->x / 16.0
-					)
-				)
-			)
-			: 0;
+	if ( drawx < 0
+		|| drawy < 0
+		|| drawx >= static_cast<int>(map.width)
+		|| drawy >= static_cast<int>(map.height) )
+	{
+		questDialogueEditorSetMessage(
+			"Cursor is outside the map; objective marker was not created."
+		);
+		return false;
+	}
 
-	const int y =
-		selectedEntity[0]
-			? std::max(
-				0,
-				static_cast<int>(
-					floor(
-						selectedEntity[0]->y / 16.0
-					)
-				)
-			)
-			: 0;
-
-	marker.AddMember("x", x, allocator);
-	marker.AddMember("y", y, allocator);
+	marker.AddMember("x", drawx, allocator);
+	marker.AddMember("y", drawy, allocator);
 
 	objective->AddMember(
 		"map_marker",
@@ -6068,6 +6625,8 @@ static bool questDialogueEditorValidateDocument(
 		return false;
 	}
 
+	std::unordered_set<std::string> choiceIDs;
+
 	for ( const auto& node :
 		questDialogueEditorDocument["nodes"].GetArray() )
 	{
@@ -6087,11 +6646,36 @@ static bool questDialogueEditorValidateDocument(
 					|| !choice["id"].IsString()
 					|| !choice.HasMember("text")
 					|| !choice["text"].IsString()
+					|| std::string(
+						choice["text"].GetString()
+					).empty()
 					|| !choice.HasMember("next")
 					|| !choice["next"].IsInt() )
 				{
 					error =
-						"Every choice needs id, text, and next.";
+						"Every choice needs unique id, non-empty text, and next.";
+					return false;
+				}
+
+				if ( !choiceIDs.insert(
+						choice["id"].GetString()
+					).second )
+				{
+					error = "Duplicate choice ID.";
+					return false;
+				}
+
+				if ( choice.HasMember("condition")
+					&& !choice["condition"].IsObject() )
+				{
+					error = "Choice condition must be an object.";
+					return false;
+				}
+
+				if ( choice.HasMember("action")
+					&& !choice["action"].IsObject() )
+				{
+					error = "Choice action must be an object.";
 					return false;
 				}
 
@@ -6103,6 +6687,59 @@ static bool questDialogueEditorValidateDocument(
 						"A choice points to a missing node.";
 					return false;
 				}
+			}
+		}
+	}
+
+	if ( questDialogueEditorDocument.HasMember("quest")
+		&& questDialogueEditorDocument["quest"].IsObject()
+		&& questDialogueEditorDocument["quest"].HasMember("objectives") )
+	{
+		const rapidjson::Value& objectives =
+			questDialogueEditorDocument["quest"]["objectives"];
+
+		if ( !objectives.IsArray() )
+		{
+			error = "quest.objectives must be an array.";
+			return false;
+		}
+
+		std::unordered_set<std::string> objectiveIDs;
+
+		for ( const rapidjson::Value& objective :
+			objectives.GetArray() )
+		{
+			if ( !objective.IsObject()
+				|| !objective.HasMember("id")
+				|| !objective["id"].IsString()
+				|| std::string(
+					objective["id"].GetString()
+				).empty()
+				|| !objective.HasMember("text")
+				|| !objective["text"].IsString()
+				|| std::string(
+					objective["text"].GetString()
+				).empty() )
+			{
+				error =
+					"Every objective needs unique id and non-empty text.";
+				return false;
+			}
+
+			if ( !objectiveIDs.insert(
+					objective["id"].GetString()
+				).second )
+			{
+				error = "Duplicate objective ID.";
+				return false;
+			}
+
+			if ( objective.HasMember("map_marker")
+				&& !objective["map_marker"].IsObject() )
+			{
+				error =
+					"Objective map_marker must be an object.";
+				return false;
 			}
 		}
 	}
@@ -6673,7 +7310,7 @@ void openQuestDialogueEditor()
 	const int desiredHalfWidth =
 		std::max(390, std::min(560, xres / 2 - 20));
 	const int desiredHalfHeight =
-		std::max(410, std::min(530, yres / 2 - 4));
+		std::max(470, std::min(610, yres / 2 - 2));
 
 	subx1 = std::max(
 		8,
@@ -6742,14 +7379,21 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "RENAME", "Rename the selected dialogue file and update the selected NPC dialogue ID." },
 		{ "+NODE", "Add a new dialogue node with a unique numeric node ID." },
 		{ "-NODE", "Delete the selected node when nothing still links to it." },
+		{ "DUPLICATE NODE", "Copy the selected node, assign a new node ID, and repair self-links to the copied node." },
 		{ "+CHOICE", "Add a player response to the selected dialogue node." },
 		{ "-CHOICE", "Delete the currently selected player response." },
+		{ "DUPLICATE CHOICE", "Copy the selected choice, including its requirements and actions, with a unique ID." },
+		{ "CHOICE UP", "Move the selected choice earlier in the displayed response order." },
+		{ "CHOICE DOWN", "Move the selected choice later in the displayed response order." },
 		{ "NEXT>", "Change the selected choice destination to the next dialogue node." },
 		{ "ONCE", "Allow the selected choice to be used only once by this player for this NPC." },
 		{ "+OBJECT", "Add a new quest objective." },
 		{ "-OBJECT", "Delete the selected quest objective." },
+		{ "DUPLICATE OBJECTIVE", "Copy the selected objective with a unique objective ID." },
+		{ "OBJECTIVE UP", "Move the selected objective earlier in the journal order." },
+		{ "OBJECTIVE DOWN", "Move the selected objective later in the journal order." },
 		{ "OPTIONAL", "Toggle whether the selected objective is optional." },
-		{ "OBJ MARK", "Toggle a map marker for the selected objective using the selected entity position." },
+		{ "OBJ MARK", "Toggle a map marker for the selected objective at the current editor cursor tile." },
 		{ "CAT<", "Move to the previous editing category." },
 		{ "CAT>", "Move to the next editing category." },
 		{ "FIELD<", "Move to the previous editable field in the current category." },
@@ -7346,6 +7990,17 @@ static void drawQuestDialogueEditor()
 	);
 	toolboxY += toolboxRowHeight;
 
+	if ( dialogueEditorButton(
+		toolboxX1,
+		toolboxY,
+		toolboxX2 - toolboxX1,
+		"DUPLICATE NODE"
+	) )
+	{
+		questDialogueEditorDuplicateSelectedNode();
+	}
+	toolboxY += toolboxRowHeight;
+
 	toolboxButtonPair(
 		toolboxY,
 		"+CHOICE",
@@ -7357,6 +8012,32 @@ static void drawQuestDialogueEditor()
 		[]()
 		{
 			questDialogueEditorDeleteChoice();
+		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	if ( dialogueEditorButton(
+		toolboxX1,
+		toolboxY,
+		toolboxX2 - toolboxX1,
+		"DUPLICATE CHOICE"
+	) )
+	{
+		questDialogueEditorDuplicateSelectedChoice();
+	}
+	toolboxY += toolboxRowHeight;
+
+	toolboxButtonPair(
+		toolboxY,
+		"CHOICE UP",
+		"CHOICE DOWN",
+		[]()
+		{
+			questDialogueEditorMoveSelectedChoice(-1);
+		},
+		[]()
+		{
+			questDialogueEditorMoveSelectedChoice(1);
 		}
 	);
 	toolboxY += toolboxRowHeight;
@@ -7387,6 +8068,32 @@ static void drawQuestDialogueEditor()
 		[]()
 		{
 			questDialogueEditorDeleteObjective();
+		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	if ( dialogueEditorButton(
+		toolboxX1,
+		toolboxY,
+		toolboxX2 - toolboxX1,
+		"DUPLICATE OBJECTIVE"
+	) )
+	{
+		questDialogueEditorDuplicateSelectedObjective();
+	}
+	toolboxY += toolboxRowHeight;
+
+	toolboxButtonPair(
+		toolboxY,
+		"OBJECTIVE UP",
+		"OBJECTIVE DOWN",
+		[]()
+		{
+			questDialogueEditorMoveSelectedObjective(-1);
+		},
+		[]()
+		{
+			questDialogueEditorMoveSelectedObjective(1);
 		}
 	);
 	toolboxY += toolboxRowHeight;

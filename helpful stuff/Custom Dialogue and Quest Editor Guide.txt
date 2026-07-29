@@ -1023,3 +1023,59 @@ at-least, and at-most. TYPE EXACT VALUE accepts a precise integer.
 
 These controls update the selected condition immediately and keep the
 green requirement summaries synchronized.
+
+
+PART 21: GUIDED AUTHORING MEGAPACK
+==================================
+
+This is a consolidated structural-authoring update rather than a small
+single-control release.
+
+Node duplication
+----------------
+
+DUPLICATE NODE deep-copies the selected node. The copy receives a new
+numeric node ID. Self-links inside the copied node are redirected to the
+new node, and copied choices receive fresh IDs.
+
+Choice duplication and ordering
+-------------------------------
+
+DUPLICATE CHOICE copies the selected response, including its condition,
+actions, next target, and once-only setting. A unique choice ID is
+generated automatically.
+
+CHOICE UP and CHOICE DOWN change the response order shown to players.
+
+Objective duplication and ordering
+----------------------------------
+
+DUPLICATE OBJECTIVE copies the selected objective and assigns a unique
+objective ID.
+
+OBJECTIVE UP and OBJECTIVE DOWN control journal display order.
+
+Objective markers
+-----------------
+
+OBJ MARK now uses the current editor cursor tile. An invalid cursor does
+not create a marker and never writes coordinates 0,0.
+
+Expanded validation
+-------------------
+
+VALIDATE now additionally rejects:
+
+    Duplicate choice IDs
+    Empty choice text
+    Non-object choice conditions
+    Non-object choice actions
+    Duplicate objective IDs
+    Empty objective IDs
+    Empty objective text
+    Non-array objective collections
+    Invalid objective marker values
+
+All earlier guided condition controls, quest selectors, item selectors,
+tooltips, summaries, giver markers, and the Restart Game journal fix are
+included.
