@@ -12793,7 +12793,53 @@ int main(int argc, char** argv)
 				camera.winy = 16;
 				camera.winw = xres - 128;
 				camera.winh = yres - 32;
-				light = addLight(camera.x, camera.y, "editor");
+				/*
+				 * The editor 3D preview should stay readable on every
+				 * vertical layer. Add a temporary camera-following light
+				 * to every active map layer for this rendered frame.
+				 *
+				 * These are runtime-only editor lights. They are removed
+				 * immediately after drawing and are never stored in the
+				 * map entity list or written to the .lmp file.
+				 */
+				const int editor3DCameraLightLayer =
+					entityZToLightmapLayer(camera.z);
+				const int editor3DActiveLightLayers =
+					std::max(
+						1,
+						std::min(
+							MAPLAYERS,
+							static_cast<int>(
+								map.numLayers
+							)
+						)
+					);
+
+				std::vector<light_t*> editor3DCameraLights;
+				editor3DCameraLights.reserve(
+					editor3DActiveLightLayers
+				);
+
+				for ( int lightLayer = 0;
+					lightLayer < editor3DActiveLightLayers;
+					++lightLayer )
+				{
+					light_t* cameraLayerLight =
+						addLight(
+							static_cast<Sint32>(camera.x),
+							static_cast<Sint32>(camera.y),
+							lightLayer,
+							"editor",
+							10
+						);
+
+					if ( cameraLayerLight )
+					{
+						editor3DCameraLights.push_back(
+							cameraLayerLight
+						);
+					}
+				}
 
 				using Editor3DPreviewState =
 					std::tuple<
@@ -12960,6 +13006,7 @@ int main(int argc, char** argv)
 					"ang = %3.3f\n"
 					"fps = %3.1f\n"
 					"decor models = %d  sprites = %d\n"
+					"camera light layer = %d  lit layers = %d\n"
 					"Up/Down move  Left/Right turn\n"
 					"Q/E or PgUp/PgDn height  Home reset",
 					camera.x,
@@ -12968,10 +13015,24 @@ int main(int argc, char** argv)
 					camera.ang,
 					fps,
 					editor3DModelCount,
-					editor3DSpriteCount
+					editor3DSpriteCount,
+					editor3DCameraLightLayer,
+					static_cast<int>(
+						editor3DCameraLights.size()
+					)
 				);
 
-				list_RemoveNode(light->node);
+				for ( light_t* cameraLayerLight :
+					editor3DCameraLights )
+				{
+					if ( cameraLayerLight
+						&& cameraLayerLight->node )
+					{
+						list_RemoveNode(
+							cameraLayerLight->node
+						);
+					}
+				}
 
 				for ( auto& previewState :
 					editor3DEntityPreviewStates )
