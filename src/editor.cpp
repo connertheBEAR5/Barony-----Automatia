@@ -28,6 +28,8 @@
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
 #include <functional>
+#include <tuple>
+#include <utility>
 #ifndef EDITOR
 #define EDITOR
 #endif
@@ -10673,16 +10675,71 @@ void mainLogic(void)
 	}
 	else
 	{
+		const bool editor3DFastCamera =
+			keystatus[SDLK_LSHIFT]
+			|| keystatus[SDLK_RSHIFT];
+		const real_t editor3DMoveSpeed =
+			editor3DFastCamera
+				? 0.12
+				: 0.05;
+		const real_t editor3DVerticalSpeed =
+			editor3DFastCamera
+				? 0.6
+				: 0.25;
+
 		// camera velocity
-		camera_vel.x += cos(camera.ang) * (keystatus[SDLK_UP] - keystatus[SDLK_DOWN]) * .05;
-		camera_vel.y += sin(camera.ang) * (keystatus[SDLK_UP] - keystatus[SDLK_DOWN]) * .05;
-		camera_vel.z += (keystatus[SDLK_PAGEDOWN] - keystatus[SDLK_PAGEUP]) * .25;
-		camera_vel.ang += (keystatus[SDLK_RIGHT] - keystatus[SDLK_LEFT]) * .04;
+		camera_vel.x +=
+			cos(camera.ang)
+			* (keystatus[SDLK_UP] - keystatus[SDLK_DOWN])
+			* editor3DMoveSpeed;
+		camera_vel.y +=
+			sin(camera.ang)
+			* (keystatus[SDLK_UP] - keystatus[SDLK_DOWN])
+			* editor3DMoveSpeed;
+
+		const int editor3DMoveDown =
+			keystatus[SDLK_PAGEDOWN]
+			|| keystatus[SDLK_e];
+		const int editor3DMoveUp =
+			keystatus[SDLK_PAGEUP]
+			|| keystatus[SDLK_q];
+
+		camera_vel.z +=
+			(editor3DMoveDown - editor3DMoveUp)
+			* editor3DVerticalSpeed;
+		camera_vel.ang +=
+			(keystatus[SDLK_RIGHT] - keystatus[SDLK_LEFT])
+			* .04;
+
+		if ( keystatus[SDLK_HOME] )
+		{
+			keystatus[SDLK_HOME] = 0;
+			camera.z = 0;
+			camera_vel.z = 0;
+		}
 
 		// camera position
 		camera.x += camera_vel.x;
 		camera.y += camera_vel.y;
 		camera.z += camera_vel.z;
+
+		const real_t editor3DHighestCamera =
+			-std::max(
+				64.0,
+				static_cast<real_t>(
+					MAPLAYERS * 16
+				)
+			);
+		const real_t editor3DLowestCamera = 64.0;
+
+		camera.z = std::min(
+			editor3DLowestCamera,
+			std::max(
+				editor3DHighestCamera,
+				camera.z
+			)
+		);
+
 		camera.ang += camera_vel.ang;
 		while ( camera.ang >= PI * 2 )
 		{
@@ -12737,13 +12794,145 @@ int main(int argc, char** argv)
 				camera.winw = xres - 128;
 				camera.winh = yres - 32;
 				light = addLight(camera.x, camera.y, "editor");
-				for ( node = map.entities->first; node != NULL; node = node->next )
+
+				using Editor3DPreviewState =
+					std::tuple<
+						Entity*,
+						bool,
+						int,
+						real_t,
+						real_t,
+						real_t,
+						real_t
+					>;
+
+				std::vector<Editor3DPreviewState>
+					editor3DEntityPreviewStates;
+				editor3DEntityPreviewStates.reserve(
+					map.entities
+						? list_Size(map.entities)
+						: 0
+				);
+
+				int editor3DModelCount = 0;
+				int editor3DSpriteCount = 0;
+
+				for ( node = map.entities->first;
+					node != NULL;
+					node = node->next )
 				{
-					entity = (Entity*)node->element;
-					entity->flags[SPRITE] = true; // all entities rendered as SPRITES in the editor
+					entity =
+						static_cast<Entity*>(
+							node->element
+						);
+
+					if ( !entity )
+					{
+						continue;
+					}
+
+					editor3DEntityPreviewStates.emplace_back(
+						entity,
+						entity->flags[SPRITE],
+						entity->sprite,
+						entity->x,
+						entity->y,
+						entity->z,
+						entity->yaw
+					);
+
+					const int editorSpriteType =
+						checkSpriteType(
+							entity->sprite
+						);
+
+					/*
+					 * Only authored decoration categories should appear as
+					 * voxel models in the editor's 3D preview. Gameplay
+					 * entities such as monsters, items, mechanisms, traps,
+					 * and exits remain flat editor sprites.
+					 *
+					 * 12 = furniture
+					 * 13 = floor decoration
+					 */
+					const bool isFurnitureDecoration =
+						editorSpriteType == 12;
+					const bool isFloorDecoration =
+						editorSpriteType == 13;
+
+					int editor3DModelIndex =
+						entity->sprite;
+
+					if ( isFloorDecoration )
+					{
+						/*
+						 * A floor-decoration sprite is only a placement
+						 * placeholder. The selected .vox model is stored in
+						 * floorDecorationModel.
+						 */
+						editor3DModelIndex =
+							entity->floorDecorationModel;
+					}
+
+					const bool hasEditorDecorationModel =
+						(isFurnitureDecoration
+							|| isFloorDecoration)
+						&& editor3DModelIndex >= 0
+						&& static_cast<Uint32>(
+							editor3DModelIndex
+						) < nummodels
+						&& modelFileNames.find(
+							editor3DModelIndex
+						) != modelFileNames.end();
+
+					entity->flags[SPRITE] =
+						!hasEditorDecorationModel;
+
+					if ( hasEditorDecorationModel )
+					{
+						entity->sprite =
+							editor3DModelIndex;
+
+						if ( isFloorDecoration )
+						{
+							entity->z +=
+								7.5
+								- entity->floorDecorationHeightOffset
+									* 0.25;
+							entity->x +=
+								entity->floorDecorationXOffset
+								* 0.25;
+							entity->y +=
+								entity->floorDecorationYOffset
+								* 0.25;
+
+							int decorationRotation =
+								entity->floorDecorationRotation;
+
+							if ( decorationRotation < 0 )
+							{
+								/*
+								 * Keep random rotation stable while previewing.
+								 */
+								decorationRotation = 0;
+							}
+
+							entity->yaw =
+								decorationRotation
+								* (PI / 4);
+						}
+
+						++editor3DModelCount;
+					}
+					else
+					{
+						++editor3DSpriteCount;
+					}
+
 					entity->x += 8;
 					entity->y += 8;
 				}
+
 				occlusionCulling(map, camera);
                 beginGraphics();
 				glBeginCamera(&camera, false, map);
@@ -12751,13 +12940,53 @@ int main(int argc, char** argv)
 				//drawFloors(&camera);
 				drawEntities3D(&camera, REALCOLORS);
 				glEndCamera(&camera, false, map);
-				printTextFormatted(font8x8_bmp, 8, yres - 64, "x = %3.3f\ny = %3.3f\nz = %3.3f\nang = %3.3f\nfps = %3.1f", camera.x, camera.y, camera.z, camera.ang, fps);
+
+				printTextFormatted(
+					font8x8_bmp,
+					8,
+					yres - 104,
+					"x = %3.3f\n"
+					"y = %3.3f\n"
+					"z = %3.3f\n"
+					"ang = %3.3f\n"
+					"fps = %3.1f\n"
+					"decor models = %d  sprites = %d\n"
+					"Up/Down move  Left/Right turn\n"
+					"Q/E or PgUp/PgDn height  Home reset",
+					camera.x,
+					camera.y,
+					camera.z,
+					camera.ang,
+					fps,
+					editor3DModelCount,
+					editor3DSpriteCount
+				);
+
 				list_RemoveNode(light->node);
-				for ( node = map.entities->first; node != NULL; node = node->next )
+
+				for ( auto& previewState :
+					editor3DEntityPreviewStates )
 				{
-					entity = (Entity*)node->element;
-					entity->x -= 8;
-					entity->y -= 8;
+					Entity* editorEntity =
+						std::get<0>(previewState);
+
+					if ( !editorEntity )
+					{
+						continue;
+					}
+
+					editorEntity->flags[SPRITE] =
+						std::get<1>(previewState);
+					editorEntity->sprite =
+						std::get<2>(previewState);
+					editorEntity->x =
+						std::get<3>(previewState);
+					editorEntity->y =
+						std::get<4>(previewState);
+					editorEntity->z =
+						std::get<5>(previewState);
+					editorEntity->yaw =
+						std::get<6>(previewState);
 				}
 			}
 
