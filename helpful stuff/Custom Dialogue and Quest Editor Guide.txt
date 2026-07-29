@@ -884,3 +884,104 @@ case the marker is turned off and the editor reports the reason.
 Quest-completed checks already exist. Use NEXT CONDITION until Quest
 Completed is selected, then set Condition Reference to the other quest's
 quest_id.
+
+
+PART 18: COMBINED GUIDED AUTHORING UPDATE
+========================================
+
+This package combines several planned stages.
+
+Static giver markers
+--------------------
+
+USE CURSOR TILE writes the current editor cursor tile directly into the
+quest origin. The toolbox then displays:
+
+    Static giver tile 24, 17
+
+An invalid/outside cursor turns the marker off rather than writing 0,0.
+
+Dynamic giver markers
+---------------------
+
+USE SELECTED NPC copies the selected NPC's persistent ID. The toolbox
+then displays:
+
+    Giver follows NPC ID 1842
+
+Condition browser
+-----------------
+
+COND < and COND > browse all guided condition templates:
+
+    None
+    Has item
+    Has gold
+    Quest started
+    Quest accepted
+    Quest completed
+    Quest failed
+    Quest stage
+    Objective completed
+    Objective incomplete
+    World flag
+    NPC flag
+    World variable
+    NPC variable
+
+CLEAR CONDITION removes only the selected choice requirement. CLEAR
+ACTION remains separate.
+
+Quest-completed checks
+----------------------
+
+Select Quest Completed with COND < or COND >. Then use the Condition
+category's reference field to enter the other quest's quest_id.
+
+The initial templates use the currently selected item, item quantity,
+gold amount, quest ID, and objective where applicable.
+
+Restart Game
+------------
+
+GameUI.cpp includes the confirmed stale quest-journal frame-pointer fix.
+The journal and tracker are re-associated with the newly created UI tree
+after Restart Game.
+
+
+PART 19: GUIDED CONDITION VALUE SELECTORS
+=========================================
+
+Has Item requirements
+---------------------
+
+After selecting Has Item with COND < or COND >, the toolbox displays:
+
+    REQ ITEM <
+    REQ ITEM >
+    Required item ID: 42
+    Item: iron sword
+    REQ QTY -
+    REQ QTY +
+    Required quantity: 1
+
+Changing the item or quantity immediately updates the selected choice's
+condition. The user does not need to type the item ID into JSON.
+
+Quest-state requirements
+------------------------
+
+For Quest Started, Quest Accepted, Quest Completed, Quest Failed, and
+Quest Stage, the toolbox displays:
+
+    QUEST <
+    QUEST >
+    Quest ID: village_help
+    Title: Help the Village
+
+The editor scans every valid JSON file in ./dialogue, collects unique
+quest_id values, and lets the author browse them by title.
+
+Changing the selected quest immediately updates the condition's quest
+reference. This works for checking whether any other authored quest is
+started, accepted, completed, failed, or at a particular stage.
