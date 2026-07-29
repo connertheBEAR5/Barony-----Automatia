@@ -985,3 +985,41 @@ quest_id values, and lets the author browse them by title.
 Changing the selected quest immediately updates the condition's quest
 reference. This works for checking whether any other authored quest is
 started, accepted, completed, failed, or at a particular stage.
+
+
+PART 20: GUIDED CONDITION PARAMETERS
+====================================
+
+Has Gold
+--------
+
+Use GOLD REQ -10 and GOLD REQ +10 to adjust the required amount. TYPE
+EXACT AMOUNT opens the guided number field for a precise value.
+
+Quest Stage
+-----------
+
+Choose the required quest with QUEST < and QUEST >. Then use STAGE - and
+STAGE + to set the required stage.
+
+Objective Complete / Incomplete
+-------------------------------
+
+Use OBJECTIVE < and OBJECTIVE > to browse the current quest's objectives.
+The editor displays both objective ID and objective text.
+
+World and NPC flags
+-------------------
+
+EDIT FLAG NAME opens a guided text field for the persistent flag ID.
+TOGGLE REQUIRED VALUE switches between requiring true and false.
+
+World and NPC variables
+-----------------------
+
+EDIT VARIABLE NAME opens the guided variable-ID field. VALUE - and VALUE
++ adjust the required number. COMPARE cycles equals, not-equals,
+at-least, and at-most. TYPE EXACT VALUE accepts a precise integer.
+
+These controls update the selected condition immediately and keep the
+green requirement summaries synchronized.

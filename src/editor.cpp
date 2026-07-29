@@ -4842,6 +4842,390 @@ questDialogueEditorCurrentConditionQuestReference()
 	return result;
 }
 
+
+static int questDialogueEditorConditionInteger(
+	const char* member,
+	const int fallback
+)
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition
+		|| !condition->HasMember(member)
+		|| !(*condition)[member].IsInt() )
+	{
+		return fallback;
+	}
+
+	return (*condition)[member].GetInt();
+}
+
+static std::string questDialogueEditorConditionString(
+	const char* member,
+	const std::string& fallback
+)
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition
+		|| !condition->HasMember(member)
+		|| !(*condition)[member].IsString() )
+	{
+		return fallback;
+	}
+
+	return (*condition)[member].GetString();
+}
+
+static bool questDialogueEditorAdjustConditionNumber(
+	const int amount,
+	const int minimum,
+	const int maximum
+)
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition )
+	{
+		questDialogueEditorSetMessage(
+			"Select a condition first."
+		);
+		return false;
+	}
+
+	const std::string type =
+		questDialogueEditorSelectedConditionType();
+
+	const char* member = nullptr;
+
+	if ( type == "has_gold" )
+	{
+		member = "amount";
+	}
+	else if ( type == "quest_stage" )
+	{
+		member = "stage";
+	}
+	else if ( type == "world_variable"
+		|| type == "npc_variable" )
+	{
+		member = "value";
+	}
+
+	if ( !member )
+	{
+		questDialogueEditorSetMessage(
+			"This condition has no guided number."
+		);
+		return false;
+	}
+
+	const int current =
+		questDialogueEditorConditionInteger(
+			member,
+			type == "has_gold" ? 100 : 1
+		);
+
+	const int next =
+		std::max(
+			minimum,
+			std::min(
+				maximum,
+				current + amount
+			)
+		);
+
+	questDialogueEditorWriteIntegerMember(
+		*condition,
+		member,
+		next
+	);
+
+	questDialogueEditorSetMessage(
+		std::string(member)
+		+ ": "
+		+ std::to_string(next)
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorCycleConditionObjective(
+	const int direction
+)
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition )
+	{
+		questDialogueEditorSetMessage(
+			"Select an objective condition first."
+		);
+		return false;
+	}
+
+	const std::string type =
+		questDialogueEditorSelectedConditionType();
+
+	if ( type != "objective_completed"
+		&& type != "objective_incomplete" )
+	{
+		questDialogueEditorSetMessage(
+			"Select Objective Complete or Objective Incomplete first."
+		);
+		return false;
+	}
+
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( !quest
+		|| !quest->HasMember("objectives")
+		|| !(*quest)["objectives"].IsArray()
+		|| (*quest)["objectives"].Empty() )
+	{
+		questDialogueEditorSetMessage(
+			"This quest has no objectives to select."
+		);
+		return false;
+	}
+
+	rapidjson::Value& objectives =
+		(*quest)["objectives"];
+
+	std::string current =
+		questDialogueEditorConditionString(
+			"objective",
+			""
+		);
+
+	int selected = 0;
+
+	for ( rapidjson::SizeType index = 0;
+		index < objectives.Size();
+		++index )
+	{
+		if ( objectives[index].IsObject()
+			&& objectives[index].HasMember("id")
+			&& objectives[index]["id"].IsString()
+			&& current
+				== objectives[index]["id"].GetString() )
+		{
+			selected =
+				static_cast<int>(index);
+			break;
+		}
+	}
+
+	selected += direction;
+
+	if ( selected < 0 )
+	{
+		selected =
+			static_cast<int>(
+				objectives.Size()
+			) - 1;
+	}
+	else if ( selected
+		>= static_cast<int>(objectives.Size()) )
+	{
+		selected = 0;
+	}
+
+	rapidjson::Value& objective =
+		objectives[
+			static_cast<rapidjson::SizeType>(
+				selected
+			)
+		];
+
+	if ( !objective.IsObject()
+		|| !objective.HasMember("id")
+		|| !objective["id"].IsString() )
+	{
+		questDialogueEditorSetMessage(
+			"Selected objective has no valid ID."
+		);
+		return false;
+	}
+
+	const std::string objectiveID =
+		objective["id"].GetString();
+
+	questDialogueEditorWriteStringMember(
+		*condition,
+		"objective",
+		objectiveID
+	);
+
+	std::string title = objectiveID;
+
+	if ( objective.HasMember("text")
+		&& objective["text"].IsString() )
+	{
+		title = objective["text"].GetString();
+	}
+
+	questDialogueEditorSetMessage(
+		"Required objective: "
+		+ title
+		+ " ["
+		+ objectiveID
+		+ "]"
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
+static std::string questDialogueEditorConditionObjectiveTitle()
+{
+	const std::string objectiveID =
+		questDialogueEditorConditionString(
+			"objective",
+			""
+		);
+
+	if ( objectiveID.empty() )
+	{
+		return "";
+	}
+
+	rapidjson::Value* quest =
+		questDialogueEditorQuestValue();
+
+	if ( quest
+		&& quest->HasMember("objectives")
+		&& (*quest)["objectives"].IsArray() )
+	{
+		for ( rapidjson::Value& objective :
+			(*quest)["objectives"].GetArray() )
+		{
+			if ( objective.IsObject()
+				&& objective.HasMember("id")
+				&& objective["id"].IsString()
+				&& objectiveID
+					== objective["id"].GetString() )
+			{
+				if ( objective.HasMember("text")
+					&& objective["text"].IsString() )
+				{
+					return objective["text"].GetString();
+				}
+			}
+		}
+	}
+
+	return objectiveID;
+}
+
+static bool questDialogueEditorToggleConditionFlagValue()
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition )
+	{
+		questDialogueEditorSetMessage(
+			"Select a flag condition first."
+		);
+		return false;
+	}
+
+	const std::string type =
+		questDialogueEditorSelectedConditionType();
+
+	if ( type != "world_flag"
+		&& type != "npc_flag" )
+	{
+		questDialogueEditorSetMessage(
+			"Select World Flag or NPC Flag first."
+		);
+		return false;
+	}
+
+	bool value = true;
+
+	if ( condition->HasMember("value")
+		&& (*condition)["value"].IsBool() )
+	{
+		value =
+			(*condition)["value"].GetBool();
+	}
+
+	questDialogueEditorSetBoolMember(
+		*condition,
+		"value",
+		!value
+	);
+
+	questDialogueEditorSetMessage(
+		std::string("Required flag value: ")
+		+ (!value ? "true" : "false")
+	);
+
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorOpenConditionReferenceEditor()
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition )
+	{
+		questDialogueEditorSetMessage(
+			"Select a condition first."
+		);
+		return false;
+	}
+
+	questDialogueEditorFieldCategory =
+		QUEST_DIALOGUE_CATEGORY_CONDITION;
+
+	questDialogueEditorEditableField =
+		QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE;
+
+	questDialogueEditorBeginEditingField();
+
+	questDialogueEditorSetMessage(
+		"Type the condition name or ID, then press APPLY."
+	);
+
+	return true;
+}
+
+static bool questDialogueEditorOpenConditionNumberEditor()
+{
+	rapidjson::Value* condition =
+		questDialogueEditorSelectedChoiceCondition();
+
+	if ( !condition )
+	{
+		questDialogueEditorSetMessage(
+			"Select a condition first."
+		);
+		return false;
+	}
+
+	questDialogueEditorFieldCategory =
+		QUEST_DIALOGUE_CATEGORY_CONDITION;
+
+	questDialogueEditorEditableField =
+		QUEST_DIALOGUE_FIELD_CONDITION_NUMBER;
+
+	questDialogueEditorBeginEditingField();
+
+	questDialogueEditorSetMessage(
+		"Type the exact condition number, then press APPLY."
+	);
+
+	return true;
+}
+
 static const char* questDialogueEditorEffectName(
 	const int effectID
 )
@@ -6382,6 +6766,19 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "REQ QTY +", "Increase how many of the required item the player must possess." },
 		{ "QUEST <", "Choose the previous authored quest for this quest-state requirement." },
 		{ "QUEST >", "Choose the next authored quest for this quest-state requirement." },
+		{ "STAGE -", "Decrease the required quest stage." },
+		{ "STAGE +", "Increase the required quest stage." },
+		{ "GOLD REQ -10", "Decrease the required gold amount by 10." },
+		{ "GOLD REQ +10", "Increase the required gold amount by 10." },
+		{ "TYPE EXACT AMOUNT", "Type an exact required gold amount in the guided condition field." },
+		{ "OBJECTIVE <", "Choose the previous objective for this requirement." },
+		{ "OBJECTIVE >", "Choose the next objective for this requirement." },
+		{ "EDIT FLAG NAME", "Type the persistent flag name used by this condition." },
+		{ "TOGGLE REQUIRED VALUE", "Require the flag to be true or false." },
+		{ "EDIT VARIABLE NAME", "Type the persistent variable name used by this condition." },
+		{ "VALUE -", "Decrease the required variable value." },
+		{ "VALUE +", "Increase the required variable value." },
+		{ "TYPE EXACT VALUE", "Type an exact required variable value." },
 		{ "CLEAR ACTION", "Remove the entire action object from the selected choice." },
 		{ "ACTION <", "Show the previous guided action group." },
 		{ "ACTION >", "Show the next guided action group." },
@@ -7200,6 +7597,285 @@ static void drawQuestDialogueEditor()
 			requiredQuest.title.empty()
 				? "(not found)"
 				: requiredQuest.title.c_str()
+		);
+		toolboxY += toolboxRowHeight;
+
+		if ( selectedConditionType == "quest_stage" )
+		{
+			toolboxButtonPair(
+				toolboxY,
+				"STAGE -",
+				"STAGE +",
+				[]()
+				{
+					questDialogueEditorAdjustConditionNumber(
+						-1,
+						0,
+						999
+					);
+				},
+				[]()
+				{
+					questDialogueEditorAdjustConditionNumber(
+						1,
+						0,
+						999
+					);
+				}
+			);
+			toolboxY += toolboxRowHeight;
+
+			printTextFormatted(
+				font8x8_bmp,
+				toolboxX1,
+				toolboxY + 4,
+				"Required stage: %d",
+				questDialogueEditorConditionInteger(
+					"stage",
+					1
+				)
+			);
+			toolboxY += toolboxRowHeight;
+		}
+	}
+	else if ( selectedConditionType == "has_gold" )
+	{
+		toolboxButtonPair(
+			toolboxY,
+			"GOLD REQ -10",
+			"GOLD REQ +10",
+			[]()
+			{
+				questDialogueEditorAdjustConditionNumber(
+					-10,
+					0,
+					999999
+				);
+			},
+			[]()
+			{
+				questDialogueEditorAdjustConditionNumber(
+					10,
+					0,
+					999999
+				);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(128, 255, 160),
+			"Required gold: %d",
+			questDialogueEditorConditionInteger(
+				"amount",
+				100
+			)
+		);
+		toolboxY += toolboxRowHeight;
+
+		if ( dialogueEditorButton(
+			toolboxX1,
+			toolboxY,
+			toolboxX2 - toolboxX1,
+			"TYPE EXACT AMOUNT"
+		) )
+		{
+			questDialogueEditorOpenConditionNumberEditor();
+		}
+		toolboxY += toolboxRowHeight;
+	}
+	else if ( selectedConditionType == "objective_completed"
+		|| selectedConditionType == "objective_incomplete" )
+	{
+		toolboxButtonPair(
+			toolboxY,
+			"OBJECTIVE <",
+			"OBJECTIVE >",
+			[]()
+			{
+				questDialogueEditorCycleConditionObjective(-1);
+			},
+			[]()
+			{
+				questDialogueEditorCycleConditionObjective(1);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(128, 192, 255),
+			"Objective ID: %.18s",
+			questDialogueEditorConditionString(
+				"objective",
+				"(choose objective)"
+			).c_str()
+		);
+		toolboxY += toolboxRowHeight;
+
+		const std::string objectiveTitle =
+			questDialogueEditorConditionObjectiveTitle();
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Objective: %.23s",
+			objectiveTitle.empty()
+				? "(not found)"
+				: objectiveTitle.c_str()
+		);
+		toolboxY += toolboxRowHeight;
+	}
+	else if ( selectedConditionType == "world_flag"
+		|| selectedConditionType == "npc_flag" )
+	{
+		if ( dialogueEditorButton(
+			toolboxX1,
+			toolboxY,
+			toolboxX2 - toolboxX1,
+			"EDIT FLAG NAME"
+		) )
+		{
+			questDialogueEditorOpenConditionReferenceEditor();
+		}
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(128, 255, 160),
+			"Flag: %.24s",
+			questDialogueEditorConditionString(
+				"id",
+				"(type a flag name)"
+			).c_str()
+		);
+		toolboxY += toolboxRowHeight;
+
+		if ( dialogueEditorButton(
+			toolboxX1,
+			toolboxY,
+			toolboxX2 - toolboxX1,
+			"TOGGLE REQUIRED VALUE"
+		) )
+		{
+			questDialogueEditorToggleConditionFlagValue();
+		}
+		toolboxY += toolboxRowHeight;
+
+		const rapidjson::Value* flagCondition =
+			questDialogueEditorSelectedChoiceCondition();
+
+		const bool requiredFlag =
+			flagCondition
+			&& flagCondition->HasMember("value")
+			&& (*flagCondition)["value"].IsBool()
+				? (*flagCondition)["value"].GetBool()
+				: true;
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Required value: %s",
+			requiredFlag ? "true" : "false"
+		);
+		toolboxY += toolboxRowHeight;
+	}
+	else if ( selectedConditionType == "world_variable"
+		|| selectedConditionType == "npc_variable" )
+	{
+		if ( dialogueEditorButton(
+			toolboxX1,
+			toolboxY,
+			toolboxX2 - toolboxX1,
+			"EDIT VARIABLE NAME"
+		) )
+		{
+			questDialogueEditorOpenConditionReferenceEditor();
+		}
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(128, 255, 160),
+			"Variable: %.20s",
+			questDialogueEditorConditionString(
+				"id",
+				"(type a variable name)"
+			).c_str()
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"VALUE -",
+			"VALUE +",
+			[]()
+			{
+				questDialogueEditorAdjustConditionNumber(
+					-1,
+					-999999,
+					999999
+				);
+			},
+			[]()
+			{
+				questDialogueEditorAdjustConditionNumber(
+					1,
+					-999999,
+					999999
+				);
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormatted(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			"Required value: %d",
+			questDialogueEditorConditionInteger(
+				"value",
+				1
+			)
+		);
+		toolboxY += toolboxRowHeight;
+
+		toolboxButtonPair(
+			toolboxY,
+			"COMPARE",
+			"TYPE EXACT VALUE",
+			[]()
+			{
+				questDialogueEditorCycleComparisonDirect();
+			},
+			[]()
+			{
+				questDialogueEditorOpenConditionNumberEditor();
+			}
+		);
+		toolboxY += toolboxRowHeight;
+
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(128, 255, 160),
+			"Compare: %.18s",
+			questDialogueEditorConditionString(
+				"comparison",
+				"equals"
+			).c_str()
 		);
 		toolboxY += toolboxRowHeight;
 	}
