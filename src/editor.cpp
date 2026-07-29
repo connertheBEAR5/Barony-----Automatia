@@ -95,99 +95,6 @@ int roomClipboardEntityCount = 0;
 static map_t roomClipboardMap;
 static list_t roomClipboardEntityList = { nullptr, nullptr };
 
-enum RoomSelectEditField
-{
-	ROOM_FIELD_NONE = -1,
-	ROOM_FIELD_TOP_LEFT_X = 0,
-	ROOM_FIELD_TOP_LEFT_Y,
-	ROOM_FIELD_BOTTOM_RIGHT_X,
-	ROOM_FIELD_BOTTOM_RIGHT_Y,
-	ROOM_FIELD_BOTTOM_LAYER,
-	ROOM_FIELD_TOP_LAYER
-};
-
-static int roomSelectEditingField = ROOM_FIELD_NONE;
-static char roomSelectEditBuffer[16] = "";
-static bool roomSelectManualMode = false;
-
-static int* roomSelectFieldValue(const int field)
-{
-	switch ( field )
-	{
-		case ROOM_FIELD_TOP_LEFT_X:
-			return &selectedarea_x1;
-		case ROOM_FIELD_TOP_LEFT_Y:
-			return &selectedarea_y1;
-		case ROOM_FIELD_BOTTOM_RIGHT_X:
-			return &selectedarea_x2;
-		case ROOM_FIELD_BOTTOM_RIGHT_Y:
-			return &selectedarea_y2;
-		case ROOM_FIELD_BOTTOM_LAYER:
-			return &roomSelectBottomLayer;
-		case ROOM_FIELD_TOP_LAYER:
-			return &roomSelectTopLayer;
-		default:
-			return nullptr;
-	}
-}
-
-static int roomSelectFieldMaximum(const int field)
-{
-	switch ( field )
-	{
-		case ROOM_FIELD_TOP_LEFT_X:
-		case ROOM_FIELD_BOTTOM_RIGHT_X:
-			return std::max(0, static_cast<int>(map.width) - 1);
-		case ROOM_FIELD_TOP_LEFT_Y:
-		case ROOM_FIELD_BOTTOM_RIGHT_Y:
-			return std::max(0, static_cast<int>(map.height) - 1);
-		case ROOM_FIELD_BOTTOM_LAYER:
-		case ROOM_FIELD_TOP_LAYER:
-			return std::max(0, static_cast<int>(map.numLayers) - 1);
-		default:
-			return 0;
-	}
-}
-
-static void roomSelectCommitEditingField()
-{
-	int* value = roomSelectFieldValue(roomSelectEditingField);
-
-	if ( value )
-	{
-		const int parsed = roomSelectEditBuffer[0]
-			? atoi(roomSelectEditBuffer)
-			: 0;
-
-		*value = std::max(
-			0,
-			std::min(
-				roomSelectFieldMaximum(roomSelectEditingField),
-				parsed
-			)
-		);
-	}
-
-	roomSelectEditingField = ROOM_FIELD_NONE;
-	roomSelectEditBuffer[0] = 0;
-	SDL_StopTextInput();
-}
-
-static void roomSelectBeginEditingField(const int field)
-{
-	roomSelectEditingField = field;
-	int* value = roomSelectFieldValue(field);
-
-	snprintf(
-		roomSelectEditBuffer,
-		sizeof(roomSelectEditBuffer),
-		"%d",
-		value ? *value : 0
-	);
-
-	SDL_StartTextInput();
-}
-
 void roomSelectResetSelection()
 {
 	if ( pasting )
@@ -205,10 +112,6 @@ void roomSelectResetSelection()
 	selectedarea = false;
 	selectingspace = false;
 	groupedEntities.clear();
-	roomSelectEditingField = ROOM_FIELD_NONE;
-	roomSelectEditBuffer[0] = 0;
-	roomSelectManualMode = false;
-	SDL_StopTextInput();
 }
 std::vector<std::string> mapNames;
 std::list<std::string> modFolderNames;
@@ -10777,9 +10680,7 @@ static const char* roomSelectStageText()
 	switch ( roomSelectStage )
 	{
 		case 0:
-			return roomSelectManualMode
-				? "Enter Selection"
-				: "Click and Drag";
+			return "Click and Drag";
 		case 1:
 			return "Dragging Area";
 		case 2:
@@ -11705,66 +11606,6 @@ bool handleEvents(void)
 
 	while ( SDL_PollEvent(&event) )   // poll SDL events
 	{
-		if ( roomSelectEditingField != ROOM_FIELD_NONE )
-		{
-			if ( event.type == SDL_TEXTINPUT )
-			{
-				for ( const char* character = event.text.text;
-					*character;
-					++character )
-				{
-					if ( *character >= '0'
-						&& *character <= '9'
-						&& strlen(roomSelectEditBuffer)
-							< sizeof(roomSelectEditBuffer) - 1 )
-					{
-						const size_t length =
-							strlen(roomSelectEditBuffer);
-						roomSelectEditBuffer[length] =
-							*character;
-						roomSelectEditBuffer[length + 1] = 0;
-					}
-				}
-				continue;
-			}
-
-			if ( event.type == SDL_KEYDOWN )
-			{
-				if ( event.key.keysym.sym == SDLK_BACKSPACE )
-				{
-					const size_t length =
-						strlen(roomSelectEditBuffer);
-					if ( length > 0 )
-					{
-						roomSelectEditBuffer[length - 1] = 0;
-					}
-					continue;
-				}
-
-				if ( event.key.keysym.sym == SDLK_RETURN
-					|| event.key.keysym.sym == SDLK_KP_ENTER
-					|| event.key.keysym.sym == SDLK_TAB )
-				{
-					roomSelectCommitEditingField();
-					continue;
-				}
-
-				if ( event.key.keysym.sym == SDLK_ESCAPE )
-				{
-					roomSelectEditingField = ROOM_FIELD_NONE;
-					roomSelectEditBuffer[0] = 0;
-					SDL_StopTextInput();
-					continue;
-				}
-			}
-
-			if ( event.type == SDL_MOUSEBUTTONDOWN
-				&& event.button.button == SDL_BUTTON_LEFT )
-			{
-				roomSelectCommitEditingField();
-			}
-		}
-
 		// Global events
 		switch ( event.type )
 		{
@@ -13392,8 +13233,6 @@ int main(int argc, char** argv)
 							}
 							else if ( selectedTool == 3 )	// Process Select Tool functionality
 							{
-								if ( !roomSelectManualMode )
-								{
 									if ( !selectingspace )
 									{
 										if ( drawx >= 0
@@ -13460,7 +13299,6 @@ int main(int argc, char** argv)
 											moveSelectionNegativeY = false;
 										}
 									}
-								}
 							}
 							else if ( selectedTool == 4 )	// Process Fill Tool functionality
 							{
@@ -13485,7 +13323,6 @@ int main(int argc, char** argv)
 				{
 					if ( selectedTool == 3
 						&& selectingspace
-						&& !roomSelectManualMode
 						&& selectedarea )
 					{
 						normalizeRoomSelection();
@@ -13891,8 +13728,7 @@ int main(int argc, char** argv)
 							valueX
 						](
 							const char* label,
-							const int value,
-							const int field
+							const int value
 						)
 						{
 							printText(
@@ -13901,68 +13737,26 @@ int main(int argc, char** argv)
 								panelY + 4,
 								label
 							);
-
 							drawDepressed(
 								valueX,
 								panelY,
 								xres - 8,
 								panelY + 16
 							);
-
-							if ( roomSelectEditingField == field )
-							{
-								printText(
-									font8x8_bmp,
-									valueX + 4,
-									panelY + 4,
-									roomSelectEditBuffer
-								);
-							}
-							else
-							{
-								printTextFormatted(
-									font8x8_bmp,
-									valueX + 4,
-									panelY + 4,
-									"%d",
-									value
-								);
-							}
-
-							if ( roomSelectManualMode
-								&& mousestatus[SDL_BUTTON_LEFT]
-								&& omousex >= valueX
-								&& omousex < xres - 8
-								&& omousey >= panelY
-								&& omousey < panelY + 16 )
-							{
-								mousestatus[SDL_BUTTON_LEFT] = 0;
-								roomSelectBeginEditingField(field);
-							}
-
+							printTextFormatted(
+								font8x8_bmp,
+								valueX + 4,
+								panelY + 4,
+								"%d",
+								value
+							);
 							panelY += 20;
 						};
 
-					drawValueField(
-						"TL X",
-						selectedarea_x1,
-						ROOM_FIELD_TOP_LEFT_X
-					);
-					drawValueField(
-						"TL Y",
-						selectedarea_y1,
-						ROOM_FIELD_TOP_LEFT_Y
-					);
-					drawValueField(
-						"BR X",
-						selectedarea_x2,
-						ROOM_FIELD_BOTTOM_RIGHT_X
-					);
-					drawValueField(
-						"BR Y",
-						selectedarea_y2,
-						ROOM_FIELD_BOTTOM_RIGHT_Y
-					);
+					drawValueField("TL X", selectedarea_x1);
+					drawValueField("TL Y", selectedarea_y1);
+					drawValueField("BR X", selectedarea_x2);
+					drawValueField("BR Y", selectedarea_y2);
 
 					auto drawLayerField =
 						[
@@ -13981,7 +13775,7 @@ int main(int argc, char** argv)
 							);
 
 							const int minusX = xres - 68;
-							const int layerValueX = xres - 50;
+							const int valueX = xres - 50;
 							const int plusX = xres - 24;
 
 							drawWindowFancy(
@@ -13997,6 +13791,20 @@ int main(int argc, char** argv)
 								"-"
 							);
 
+							drawDepressed(
+								valueX,
+								panelY,
+								valueX + 24,
+								panelY + 16
+							);
+							printTextFormatted(
+								font8x8_bmp,
+								valueX + 4,
+								panelY + 4,
+								"%d",
+								value
+							);
+
 							drawWindowFancy(
 								plusX,
 								panelY,
@@ -14010,71 +13818,30 @@ int main(int argc, char** argv)
 								"+"
 							);
 
-							drawDepressed(
-								layerValueX,
-								panelY,
-								layerValueX + 24,
-								panelY + 16
-							);
-
-							const int field =
-								&value == &roomSelectBottomLayer
-									? ROOM_FIELD_BOTTOM_LAYER
-									: ROOM_FIELD_TOP_LAYER;
-
-							if ( roomSelectEditingField == field )
-							{
-								printText(
-									font8x8_bmp,
-									layerValueX + 3,
-									panelY + 4,
-									roomSelectEditBuffer
-								);
-							}
-							else
-							{
-								printTextFormatted(
-									font8x8_bmp,
-									layerValueX + 3,
-									panelY + 4,
-									"%d",
-									value
-								);
-							}
-
 							if ( mousestatus[SDL_BUTTON_LEFT]
 								&& omousey >= panelY
 								&& omousey < panelY + 16 )
 							{
-								if ( roomSelectManualMode
-									&& omousex >= layerValueX
-									&& omousex < layerValueX + 24 )
-								{
-									mousestatus[SDL_BUTTON_LEFT] = 0;
-									roomSelectBeginEditingField(field);
-								}
-								else if ( omousex >= minusX
+								if ( omousex >= minusX
 									&& omousex < minusX + 16 )
 								{
 									mousestatus[SDL_BUTTON_LEFT] = 0;
-									value =
-										std::max(0, value - 1);
+									value = std::max(0, value - 1);
 									roomSelectStage = 2;
 								}
 								else if ( omousex >= plusX
 									&& omousex < plusX + 16 )
 								{
 									mousestatus[SDL_BUTTON_LEFT] = 0;
-									value =
-										std::min(
-											std::max(
-												0,
-												static_cast<int>(
-													map.numLayers
-												) - 1
-											),
-											value + 1
-										);
+									value = std::min(
+										std::max(
+											0,
+											static_cast<int>(
+												map.numLayers
+											) - 1
+										),
+										value + 1
+									);
 									roomSelectStage = 2;
 								}
 							}
@@ -14138,100 +13905,6 @@ int main(int argc, char** argv)
 
 					const int buttonX = xres - 120;
 					const int buttonWidth = 108;
-
-					if ( roomPanelButton(
-							buttonX,
-							buttonWidth,
-							roomSelectManualMode
-								? "MODE: MANUAL"
-								: "MODE: DRAG"
-						) )
-					{
-						if ( roomSelectEditingField
-							!= ROOM_FIELD_NONE )
-						{
-							roomSelectCommitEditingField();
-						}
-
-						roomSelectManualMode = !roomSelectManualMode;
-						selectingspace = false;
-						roomSelectStage =
-							roomSelectManualMode && selectedarea
-								? 2
-								: 0;
-					}
-
-					panelY += 23;
-
-					const int stageButtonWidth = 52;
-
-					if ( roomPanelButton(
-							buttonX,
-							stageButtonWidth,
-							"BACK"
-						) )
-					{
-						if ( roomSelectEditingField
-							!= ROOM_FIELD_NONE )
-						{
-							roomSelectCommitEditingField();
-						}
-
-						roomSelectStage =
-							std::max(0, roomSelectStage - 1);
-
-						if ( roomSelectStage == 0 )
-						{
-							selectedarea = false;
-							selectingspace = false;
-						}
-					}
-
-					drawWindowFancy(
-						buttonX + 56,
-						panelY,
-						buttonX + 108,
-						panelY + 18
-					);
-					printText(
-						font8x8_bmp,
-						buttonX + 66,
-						panelY + 5,
-						"NEXT"
-					);
-
-					if ( mousestatus[SDL_BUTTON_LEFT]
-						&& omousex >= buttonX + 56
-						&& omousex < buttonX + 108
-						&& omousey >= panelY
-						&& omousey < panelY + 18 )
-					{
-						mousestatus[SDL_BUTTON_LEFT] = 0;
-
-						if ( roomSelectEditingField
-							!= ROOM_FIELD_NONE )
-						{
-							roomSelectCommitEditingField();
-						}
-
-						roomSelectStage =
-							std::min(4, roomSelectStage + 1);
-
-						if ( roomSelectStage >= 2 )
-						{
-							selectedarea = true;
-							normalizeRoomSelection();
-							reselectEntityGroup();
-						}
-
-						if ( roomSelectStage == 4
-							&& roomClipboardReady )
-						{
-							editorRoomBeginPaste();
-						}
-					}
-
-					panelY += 23;
 
 					if ( roomPanelButton(
 							buttonX,
