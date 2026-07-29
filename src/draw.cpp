@@ -2431,8 +2431,7 @@ if ( x >= 0
 	&& y < map.height )
 {
 	const bool spriteVisibleForCulling =
-	entity->behavior == &actFlame
-	|| rendererLayerIsVisible(
+	rendererLayerIsVisible(
 		*camera,
 		map,
 		x,

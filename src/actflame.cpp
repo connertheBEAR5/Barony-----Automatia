@@ -15,6 +15,8 @@
 #include "entity.hpp"
 #include "prng.hpp"
 #include "player.hpp"
+#include "draw.hpp"
+#include "light.hpp"
 
 /*-------------------------------------------------------------------------------
 
@@ -150,28 +152,69 @@ Entity* spawnFlame(Entity* parentent, Sint32 sprite )
 	}
 	if ( *cvar_flame_use_vismap && !intro )
 	{
-		if ( parentent->behavior != actPlayer 
+		if ( parentent->behavior != actPlayer
 			&& parentent->behavior != actPlayerLimb
 			&& !parentent->flags[OVERDRAW]
 			&& !parentent->flags[GENIUS] )
 		{
-			int x = parentent->x / 16.0;
-			int y = parentent->y / 16.0;
-			if ( x >= 0 && x < map.width && y >= 0 && y < map.height )
+			const int x =
+				static_cast<int>(parentent->x / 16.0);
+			const int y =
+				static_cast<int>(parentent->y / 16.0);
+
+			if ( x >= 0
+				&& x < map.width
+				&& y >= 0
+				&& y < map.height )
 			{
-				bool anyVismap = false;
+				const int parentLayer =
+					entityZToLightmapLayer(parentent->z);
+
+				bool visibleToAnyLocalPlayer = false;
+
 				for ( int i = 0; i < MAXPLAYERS; ++i )
 				{
-					if ( !client_disconnected[i] && players[i]->isLocalPlayer() )
+					if ( client_disconnected[i]
+						|| !players[i]
+						|| !players[i]->isLocalPlayer() )
 					{
-                        if ( cameras[i].vismap && cameras[i].vismap[y + x * map.height] )
-                        {
-                            anyVismap = true;
-                            break;
-                        }
+						continue;
+					}
+
+					/*
+					 * Tall layered maps must use the renderer's
+					 * per-layer visibility. The legacy 2D vismap can
+					 * mark a high torch hidden merely because lower
+					 * wall geometry occupies the same X/Y tile.
+					 */
+					if ( rendererLayerIsVisible(
+							cameras[i],
+							map,
+							x,
+							y,
+							parentLayer
+						) )
+					{
+						visibleToAnyLocalPlayer = true;
+						break;
+					}
+
+					/*
+					 * Preserve the original conservative fallback
+					 * while the layered visibility state is being
+					 * initialized or for legacy map situations.
+					 */
+					if ( cameras[i].vismap
+						&& cameras[i].vismap[
+							y + x * map.height
+						] )
+					{
+						visibleToAnyLocalPlayer = true;
+						break;
 					}
 				}
-				if ( !anyVismap )
+
+				if ( !visibleToAnyLocalPlayer )
 				{
 					return nullptr;
 				}

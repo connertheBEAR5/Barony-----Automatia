@@ -14,3 +14,6 @@ There are also features, modifications, or ideas which I would like to implement
 Happy hacking,
  - Ciprian
 August 19, 2016
+I did have fun hacking thank you,
+ - Conner
+July 29, 2026
