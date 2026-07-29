@@ -4094,26 +4094,12 @@ void buttonMonsterItems(button_t* my)
 
 	itemSelect = 0;
 
-	inputstr = spriteProperties[0];
-	cursorflash = ticks;
-	menuVisible = 0;
-	subwindow = 1;
-	slidery = 0;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 158;
-	suby2 = yres / 2 + 158;
-	strcpy(subtext, "Monster Item Properties:");
-
-	Stat* tmpSpriteStats = selectedEntity[0]->getStats();
-
-	// stores any modified monster stats, to be restored when window is closed.
-
-	for ( int i = 0; i < sizeof(spriteProperties) / sizeof(spriteProperties[0]); i++ )
-	{
-		strcpy(tmpSpriteProperties[i], spriteProperties[i]);
-	}
-
+	/*
+	 * Resolve and validate the clicked slot before changing window state or
+	 * dereferencing the selected entity. Buttons can remain queued for one
+	 * frame while property windows are rebuilt, so a stale/unknown button must
+	 * never become item slot -1 and index EDITOR_ITEMS before the array.
+	 */
 	if ( my == butMonsterHelm )
 	{
 		itemSlotSelected = 0;
@@ -4181,8 +4167,44 @@ void buttonMonsterItems(button_t* my)
 	else
 	{
 		itemSlotSelected = -1;
+		return;
 	}
 
+	if ( selectedEntity[0] == NULL )
+	{
+		itemSlotSelected = -1;
+		return;
+	}
+
+	Stat* tmpSpriteStats = selectedEntity[0]->getStats();
+	if ( tmpSpriteStats == NULL )
+	{
+		itemSlotSelected = -1;
+		return;
+	}
+
+	inputstr = spriteProperties[0];
+	cursorflash = ticks;
+	menuVisible = 0;
+	subwindow = 1;
+	slidery = 0;
+	subx1 = xres / 2 - 200;
+	subx2 = xres / 2 + 200;
+	suby1 = yres / 2 - 158;
+	suby2 = yres / 2 + 158;
+	strcpy(subtext, "Monster Item Properties:");
+
+	// stores any modified monster stats, to be restored when window is closed.
+
+	for ( int i = 0; i < sizeof(spriteProperties) / sizeof(spriteProperties[0]); i++ )
+	{
+		strcpy(tmpSpriteProperties[i], spriteProperties[i]);
+	}
+
+	/*
+	 * The slot was already resolved and validated above. Do not resolve it a
+	 * second time after changing the property-window state.
+	 */
 	newwindow = 5;
 
 
@@ -4262,20 +4284,36 @@ void buttonMonsterItems(button_t* my)
 	{
 		butMonsterX->visible = 0;
 	}
-	snprintf(spriteProperties[0], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 0]);
-	snprintf(spriteProperties[1], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 1]);
-	if ( (int)tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 2] == 10 )
+
+	const int editorItemValueCount =
+		static_cast<int>(sizeof(tmpSpriteStats->EDITOR_ITEMS)
+		/ sizeof(tmpSpriteStats->EDITOR_ITEMS[0]));
+	const int itemSlotBase = itemSlotSelected * ITEM_SLOT_NUMPROPERTIES;
+	if ( itemSlotSelected < 0
+		|| itemSlotSelected >= 16
+		|| itemSlotBase < 0
+		|| itemSlotBase + ITEM_SLOT_NUMPROPERTIES > editorItemValueCount )
 	{
-		strcpy(spriteProperties[2], "00"); //bless random
+		itemSlotSelected = -1;
+		buttonCloseSpriteSubwindow(nullptr);
+		return;
+	}
+
+	snprintf(spriteProperties[0], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 0]);
+	snprintf(spriteProperties[1], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 1]);
+	if ( static_cast<int>(tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 2]) == 10 )
+	{
+		strcpy(spriteProperties[2], "00"); // bless random
 	}
 	else
 	{
-		snprintf(spriteProperties[2], 4, "%d", (int)tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 2]); //bless
+		snprintf(spriteProperties[2], 4, "%d",
+			static_cast<int>(tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 2]));
 	}
-	snprintf(spriteProperties[3], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 3]);
-	snprintf(spriteProperties[4], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 4]);
-	snprintf(spriteProperties[5], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 5]);
-	snprintf(spriteProperties[6], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 6]);
+	snprintf(spriteProperties[3], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 3]);
+	snprintf(spriteProperties[4], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 4]);
+	snprintf(spriteProperties[5], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 5]);
+	snprintf(spriteProperties[6], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 6]);
 
 	butMonsterItemOK = newButton();
 	strcpy(butMonsterItemOK->label, "  OK  ");
