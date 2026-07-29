@@ -14264,6 +14264,255 @@ int main(int argc, char** argv)
 								}
 							}
 
+							const int currentElitePreset =
+								std::max(
+									0,
+									atoi(
+										spriteProperties[29]
+									)
+								);
+
+							const char* currentElitePresetName =
+								"Normal monster";
+							switch ( currentElitePreset )
+							{
+								case 1:
+									currentElitePresetName =
+										"Algernon";
+									break;
+								case 2:
+									currentElitePresetName =
+										"Funny Bones";
+									break;
+								case 3:
+									currentElitePresetName =
+										"Potato King";
+									break;
+								case 4:
+									currentElitePresetName =
+										"Thumpus";
+									break;
+								case 5:
+									currentElitePresetName =
+										"Bram Kindly";
+									break;
+								case 6:
+									currentElitePresetName =
+										"Johann";
+									break;
+								case 7:
+									currentElitePresetName =
+										"Merlin";
+									break;
+								default:
+									break;
+							}
+
+							const int authoredInfoY =
+								authoredStartY + 4 * 22 + 10;
+
+							int squadOptionsValue =
+								std::max(
+									0,
+									atoi(
+										spriteProperties[28]
+									)
+								);
+							const int squadRoleBits =
+								squadOptionsValue & 3;
+							const bool squadLeaderEnabled =
+								squadRoleBits == 1;
+							const bool squadFollowEnabled =
+								(squadOptionsValue & 4) != 0;
+							const bool squadAssistEnabled =
+								(squadOptionsValue & 8) != 0;
+							const bool squadShareTargetEnabled =
+								(squadOptionsValue & 16) != 0;
+							const bool squadWakeTogetherEnabled =
+								(squadOptionsValue & 32) != 0;
+
+							const char* squadRoleName = "None";
+							if ( squadRoleBits == 1 )
+							{
+								squadRoleName = "Leader";
+							}
+							else if ( squadRoleBits == 2 )
+							{
+								squadRoleName = "Member";
+							}
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY,
+								makeColorRGB(96, 255, 96),
+								"Current elite preset: %s",
+								currentElitePresetName
+							);
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 16,
+								makeColorRGB(96, 220, 255),
+								"Current squad role: %s",
+								squadRoleName
+							);
+
+							const char* squadToggleLabels[5] =
+							{
+								"Leader",
+								"Follows leader",
+								"Assists squadmates",
+								"Shares target",
+								"Wakes together"
+							};
+							const bool squadToggleValues[5] =
+							{
+								squadLeaderEnabled,
+								squadFollowEnabled,
+								squadAssistEnabled,
+								squadShareTargetEnabled,
+								squadWakeTogetherEnabled
+							};
+							const int squadToggleBits[5] =
+							{
+								1,
+								4,
+								8,
+								16,
+								32
+							};
+
+							for ( int squadToggleIndex = 0;
+								squadToggleIndex < 5;
+								++squadToggleIndex )
+							{
+								const int toggleY =
+									authoredInfoY + 30 + squadToggleIndex * 12;
+								const int boxX1 = authoredFieldX1;
+								const int boxY1 = toggleY - 2;
+								const int boxX2 = authoredFieldX1 + 10;
+								const int boxY2 = toggleY + 10;
+								const int clickX2 = authoredFieldX1 + 120;
+
+								drawDepressed(
+									boxX1,
+									boxY1,
+									boxX2,
+									boxY2
+								);
+
+								if ( squadToggleValues[squadToggleIndex] )
+								{
+									printTextFormattedColor(
+										font8x8_bmp,
+										boxX1 + 2,
+										toggleY,
+										makeColorRGB(96, 255, 96),
+										"X"
+									);
+								}
+
+								printTextFormattedColor(
+									font8x8_bmp,
+									authoredFieldX1 + 16,
+									toggleY,
+									squadToggleValues[squadToggleIndex]
+										? makeColorRGB(96, 255, 96)
+										: makeColorRGB(220, 220, 220),
+									squadToggleLabels[squadToggleIndex]
+								);
+
+								if ( mousestatus[SDL_BUTTON_LEFT]
+									&& omousex >= boxX1
+									&& omousex < clickX2
+									&& omousey >= boxY1
+									&& omousey < boxY2 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									int newSquadOptionsValue =
+										squadOptionsValue;
+
+									if ( squadToggleIndex == 0 )
+									{
+										if ( (newSquadOptionsValue & 3) == 1 )
+										{
+											newSquadOptionsValue &= ~3;
+										}
+										else
+										{
+											newSquadOptionsValue =
+												(newSquadOptionsValue & ~3) | 1;
+										}
+									}
+									else
+									{
+										newSquadOptionsValue ^=
+											squadToggleBits[
+												squadToggleIndex
+											];
+									}
+
+									if ( (newSquadOptionsValue & 3) != 1 )
+									{
+										if ( newSquadOptionsValue
+											& (4 | 8 | 16 | 32) )
+										{
+											newSquadOptionsValue =
+												(newSquadOptionsValue & ~3) | 2;
+										}
+										else
+										{
+											newSquadOptionsValue &= ~3;
+										}
+									}
+
+									snprintf(
+										spriteProperties[28],
+										sizeof(spriteProperties[28]),
+										"%d",
+										newSquadOptionsValue
+									);
+								}
+							}
+
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 92,
+								makeColorRGB(220, 220, 220),
+								"Field guide:"
+							);
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 104,
+								makeColorRGB(180, 180, 180),
+								"Squad ID: same number = same squad."
+							);
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 116,
+								makeColorRGB(180, 180, 180),
+								"Leader off + squad bits on = member."
+							);
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 128,
+								makeColorRGB(180, 180, 180),
+								"Elite IDs: 0 normal, 1-7 named elites."
+							);
+							printTextFormattedColor(
+								font8x8_bmp,
+								authoredFieldX1,
+								authoredInfoY + 140,
+								makeColorRGB(180, 180, 180),
+								"Defeat ID: numeric tag for later checks."
+							);
+
 							//items for monster
 							pad_y2 = suby1 + 28 + 2 * spacing;
 							pad_x3 = 40;
