@@ -48,6 +48,7 @@ extern int monsterEffectSelectedId;
 extern void monsterEffectsUpdateSelectionFromFields();
 extern const char* monsterEffectDisplayName(int effect);
 extern bool monsterEffectCanSelect(int effect);
+extern void monsterEffectsSetRowsVisible(bool visible);
 
 static int monsterEffectDropdownScroll = 0;
 static std::string monsterEffectDropdownLastQuery;
@@ -15939,6 +15940,41 @@ int main(int argc, char** argv)
 							const int authoredStartY =
 								dialogueFieldY2 + 18;
 
+							// Keep the miniboss toggle with the authored monster fields
+							// instead of below the inventory template buttons.
+							const int disableMinibossX = subx2 - 176;
+							const int disableMinibossY = authoredStartY;
+							printTextFormattedColor(
+								font8x8_bmp,
+								disableMinibossX,
+								disableMinibossY,
+								color,
+								!strcmp(spriteProperties[31], "disable")
+									? "Disable Miniboss: [x]"
+									: "Disable Miniboss: [ ]"
+							);
+							if ( mousestatus[SDL_BUTTON_LEFT] )
+							{
+								const int checkboxX1 = disableMinibossX
+									+ static_cast<int>(strlen("Disable Miniboss: ")) * 8;
+								const int checkboxX2 = checkboxX1 + 3 * 8;
+								if ( omousex >= checkboxX1
+									&& omousex < checkboxX2
+									&& omousey >= disableMinibossY
+									&& omousey < disableMinibossY + 8 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									if ( !strcmp(spriteProperties[31], "disable") )
+									{
+										strcpy(spriteProperties[31], "");
+									}
+									else
+									{
+										strcpy(spriteProperties[31], "disable");
+									}
+								}
+							}
+
 							for ( int authoredIndex = 0;
 								authoredIndex < 4;
 								++authoredIndex )
@@ -16315,32 +16351,6 @@ int main(int argc, char** argv)
 							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2 + 12, color,
 								"Slots %d-%d of %d active", inventoryFirstSlot, inventoryLastSlot, activeInventorySlots);
 
-							pad_y2 += spacing * 3 + 62;
-							if ( !strcmp(spriteProperties[31], "disable") )
-							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");
-							}
-							else
-							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [ ]");
-							}
-							if ( mousestatus[SDL_BUTTON_LEFT] )
-							{
-								int checkbox_x1 = pad_x4 - 8 + strlen("Disable Miniboss: ") * 8;
-								int checkbox_x2 = checkbox_x1 + strlen("[ ]") * 8;
-								if ( omousex >= checkbox_x1 && omousey >= pad_y2 && omousex < checkbox_x2 && omousey < pad_y2 + 8 )
-								{
-									mousestatus[SDL_BUTTON_LEFT] = 0;
-									if ( !strcmp(spriteProperties[31], "disable") )
-									{
-										strcpy(spriteProperties[31], "");
-									}
-									else
-									{
-										strcpy(spriteProperties[31], "disable");
-									}
-								}
-							}
 
 							if ( editproperty <= 30 )
 							{
@@ -17097,6 +17107,21 @@ int main(int argc, char** argv)
 						printText(font8x8_bmp, pad_x3, pad_y3 - 12, "Item Name");
 						printText(font8x8_bmp, pad_x1, pad_y1 - 12, "Click to select item");
 						printText(font8x8_bmp, pad_x3, pad_y3 + 4, itemName);
+                        {
+                            const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
+                            char samName[128] = "";
+                            char samDetail[256] = "";
+                            const char* slotStableID = editorGetMonsterSlotStableID(
+                                selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
+                                itemSlotSelected
+                            );
+                            if ( editorDescribeSAMItem(displayedItemID, slotStableID,
+                                samName, sizeof(samName), samDetail, sizeof(samDetail))
+                                && samDetail[0] != '\0' )
+                            {
+                                printText(font8x8_bmp, pad_x3, pad_y3 + 20, samDetail);
+                            }
+                        }
 						//drawDepressed(pad_x1, suby2 - 48, subx2 - 4, suby2 - 32);
 						//printText(font8x8_bmp, pad_x1, suby2 - 44, itemName);
 
@@ -17199,16 +17224,28 @@ int main(int argc, char** argv)
 
 							if ( editproperty == 0 )
 							{
-								inputlen = 3;
+                                inputlen = 10;
 								//update the item name when the ID changes.
-								if ( newwindow == 5 && atoi(spriteProperties[0]) == 1 )
-								{
-									strcpy(itemName, "default_random");
-								}
-								else
-								{
-									strcpy(itemName, itemNameStrings[safeGlobalItemIndex(atoi(spriteProperties[0]))]);
-								}
+                                const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
+                                char samName[128] = "";
+                                char samDetail[256] = "";
+                                const char* slotStableID = editorGetMonsterSlotStableID(
+                                    selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
+                                    itemSlotSelected
+                                );
+                                if ( editorDescribeSAMItem(displayedItemID, slotStableID,
+                                    samName, sizeof(samName), samDetail, sizeof(samDetail)) )
+                                {
+                                    snprintf(itemName, sizeof(itemName), "%s", samName);
+                                }
+                                else if ( newwindow == 5 && displayedItemID == 1 )
+                                {
+                                    strcpy(itemName, "default_random");
+                                }
+                                else
+                                {
+                                    strcpy(itemName, itemNameStrings[safeGlobalItemIndex(displayedItemID)]);
+                                }
 							}
 							else if( editproperty == 2 || editproperty == 3 )
 							{
@@ -17943,6 +17980,7 @@ int main(int argc, char** argv)
                     printText(font8x8_bmp, subx1 + 384, suby1 + 54, monsterEffectIdText);
 
                     const bool showEffectDropdown = inputstr == monsterEffectSearchText;
+                    monsterEffectsSetRowsVisible(!showEffectDropdown);
                     std::vector<int> effectSearchMatches;
                     const int effectDropdownVisibleRows = 8;
                     std::string effectQuery = monsterEffectSearchText;
@@ -21282,6 +21320,10 @@ int main(int argc, char** argv)
 							propertyPageCursorFlash(spacing);
 						}
 					}
+				}
+				else if ( newwindow == 40 )
+				{
+					drawMonsterTemplateBrowser();
 				}
 				else if ( newwindow == 25 )
 				{
