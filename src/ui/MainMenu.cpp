@@ -12063,7 +12063,20 @@ bind_failed:
 			    }
 
 			    // process incoming join request
-			    NetworkingLobbyJoinRequestResult result = lobbyPlayerJoinRequest(playerNum, playerSlotsLocked);
+				bool useChunkedHelo = false;
+			    NetworkingLobbyJoinRequestResult result =
+					lobbyPlayerJoinRequest(
+						playerNum,
+						playerSlotsLocked,
+						useChunkedHelo
+					);
+
+				/*
+				 * Stage 1C will use this value for capability-gated
+				 * HLCN transmission. Keep it explicit now so the
+				 * server/caller API cannot drift back to four slots.
+				 */
+				(void)useChunkedHelo;
 
 			    // finalize connections for Steamworks / EOS
 			    if (result == NetworkingLobbyJoinRequestResult::NET_LOBBY_JOIN_P2P_FAILURE) {

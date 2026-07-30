@@ -1597,9 +1597,19 @@ void sendAllyCommandClient(int player, Uint32 uid, int command, Uint8 x, Uint8 y
 	sendPacket(net_sock, -1, net_packet, 0);
 }
 
-NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool lockedSlots[4])
+NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
+	int& outResult,
+	bool lockedSlots[MAXPLAYERS],
+	bool& outUseChunkedHelo
+)
 {
     printlog("processing lobby join request\n");
+
+	/*
+	 * Stage 1B only prepares the lobby API for HELO chunking.
+	 * Chunk transmission/reassembly is added in the next protocol stage.
+	 */
+	outUseChunkedHelo = false;
 
 	Uint32 result = MAXPLAYERS;
 	if ( strcmp(VERSION, (char*)net_packet->data + 48) ) // TODO this should be safer.
@@ -1726,6 +1736,10 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 		SDLNet_Write32(c, &net_packet->data[4]);
 		if (loadingsavegame) {
 			constexpr int chunk_size = 6 + 32 + 6 * 10; // 6 bytes for player stats, 32 for name, 60 for equipment
+			static_assert(
+				8 + MAXPLAYERS * chunk_size <= NET_PACKET_SIZE,
+				"NET_PACKET_SIZE is too small for the 15-player savegame HELO payload"
+			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
 				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
@@ -1767,6 +1781,10 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 			net_packet->len = 8 + MAXPLAYERS * chunk_size;
 		} else {
 			constexpr int chunk_size = 6 + 32; // 6 bytes for player stats, 32 for name
+			static_assert(
+				8 + MAXPLAYERS * chunk_size <= NET_PACKET_SIZE,
+				"NET_PACKET_SIZE is too small for the 15-player HELO payload"
+			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
 				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
