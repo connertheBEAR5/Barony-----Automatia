@@ -48,6 +48,159 @@
 #include <future>
 #include <thread>
 
+namespace
+{
+	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr int kHeloChunkHeaderSize = 12;
+	constexpr int kHeloChunkPayloadMax = 900;
+	constexpr int kHeloSinglePacketMax = 1100;
+	constexpr int kHeloChunkMaxCount = 32;
+	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+
+	static int decodeGameplayPacketPlayerIndex(
+		const Uint8 encodedPlayer
+	)
+	{
+		const int player =
+			static_cast<int>(encodedPlayer);
+
+		if ( player >= MAXPLAYERS )
+		{
+			printlog(
+				"[NET]: ignoring gameplay packet with invalid player index %d",
+				player
+			);
+			return -1;
+		}
+
+		return player;
+	}
+
+	static Uint16 nextHeloTransferIdForPlayer(const int player)
+	{
+		if ( player <= 0 || player >= MAXPLAYERS )
+		{
+			return 0;
+		}
+
+		++g_heloTransferId[player];
+		if ( g_heloTransferId[player] == 0 )
+		{
+			++g_heloTransferId[player];
+		}
+		return g_heloTransferId[player];
+	}
+
+	static bool sendChunkedHeloDirect(
+		const Uint8* heloData,
+		const int heloLen,
+		const Uint16 transferId,
+		const int playerNumForLog
+	)
+	{
+		if ( !heloData
+			|| heloLen <= 0
+			|| heloLen > NET_PACKET_SIZE )
+		{
+			printlog(
+				"[NET]: refusing chunked HELO with invalid payload length %d",
+				heloLen
+			);
+			return false;
+		}
+
+		const int chunkPayloadMax =
+			std::min(
+				kHeloChunkPayloadMax,
+				NET_PACKET_SIZE - kHeloChunkHeaderSize
+			);
+		const int chunkCount =
+			(heloLen + chunkPayloadMax - 1)
+				/ chunkPayloadMax;
+
+		if ( chunkPayloadMax <= 0
+			|| chunkCount <= 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkCount > 0xFF )
+		{
+			printlog(
+				"[NET]: refusing chunked HELO with invalid chunk count %d",
+				chunkCount
+			);
+			return false;
+		}
+
+		printlog(
+			"sending chunked HELO: player=%d transfer=%u chunks=%d total=%d",
+			playerNumForLog,
+			static_cast<unsigned>(transferId),
+			chunkCount,
+			heloLen
+		);
+
+		for ( int chunkIndex = 0;
+			chunkIndex < chunkCount;
+			++chunkIndex )
+		{
+			const int offset =
+				chunkIndex * chunkPayloadMax;
+			const int chunkLen =
+				std::min(
+					chunkPayloadMax,
+					heloLen - offset
+				);
+
+			if ( chunkLen <= 0
+				|| chunkLen > chunkPayloadMax )
+			{
+				return false;
+			}
+
+			memcpy(net_packet->data, "HLCN", 4);
+			SDLNet_Write16(
+				transferId,
+				&net_packet->data[4]
+			);
+			net_packet->data[6] =
+				static_cast<Uint8>(chunkIndex);
+			net_packet->data[7] =
+				static_cast<Uint8>(chunkCount);
+			SDLNet_Write16(
+				static_cast<Uint16>(heloLen),
+				&net_packet->data[8]
+			);
+			SDLNet_Write16(
+				static_cast<Uint16>(chunkLen),
+				&net_packet->data[10]
+			);
+			memcpy(
+				&net_packet->data[kHeloChunkHeaderSize],
+				heloData + offset,
+				chunkLen
+			);
+			net_packet->len =
+				kHeloChunkHeaderSize + chunkLen;
+
+			if ( !sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					0
+				) )
+			{
+				printlog(
+					"[NET]: failed sending HELO chunk %d/%d",
+					chunkIndex + 1,
+					chunkCount
+				);
+				return false;
+			}
+		}
+
+		return true;
+	}
+}
+
 NetHandler* net_handler = nullptr;
 struct PendingTunnelSpawn
 {
@@ -556,11 +709,13 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		return;
 	}
-	if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+	if ( c <= 0 || c >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( c <= 0 )
+	if ( client_disconnected[c]
+		|| !players[c]
+		|| players[c]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -677,7 +832,7 @@ void serverUpdateBodypartIDs(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -729,7 +884,7 @@ void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -788,7 +943,7 @@ void serverUpdateEntitySprite(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -819,7 +974,7 @@ void serverUpdateEntitySkill(Entity* entity, int skill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -855,7 +1010,7 @@ void serverUpdateEntityStatFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -887,7 +1042,7 @@ void serverUpdateEntityFSkill(Entity* entity, int fskill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -919,7 +1074,7 @@ void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSpri
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -955,7 +1110,7 @@ void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int partic
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -992,7 +1147,7 @@ void serverUpdateEntityFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -1016,7 +1171,7 @@ void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -1054,7 +1209,7 @@ void serverUpdateEffects(int player)
 	{
 		return;
 	}
-	if ( client_disconnected[player] == true || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] == true || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1124,7 +1279,7 @@ void serverUpdateHunger(int player)
 	{
 		return;
 	}
-	if ( client_disconnected[player] == true || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] == true || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1154,7 +1309,7 @@ void serverUpdateSexChange(int player)
 
 	for ( int c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -1178,38 +1333,113 @@ Updates all player current HP/MP for clients
 
 void serverUpdatePlayerStats()
 {
-	int c;
 	if ( multiplayer != SERVER )
 	{
 		return;
 	}
-	for ( c = 1; c < MAXPLAYERS; c++ )
+
+	constexpr int packetLength =
+		4 + 8 * MAXPLAYERS;
+	static_assert(
+		packetLength <= NET_PACKET_SIZE,
+		"NET_PACKET_SIZE is too small for STAT"
+	);
+
+	strcpy((char*)net_packet->data, "STAT");
+
+	for ( int i = 0; i < MAXPLAYERS; ++i )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		Uint32 packedHP = 0;
+		Uint32 packedMP = 0;
+
+		if ( stats[i] )
+		{
+			const Uint16 maxHP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MAXHP,
+							65535
+						)
+					)
+				);
+			const Uint16 currentHP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->HP,
+							65535
+						)
+					)
+				);
+			const Uint16 maxMP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MAXMP,
+							65535
+						)
+					)
+				);
+			const Uint16 currentMP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MP,
+							65535
+						)
+					)
+				);
+
+			packedHP =
+				static_cast<Uint32>(maxHP)
+				| (
+					static_cast<Uint32>(currentHP)
+					<< 16
+				);
+			packedMP =
+				static_cast<Uint32>(maxMP)
+				| (
+					static_cast<Uint32>(currentMP)
+					<< 16
+				);
+		}
+
+		SDLNet_Write32(
+			packedHP,
+			&net_packet->data[4 + i * 8]
+		);
+		SDLNet_Write32(
+			packedMP,
+			&net_packet->data[8 + i * 8]
+		);
+	}
+
+	net_packet->len = packetLength;
+
+	for ( int c = 1; c < MAXPLAYERS; ++c )
+	{
+		if ( client_disconnected[c]
+			|| !players[c]
+			|| players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
-		strcpy((char*)net_packet->data, "STAT");
-		Sint32 playerHP = 0;
-		Sint32 playerMP = 0;
-		for ( int i = 0; i < MAXPLAYERS; ++i )
-		{
-			if ( stats[i] )
-			{
-				playerHP = static_cast<Sint16>(stats[i]->MAXHP);
-				playerHP |= static_cast<Sint16>(stats[i]->HP) << 16;
-				playerMP = static_cast<Sint16>(stats[i]->MAXMP);
-				playerMP |= static_cast<Sint16>(stats[i]->MP) << 16;
-			}
-			SDLNet_Write32(playerHP, &net_packet->data[4 + i * 8]); // 4/12/20/28 data
-			SDLNet_Write32(playerMP, &net_packet->data[8 + i * 8]); // 8/16/24/32 data
-			playerHP = 0;
-			playerMP = 0;
-		}
-		net_packet->address.host = net_clients[c - 1].host;
-		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 4 + 8 * MAXPLAYERS;
-		sendPacketSafe(net_sock, -1, net_packet, c - 1);
+
+		net_packet->address.host =
+			net_clients[c - 1].host;
+		net_packet->address.port =
+			net_clients[c - 1].port;
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			c - 1
+		);
 	}
 }
 
@@ -1342,7 +1572,7 @@ void serverUpdatePlayerConduct(int player, int conduct, int value)
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1365,41 +1595,63 @@ Updates all player current LVL for clients
 
 void serverUpdatePlayerLVL()
 {
-	int c;
 	if ( multiplayer != SERVER )
 	{
 		return;
 	}
-	for ( c = 1; c < MAXPLAYERS; c++ )
+
+	static_assert(
+		4 + MAXPLAYERS <= NET_PACKET_SIZE,
+		"NET_PACKET_SIZE is too small for UPLV"
+	);
+
+	strcpy((char*)net_packet->data, "UPLV");
+	for ( int i = 0; i < MAXPLAYERS; ++i )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		net_packet->data[4 + i] =
+			stats[i]
+				? static_cast<Uint8>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->LVL,
+							255
+						)
+					)
+				)
+				: 0;
+	}
+	net_packet->len = 4 + MAXPLAYERS;
+
+	for ( int c = 1; c < MAXPLAYERS; ++c )
+	{
+		if ( client_disconnected[c]
+			|| !players[c]
+			|| players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
-		strcpy((char*)net_packet->data, "UPLV");
-		Sint32 playerLevels = 0;
-		for ( int i = 0; i < MAXPLAYERS; ++i )
-		{
-			if ( stats[i] )
-			{
-				playerLevels |= static_cast<Uint8>(stats[i]->LVL) << (8 * i); // store uint8 in data, highest bits for player 4.
-			}
-		}
-		SDLNet_Write32(playerLevels, &net_packet->data[4]);
-		net_packet->address.host = net_clients[c - 1].host;
-		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 8;
-		sendPacketSafe(net_sock, -1, net_packet, c - 1);
+
+		net_packet->address.host =
+			net_clients[c - 1].host;
+		net_packet->address.port =
+			net_clients[c - 1].port;
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			c - 1
+		);
 	}
 }
 
 void serverRemoveClientFollower(int player, Uint32 uidToRemove)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1414,11 +1666,11 @@ void serverRemoveClientFollower(int player, Uint32 uidToRemove)
 
 void serverSendItemToPickupAndEquip(int player, Item* item)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1440,11 +1692,11 @@ void serverSendItemToPickupAndEquip(int player, Item* item)
 
 void serverUpdateAllyStat(int player, Uint32 uidToUpdate, int LVL, int HP, int MAXHP, int type)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1467,11 +1719,14 @@ void serverUpdatePlayerSummonStrength(int player)
 	{
 		return;
 	}
-	if ( player <= 0 || player > MAXPLAYERS )
+	if ( player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || !stats[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player]
+		|| !stats[player]
+		|| !players[player]
+		|| players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1495,11 +1750,11 @@ void serverUpdateAllyHP(int player, Uint32 uidToUpdate, int HP, int MAXHP, bool 
 	{
 		return;
 	}
-	if ( player <= 0 )
+	if ( player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1605,14 +1860,51 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 {
     printlog("processing lobby join request\n");
 
-	/*
-	 * Stage 1B only prepares the lobby API for HELO chunking.
-	 * Chunk transmission/reassembly is added in the next protocol stage.
-	 */
 	outUseChunkedHelo = false;
 
+	/*
+	 * The legacy JOIN layout is 69 bytes. New clients append one
+	 * capability byte at offset 69, making the packet 70 bytes.
+	 * Reject shorter packets before reading any fixed fields.
+	 */
+	constexpr int legacyJoinPacketLength = 69;
+	constexpr int versionFieldOffset = 48;
+	constexpr int versionFieldLength = 8;
+
+	if ( !net_packet
+		|| net_packet->len < legacyJoinPacketLength )
+	{
+		printlog(
+			"[NET]: rejecting truncated JOIN packet (len=%d expected>=%d)",
+			net_packet ? net_packet->len : 0,
+			legacyJoinPacketLength
+		);
+		outResult = MAXPLAYERS + 1;
+		return directConnect
+			? NET_LOBBY_JOIN_DIRECTIP_FAILURE
+			: NET_LOBBY_JOIN_P2P_FAILURE;
+	}
+
+	const bool clientSupportsHeloChunk =
+		net_packet->len >= 70
+		&& (
+			net_packet->data[69]
+				& kJoinCapabilityHeloChunkV1
+		);
+
+	char clientVersion[versionFieldLength + 1] = { 0 };
+	memcpy(
+		clientVersion,
+		&net_packet->data[versionFieldOffset],
+		versionFieldLength
+	);
+
 	Uint32 result = MAXPLAYERS;
-	if ( strcmp(VERSION, (char*)net_packet->data + 48) ) // TODO this should be safer.
+	if ( strncmp(
+			VERSION,
+			clientVersion,
+			versionFieldLength
+		) != 0 )
 	{
 		result = MAXPLAYERS + 1; // wrong version number
 	}
@@ -1670,11 +1962,11 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 	if ( result >= MAXPLAYERS )
 	{
 
-		// on error, client gets a player number that is invalid (to be interpreted as an error code)
-		net_clients[MAXPLAYERS - 1].host = net_packet->address.host;
-		net_clients[MAXPLAYERS - 1].port = net_packet->address.port;
-		net_packet->address.host = net_clients[MAXPLAYERS - 1].host;
-		net_packet->address.port = net_clients[MAXPLAYERS - 1].port;
+		/*
+		 * On error, reply directly to the packet's existing source
+		 * address. Do not use the final valid client slot as scratch
+		 * storage, because player 15 may already occupy it.
+		 */
 		net_packet->len = 8;
 		memcpy(net_packet->data, "HELO", 4);
 		SDLNet_Write32(result, &net_packet->data[4]); // error code for client to interpret
@@ -1802,9 +2094,71 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 		}
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
+
+		const bool shouldChunkHelo =
+			loadingsavegame
+			&& net_packet->len > kHeloSinglePacketMax;
+		outUseChunkedHelo =
+			clientSupportsHeloChunk
+			&& shouldChunkHelo;
+
 		if ( directConnect )
 		{
-		    sendPacketSafe(net_sock, -1, net_packet, 0);
+			if ( outUseChunkedHelo )
+			{
+				std::vector<Uint8> heloSnapshot(
+					net_packet->len
+				);
+				memcpy(
+					heloSnapshot.data(),
+					net_packet->data,
+					heloSnapshot.size()
+				);
+
+				const Uint16 transferId =
+					nextHeloTransferIdForPlayer(c);
+
+				if ( !sendChunkedHeloDirect(
+						heloSnapshot.data(),
+						static_cast<int>(
+							heloSnapshot.size()
+						),
+						transferId,
+						c
+					) )
+				{
+					printlog(
+						"[NET]: chunked HELO failed; using legacy HELO for player %d",
+						c
+					);
+					memcpy(
+						net_packet->data,
+						heloSnapshot.data(),
+						heloSnapshot.size()
+					);
+					net_packet->len =
+						static_cast<int>(
+							heloSnapshot.size()
+						);
+					outUseChunkedHelo = false;
+					sendPacketSafe(
+						net_sock,
+						-1,
+						net_packet,
+						0
+					);
+				}
+			}
+			else
+			{
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					0
+				);
+			}
+
 			return NET_LOBBY_JOIN_DIRECTIP_SUCCESS;
 		}
 		else
@@ -2202,7 +2556,7 @@ void clientActions(Entity* entity)
 				playernum = SDLNet_Read32(&net_packet->data[30]);
 				if ( playernum >= 0 && playernum < MAXPLAYERS )
 				{
-					if ( players[playernum] && players[playernum]->entity )
+					if ( players[playernum] )
 					{
 						players[playernum]->entity = entity;
 					}
@@ -2912,20 +3266,41 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
     
     // raise/lower shield
     {'SHLD', [](){
-        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        const int player =
+        	decodeGameplayPacketPlayerIndex(
+        		net_packet->data[4]
+        	);
+        if ( player < 0 )
+        {
+        	return;
+        }
         stats[player]->defending = net_packet->data[5];
     }},
 
     // sneaking
     {'SNEK', [](){
-        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        const int player =
+        	decodeGameplayPacketPlayerIndex(
+        		net_packet->data[4]
+        	);
+        if ( player < 0 )
+        {
+        	return;
+        }
         stats[player]->sneaking = net_packet->data[5];
         return;
     }},
 
 	// ghost sneaking
 	{ 'GHOD', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
 		if ( players[player]->ghost.my )
 		{
 			players[player]->ghost.my->skill[3] = net_packet->data[5] & (1 << 0);
@@ -4124,21 +4499,42 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// pause game
 	{'PAUS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1118), stats[player]->name);
 		pauseGame(2, 0);
 	}},
 
 	// unpause game
 	{'UNPS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1119), stats[player]->name);
 		pauseGame(1, 0);
 	}},
 
 	// server or player shut down
 	{'DISC', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_disconnected[player] = true;
 		if (player == 0)
 		{
@@ -5177,7 +5573,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server forwarded a player callout
 	{ 'CALL', []() {
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		if ( pnum != clientnum )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
@@ -5452,15 +5855,50 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update player stat values
 	{'STAT', [](){
-		Sint32 buffer = 0;
+		constexpr int expectedLength =
+			4 + 8 * MAXPLAYERS;
+		if ( net_packet->len < expectedLength )
+		{
+			printlog(
+				"[NET]: ignoring truncated STAT packet (len=%d expected>=%d)",
+				net_packet->len,
+				expectedLength
+			);
+			return;
+		}
+
 		for ( int i = 0; i < MAXPLAYERS; ++i )
 		{
-			buffer = (Sint32)SDLNet_Read32(&net_packet->data[4 + i * 8]);
-			stats[i]->MAXHP = buffer & 0xFFFF;
-			stats[i]->HP = (buffer >> 16) & 0xFFFF;
-			buffer = (Sint32)SDLNet_Read32(&net_packet->data[8 + i * 8]);
-			stats[i]->MAXMP = buffer & 0xFFFF;
-			stats[i]->MP = (buffer >> 16) & 0xFFFF;
+			if ( !stats[i] )
+			{
+				continue;
+			}
+
+			const Uint32 packedHP =
+				SDLNet_Read32(
+					&net_packet->data[4 + i * 8]
+				);
+			const Uint32 packedMP =
+				SDLNet_Read32(
+					&net_packet->data[8 + i * 8]
+				);
+
+			stats[i]->MAXHP =
+				static_cast<Sint32>(
+					packedHP & 0xFFFF
+				);
+			stats[i]->HP =
+				static_cast<Sint32>(
+					(packedHP >> 16) & 0xFFFF
+				);
+			stats[i]->MAXMP =
+				static_cast<Sint32>(
+					packedMP & 0xFFFF
+				);
+			stats[i]->MP =
+				static_cast<Sint32>(
+					(packedMP >> 16) & 0xFFFF
+				);
 		}
 	}},
 
@@ -5582,10 +6020,27 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update player levels
 	{'UPLV', [](){
-		Sint32 buffer = SDLNet_Read32(&net_packet->data[4]);
+		const int expectedLength =
+			4 + MAXPLAYERS;
+		if ( net_packet->len < expectedLength )
+		{
+			printlog(
+				"[NET]: ignoring truncated UPLV packet (len=%d expected>=%d)",
+				net_packet->len,
+				expectedLength
+			);
+			return;
+		}
+
 		for ( int i = 0; i < MAXPLAYERS; ++i )
 		{
-			stats[i]->LVL = static_cast<Sint32>((buffer >> (i * 8) ) & 0xFF);
+			if ( stats[i] )
+			{
+				stats[i]->LVL =
+					static_cast<Sint32>(
+						net_packet->data[4 + i]
+					);
+			}
 		}
 	}},
 	// Authoritative persistent gate state.
@@ -7501,9 +7956,20 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update class from script
 	{ 'SCRC', []() {
-		int player = net_packet->data[4];
-		int classnum = net_packet->data[5];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 6 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SCRC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		const int classnum = net_packet->data[5];
+		if ( player >= 0 )
 		{
 			client_classes[player] = classnum;
 			bool oldIntro = intro;
@@ -7882,7 +8348,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	{ 'ASSU', []() {
 		// server sent player current assist values
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		Sint32 assistance = SDLNet_Read32(&net_packet->data[5]);
 		if ( player == clientnum )
 		{
@@ -7909,10 +8382,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close assist shrine
 	{ 'ASCL', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated ASCL packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* shrine = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].assistShrineGUI.closeAssistShrine();
@@ -7934,10 +8419,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close cauldron
 	{ 'CAUC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated CAUC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].alchemyGUI.closeAlchemyMenu();
@@ -7959,10 +8456,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close workbench
 	{ 'WRKC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated WRKC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].tinkerGUI.closeTinkerMenu();
@@ -7984,10 +8493,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close mailbox
 	{ 'MBXC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated MBXC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].mailboxGUI.closeMailMenu();
@@ -7997,7 +8518,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to consume key for lock
 	{ 'LKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		bool success = false;
 
 		// reply got packet
@@ -8101,10 +8629,31 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	} },
 
 	{ 'SANM',[]() { // player spellcast animation
-		int player = net_packet->data[4];
-		int pose = net_packet->data[5];
-		int charge = SDLNet_Read16(&net_packet->data[6]);
-		spellcastAnimationUpdateReceive(player, pose, charge);
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SANM packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
+
+		const int pose = net_packet->data[5];
+		const int charge =
+			SDLNet_Read16(&net_packet->data[6]);
+		spellcastAnimationUpdateReceive(
+			player,
+			pose,
+			charge
+		);
 	} },
 
 	// update breakable counter
@@ -8294,7 +8843,14 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// keep alive
 	{'KPAL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 	}},
 
@@ -8388,7 +8944,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
-		if ( client_disconnected[j] || players[j]->isLocalPlayer() )
+		if ( client_disconnected[j] || !players[j] || players[j]->isLocalPlayer() )
 		{
 			return;
 		}
@@ -8417,14 +8973,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// pause game
 	{'PAUS', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1118), stats[net_packet->data[4]]->name);
-		const int j = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int j =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( j < 0 )
+		{
+			return;
+		}
 		pauseGame(2, j);
 	}},
 
 	// unpause game
 	{'UNPS', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1119), stats[net_packet->data[4]]->name);
-		const int j = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int j =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( j < 0 )
+		{
+			return;
+		}
 		pauseGame(1, j);
 	}},
 
@@ -8689,7 +9259,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			playSoundEntityLocal(players[player]->ghost.my, 612 + local_rng.rand() % 3, 64);
 			for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 			{
-				if ( c == player || client_disconnected[c] || players[c]->isLocalPlayer() )
+				if ( c == player || client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 				{
 					continue;
 				}
@@ -8708,7 +9278,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			players[player]->ghost.setActive(deactivated == 0 ? true : false);
 			for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 			{
-				if ( c == player || client_disconnected[c] || players[c]->isLocalPlayer() )
+				if ( c == player || client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 				{
 					continue;
 				}
@@ -8725,33 +9295,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{'REZZ', []() {
-		// check if the info is outdated
-		if ( net_packet->data[5] != currentlevel || net_packet->data[10] != secretlevel )
+		if ( !net_packet || net_packet->len < 11 )
+		{
+			printlog(
+				"[NET]: ignoring truncated REZZ packet"
+			);
+			return;
+		}
+
+		if ( net_packet->data[5] != currentlevel
+			|| net_packet->data[10] != secretlevel )
 		{
 			return;
 		}
 
-		int player = net_packet->data[4];
-
-		if ( player < 0 || player >= MAXPLAYERS )
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
 		{
 			return;
 		}
-
 		if ( players[player]->entity )
 		{
 			return;
 		}
 
-		int x = SDLNet_Read16(&net_packet->data[6]);
-		int y = SDLNet_Read16(&net_packet->data[8]);
-
-		if ( players[player]->ghost.my )
-		{
-			list_RemoveNode(players[player]->ghost.my->mynode);
-			players[player]->ghost.my = nullptr;
-		}
-		players[player]->ghost.reset();
+		const int x =
+			SDLNet_Read16(&net_packet->data[6]);
+		const int y =
+			SDLNet_Read16(&net_packet->data[8]);
 
 		Entity* entity = newEntity(113, 1, map.entities, nullptr); //Player entity.
 		entity->x = (x * 16) + 8;
@@ -8778,25 +9354,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player created ghost
 	{'GHOS', []() {
-		// check if the info is outdated
-		if ( net_packet->data[5] != currentlevel || net_packet->data[10] != secretlevel )
+		if ( !net_packet || net_packet->len < 11 )
 		{
-			return;
-		}
-		
-		int player = net_packet->data[4];
-
-		if ( player < 0 || player >= MAXPLAYERS )
-		{
+			printlog(
+				"[NET]: ignoring truncated GHOS packet"
+			);
 			return;
 		}
 
-		int x = SDLNet_Read16(&net_packet->data[6]);
-		int y = SDLNet_Read16(&net_packet->data[8]);
+		if ( net_packet->data[5] != currentlevel
+			|| net_packet->data[10] != secretlevel )
+		{
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
+
+		const int x =
+			SDLNet_Read16(&net_packet->data[6]);
+		const int y =
+			SDLNet_Read16(&net_packet->data[8]);
 
 		if ( players[player]->ghost.my )
 		{
-			list_RemoveNode(players[player]->ghost.my->mynode);
+			list_RemoveNode(
+				players[player]->ghost.my->mynode
+			);
 			players[player]->ghost.my = nullptr;
 		}
 		players[player]->ghost.reset();
@@ -8836,7 +9426,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client deleted entity
 	/*{'ENTD', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		for ( auto node = entitiesToDelete[player].first; node != NULL; node = node->next )
 		{
 			auto deleteent = (deleteent_t*)node->element;
@@ -8850,7 +9447,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked entity in range
 	{'CKIR', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8863,7 +9467,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// tinker salvage
 	{'SALV', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8884,7 +9495,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked wall lock entity in range with key
 	{'LKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8913,7 +9531,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked wall lock entity in range without key
 	{'LNOK', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8938,7 +9563,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client checked valid key for the lock
 	{ 'OKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8988,7 +9620,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// rat feed
 	{'RATF', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -9015,7 +9654,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	{'DISC', [](){
 	    // TODO verify packet origin
 		char shortname[32];
-		const int playerDisconnected = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int playerDisconnected =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( playerDisconnected < 0 )
+		{
+			return;
+		}
 	    if (playerDisconnected == 0) {
 	        // yeah right
 	        return;
@@ -9041,7 +9687,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client callout
 	{'CALL', []() {
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		if ( pnum != clientnum )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
@@ -9102,7 +9755,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// message
 	{'MSGS', [](){
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		client_keepalive[pnum] = ticks;
 		Uint32 color = SDLNet_Read32(&net_packet->data[5]);
 		MessageType type = MESSAGE_CHAT; // the only kind of message you can get from a client.
@@ -9119,7 +9779,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		// relay message to all clients
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( c == pnum || client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( c == pnum || client_disconnected[c] == true || !players[c] || players[c]->isLocalPlayer() )
 			{
 				continue;
 			}
@@ -9136,7 +9796,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// spotting (examining)
 	{'SPOT', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -9148,7 +9815,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// item drop
 	{'DROP', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[25]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9162,7 +9836,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// item drop (greasy)
 	{ 'GRES', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9208,7 +9889,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// duck throw
 	{ 'DCKA', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9235,7 +9923,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// item drop (on death)
 	{'DIEI', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[25]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9289,7 +9984,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// raise/lower shield
 	{'SHLD', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
+		{
+			return;
+		}
 		stats[player]->defending = net_packet->data[5];
         for (int c = 1; c < MAXPLAYERS; ++c) {
             // relay packet to other players
@@ -9304,7 +10008,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// sneaking
 	{'SNEK', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
+		{
+			return;
+		}
 		stats[player]->sneaking = net_packet->data[5];
         for (int c = 1; c < MAXPLAYERS; ++c) {
             // relay packet to other players
@@ -9319,7 +10032,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// ghost sneaking
 	{ 'GHOD', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
 		if ( players[player]->ghost.my )
 		{
 			players[player]->ghost.my->skill[3] = net_packet->data[5] & (1 << 0);
@@ -9351,7 +10071,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// buy item from shop
 	{'SHPB', [](){
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
-		const int client = std::min(net_packet->data[29], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[29]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity(uidnum);
 		if ( !entity )
 		{
@@ -9506,7 +10233,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Remove a spell from the channeled spells list.
 	{'UNCH', [](){
-		const int client = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if (spellInList(&channeledSpells[client], thespell))
 		{
@@ -9526,7 +10260,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// sell item to shop
 	{'SHPS', [](){
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
-		const int client = std::min(net_packet->data[29], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[29]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity(uidnum);
 		if ( !entity )
 		{
@@ -9603,7 +10344,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// use item
 	{'USEI', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9617,14 +10365,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// use loot bag
 	{ 'LOOT', []() {
-		const int client = std::min(net_packet->data[8], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[8]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Uint32 appearance = SDLNet_Read32(&net_packet->data[4]);
 		Stat::emptyLootingBag(client, appearance);
 	} },
 
 	// equip item (as a weapon)
 	{'EQUI', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9653,7 +10415,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// equip item (as a shield)
 	{'EQUS', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9682,7 +10451,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// consume torch item shield slot
 	{ 'COOK', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9726,7 +10502,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// equip item (any other slot)
 	{'EQUM', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9792,7 +10575,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// update appearance of item
 	{ 'EQUA', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9865,7 +10655,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// update itemType of item
 	{ 'EQUT', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9929,7 +10726,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// apply item to entity
 	{'APIT', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9952,7 +10756,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// apply item to entity
 	{'APIW', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9969,7 +10780,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// attacking
 	{'ATAK', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if (players[player] && players[player]->entity)
 		{
 			ItemType type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[7]));
@@ -10012,7 +10830,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Multiplayer chest code (server).
 	{'CCLS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if (openedChest[player])
 		{
 			openedChest[player]->closeChestServer();
@@ -10021,7 +10846,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Multiplayer duck code (server).
 	{ 'DUCK', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		const int duck = net_packet->data[5];
 		players[player]->mechanics.pendingDucks.push_back(
 			std::make_pair(duck, ticks + (3 + (local_rng.rand() % 30)) * TICKS_PER_SECOND));
@@ -10029,7 +10861,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client failed some alchemy.
 	{'BOOM', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( players[player] && players[player]->entity )
 		{
 			bool protection = false;
@@ -10058,7 +10897,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client cast a spell.
 	{'SPEL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if ( players[player] && players[player]->entity )
@@ -10086,7 +10932,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client ghost cast a spell.
 	{'GHSP', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if ( players[player] && players[player]->ghost.isActive() )
@@ -10097,7 +10950,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client added an item to the chest.
 	{'CITM', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( net_packet->data[27] == 0 && !openedChest[player])
 		{
 			return;
@@ -10131,7 +10991,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client removed an item from the chest.
 	{'RCIT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( net_packet->data[27] == 0 && !openedChest[player])
 		{
 			return;
@@ -10159,7 +11026,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// the client removed a curse on his equipment
 	{'RCUR', [](){
 	    Item* item;
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		switch ( net_packet->data[5] )
 		{
 			case 0:
@@ -10204,7 +11078,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client repaired equipment or otherwise modified status of equipment.
 	{'REPA', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		Item* equipment = nullptr;
 
 		switch ( net_packet->data[5] )
@@ -10257,7 +11138,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client repaired tinkering bots
 	{ 'REPT', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		Item* equipment = nullptr;
 
 		switch ( net_packet->data[5] )
@@ -10318,7 +11206,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client changed beatitude of equipment.
 	{'BEAT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		Item* equipment = nullptr;
 		//messagePlayer(0, "client: %d, armornum: %d, status %d", player, net_packet->data[5], net_packet->data[6]);
 		switch ( net_packet->data[5] )
@@ -10366,7 +11261,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client dropped gold
 	{'DGLD', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		int amount = SDLNet_Read32(&net_packet->data[5]);
 
 		if ( stats[player]->GOLD < 0 )
@@ -10406,7 +11308,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client played a sound
 	{'EMOT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated EMOT packet"
+			);
+			return;
+		}
+
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int sfx = SDLNet_Read16(&net_packet->data[5]);
 		const int vol = std::min(92, (int)(net_packet->data[7]));
 		if ( players[player] && players[player]->entity )
@@ -10415,7 +11332,10 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			for ( int c = 1; c < MAXPLAYERS; ++c )
 			{
 				// send to all other players
-				if ( c != player && !client_disconnected[c] && !players[c]->isLocalPlayer() )
+				if ( c != player
+					&& !client_disconnected[c]
+					&& players[c]
+					&& !players[c]->isLocalPlayer() )
 				{
 					strcpy((char*)net_packet->data, "SNEL");
 					SDLNet_Write16(sfx, &net_packet->data[4]);
@@ -10432,7 +11352,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client asked for a level up
 	{'CLVL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( players[player] && players[player]->entity )
 		{
 			players[player]->entity->getStats()->EXP += 100;
@@ -10441,7 +11368,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client asked for a level up
 	{'CSKL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int skill = net_packet->data[5];
 		if ( player > 0 && player < MAXPLAYERS && players[player] && players[player]->entity )
 		{
@@ -10469,7 +11403,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Remove vampiric aura
 	{'VAMP', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int spellID = SDLNet_Read32(&net_packet->data[5]);
 		if ( players[player] && players[player]->entity && stats[player] )
 		{
@@ -10491,7 +11432,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client sent a monster command.
 	{'ALLY', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int allyCmd = net_packet->data[5];
 		const Uint32 uid = SDLNet_Read32(&net_packet->data[8]);
 		//messagePlayer(0, " received %d, %d, %d, %d, %d", player, allyCmd, net_packet->data[6], net_packet->data[7], uid);
@@ -10525,7 +11473,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// use automaton food item
 	{'FODA', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[25]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -10539,7 +11494,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// adorcise item
 	{ 'ADOR', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -10613,7 +11575,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// broke a mirror
 	{ 'MIRR', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		if ( players[player]->entity )
 		{
 			if ( players[player]->entity->setEffect(EFF_BLEEDING, true, TICKS_PER_SECOND * 15, true) )
@@ -10627,7 +11596,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	{ 'CMPD', []() {
 		// client ack received the packet
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		const Uint8 clientSequence = net_packet->data[5];
 
 		auto find = Compendium_t::Events_t::clientDataStrings[player].find(clientSequence);
@@ -10801,8 +11777,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	} },
 
 	{ 'FXGD',[]() {
-		int player = net_packet->data[4];
-		if ( player >= 1 && player < MAXPLAYERS && !players[player]->isLocalPlayer() )
+		if ( !net_packet || net_packet->len < 15 )
+		{
+			printlog(
+				"[NET]: ignoring truncated FXGD packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 1
+			&& players[player]
+			&& stats[player]
+			&& !players[player]->isLocalPlayer() )
 		{
 			Sint32 goldSpent = (Sint32)SDLNet_Read32(&net_packet->data[5]);
 			stats[player]->GOLD -= goldSpent;
@@ -10846,34 +11836,79 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{ 'SANM',[]() { // player spellcast animation
-		int player = net_packet->data[4];
-		int pose = net_packet->data[5];
-		int charge = SDLNet_Read16(&net_packet->data[6]);
-		spellcastAnimationUpdateReceive(player, pose, charge);
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SANM packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
+
+		const int pose = net_packet->data[5];
+		const int charge =
+			SDLNet_Read16(&net_packet->data[6]);
+		spellcastAnimationUpdateReceive(
+			player,
+			pose,
+			charge
+		);
 	} },
 
 	{ 'OVRC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 1 && player < MAXPLAYERS && !players[player]->isLocalPlayer() )
+		if ( !net_packet || net_packet->len < 6 )
 		{
-			if ( players[player] && players[player]->entity && stats[player] )
-			{
-				cast_animation[clientnum].overcharge_init = net_packet->data[5];
-			}
+			printlog(
+				"[NET]: ignoring truncated OVRC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 1
+			&& players[player]
+			&& players[player]->entity
+			&& stats[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			cast_animation[player].overcharge_init =
+				net_packet->data[5];
 		}
 	} },
 
 	{ 'SPLV',[]() { // player spell level proc
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 15 )
 		{
-			if ( !players[player]->isLocalPlayer() )
+			printlog(
+				"[NET]: ignoring truncated SPLV packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 0
+			&& players[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			if ( players[player]->entity )
 			{
-				if ( players[player]->entity )
-				{
-					int spellID = SDLNet_Read16(&net_packet->data[5]);
-					Uint32 eventType = SDLNet_Read32(&net_packet->data[7]);
-					int eventValue = SDLNet_Read32(&net_packet->data[11]);
+				int spellID = SDLNet_Read16(&net_packet->data[5]);
+				Uint32 eventType = SDLNet_Read32(&net_packet->data[7]);
+				int eventValue = SDLNet_Read32(&net_packet->data[11]);
 					if ( spellID == SPELL_DETECT_FOOD )
 					{
 						players[player]->mechanics.updateSustainedSpellEvent(SPELL_DETECT_FOOD, eventValue * 10, 1.0, nullptr);
@@ -10881,7 +11916,6 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 					else
 					{
 						magicOnSpellCastEvent(players[player]->entity, players[player]->entity, nullptr, spellID, eventType, eventValue);
-					}
 				}
 			}
 		}
@@ -10889,18 +11923,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// update breakable counter
 	{ 'GBRK', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 6 )
 		{
-			if ( !players[player]->isLocalPlayer() )
+			printlog(
+				"[NET]: ignoring truncated GBRK packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 0
+			&& players[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			if ( players[player]->entity )
 			{
-				if ( players[player]->entity )
-				{
-					int eventType = net_packet->data[5];
+				int eventType = net_packet->data[5];
 					if ( eventType == (int)Player::PlayerMechanics_t::BreakableEvent::GBREAK_DEGRADE )
 					{
 						players[player]->mechanics.incrementBreakableCounter(Player::PlayerMechanics_t::BreakableEvent::GBREAK_DEGRADE, nullptr);
-					}
 				}
 			}
 		}
@@ -11644,8 +12688,19 @@ void PingNetworkStatus_t::reset()
 
 void PingNetworkStatus_t::receive()
 {
-	int player = net_packet->data[4];
-	if ( player < 0 || player >= MAXPLAYERS )
+	if ( !net_packet || net_packet->len < 9 )
+	{
+		printlog(
+			"[NET]: ignoring truncated PNGR packet"
+		);
+		return;
+	}
+
+	const int player =
+		decodeGameplayPacketPlayerIndex(
+			net_packet->data[4]
+		);
+	if ( player < 0 )
 	{
 		return;
 	}
@@ -11680,8 +12735,19 @@ void PingNetworkStatus_t::receive()
 
 void PingNetworkStatus_t::respond()
 {
-	int player = net_packet->data[4];
-	if ( player < 0 || player >= MAXPLAYERS )
+	if ( !net_packet || net_packet->len < 9 )
+	{
+		printlog(
+			"[NET]: ignoring truncated PNGU packet"
+		);
+		return;
+	}
+
+	const int player =
+		decodeGameplayPacketPlayerIndex(
+			net_packet->data[4]
+		);
+	if ( player < 0 )
 	{
 		return;
 	}
@@ -11824,7 +12890,7 @@ void PingNetworkStatus_t::update()
 		if ( client_disconnected[i] )
 		{
 			p.clear();
-			return;
+			continue;
 		}
 		Uint32 minSequence = 0;
 		for ( auto& keypairs : p.pings )

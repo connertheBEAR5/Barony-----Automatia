@@ -80,6 +80,421 @@ namespace MainMenu {
     ConsoleVariable<int> cvar_displayHz("/displayhz", 0);
 	ConsoleVariable<bool> cvar_hdrEnabled("/hdr_enabled", true);
 	static const int numFilters = NUM_SERVER_FLAGS + 2;
+
+	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr int kHeloChunkHeaderSize = 12;
+	constexpr int kHeloChunkPayloadMax = 900;
+	constexpr int kHeloChunkMaxCount = 32;
+	constexpr Uint32 kHeloChunkReassemblyTimeoutTicks =
+		5 * TICKS_PER_SECOND;
+	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+
+	static int decodeNetworkPlayerIndex(
+		const Uint8 encodedPlayer
+	)
+	{
+		const int player =
+			static_cast<int>(encodedPlayer);
+
+		if ( player >= MAXPLAYERS )
+		{
+			printlog(
+				"[NET]: ignoring packet with invalid player index %d",
+				player
+			);
+			return -1;
+		}
+
+		return player;
+	}
+
+	struct HeloChunkReassemblyState
+	{
+		bool active = false;
+		Uint16 transferId = 0;
+		Uint8 chunkCount = 0;
+		Uint16 totalLen = 0;
+		Uint32 lastChunkTick = 0;
+		std::vector<std::vector<Uint8>> chunks;
+		std::vector<bool> received;
+		int receivedCount = 0;
+	};
+
+	static HeloChunkReassemblyState
+		g_heloChunkReassemblyState;
+
+	static Uint16 nextHeloTransferIdForPlayer(
+		const int player
+	)
+	{
+		if ( player <= 0 || player >= MAXPLAYERS )
+		{
+			return 0;
+		}
+
+		++g_heloTransferId[player];
+		if ( g_heloTransferId[player] == 0 )
+		{
+			++g_heloTransferId[player];
+		}
+		return g_heloTransferId[player];
+	}
+
+	static void resetHeloChunkReassemblyState()
+	{
+		g_heloChunkReassemblyState =
+			HeloChunkReassemblyState();
+	}
+
+	static void resetHeloChunkReassemblyStateWithLog(
+		const char* reason
+	)
+	{
+		if ( g_heloChunkReassemblyState.active )
+		{
+			printlog(
+				"HELO chunk timeout/reset transfer=%u (%s)",
+				static_cast<unsigned>(
+					g_heloChunkReassemblyState.transferId
+				),
+				reason ? reason : "reset"
+			);
+		}
+		resetHeloChunkReassemblyState();
+	}
+
+	static bool sendChunkedHeloToPeer(
+		const int hostnum,
+		const Uint8* heloData,
+		const int heloLen,
+		const Uint16 transferId,
+		const int playerNumForLog
+	)
+	{
+		if ( !heloData
+			|| heloLen <= 0
+			|| heloLen > NET_PACKET_SIZE )
+		{
+			return false;
+		}
+
+		const int chunkPayloadMax =
+			std::min(
+				kHeloChunkPayloadMax,
+				NET_PACKET_SIZE - kHeloChunkHeaderSize
+			);
+		const int chunkCount =
+			(heloLen + chunkPayloadMax - 1)
+				/ chunkPayloadMax;
+
+		if ( chunkPayloadMax <= 0
+			|| chunkCount <= 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkCount > 0xFF )
+		{
+			return false;
+		}
+
+		printlog(
+			"sending chunked HELO: player=%d transfer=%u chunks=%d total=%d",
+			playerNumForLog,
+			static_cast<unsigned>(transferId),
+			chunkCount,
+			heloLen
+		);
+
+		for ( int chunkIndex = 0;
+			chunkIndex < chunkCount;
+			++chunkIndex )
+		{
+			const int offset =
+				chunkIndex * chunkPayloadMax;
+			const int chunkLen =
+				std::min(
+					chunkPayloadMax,
+					heloLen - offset
+				);
+
+			memcpy(net_packet->data, "HLCN", 4);
+			SDLNet_Write16(
+				transferId,
+				&net_packet->data[4]
+			);
+			net_packet->data[6] =
+				static_cast<Uint8>(chunkIndex);
+			net_packet->data[7] =
+				static_cast<Uint8>(chunkCount);
+			SDLNet_Write16(
+				static_cast<Uint16>(heloLen),
+				&net_packet->data[8]
+			);
+			SDLNet_Write16(
+				static_cast<Uint16>(chunkLen),
+				&net_packet->data[10]
+			);
+			memcpy(
+				&net_packet->data[kHeloChunkHeaderSize],
+				heloData + offset,
+				chunkLen
+			);
+			net_packet->len =
+				kHeloChunkHeaderSize + chunkLen;
+
+			if ( !sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					hostnum
+				) )
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static bool ingestHeloChunkAndMaybeAssemble()
+	{
+		if ( net_packet->len < kHeloChunkHeaderSize )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"short packet"
+			);
+			return false;
+		}
+
+		const Uint16 transferId =
+			SDLNet_Read16(&net_packet->data[4]);
+		const Uint8 chunkIndex =
+			net_packet->data[6];
+		const Uint8 chunkCount =
+			net_packet->data[7];
+		const Uint16 totalHeloLen =
+			SDLNet_Read16(&net_packet->data[8]);
+		const Uint16 chunkLen =
+			SDLNet_Read16(&net_packet->data[10]);
+
+		if ( chunkCount == 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkIndex >= chunkCount
+			|| totalHeloLen < 8
+			|| totalHeloLen > NET_PACKET_SIZE
+			|| chunkLen == 0
+			|| chunkLen > kHeloChunkPayloadMax
+			|| kHeloChunkHeaderSize + chunkLen
+				!= net_packet->len
+			|| totalHeloLen
+				> chunkCount * kHeloChunkPayloadMax )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"invalid chunk metadata"
+			);
+			return false;
+		}
+
+		if ( !g_heloChunkReassemblyState.active )
+		{
+			g_heloChunkReassemblyState.active = true;
+			g_heloChunkReassemblyState.transferId =
+				transferId;
+			g_heloChunkReassemblyState.chunkCount =
+				chunkCount;
+			g_heloChunkReassemblyState.totalLen =
+				totalHeloLen;
+			g_heloChunkReassemblyState.chunks.resize(
+				chunkCount
+			);
+			g_heloChunkReassemblyState.received.assign(
+				chunkCount,
+				false
+			);
+		}
+		else if (
+			g_heloChunkReassemblyState.transferId
+				!= transferId
+		)
+		{
+			if ( chunkIndex != 0 )
+			{
+				return false;
+			}
+			resetHeloChunkReassemblyState();
+			g_heloChunkReassemblyState.active = true;
+			g_heloChunkReassemblyState.transferId =
+				transferId;
+			g_heloChunkReassemblyState.chunkCount =
+				chunkCount;
+			g_heloChunkReassemblyState.totalLen =
+				totalHeloLen;
+			g_heloChunkReassemblyState.chunks.resize(
+				chunkCount
+			);
+			g_heloChunkReassemblyState.received.assign(
+				chunkCount,
+				false
+			);
+		}
+
+		if ( g_heloChunkReassemblyState.chunkCount
+				!= chunkCount
+			|| g_heloChunkReassemblyState.totalLen
+				!= totalHeloLen )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"transfer metadata mismatch"
+			);
+			return false;
+		}
+
+		printlog(
+			"recv HLCN: transfer=%u idx=%u/%u len=%u",
+			static_cast<unsigned>(transferId),
+			static_cast<unsigned>(chunkIndex + 1),
+			static_cast<unsigned>(chunkCount),
+			static_cast<unsigned>(chunkLen)
+		);
+
+		g_heloChunkReassemblyState.lastChunkTick = ticks;
+
+		if (
+			g_heloChunkReassemblyState.received[
+				chunkIndex
+			]
+		)
+		{
+			return false;
+		}
+
+		g_heloChunkReassemblyState.chunks[
+			chunkIndex
+		].assign(
+			&net_packet->data[kHeloChunkHeaderSize],
+			&net_packet->data[
+				kHeloChunkHeaderSize + chunkLen
+			]
+		);
+		g_heloChunkReassemblyState.received[
+			chunkIndex
+		] = true;
+		++g_heloChunkReassemblyState.receivedCount;
+
+		if (
+			g_heloChunkReassemblyState.receivedCount
+				< g_heloChunkReassemblyState.chunkCount
+		)
+		{
+			return false;
+		}
+
+		std::vector<Uint8> reassembled(
+			g_heloChunkReassemblyState.totalLen
+		);
+		int offset = 0;
+
+		for ( int i = 0;
+			i < g_heloChunkReassemblyState.chunkCount;
+			++i )
+		{
+			if (
+				!g_heloChunkReassemblyState.received[i]
+			)
+			{
+				resetHeloChunkReassemblyStateWithLog(
+					"missing chunk"
+				);
+				return false;
+			}
+
+			const auto& chunk =
+				g_heloChunkReassemblyState.chunks[i];
+
+			if ( offset
+					+ static_cast<int>(chunk.size())
+				> g_heloChunkReassemblyState.totalLen )
+			{
+				resetHeloChunkReassemblyStateWithLog(
+					"assembly overflow"
+				);
+				return false;
+			}
+
+			memcpy(
+				&reassembled[offset],
+				chunk.data(),
+				chunk.size()
+			);
+			offset +=
+				static_cast<int>(chunk.size());
+		}
+
+		if ( offset
+				!= g_heloChunkReassemblyState.totalLen
+			|| SDLNet_Read32(reassembled.data())
+				!= 'HELO' )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"bad assembled HELO"
+			);
+			return false;
+		}
+
+		const Uint16 completedTransfer =
+			g_heloChunkReassemblyState.transferId;
+		const Uint16 completedLen =
+			g_heloChunkReassemblyState.totalLen;
+
+		memcpy(
+			net_packet->data,
+			reassembled.data(),
+			reassembled.size()
+		);
+		net_packet->len =
+			static_cast<int>(reassembled.size());
+
+		printlog(
+			"HELO reassembled: transfer=%u total=%u",
+			static_cast<unsigned>(completedTransfer),
+			static_cast<unsigned>(completedLen)
+		);
+
+		resetHeloChunkReassemblyState();
+		return true;
+	}
+
+	static void checkHeloChunkReassemblyTimeout()
+	{
+		if (
+			g_heloChunkReassemblyState.active
+			&& ticks
+				- g_heloChunkReassemblyState.lastChunkTick
+				> kHeloChunkReassemblyTimeoutTicks
+		)
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"timeout"
+			);
+		}
+	}
+
+	static void processJoinHandshakePacket(
+		bool& gotPacket
+	)
+	{
+		const Uint32 packetId =
+			SDLNet_Read32(&net_packet->data[0]);
+
+		if ( packetId == 'HELO' )
+		{
+			resetHeloChunkReassemblyState();
+			gotPacket = true;
+		}
+		else if ( packetId == 'HLCN' )
+		{
+			gotPacket =
+				ingestHeloChunkAndMaybeAssemble();
+		}
+	}
 	enum Filter : int {
 		UNCHECKED,
 		OFF,
@@ -11795,7 +12210,14 @@ bind_failed:
 				sendPacketSafe(net_sock, -1, net_packet, i - 1);
 			}
 
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 			if (!loadingsavegame) {
 				stats[player]->clearStats();
 			}
@@ -11823,7 +12245,14 @@ bind_failed:
 				net_packet->address.port = net_clients[i - 1].port;
 				sendPacketSafe(net_sock, -1, net_packet, i - 1);
 			}
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    Uint8 status = net_packet->data[5];
 		    createReadyStone((int)player, false, status ? true : false);
 		}},
@@ -11871,7 +12300,14 @@ bind_failed:
 
 		// player disconnected
 		{'DISC', [](){
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
             if (player == 0) {
                 // yeah right
                 return;
@@ -11950,7 +12386,14 @@ bind_failed:
 
 		// keepalive
 		{'KPAL', [](){
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 			client_keepalive[player] = ticks;
 		}},
 
@@ -12071,13 +12514,6 @@ bind_failed:
 						useChunkedHelo
 					);
 
-				/*
-				 * Stage 1C will use this value for capability-gated
-				 * HLCN transmission. Keep it explicit now so the
-				 * server/caller API cannot drift back to four slots.
-				 */
-				(void)useChunkedHelo;
-
 			    // finalize connections for Steamworks / EOS
 			    if (result == NetworkingLobbyJoinRequestResult::NET_LOBBY_JOIN_P2P_FAILURE) {
 				    if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
@@ -12104,21 +12540,82 @@ bind_failed:
 						}
 						steamIDRemote[playerNum - 1] = new CSteamID();
 						*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]) = newSteamID;
-						for ( int responses = 0; responses < 5; ++responses ) {
-							SteamNetworking()->SendP2PPacket(*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]), net_packet->data, net_packet->len, k_EP2PSendReliable, 0);
-							SDL_Delay(5);
-						}
 #endif // STEAMWORKS
 					}
 					else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY ) {
 #if defined USE_EOS
 						EOS.P2PConnectionInfo.assignPeerIndex(newRemoteProductId, playerNum - 1);
-						for ( int responses = 0; responses < 5; ++responses ) {
-							EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(playerNum - 1), net_packet->data, net_packet->len);
-							SDL_Delay(5);
-						}
 #endif
 					}
+
+					bool sentChunkedHelo = false;
+					if ( useChunkedHelo
+						&& playerNum > 0
+						&& playerNum < MAXPLAYERS )
+					{
+						std::vector<Uint8> heloSnapshot(
+							net_packet->len
+						);
+						memcpy(
+							heloSnapshot.data(),
+							net_packet->data,
+							heloSnapshot.size()
+						);
+
+						const Uint16 transferId =
+							nextHeloTransferIdForPlayer(
+								playerNum
+							);
+
+						sentChunkedHelo =
+							sendChunkedHeloToPeer(
+								playerNum - 1,
+								heloSnapshot.data(),
+								static_cast<int>(
+									heloSnapshot.size()
+								),
+								transferId,
+								playerNum
+							);
+
+						if ( !sentChunkedHelo )
+						{
+							printlog(
+								"[NET]: chunked HELO failed; using legacy HELO for player %d",
+								playerNum
+							);
+							memcpy(
+								net_packet->data,
+								heloSnapshot.data(),
+								heloSnapshot.size()
+							);
+							net_packet->len =
+								static_cast<int>(
+									heloSnapshot.size()
+								);
+						}
+					}
+
+					if ( !sentChunkedHelo )
+					{
+						if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM ) {
+#ifdef STEAMWORKS
+							for ( int responses = 0; responses < 5; ++responses ) {
+								SteamNetworking()->SendP2PPacket(*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]), net_packet->data, net_packet->len, k_EP2PSendReliable, 0);
+								SDL_Delay(5);
+							}
+#endif // STEAMWORKS
+						}
+						else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY ) {
+#if defined USE_EOS
+							for ( int responses = 0; responses < 5; ++responses ) {
+								EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(playerNum - 1), net_packet->data, net_packet->len);
+								SDL_Delay(5);
+							}
+#endif
+						}
+					}
+
 					sendSvFlagsOverNet();
 					sendCustomScenarioOverNet(playerNum);
 				}
@@ -12172,6 +12669,14 @@ bind_failed:
 	        }
 	    }},
 
+		// Late join-handshake retries may arrive after the lobby transition.
+		{'HELO', [](){
+			return;
+		}},
+		{'HLCN', [](){
+			return;
+		}},
+
 		// we can get an ENTU packet if the server already started and we missed it somehow
 	    /*{'ENTU', [](){
             destroyMainMenu();
@@ -12183,7 +12688,14 @@ bind_failed:
 
 	    // new player
 	    {'JOIN', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    client_disconnected[player] = false;
 		    client_classes[player] = net_packet->data[5];
 		    stats[player]->sex = static_cast<sex_t>(net_packet->data[6]);
@@ -12202,7 +12714,14 @@ bind_failed:
 
 	    // lock/unlock a player slot
 	    {'LOCK', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 	        const bool locked = net_packet->data[5];
 	        playerSlotsLocked[player] = locked;
 
@@ -12218,7 +12737,14 @@ bind_failed:
 
 	    // update player attributes
 	    {'PLYR', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    if (player != clientnum) {
 				if (!loadingsavegame) {
 					stats[player]->clearStats();
@@ -12238,7 +12764,14 @@ bind_failed:
 
 	    // update ready status
 	    {'REDY', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 	        Uint8 status = net_packet->data[5];
 	        if (player != clientnum) {
 	            createReadyStone((int)player, false, status ? true : false);
@@ -12264,7 +12797,14 @@ bind_failed:
 
 		// player disconnect
 	    {'DISC', [](){
-		    const int playerDisconnected = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		    const int playerDisconnected =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( playerDisconnected < 0 )
+			{
+				return;
+			}
 			client_disconnected[playerDisconnected] = true;
 		    if (playerDisconnected == clientnum || playerDisconnected == 0) {
 			    // we got dropped
@@ -12442,14 +12982,12 @@ bind_failed:
 
 			// trying to connect to the server and get a player number
 			// receive the packet:
+			checkHeloChunkReassemblyTimeout();
 			bool gotPacket = false;
 			if (directConnect) {
 			    if (SDLNet_UDP_Recv(net_sock, net_packet)) {
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 			    }
 			} else if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
@@ -12477,10 +13015,7 @@ bind_failed:
 					}
 
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 					break;
 				}
@@ -12493,10 +13028,7 @@ bind_failed:
 					}
 
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 					break;
 				}
@@ -12505,6 +13037,15 @@ bind_failed:
 
 			// parse the packet:
 			if (gotPacket) {
+				if ( net_packet->len < 8 )
+				{
+					printlog(
+						"[NET]: ignoring short HELO packet while joining (len=%d)",
+						net_packet->len
+					);
+					return;
+				}
+
 				clientnum = (int)SDLNet_Read32(&net_packet->data[4]);
 				if (clientnum >= MAXPLAYERS || clientnum <= 0) {
                     int error = clientnum;
@@ -12560,6 +13101,23 @@ bind_failed:
 #endif
                     return;
 				} else {
+					const int heloChunkSize =
+						loadingsavegame
+							? 6 + 32 + 6 * 10
+							: 6 + 32;
+					const int expectedHeloLen =
+						8 + MAXPLAYERS * heloChunkSize;
+
+					if ( net_packet->len < expectedHeloLen )
+					{
+						printlog(
+							"[NET]: ignoring truncated HELO packet while joining (len=%d expected>=%d)",
+							net_packet->len,
+							expectedHeloLen
+						);
+						return;
+					}
+
 					// join game succeeded, advance to lobby
 					client_keepalive[0] = ticks;
 					PingNetworkStatus_t::reset();
@@ -12861,9 +13419,11 @@ bind_failed:
 	    }
 	    SDLNet_Write32(loadingsavegame, &net_packet->data[61]); // send unique game key
 		SDLNet_Write32(loadinglobbykey, &net_packet->data[65]); // send unique lobby key
+		net_packet->data[69] =
+			kJoinCapabilityHeloChunkV1;
 	    net_packet->address.host = net_server.host;
 	    net_packet->address.port = net_server.port;
-	    net_packet->len = 69;
+	    net_packet->len = 70;
 
 	    /*if (!directConnect) {
 		    sendPacket(net_sock, -1, net_packet, 0);

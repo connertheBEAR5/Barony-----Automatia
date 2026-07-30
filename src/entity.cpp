@@ -37,6 +37,7 @@ See LICENSE for details.
 #include "ui/MainMenu.hpp"
 #include "ui/GameUI.hpp"
 #include "light.hpp"
+#include "status_effect_owner_encoding.hpp"
 /*-------------------------------------------------------------------------------
 
 Entity::Entity)
@@ -2625,7 +2626,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 					|| skill == PRO_RANGED
 					|| skill == PRO_STEALTH) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_NIMBLENESS) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_NIMBLENESS));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2639,7 +2640,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 					|| skill == PRO_AXE
 					|| skill == PRO_MACE) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_GREATER_MIGHT) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_GREATER_MIGHT));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2652,7 +2653,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 				&& (skill == PRO_SORCERY
 					|| skill == PRO_MYSTICISM) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_COUNSEL) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_COUNSEL));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2664,7 +2665,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 			if ( myStats->getEffectActive(EFF_STURDINESS)
 				&& (skill == PRO_SHIELD) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_STURDINESS) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_STURDINESS));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -18185,10 +18186,10 @@ void Entity::awardXP(Entity* src, bool share, bool root)
 				bool bonus = false;
 				if ( srcStats->getEffectActive(EFF_DIVINE_FIRE) )
 				{
-					int effectInflictedBy = (srcStats->getEffectActive(EFF_DIVINE_FIRE) & 0xF0) >> 4;
+					int effectInflictedBy = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(srcStats->getEffectActive(EFF_DIVINE_FIRE));
 					if ( behavior == &actPlayer && !checkFriend(src) )
 					{
-						if ( effectInflictedBy == (1 + skill[2]) )
+						if ( effectInflictedBy == skill[2] )
 						{
 							minRoll += srcStats->getEffectActive(EFF_DIVINE_FIRE) & 0xF;
 							bonus = true;
@@ -32576,7 +32577,7 @@ bool Entity::modifyDamageMultipliersFromEffects(Entity* hitentity, Entity* attac
 	}
 	if ( hitstats->getEffectActive(EFF_SIGIL) )
 	{
-		int caster = ((hitstats->getEffectActive(EFF_SIGIL) >> 4) & 0xF) - 1;
+		int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(hitstats->getEffectActive(EFF_SIGIL));
 		if ( caster >= 0 && caster < MAXPLAYERS )
 		{
 			if ( hitentity->behavior == &actMonster 
@@ -32596,7 +32597,7 @@ bool Entity::modifyDamageMultipliersFromEffects(Entity* hitentity, Entity* attac
 		real_t reduction = std::min(0.8, std::max(0.0, 0.1 + (0.15 * (int)(hitstats->getEffectActive(EFF_SANCTUARY) & 0xF))));
 		damageMultiplier = std::max(0.1, damageMultiplier * (1.0 - reduction));
 
-		int caster = ((hitstats->getEffectActive(EFF_SANCTUARY) >> 4) & 0xF) - 1;
+		int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(hitstats->getEffectActive(EFF_SANCTUARY));
 		if ( caster >= 0 && caster < MAXPLAYERS )
 		{
 			if ( players[caster]->entity )
@@ -32618,7 +32619,7 @@ real_t Entity::getHealingSpellPotionModifierFromEffects(bool processLevelup)
 	{
 		if ( myStats->getEffectActive(EFF_SIGIL) )
 		{
-			int caster = ((myStats->getEffectActive(EFF_SIGIL) >> 4) & 0xF) - 1;
+			int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_SIGIL));
 			if ( caster >= 0 && caster < MAXPLAYERS )
 			{
 				if ( (behavior == &actMonster

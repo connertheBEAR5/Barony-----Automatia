@@ -5,6 +5,19 @@ if (NOT CMAKE_BUILD_TYPE)
 	set (CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
 
+option(
+	BARONY_SUPER_MULTIPLAYER
+	"Build Barony with support for up to 15 players"
+	OFF
+)
+
+if (BARONY_SUPER_MULTIPLAYER)
+	add_definitions(-DBARONY_SUPER_MULTIPLAYER)
+	message(STATUS "Building with 15-player multiplayer support")
+else()
+	message(STATUS "Building with standard 4-player multiplayer support")
+endif()
+
 if (DEFINED ENV{STEAMWORKS_ENABLED})
 	set (STEAMWORKS_ENABLED $ENV{STEAMWORKS_ENABLED})
 endif()

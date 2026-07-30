@@ -2587,6 +2587,54 @@ SaveGameInfo getSaveGameInfo(bool singleplayer, int saveIndex)
 	if (!result) {
 		info.game_version = -1;
 	}
+
+	/*
+	 * Older save formats may omit players_connected, or may contain
+	 * fewer entries than the serialized player list. Normalize the
+	 * metadata before lobby/savegame code examines the participant
+	 * slots so players above the former four/eight-player limits are
+	 * not silently treated as unavailable.
+	 */
+	if ( result && !info.players.empty() )
+	{
+		const size_t playerCount = info.players.size();
+
+		if ( info.players_connected.empty() )
+		{
+			info.players_connected.assign(playerCount, 0);
+
+			if ( info.multiplayer_type == SINGLE )
+			{
+				info.players_connected[0] = 1;
+			}
+			else
+			{
+				for ( size_t i = 0; i < playerCount; ++i )
+				{
+					info.players_connected[i] = 1;
+				}
+			}
+		}
+		else if (
+			info.players_connected.size() != playerCount
+		)
+		{
+			const int defaultConnectedState =
+				info.multiplayer_type == SINGLE
+					? 0
+					: 1;
+
+			info.players_connected.resize(
+				playerCount,
+				defaultConnectedState
+			);
+
+			if ( info.multiplayer_type == SINGLE )
+			{
+				info.players_connected[0] = 1;
+			}
+		}
+	}
 	
 	// check hash
 	Uint32 hash = 0;

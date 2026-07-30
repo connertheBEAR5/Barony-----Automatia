@@ -26,6 +26,8 @@
 #include "lobbies.hpp"
 #include "ui/MainMenu.hpp"
 
+#include <array>
+
 #ifdef NINTENDO
 #include "nintendo/baronynx.hpp"
 #endif
@@ -7390,16 +7392,48 @@ void Player::clearGUIPointers()
 	players[playernum]->inventoryUI.compendiumItemTooltipDisplay.reset();
 }
 
+namespace
+{
+	const char* getDirectConnectPlayerName(
+		const int playernum
+	)
+	{
+		static std::array<
+			std::array<char, 16>,
+			MAXPLAYERS
+		> directConnectNames{};
+		static bool initialized = false;
+
+		if ( !initialized )
+		{
+			for ( int i = 0; i < MAXPLAYERS; ++i )
+			{
+				snprintf(
+					directConnectNames[i].data(),
+					directConnectNames[i].size(),
+					"Player %d",
+					i + 1
+				);
+			}
+			initialized = true;
+		}
+
+		if ( playernum >= 0
+			&& playernum < MAXPLAYERS )
+		{
+			return directConnectNames[
+				playernum
+			].data();
+		}
+
+		return "...";
+	}
+}
+
 const char* Player::getAccountName() const {
     const char* unknown = "...";
     if (directConnect) {
-	    switch (playernum) {
-	    case 0: return "Player 1";
-	    case 1: return "Player 2";
-	    case 2: return "Player 3";
-	    case 3: return "Player 4";
-	    default: return unknown;
-	    }
+		return getDirectConnectPlayerName(playernum);
     } else {
 		if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
 #ifdef STEAMWORKS

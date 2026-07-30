@@ -47,6 +47,67 @@
 #define ITEM_SPLOOSHED my->skill[27]
 #define ITEM_WATERBOB my->fskill[2]
 
+static const char* getItemLightNameFromSprite(
+	const int sprite
+)
+{
+	struct StaticItemLightEntry
+	{
+		int sprite;
+		const char* light;
+	};
+
+	static const StaticItemLightEntry kStaticLights[] = {
+		{ 610, "orb_blue" },
+		{ 611, "orb_red" },
+		{ 612, "orb_purple" },
+		{ 613, "orb_green" },
+		{ 2409, "jewel_yellow" }
+	};
+
+	for ( const auto& entry : kStaticLights )
+	{
+		if ( entry.sprite == sprite )
+		{
+			return entry.light;
+		}
+	}
+
+	const int variation =
+		sprite - items[TOOL_PLAYER_LOOT_BAG].index;
+
+	if ( variation < 0
+		|| variation
+			>= items[TOOL_PLAYER_LOOT_BAG].variations )
+	{
+		return nullptr;
+	}
+
+	static const char* kLootBagLightByPalette[] = {
+		"lootbag_yellow",
+		"lootbag_green",
+		"lootbag_red",
+		"lootbag_pink",
+		"lootbag_white"
+	};
+
+	const int palette =
+		getLootBagLightPaletteForVariation(
+			variation,
+			colorblind_lobby
+		);
+	const int maxPalette =
+		static_cast<int>(
+			sizeof(kLootBagLightByPalette)
+				/ sizeof(kLootBagLightByPalette[0])
+		) - 1;
+
+	return kLootBagLightByPalette[
+		std::max(0, std::min(palette, maxPalette))
+	];
+}
+
+
 bool itemProcessReturnItemEffect(Entity* my, bool fallingIntoVoid)
 {
 	if ( Entity* returnToParent = uidToEntity(my->itemReturnUID) )
@@ -863,70 +924,16 @@ void actItem(Entity* my)
 	}
 
 	my->removeLightField();
-	switch ( my->sprite )
+
+	if ( const char* lightName =
+			getItemLightNameFromSprite(my->sprite) )
 	{
-	case 610: // orbs (blue)
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "orb_blue");
-		}
-		break;
-	case 611: // red
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "orb_red");
-		}
-		break;
-	case 612: // purple
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "orb_purple");
-		}
-		break;
-	case 613: // green
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "orb_green");
-		}
-		break;
-	case 1206: // loot bags (yellow)
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "lootbag_yellow");
-		}
-		break;
-	case 1207: // green
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "lootbag_green");
-		}
-		break;
-	case 1208: // red
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "lootbag_red");
-		}
-		break;
-	case 1209: // pink
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "lootbag_pink");
-		}
-		break;
-	case 1210: // white
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "lootbag_white");
-		}
-		break;
-	case 2409: // jewel
-		if ( !my->light )
-		{
-			my->light = addLight(my->x / 16, my->y / 16, "jewel_yellow");
-		}
-		break;
-	default:
-		break;
+		my->light =
+			addLight(
+				my->x / 16,
+				my->y / 16,
+				lightName
+			);
 	}
 
 	bool levitating = false;

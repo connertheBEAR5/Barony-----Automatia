@@ -27,47 +27,66 @@
 #include "../shops.hpp"
 #include "../colors.hpp"
 #include "../book.hpp"
+#include "../player_slot_map.hpp"
 #include "../ui/MainMenu.hpp"
 
 #include <assert.h>
 
 const Uint32 playerColor(int index, bool colorblind, bool ally)
 {
-    Uint32 result;
-    if (colorblind) {
-        switch (index) {
-        default: result = uint32ColorPlayerX_colorblind; break;
-        case 0: result = uint32ColorPlayer1_colorblind; break;
-        case 1: result = uint32ColorPlayer2_colorblind; break;
-        case 2: result = uint32ColorPlayer3_colorblind; break;
-        case 3: result = uint32ColorPlayer4_colorblind; break;
-        case 4: result = uint32ColorPlayer5_colorblind; break;
-        case 5: result = uint32ColorPlayer6_colorblind; break;
-        case 6: result = uint32ColorPlayer7_colorblind; break;
-        case 7: result = uint32ColorPlayer8_colorblind; break;
-        }
-    }
-    else {
-        switch (index) {
-        default: result = uint32ColorPlayerX; break;
-        case 0: result = uint32ColorPlayer1; break;
-        case 1: result = uint32ColorPlayer2; break;
-        case 2: result = uint32ColorPlayer3; break;
-        case 3: result = uint32ColorPlayer4; break;
-        case 4: result = uint32ColorPlayer5; break;
-        case 5: result = uint32ColorPlayer6; break;
-        case 6: result = uint32ColorPlayer7; break;
-        case 7: result = uint32ColorPlayer8; break;
-        }
-    }
-    if (ally) {
-        uint8_t r, g, b, a;
-        getColor(result, &r, &g, &b, &a);
-        r /= 2; g /= 2; b /= 2;
-        return makeColor(r, g, b, a);
-    } else {
-        return result;
-    }
+	static const Uint32 normalColors[] = {
+		uint32ColorPlayer1,
+		uint32ColorPlayer2,
+		uint32ColorPlayer3,
+		uint32ColorPlayer4,
+		uint32ColorPlayer5,
+		uint32ColorPlayer6,
+		uint32ColorPlayer7,
+		uint32ColorPlayer8
+	};
+	static const Uint32 colorblindColors[] = {
+		uint32ColorPlayer1_colorblind,
+		uint32ColorPlayer2_colorblind,
+		uint32ColorPlayer3_colorblind,
+		uint32ColorPlayer4_colorblind,
+		uint32ColorPlayer5_colorblind,
+		uint32ColorPlayer6_colorblind,
+		uint32ColorPlayer7_colorblind,
+		uint32ColorPlayer8_colorblind
+	};
+
+	constexpr int colorCount =
+		static_cast<int>(
+			sizeof(normalColors)
+				/ sizeof(normalColors[0])
+		);
+
+	Uint32 result = colorblind
+		? uint32ColorPlayerX_colorblind
+		: uint32ColorPlayerX;
+
+	if ( index >= 0 && index < MAXPLAYERS )
+	{
+		const int colorIndex = index % colorCount;
+		result = colorblind
+			? colorblindColors[colorIndex]
+			: normalColors[colorIndex];
+	}
+
+	if ( ally )
+	{
+		uint8_t r;
+		uint8_t g;
+		uint8_t b;
+		uint8_t a;
+		getColor(result, &r, &g, &b, &a);
+		r /= 2;
+		g /= 2;
+		b /= 2;
+		return makeColor(r, g, b, a);
+	}
+
+	return result;
 }
 
 static const char* bigfont_outline = "fonts/pixelmix.ttf#16#2";
@@ -281,9 +300,15 @@ bool bUseSelectedSlotCycleAnimation = false; // probably not gonna use, but can 
 CustomColors_t hudColors;
 EnemyBarSettings_t enemyBarSettings;
 #ifdef BARONY_SUPER_MULTIPLAYER
-StatusEffectQueue_t StatusEffectQueue[MAXPLAYERS] = { {0}, {1}, {2}, {3}, {4}, {5}, {6}, {7} };
+StatusEffectQueue_t StatusEffectQueue[MAXPLAYERS] = {
+	{0}, {1}, {2}, {3}, {4},
+	{5}, {6}, {7}, {8}, {9},
+	{10}, {11}, {12}, {13}, {14}
+};
 #else
-StatusEffectQueue_t StatusEffectQueue[MAXPLAYERS] = { {0}, {1}, {2}, {3} };
+StatusEffectQueue_t StatusEffectQueue[MAXPLAYERS] = {
+	{0}, {1}, {2}, {3}
+};
 #endif
 std::unordered_map<int, StatusEffectQueue_t::EffectDefinitionEntry_t> StatusEffectQueue_t::StatusEffectDefinitions_t::allEffects;
 std::unordered_map<int, StatusEffectQueue_t::EffectDefinitionEntry_t> StatusEffectQueue_t::StatusEffectDefinitions_t::allSustainedSpells;
@@ -4419,6 +4444,46 @@ std::vector<std::vector<std::string>> playerXPCapPaths = {
     }
 };
 
+static int getXPBarThemeIndex(const int player)
+{
+	static const int normalPrimary[] = {
+		0, 1, 2, 3, 4
+	};
+	static const int normalCycle[] = {
+		2, 3, 4
+	};
+	static const int colorblindPrimary[] = {
+		2, 3, 1, 4, 4
+	};
+	static const int colorblindCycle[] = {
+		2, 3, 4
+	};
+
+	static const PlayerSlotLookup<int, MAXPLAYERS>
+		normalThemeByPlayer =
+			buildPlayerSlotLookup<int, MAXPLAYERS>(
+				normalPrimary,
+				normalCycle,
+				0
+			);
+	static const PlayerSlotLookup<int, MAXPLAYERS>
+		colorblindThemeByPlayer =
+			buildPlayerSlotLookup<int, MAXPLAYERS>(
+				colorblindPrimary,
+				colorblindCycle,
+				0
+			);
+
+	if ( player < 0 || player >= MAXPLAYERS )
+	{
+		return 0;
+	}
+
+	return colorblind_lobby
+		? colorblindThemeByPlayer[player]
+		: normalThemeByPlayer[player];
+}
+
 void createXPBar(const int player)
 {
     auto& hud_t = players[player]->hud;
@@ -4445,51 +4510,31 @@ void createXPBar(const int player)
     auto progressClipFrame = hud_t.xpFrame->addFrame("xp progress clipping frame");
     progressClipFrame->setSize(SDL_Rect{ 0, 6, 1, progressBarHeight });
 
-    std::string bodyPath = "*#images/ui/HUD/xpbar/HUD_Exp_SandBody2_";
-    int xpPathNum = player;
-    if ( !colorblind_lobby )
+    std::string bodyPath =
+        "*#images/ui/HUD/xpbar/HUD_Exp_SandBody2_";
+    int xpPathNum = getXPBarThemeIndex(player);
+
+    static const char* xpBodySuffixes[] = {
+        "00.png",
+        "01.png",
+        "02.png",
+        "03.png",
+        "04.png"
+    };
+
+    if ( xpPathNum < 0
+        || xpPathNum >= static_cast<int>(
+            sizeof(xpBodySuffixes)
+                / sizeof(xpBodySuffixes[0])
+        ) )
     {
-        switch ( player )
-        {
-            case 0:
-            default:
-                bodyPath += "00.png";
-                break;
-            case 1:
-                bodyPath += "01.png";
-                break;
-            case 2:
-                bodyPath += "02.png";
-                break;
-            case 3:
-                bodyPath += "03.png";
-                break;
-        }
+        xpPathNum = 0;
     }
-    else
-    {
-        switch ( player )
-        {
-            case 0:
-            default:
-                bodyPath += "02.png";
-                xpPathNum = 2;
-                break;
-            case 1:
-                bodyPath += "03.png";
-                xpPathNum = 3;
-                break;
-            case 2:
-                bodyPath += "01.png";
-                xpPathNum = 1;
-                break;
-            case 3:
-                bodyPath += "04.png";
-                xpPathNum = 4;
-                break;
-        }
-    }
-    if ( player >= playerXPCapPaths.size() )
+
+    bodyPath += xpBodySuffixes[xpPathNum];
+
+    if ( xpPathNum
+        >= static_cast<int>(playerXPCapPaths.size()) )
     {
         xpPathNum = 0;
     }
