@@ -145,6 +145,197 @@ static Uint32 questEditorStatusUntil = 0;
 static bool questEditorCreateMarkers = false;
 
 
+/*
+ * Searchable editor palette state.
+ *
+ * These fields are UI-only and deliberately remain local to editor.cpp so the
+ * palette update does not alter map data, editor file formats, or entity data.
+ */
+static char editorSpritePaletteSearch[128] = "";
+static char editorTilePaletteSearch[128] = "";
+static char editorMonsterItemSearch[128] = "";
+static std::string editorMonsterItemSearchLastKey;
+static std::string editorPaletteLastFilter;
+static std::vector<int> editorPaletteMatches;
+static int editorPaletteSelectedMatch = 0;
+static int editorPaletteFirstVisible = 0;
+static int editorPaletteActiveType = 0; // 1 = sprites, 2 = tiles.
+
+static std::string editorPaletteLowercase(const std::string& text)
+{
+    std::string result = text;
+    for ( char& character : result )
+    {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return result;
+}
+
+static bool editorPaletteTextMatches(const char* displayName, int index, const char* filter)
+{
+    if ( filter == nullptr || filter[0] == '\0' )
+    {
+        return true;
+    }
+
+    const std::string loweredFilter = editorPaletteLowercase(filter);
+    const std::string loweredName = editorPaletteLowercase(displayName != nullptr ? displayName : "");
+    if ( loweredName.find(loweredFilter) != std::string::npos )
+    {
+        return true;
+    }
+
+    const std::string indexText = std::to_string(index);
+    return indexText.find(loweredFilter) != std::string::npos;
+}
+
+static void editorPaletteRebuildMatches(int paletteType)
+{
+    const char* filter = paletteType == 1 ? editorSpritePaletteSearch : editorTilePaletteSearch;
+    const std::string filterKey = std::to_string(paletteType) + ":" + filter;
+    if ( editorPaletteActiveType == paletteType && editorPaletteLastFilter == filterKey )
+    {
+        return;
+    }
+
+    editorPaletteMatches.clear();
+    if ( paletteType == 1 )
+    {
+        const int count = std::min<int>(numsprites, static_cast<int>(spriteEditorNameStrings.size()));
+        for ( int index = 0; index < count; ++index )
+        {
+            if ( editorPaletteTextMatches(spriteEditorNameStrings[index], index, filter) )
+            {
+                editorPaletteMatches.push_back(index);
+            }
+        }
+    }
+    else
+    {
+        const int namedTileCount = static_cast<int>(sizeof(tileEditorNameStrings) / sizeof(tileEditorNameStrings[0]));
+        const int count = std::min<int>(static_cast<int>(numtiles), namedTileCount);
+        for ( int index = 0; index < count; ++index )
+        {
+            if ( editorPaletteTextMatches(tileEditorNameStrings[index], index, filter) )
+            {
+                editorPaletteMatches.push_back(index);
+            }
+        }
+    }
+
+    editorPaletteActiveType = paletteType;
+    editorPaletteLastFilter = filterKey;
+    editorPaletteSelectedMatch = 0;
+    editorPaletteFirstVisible = 0;
+}
+
+static void editorPaletteKeepSelectionVisible(int columns, int visibleRows)
+{
+    if ( editorPaletteMatches.empty() )
+    {
+        editorPaletteSelectedMatch = 0;
+        editorPaletteFirstVisible = 0;
+        return;
+    }
+
+    editorPaletteSelectedMatch = std::max(0,
+        std::min(editorPaletteSelectedMatch, static_cast<int>(editorPaletteMatches.size()) - 1));
+
+    const int pageSize = std::max(1, columns * visibleRows);
+    const int selectedRow = editorPaletteSelectedMatch / columns;
+    int firstRow = editorPaletteFirstVisible / columns;
+    if ( selectedRow < firstRow )
+    {
+        firstRow = selectedRow;
+    }
+    else if ( selectedRow >= firstRow + visibleRows )
+    {
+        firstRow = selectedRow - visibleRows + 1;
+    }
+
+    const int maxFirstRow = std::max(0,
+        (static_cast<int>(editorPaletteMatches.size()) - 1) / columns - visibleRows + 1);
+    firstRow = std::max(0, std::min(firstRow, maxFirstRow));
+    editorPaletteFirstVisible = firstRow * columns;
+    editorPaletteFirstVisible = std::min(editorPaletteFirstVisible,
+        std::max(0, static_cast<int>(editorPaletteMatches.size()) - pageSize));
+    editorPaletteFirstVisible -= editorPaletteFirstVisible % columns;
+}
+
+static void editorPaletteHandleKeyboard(int columns, int visibleRows)
+{
+    if ( editorPaletteMatches.empty() )
+    {
+        return;
+    }
+
+    const int pageSize = std::max(1, columns * visibleRows);
+    if ( keystatus[SDLK_LEFT] )
+    {
+        keystatus[SDLK_LEFT] = 0;
+        --editorPaletteSelectedMatch;
+    }
+    if ( keystatus[SDLK_RIGHT] )
+    {
+        keystatus[SDLK_RIGHT] = 0;
+        ++editorPaletteSelectedMatch;
+    }
+    if ( keystatus[SDLK_UP] )
+    {
+        keystatus[SDLK_UP] = 0;
+        editorPaletteSelectedMatch -= columns;
+    }
+    if ( keystatus[SDLK_DOWN] )
+    {
+        keystatus[SDLK_DOWN] = 0;
+        editorPaletteSelectedMatch += columns;
+    }
+    if ( keystatus[SDLK_PAGEUP] )
+    {
+        keystatus[SDLK_PAGEUP] = 0;
+        editorPaletteSelectedMatch -= pageSize;
+    }
+    if ( keystatus[SDLK_PAGEDOWN] )
+    {
+        keystatus[SDLK_PAGEDOWN] = 0;
+        editorPaletteSelectedMatch += pageSize;
+    }
+    if ( keystatus[SDLK_HOME] )
+    {
+        keystatus[SDLK_HOME] = 0;
+        editorPaletteSelectedMatch = 0;
+    }
+    if ( keystatus[SDLK_END] )
+    {
+        keystatus[SDLK_END] = 0;
+        editorPaletteSelectedMatch = static_cast<int>(editorPaletteMatches.size()) - 1;
+    }
+
+    editorPaletteKeepSelectionVisible(columns, visibleRows);
+}
+
+static void editorPaletteBeginTextInput(char* searchBuffer)
+{
+    if ( inputstr != searchBuffer || !SDL_IsTextInputActive() )
+    {
+        SDL_StartTextInput();
+        inputstr = searchBuffer;
+        inputlen = 127;
+    }
+}
+
+static void editorPaletteEndTextInput()
+{
+    if ( SDL_IsTextInputActive() )
+    {
+        SDL_StopTextInput();
+    }
+    inputstr = nullptr;
+    editorPaletteActiveType = 0;
+    editorPaletteLastFilter.clear();
+}
+
+
 struct QuestDialogueEditorNodePreview
 {
 	int id = 0;
@@ -16323,7 +16514,13 @@ int main(int argc, char** argv)
 				}
 				else if ( newwindow == 4 || newwindow == 5 )
 				{
-					if ( selectedEntity[0] != NULL )
+					if ( newwindow == 5
+						&& (itemSlotSelected < 0 || itemSlotSelected >= 16) )
+					{
+						itemSlotSelected = -1;
+						buttonCloseSpriteSubwindow(nullptr);
+					}
+					else if ( selectedEntity[0] != NULL )
 					{
 						int numProperties;
 
@@ -16335,12 +16532,18 @@ int main(int argc, char** argv)
 						{
 							numProperties = sizeof(monsterItemPropertyNames) / sizeof(monsterItemPropertyNames[0]); //find number of entries in property list
 						}
-						const int lenProperties = 32;
+						/*
+						 * Some monster inventory property labels are longer than 31
+						 * characters. The previous 32-byte temporary buffer overflowed
+						 * when copying "Category: (0-16, if default_random)", causing
+						 * glibc's fortified strcpy check to abort the editor.
+						 */
+						const int lenProperties = 64;
 
 						int spacing = 36; // 36 px between each item in the list.
-						int verticalOffset = 20;
+						int verticalOffset = 0;
 						int pad_x1 = subx1 + 8 + 96 + 80; // 104 px spacing from subwindow start. handles right side item list
-						int pad_y1 = suby1 + 20 + verticalOffset; // 20 px spacing from subwindow start. handles right side item list
+						int pad_y1 = suby1 + 40 + verticalOffset; // right-side item list starts directly under its heading.
 						int pad_x2 = 64; // handles right side item list
 
 						int pad_y2 = (suby2 - 52 - 36) + verticalOffset - 4; //handles right side item list
@@ -16348,27 +16551,62 @@ int main(int argc, char** argv)
 						int pad_y3 = suby1 + 28; // 28 px spacing from subwindow start, handles left side menu
 						int pad_x4 = 64; //handles left side menu-end
 						int pad_y4; //handles left side menu-end
-						int totalNumItems = (sizeof(itemNameStrings) / sizeof(itemNameStrings[0]));
-						int editorNumItems = totalNumItems /* - 1*/;
-						switch ( itemSlotSelected )
+						const int totalNumItems =
+							static_cast<int>(sizeof(itemNameStrings) / sizeof(itemNameStrings[0]));
+						int editorNumItems = totalNumItems;
+						if ( newwindow == 5
+							&& itemSlotSelected >= 0
+							&& itemSlotSelected < 10 )
 						{
-							case -1:
-								break;
-							default:
-								if ( itemSlotSelected < 10 )
+							const int typedCapacity =
+								static_cast<int>(sizeof(itemStringsByType[itemSlotSelected])
+								/ sizeof(itemStringsByType[itemSlotSelected][0]));
+							editorNumItems = 0;
+							while ( editorNumItems < typedCapacity
+								&& itemStringsByType[itemSlotSelected][editorNumItems][0] != '\0' )
+							{
+								++editorNumItems;
+							}
+						}
+						editorNumItems = std::max(1, editorNumItems);
+						const std::string itemSearchKey = std::to_string(newwindow)
+							+ ":" + std::to_string(itemSlotSelected)
+							+ ":" + editorMonsterItemSearch;
+						if ( itemSearchKey != editorMonsterItemSearchLastKey )
+						{
+							editorMonsterItemSearchLastKey = itemSearchKey;
+							const std::string loweredFilter = editorPaletteLowercase(editorMonsterItemSearch);
+							if ( !loweredFilter.empty() )
+							{
+								for ( int searchIndex = 0; searchIndex < editorNumItems; ++searchIndex )
 								{
-									editorNumItems = 0;
-									for ( int i = 0; i < (sizeof(itemStringsByType[itemSlotSelected]) / sizeof(itemStringsByType[itemSlotSelected][0])); i++ )
+									const char* searchName = nullptr;
+									if ( newwindow == 5 && searchIndex == 1 )
 									{
-										if ( strcmp(itemStringsByType[itemSlotSelected][i], "") == 0) //look for the end of the array
-										{
-											i = totalNumItems;
-										}
-										editorNumItems++;
+										searchName = "default_random";
+									}
+									else if ( newwindow == 5 && itemSlotSelected >= 0 && itemSlotSelected < 10 )
+									{
+										searchName = itemStringsByType[itemSlotSelected][searchIndex];
+									}
+									else
+									{
+										searchName = itemNameStrings[searchIndex];
+									}
+									const std::string loweredName = editorPaletteLowercase(searchName != nullptr ? searchName : "");
+									if ( loweredName.find(loweredFilter) != std::string::npos
+										|| std::to_string(searchIndex).find(loweredFilter) != std::string::npos )
+									{
+										itemSelect = searchIndex;
+										break;
 									}
 								}
-								break;
+							}
 						}
+						auto safeGlobalItemIndex = [totalNumItems](int value)
+						{
+							return std::max(0, std::min(value, totalNumItems - 1));
+						};
 						int propertyInt = 0;
 						char tmpPropertyName[lenProperties] = "";
 						Uint32 color = makeColorRGB(0, 255, 0);
@@ -16377,12 +16615,12 @@ int main(int argc, char** argv)
 						{
 							if ( newwindow == 4 )
 							{
-								strcpy(tmpPropertyName, itemPropertyNames[i]);
+								snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", itemPropertyNames[i]);
 
 							}
 							else if ( newwindow == 5 )
 							{
-								strcpy(tmpPropertyName, monsterItemPropertyNames[i]);
+								snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", monsterItemPropertyNames[i]);
 							}
 							pad_y3 = suby1 + 40 + spacing + i * spacing;
 							pad_y4 = suby1 + 44 + 12 + spacing + i * spacing;
@@ -16585,18 +16823,22 @@ int main(int argc, char** argv)
 
 						drawDepressed(pad_x1, pad_y1, subx2 - 20, pad_y2);
 						drawDepressed(subx2 - 20, pad_y1, subx2 - 4, pad_y2);
-						slidersize = std::min<int>(((pad_y2 - 1) - (pad_y1 + 1)), ((pad_y2 - 1) - (pad_y1 + 1)) / ((real_t)(editorNumItems + 1) / 20)); //TODO: Why are int and real_t being compared?
+						const int visibleItemRows = std::max(1, (pad_y2 - (pad_y1 + 4)) / 8);
+						slidersize = std::min<int>(((pad_y2 - 1) - (pad_y1 + 1)), ((pad_y2 - 1) - (pad_y1 + 1)) / ((real_t)(editorNumItems + 1) / visibleItemRows));
 						slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
 
 						// directory list offset from slider
 						y2 = ((real_t)(slidery - (pad_y1)) / (pad_y2 - (pad_y1))) * editorNumItems;
+						y2 = std::max(0, std::min(y2, editorNumItems - 1));
+						itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
 						if ( scroll )
 						{
 							slidery -= 8 * scroll;
 							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
-							itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+							y2 = std::max(0, std::min(y2, editorNumItems - 1));
+							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
 							scroll = 0;
 						}
 						if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= subx2 - 20 && omousex < subx2 - 4 && omousey >= (pad_y1) && omousey < pad_y2 )
@@ -16604,8 +16846,9 @@ int main(int argc, char** argv)
 							slidery = oslidery + mousey - omousey;
 							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
+							y2 = std::max(0, std::min(y2, editorNumItems - 1));
 							mclick = 1;
-							itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
 						}
 						else
 						{
@@ -16621,14 +16864,7 @@ int main(int argc, char** argv)
 						// print all the items
 						x = pad_x1;
 						y = pad_y1 + 4;
-						if ( newwindow == 4 )
-						{
-							c = std::min<long unsigned int>(editorNumItems, 20 + y2); //TODO: Why are long unsigned int and int being compared?
-						}
-						else
-						{
-							c = std::min<long unsigned int>(editorNumItems, 24 + y2); //TODO: Why are long unsigned int and int being compared?
-						}
+						c = std::min(editorNumItems, y2 + visibleItemRows);
 						for ( z = y2; z < c; z++ )
 						{
 							if ( newwindow == 5 && z == 1 )
@@ -16637,6 +16873,7 @@ int main(int argc, char** argv)
 							}
 							else
 							{
+								itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
 								switch ( itemSlotSelected )
 								{
 									case -1:
@@ -16658,6 +16895,19 @@ int main(int argc, char** argv)
 							y += 8;
 						}
 
+						// Search field underneath the selectable item list.
+						const int itemSearchY = pad_y2 + 16;
+						printText(font8x8_bmp, pad_x1, itemSearchY, "Search:");
+						drawDepressed(pad_x1 + 56, itemSearchY - 4, subx2 - 24, itemSearchY + 12);
+						printText(font8x8_bmp, pad_x1 + 60, itemSearchY, editorMonsterItemSearch);
+						if ( inputstr == editorMonsterItemSearch
+							&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							printText(font8x8_bmp,
+								pad_x1 + 60 + strlen(editorMonsterItemSearch) * 8,
+								itemSearchY, "\26");
+						}
+
 						// item selection box
 						pad_y3 = suby1 + 40;
 						pad_y4 = suby1 + 44 + 12;
@@ -16665,7 +16915,7 @@ int main(int argc, char** argv)
 						drawDepressed(pad_x3 - 4, pad_y3, pad_x3 - 4 + pad_x2 + 112, pad_y4);
 						// print values on top of boxes
 						printText(font8x8_bmp, pad_x3, pad_y3 - 12, "Item Name");
-						printText(font8x8_bmp, pad_x1, pad_y3 - 12, "Click to select item");
+						printText(font8x8_bmp, pad_x1, pad_y1 - 12, "Click to select item");
 						printText(font8x8_bmp, pad_x3, pad_y3 + 4, itemName);
 						//drawDepressed(pad_x1, suby2 - 48, subx2 - 4, suby2 - 32);
 						//printText(font8x8_bmp, pad_x1, suby2 - 44, itemName);
@@ -16673,16 +16923,28 @@ int main(int argc, char** argv)
 						// select a file
 						if ( mousestatus[SDL_BUTTON_LEFT] )
 						{
-							if ( omousex >= pad_x1 && omousex < subx2 - 24 && omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
+							if ( omousex >= pad_x1 + 56 && omousex < subx2 - 24
+								&& omousey >= itemSearchY - 4 && omousey < itemSearchY + 12 )
+							{
+								if ( !SDL_IsTextInputActive() )
+								{
+									SDL_StartTextInput();
+								}
+								inputstr = editorMonsterItemSearch;
+								inputlen = 127;
+								editproperty = numProperties;
+								cursorflash = ticks;
+							}
+							else if ( omousex >= pad_x1 && omousex < subx2 - 24 && omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
 							{
 								itemSelect = y2 + ((omousey - (pad_y1 + 4)) >> 3);
 								if ( newwindow == 4 )
 								{
-									itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 2, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
 								}
 								else
 								{
-									itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 2, y2 + 23)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
 								}
 								switch ( itemSlotSelected )
 								{
@@ -16731,10 +16993,17 @@ int main(int argc, char** argv)
 						{
 							keystatus[SDLK_TAB] = 0;
 							cursorflash = ticks;
-							editproperty++;
-							if ( editproperty == numProperties )
+							if ( inputstr == editorMonsterItemSearch || editproperty >= numProperties )
 							{
 								editproperty = 0;
+							}
+							else
+							{
+								editproperty++;
+								if ( editproperty == numProperties )
+								{
+									editproperty = 0;
+								}
 							}
 
 							inputstr = spriteProperties[editproperty];
@@ -16758,7 +17027,7 @@ int main(int argc, char** argv)
 								}
 								else
 								{
-									strcpy(itemName, itemNameStrings[atoi(spriteProperties[0])]);
+									strcpy(itemName, itemNameStrings[safeGlobalItemIndex(atoi(spriteProperties[0]))]);
 								}
 							}
 							else if( editproperty == 2 || editproperty == 3 )
@@ -22500,308 +22769,181 @@ int main(int argc, char** argv)
 			handleButtons();
 		}
 
-		if ( spritepalette )
-		{
-			x = 0;
-			y = 0;
-			z = 0;
-			drawRect( NULL, makeColorRGB(0, 0, 0), 255 ); // wipe screen
-			for ( c = 0; c < xres * yres; c++ )
-			{
-				palette[c] = -1;
-			}
-			for ( c = 0; c < numsprites; c++ )
-			{
-				if ( sprites[c] != NULL )
-				{
-					pos.x = x;
-					pos.y = y;
-					pos.w = sprites[c]->w;
-					pos.h = sprites[c]->h;
-					int scale = 1;
-					if ( pos.w < 16 && pos.h < 16 )
-					{
-						scale = 4;
-						pos.w *= scale;
-						pos.h *= scale;
-					}
-					else if ( pos.w < 32 && pos.h < 32 )
-					{
-						scale = 2;
-						pos.w *= scale;
-						pos.h *= scale;
-					}
+        if ( spritepalette || tilepalette )
+        {
+            const int paletteType = spritepalette ? 1 : 2;
+            char* searchBuffer = paletteType == 1 ? editorSpritePaletteSearch : editorTilePaletteSearch;
+            editorPaletteBeginTextInput(searchBuffer);
+            editorPaletteRebuildMatches(paletteType);
 
-					drawImageScaled(sprites[c], NULL, &pos);
-					for ( x2 = x; x2 < x + sprites[c]->w * scale; x2++ )
-					{
-						for ( y2 = y; y2 < y + sprites[c]->h * scale; y2++ )
-						{
-							if ( x2 < xres && y2 < yres )
-							{
-								palette[y2 + x2 * yres] = c;
-							}
-						}
-					}
-					x += sprites[c]->w * scale;
-					z = std::max(z, sprites[c]->h * scale);
-					if ( c < numsprites - 1 )
-					{
-						if ( sprites[c + 1] != NULL )
-						{
-							if ( x + sprites[c + 1]->w * scale > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-						else
-						{
-							if ( x + sprites[0]->w * scale > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-					}
-				}
-				else
-				{
-					pos.x = x;
-					pos.y = y;
-					pos.w = TEXTURESIZE;
-					pos.h = TEXTURESIZE;
-					drawImageScaled(sprites[0], NULL, &pos);
-					x += sprites[0]->w;
-					z = std::max(z, sprites[0]->h);
-					if ( c < numsprites - 1 )
-					{
-						if ( sprites[c + 1] != NULL )
-						{
-							if ( x + sprites[c + 1]->w > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-						else
-						{
-							if ( x + sprites[0]->w > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-					}
-				}
-			}
-			if (mousestatus[SDL_BUTTON_LEFT])
-			{
-				mclick = 1;
-			}
-			if (!mousestatus[SDL_BUTTON_LEFT] && mclick)
-			{
-				// create a new object
-				if (palette[mousey + mousex * yres] >= 0)
-				{
-				entity = newEntity(
-					palette[mousey + mousex * yres],
-					0,
-					map.entities,
-					nullptr
-				);
+            const int headerHeight = 32;
+            const int footerHeight = 24;
+            const int cellSize = 64;
+            const int columns = std::max(1, xres / cellSize);
+            const int visibleRows = std::max(1, (yres - headerHeight - footerHeight) / cellSize);
+            const int pageSize = columns * visibleRows;
 
-				selectedEntity[0] = entity;
-				lastSelectedEntity[0] = selectedEntity[0];
+            editorPaletteHandleKeyboard(columns, visibleRows);
+            if ( scroll != 0 )
+            {
+                const int firstRow = editorPaletteFirstVisible / columns;
+                const int rowCount = editorPaletteMatches.empty()
+                    ? 0 : (static_cast<int>(editorPaletteMatches.size()) - 1) / columns + 1;
+                const int maxFirstRow = std::max(0, rowCount - visibleRows);
+                const int newFirstRow = std::max(0, std::min(firstRow - scroll, maxFirstRow));
+                editorPaletteFirstVisible = newFirstRow * columns;
+                editorPaletteSelectedMatch = std::max(editorPaletteFirstVisible,
+                    std::min(editorPaletteSelectedMatch, editorPaletteFirstVisible + pageSize - 1));
+                scroll = 0;
+            }
+            editorPaletteKeepSelectionVisible(columns, visibleRows);
 
-				setSpriteAttributes(selectedEntity[0], nullptr, nullptr);
+            drawRect(nullptr, makeColorRGB(0, 0, 0), 255);
+            drawWindowFancy(4, 4, xres - 4, 28);
+            printText(font8x8_bmp, 10, 12, "Search:");
+            drawDepressed(66, 8, xres - 154, 24);
+            printText(font8x8_bmp, 70, 12, searchBuffer);
+            if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+            {
+                const int cursorX = std::min(xres - 162, 70 + static_cast<int>(strlen(searchBuffer)) * 8);
+                printText(font8x8_bmp, cursorX, 12, "\26");
+            }
+            printTextFormatted(font8x8_bmp, xres - 146, 12, "%d match%s",
+                static_cast<int>(editorPaletteMatches.size()), editorPaletteMatches.size() == 1 ? "" : "es");
 
-				// Place new sprites at the currently selected editor layer.
-				selectedEntity[0]->z = spriteLayerToEntityZ(drawlayer);
-				}
+            if ( keystatus[SDLK_DELETE] && SDL_GetModState() & KMOD_CTRL )
+            {
+                keystatus[SDLK_DELETE] = 0;
+                searchBuffer[0] = '\0';
+                editorPaletteLastFilter.clear();
+                editorPaletteRebuildMatches(paletteType);
+            }
 
-				mclick = 0;
-				spritepalette = 0;
-			}
-			if (keystatus[SDLK_ESCAPE])
-			{
-				mclick = 0;
-				spritepalette = 0;
-			}
-			/*switch( palette[mousey+mousex*yres] ) {
-				case 1:	strcpy(action,"PLAYER"); break;
-				case 53:	strcpy(action,"PURPLEGEM"); break;
-				case 37:	strcpy(action,"REDGEM"); break;
-				case 74:
-				case 75:	strcpy(action,"TROLL"); break;
-				default:	strcpy(action,"STATIC"); break;
-			}*/
+            int hoveredMatch = -1;
+            const int visibleEnd = std::min(static_cast<int>(editorPaletteMatches.size()),
+                editorPaletteFirstVisible + pageSize);
+            for ( int matchIndex = editorPaletteFirstVisible; matchIndex < visibleEnd; ++matchIndex )
+            {
+                const int localIndex = matchIndex - editorPaletteFirstVisible;
+                const int column = localIndex % columns;
+                const int row = localIndex / columns;
+                const int cellX = column * cellSize;
+                const int cellY = headerHeight + row * cellSize;
+                const int objectIndex = editorPaletteMatches[matchIndex];
 
-			int numsprites = spriteEditorNameStrings.size();
+                SDL_Rect cellRect;
+                cellRect.x = cellX;
+                cellRect.y = cellY;
+                cellRect.w = cellSize;
+                cellRect.h = cellSize;
+                if ( matchIndex == editorPaletteSelectedMatch )
+                {
+                    drawRect(&cellRect, makeColorRGB(72, 72, 72), 255);
+                }
 
-			if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0 && palette[mousey + mousex * yres] < numsprites )
-			{
-				printTextFormatted(font8x8_bmp, 0, yres - 8, "Sprite index:%5d", palette[mousey + mousex * yres]);
-				printTextFormatted(font8x8_bmp, 0, yres - 16, "%s", spriteEditorNameStrings[palette[mousey + mousex * yres]]);
+                SDL_Surface* image = nullptr;
+                if ( paletteType == 1 )
+                {
+                    if ( objectIndex >= 0 && objectIndex < numsprites )
+                    {
+                        image = sprites[objectIndex] != nullptr ? sprites[objectIndex] : sprites[0];
+                    }
+                }
+                else if ( objectIndex >= 0 && objectIndex < numtiles )
+                {
+                    image = tiles[objectIndex] != nullptr ? tiles[objectIndex] : sprites[0];
+                }
 
-				char hoverTextString[1024] = "";
-				snprintf(hoverTextString, 5, "%d: ", palette[mousey + mousex * yres]);
-				strcat(hoverTextString, spriteEditorNameStrings[palette[mousey + mousex * yres]]);
-				int hoverTextWidth = strlen(hoverTextString);
+                if ( image != nullptr )
+                {
+                    const int maxImageSize = cellSize - 8;
+                    const real_t scaleX = static_cast<real_t>(maxImageSize) / std::max(1, image->w);
+                    const real_t scaleY = static_cast<real_t>(maxImageSize) / std::max(1, image->h);
+                    const real_t imageScale = std::min<real_t>(1.0, std::min(scaleX, scaleY));
+                    pos.w = std::max(1, static_cast<int>(image->w * imageScale));
+                    pos.h = std::max(1, static_cast<int>(image->h * imageScale));
+                    pos.x = cellX + (cellSize - pos.w) / 2;
+                    pos.y = cellY + (cellSize - pos.h) / 2;
+                    drawImageScaled(image, nullptr, &pos);
+                }
 
-				if ( mousey - 20 <= 0 )
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn above y = 0 and past window width (xres)
-						drawWindowFancy(mousex - 16 - (8 + 8 * hoverTextWidth), 0, mousex - 16, 16);
-						printTextFormatted(font8x8_bmp, mousex - 16 - (4 + 8 * hoverTextWidth), 4, "%s", hoverTextString);
-					}
-					else
-					{
-						// stop text being drawn above y = 0 
-						drawWindowFancy(mousex + 16, 0, 16 + 8 + mousex + 8 * hoverTextWidth, 16);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, 4, "%s", hoverTextString);
-					}
-				}
-				else
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn past window width (xres)
-						drawWindowFancy(xres - (8 + 8 * hoverTextWidth), mousey - 20, xres, mousey - 4);
-						printTextFormatted(font8x8_bmp, xres - (4 + 8 * hoverTextWidth), mousey - 16, "%s", hoverTextString);
-					}
-					else
-					{
-						drawWindowFancy(mousex + 16, mousey - 20, 16 + 8 + mousex + 8 * hoverTextWidth, mousey - 4);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, mousey - 16, "%s", hoverTextString);
-					}
-				}
-			}
-			else
-			{
-				printText(font8x8_bmp, 0, yres - 8, "Click to cancel");
-			}
-		}
-		if ( tilepalette )
-		{
-			x = 0;
-			y = 0;
-			drawRect( NULL, makeColorRGB(0, 0, 0), 255 ); // wipe screen
-			for ( c = 0; c < xres * yres; c++ )
-			{
-				palette[c] = -1;
-			}
-			for ( c = 0; c < numtiles; c++ )
-			{
-				pos.x = x;
-				pos.y = y;
-				pos.w = TEXTURESIZE;
-				pos.h = TEXTURESIZE;
-				if ( tiles[c] != NULL )
-				{
-					drawImageScaled(tiles[c], NULL, &pos);
-					for ( x2 = x; x2 < x + TEXTURESIZE; x2++ )
-						for ( y2 = y; y2 < y + TEXTURESIZE; y2++ )
-						{
-							if ( x2 < xres && y2 < yres )
-							{
-								palette[y2 + x2 * yres] = c;
-							}
-						}
-					x += TEXTURESIZE;
-					if ( c < numtiles - 1 )
-					{
-						if ( x + TEXTURESIZE > xres )
-						{
-							x = 0;
-							y += TEXTURESIZE;
-						}
-					}
-				}
-				else
-				{
-					drawImageScaled(sprites[0], NULL, &pos);
-					x += TEXTURESIZE;
-					if ( c < numtiles - 1 )
-					{
-						if ( x + TEXTURESIZE > xres )
-						{
-							x = 0;
-							y += TEXTURESIZE;
-						}
-					}
-				}
-			}
-			if (mousestatus[SDL_BUTTON_LEFT])
-			{
-				mclick = 1;
-			}
-			if (!mousestatus[SDL_BUTTON_LEFT] && mclick)
-			{
-				// select the tile under the mouse
-				if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0)
-				{
-					selectedTile = palette[mousey + mousex * yres];
-					updateRecentTileList(selectedTile);
-				}
-				mclick = 0;
-				tilepalette = 0;
-			}
-			if (keystatus[SDLK_ESCAPE])
-			{
-				mclick = 0;
-				tilepalette = 0;
-			}
+                if ( mousex >= cellX && mousex < cellX + cellSize
+                    && mousey >= cellY && mousey < cellY + cellSize )
+                {
+                    hoveredMatch = matchIndex;
+                    editorPaletteSelectedMatch = matchIndex;
+                }
+            }
 
-			int numtiles = static_cast<int>(sizeof(tileEditorNameStrings) / sizeof(tileEditorNameStrings[0]));
+            bool chooseCurrent = false;
+            if ( mousestatus[SDL_BUTTON_LEFT] )
+            {
+                mclick = 1;
+            }
+            if ( !mousestatus[SDL_BUTTON_LEFT] && mclick )
+            {
+                mclick = 0;
+                if ( hoveredMatch >= 0 )
+                {
+                    editorPaletteSelectedMatch = hoveredMatch;
+                    chooseCurrent = true;
+                }
+            }
+            if ( keystatus[SDLK_RETURN] || keystatus[SDLK_KP_ENTER] )
+            {
+                keystatus[SDLK_RETURN] = 0;
+                keystatus[SDLK_KP_ENTER] = 0;
+                chooseCurrent = !editorPaletteMatches.empty();
+            }
 
-			if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0 && palette[mousey + mousex * yres] <= numtiles)
-			{
-				printTextFormatted(font8x8_bmp, 0, yres - 8, "Tile index:%5d", palette[mousey + mousex * yres]);
-				printTextFormatted(font8x8_bmp, 0, yres - 16, "%s", tileEditorNameStrings[palette[mousey + mousex * yres]]);
+            if ( chooseCurrent && !editorPaletteMatches.empty() )
+            {
+                const int objectIndex = editorPaletteMatches[editorPaletteSelectedMatch];
+                if ( paletteType == 1 )
+                {
+                    entity = newEntity(objectIndex, 0, map.entities, nullptr);
+                    selectedEntity[0] = entity;
+                    lastSelectedEntity[0] = entity;
+                    setSpriteAttributes(entity, nullptr, nullptr);
+                    entity->z = spriteLayerToEntityZ(drawlayer);
+                    spritepalette = 0;
+                }
+                else
+                {
+                    selectedTile = objectIndex;
+                    updateRecentTileList(selectedTile);
+                    tilepalette = 0;
+                }
+                editorPaletteEndTextInput();
+            }
 
-				char hoverTextString[1024] = "";
-				snprintf(hoverTextString, 5, "%d: ", palette[mousey + mousex * yres]);
-				strcat(hoverTextString, tileEditorNameStrings[palette[mousey + mousex * yres]]);
-				int hoverTextWidth = strlen(hoverTextString);
+            if ( keystatus[SDLK_ESCAPE] )
+            {
+                keystatus[SDLK_ESCAPE] = 0;
+                mclick = 0;
+                spritepalette = 0;
+                tilepalette = 0;
+                editorPaletteEndTextInput();
+            }
 
-				if ( mousey - 20 <= 0 )
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn above y = 0 and past window width (xres)
-						drawWindowFancy(mousex - 16 - (8 + 8 * hoverTextWidth), 0, mousex - 16, 16);
-						printTextFormatted(font8x8_bmp, mousex - 16 - (4 + 8 * hoverTextWidth), 4, "%s", hoverTextString);
-					}
-					else
-					{
-						// stop text being drawn above y = 0 
-						drawWindowFancy(mousex + 16, 0, 16 + 8 + mousex + 8 * hoverTextWidth, 16);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, 4, "%s", hoverTextString);
-					}
-				}
-				else
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn past window width (xres)
-						drawWindowFancy(xres - (8 + 8 * hoverTextWidth), mousey - 20, xres, mousey - 4);
-						printTextFormatted(font8x8_bmp, xres - (4 + 8 * hoverTextWidth), mousey - 16, "%s", hoverTextString);
-					}
-					else
-					{
-						drawWindowFancy(mousex + 16, mousey - 20, 16 + 8 + mousex + 8 * hoverTextWidth, mousey - 4);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, mousey - 16, "%s", hoverTextString);
-					}
-				}
-			}
-			else
-			{
-				printText(font8x8_bmp, 0, yres - 8, "Click to cancel");
-			}
-		}
+            const int infoIndex = hoveredMatch >= 0 ? hoveredMatch : editorPaletteSelectedMatch;
+            if ( !editorPaletteMatches.empty() && infoIndex >= 0
+                && infoIndex < static_cast<int>(editorPaletteMatches.size()) )
+            {
+                const int objectIndex = editorPaletteMatches[infoIndex];
+                const char* displayName = paletteType == 1
+                    ? spriteEditorNameStrings[objectIndex] : tileEditorNameStrings[objectIndex];
+                printTextFormatted(font8x8_bmp, 4, yres - 20, "%s %d: %s",
+                    paletteType == 1 ? "Sprite" : "Tile", objectIndex, displayName);
+            }
+            else
+            {
+                printText(font8x8_bmp, 4, yres - 20, "No matching entries. Backspace to edit; Ctrl+Delete clears search.");
+            }
+            printText(font8x8_bmp, 4, yres - 10,
+                "Arrows navigate | Wheel/Page Up/Page Down scroll | Home/End jump | Enter selects | Esc closes");
+        }
+
 
 		// flip screen
 		GO_SwapBuffers(screen);
