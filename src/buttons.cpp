@@ -504,10 +504,15 @@ void buttonNew(button_t* my)
 	menuVisible = 0;
 	subwindow = 1;
 	newwindow = 1;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 200;
-	suby2 = yres / 2 + 200;
+	// The New Map dialog now contains the custom fog panel in addition to the
+	// original map settings. Give it enough room so the fog controls, map size
+	// fields, and Create/Cancel buttons do not overlap.
+	const int newMapHalfWidth = 240;
+	const int newMapHalfHeight = 280;
+	subx1 = xres / 2 - newMapHalfWidth;
+	subx2 = xres / 2 + newMapHalfWidth;
+	suby1 = yres / 2 - newMapHalfHeight;
+	suby2 = yres / 2 + newMapHalfHeight;
 	strcpy(subtext, "New map:");
 
 	button = newButton();
