@@ -16297,15 +16297,25 @@ int main(int argc, char** argv)
 							pad_x4 -= 64 * 2;
 
 							pad_y2 += 32 + spacing * 2;
-							const int inventoryPageCount = (ITEM_SLOT_INVENTORY_COUNT + 5) / 6;
+							int activeInventorySlots = 6;
+							Stat* inventoryStats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+							if ( inventoryStats != nullptr )
+							{
+								activeInventorySlots = inventoryStats->MISC_FLAGS[31];
+								if ( activeInventorySlots < 1 || activeInventorySlots > ITEM_SLOT_INVENTORY_COUNT )
+								{
+									activeInventorySlots = 6;
+								}
+							}
+							const int inventoryPageCount = (activeInventorySlots + 5) / 6;
 							const int inventoryFirstSlot = monsterInventoryPage * 6 + 1;
-							const int inventoryLastSlot = std::min(ITEM_SLOT_INVENTORY_COUNT, inventoryFirstSlot + 5);
+							const int inventoryLastSlot = std::min(activeInventorySlots, inventoryFirstSlot + 5);
 							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color,
 								"Inventory Page %d of %d", monsterInventoryPage + 1, inventoryPageCount);
 							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2 + 12, color,
-								"Slots %d-%d of %d", inventoryFirstSlot, inventoryLastSlot, ITEM_SLOT_INVENTORY_COUNT);
+								"Slots %d-%d of %d active", inventoryFirstSlot, inventoryLastSlot, activeInventorySlots);
 
-							pad_y2 += spacing * 3 + 42;
+							pad_y2 += spacing * 3 + 62;
 							if ( !strcmp(spriteProperties[31], "disable") )
 							{
 								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");

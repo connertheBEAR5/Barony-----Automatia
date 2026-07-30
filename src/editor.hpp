@@ -224,6 +224,8 @@ void buttonCloseSpriteSubwindow(button_t* my);
 void buttonMonsterItems(button_t* my);
 void buttonMonsterInventoryPrevPage(button_t* my);
 void buttonMonsterInventoryNextPage(button_t* my);
+void buttonMonsterInventoryAddSlot(button_t* my);
+void buttonMonsterInventoryRemoveSlot(button_t* my);
 void buttonMonsterEffectsOpen(button_t* my);
 void buttonMonsterEffectsDone(button_t* my);
 void buttonMonsterEffectsAdd(button_t* my);

@@ -72,12 +72,40 @@ button_t* butMonsterItem5;
 button_t* butMonsterItem6;
 button_t* butMonsterInventoryPrev;
 button_t* butMonsterInventoryNext;
+button_t* butMonsterInventoryAddSlot;
+button_t* butMonsterInventoryRemoveSlot;
 button_t* butMonsterEffectsOpenButton;
 button_t* monsterEffectButtons[8][7] = {};
 button_t* monsterEffectsAddButton;
 button_t* monsterEffectsToggleButton;
 button_t* monsterEffectsDoneButton;
 int monsterInventoryPage = 0;
+static bool monsterInventoryRemoveConfirm = false;
+static constexpr int MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX = 31;
+
+static int getMonsterInventoryActiveCount(Stat* stats)
+{
+    if ( stats == nullptr )
+    {
+        return 6;
+    }
+
+    int& storedCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    if ( storedCount < 1 || storedCount > ITEM_SLOT_INVENTORY_COUNT )
+    {
+        int highestUsedSlot = 6;
+        for ( int slot = 0; slot < ITEM_SLOT_INVENTORY_COUNT; ++slot )
+        {
+            const int itemIndex = 10 + slot;
+            if ( stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] != 0 )
+            {
+                highestUsedSlot = slot + 1;
+            }
+        }
+        storedCount = std::max(6, highestUsedSlot);
+    }
+    return storedCount;
+}
 bool monsterEffectsShowAll = false;
 char monsterEffectSearchText[64] = "";
 char monsterEffectIdText[8] = "6";
@@ -3110,6 +3138,8 @@ void buttonSpriteProperties(button_t* my)
 					}
 					
 					pad_y2 += 32 + spacing * 2;
+					const int activeInventorySlots = getMonsterInventoryActiveCount(tmpSpriteStats);
+					monsterInventoryPage = std::min(monsterInventoryPage, (activeInventorySlots - 1) / 6);
 					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 2);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
@@ -3130,7 +3160,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem3->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem3->sizey = 16;
 					butMonsterItem3->action = &buttonMonsterItems;
-					butMonsterItem3->visible = monsterInventoryPage * 6 + 2 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem3->visible = monsterInventoryPage * 6 + 2 < activeInventorySlots;
 					butMonsterItem3->focused = 1;
 
 					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 5);
@@ -3153,7 +3183,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem6->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem6->sizey = 16;
 					butMonsterItem6->action = &buttonMonsterItems;
-					butMonsterItem6->visible = monsterInventoryPage * 6 + 5 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem6->visible = monsterInventoryPage * 6 + 5 < activeInventorySlots;
 					butMonsterItem6->focused = 1;
 
 					pad_x4 -= 64;
@@ -3177,7 +3207,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem2->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem2->sizey = 16;
 					butMonsterItem2->action = &buttonMonsterItems;
-					butMonsterItem2->visible = monsterInventoryPage * 6 + 1 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem2->visible = monsterInventoryPage * 6 + 1 < activeInventorySlots;
 					butMonsterItem2->focused = 1;
 
 					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 4);
@@ -3200,7 +3230,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem5->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem5->sizey = 16;
 					butMonsterItem5->action = &buttonMonsterItems;
-					butMonsterItem5->visible = monsterInventoryPage * 6 + 4 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem5->visible = monsterInventoryPage * 6 + 4 < activeInventorySlots;
 					butMonsterItem5->focused = 1;
 
 					pad_x4 -= 64;
@@ -3224,7 +3254,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem1->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem1->sizey = 16;
 					butMonsterItem1->action = &buttonMonsterItems;
-					butMonsterItem1->visible = monsterInventoryPage * 6 + 0 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem1->visible = monsterInventoryPage * 6 + 0 < activeInventorySlots;
 					butMonsterItem1->focused = 1;
 
 					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 3);
@@ -3247,7 +3277,7 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem4->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem4->sizey = 16;
 					butMonsterItem4->action = &buttonMonsterItems;
-					butMonsterItem4->visible = monsterInventoryPage * 6 + 3 < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterItem4->visible = monsterInventoryPage * 6 + 3 < activeInventorySlots;
 					butMonsterItem4->focused = 1;
 
 					butMonsterInventoryPrev = newButton();
@@ -3267,8 +3297,29 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterInventoryNext->sizex = 64;
 					butMonsterInventoryNext->sizey = 16;
 					butMonsterInventoryNext->action = &buttonMonsterInventoryNextPage;
-					butMonsterInventoryNext->visible = monsterInventoryPage < (ITEM_SLOT_INVENTORY_COUNT - 1) / 6;
+					butMonsterInventoryNext->visible = monsterInventoryPage < (activeInventorySlots - 1) / 6;
 					butMonsterInventoryNext->focused = 1;
+
+					butMonsterInventoryAddSlot = newButton();
+					strcpy(butMonsterInventoryAddSlot->label, "Add Slot");
+					butMonsterInventoryAddSlot->x = pad_x4 - 10;
+					butMonsterInventoryAddSlot->y = pad_y2 + 2 * spacing + 42;
+					butMonsterInventoryAddSlot->sizex = 64;
+					butMonsterInventoryAddSlot->sizey = 16;
+					butMonsterInventoryAddSlot->action = &buttonMonsterInventoryAddSlot;
+					butMonsterInventoryAddSlot->visible = activeInventorySlots < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterInventoryAddSlot->focused = 1;
+
+					butMonsterInventoryRemoveSlot = newButton();
+					strcpy(butMonsterInventoryRemoveSlot->label,
+						monsterInventoryRemoveConfirm ? "Confirm Remove" : "Remove Slot");
+					butMonsterInventoryRemoveSlot->x = pad_x4 + 62;
+					butMonsterInventoryRemoveSlot->y = pad_y2 + 2 * spacing + 42;
+					butMonsterInventoryRemoveSlot->sizex = monsterInventoryRemoveConfirm ? 112 : 96;
+					butMonsterInventoryRemoveSlot->sizey = 16;
+					butMonsterInventoryRemoveSlot->action = &buttonMonsterInventoryRemoveSlot;
+					butMonsterInventoryRemoveSlot->visible = activeInventorySlots > 1;
+					butMonsterInventoryRemoveSlot->focused = 1;
 
 					butMonsterEffectsOpenButton = newButton();
 					strcpy(butMonsterEffectsOpenButton->label, "Effects...");
@@ -4140,6 +4191,7 @@ void buttonCloseSpriteSubwindow(button_t* my)
 
 void buttonMonsterInventoryPrevPage(button_t* my)
 {
+	monsterInventoryRemoveConfirm = false;
 	monsterInventoryPage = std::max(0, monsterInventoryPage - 1);
 	hideFocusedEditorButtons();
 	buttonSpriteProperties(nullptr);
@@ -4147,10 +4199,80 @@ void buttonMonsterInventoryPrevPage(button_t* my)
 
 void buttonMonsterInventoryNextPage(button_t* my)
 {
-	const int maxPage = (ITEM_SLOT_INVENTORY_COUNT - 1) / 6;
+	monsterInventoryRemoveConfirm = false;
+	Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+	const int maxPage = (getMonsterInventoryActiveCount(stats) - 1) / 6;
 	monsterInventoryPage = std::min(maxPage, monsterInventoryPage + 1);
 	hideFocusedEditorButtons();
 	buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryAddSlot(button_t* my)
+{
+    monsterInventoryRemoveConfirm = false;
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    if ( stats == nullptr )
+    {
+        return;
+    }
+
+    int& activeCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    activeCount = getMonsterInventoryActiveCount(stats);
+    if ( activeCount < ITEM_SLOT_INVENTORY_COUNT )
+    {
+        ++activeCount;
+        monsterInventoryPage = (activeCount - 1) / 6;
+    }
+    hideFocusedEditorButtons();
+    buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryRemoveSlot(button_t* my)
+{
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    if ( stats == nullptr )
+    {
+        monsterInventoryRemoveConfirm = false;
+        return;
+    }
+
+    int& activeCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    activeCount = getMonsterInventoryActiveCount(stats);
+    if ( activeCount <= 1 )
+    {
+        monsterInventoryRemoveConfirm = false;
+        return;
+    }
+
+    const int removedSlot = activeCount - 1;
+    const int itemIndex = 10 + removedSlot;
+    bool slotHasData = false;
+    for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+    {
+        if ( stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] != 0 )
+        {
+            slotHasData = true;
+            break;
+        }
+    }
+
+    if ( slotHasData && !monsterInventoryRemoveConfirm )
+    {
+        monsterInventoryRemoveConfirm = true;
+        hideFocusedEditorButtons();
+        buttonSpriteProperties(nullptr);
+        return;
+    }
+
+    for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+    {
+        stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] = 0;
+    }
+    --activeCount;
+    monsterInventoryPage = std::min(monsterInventoryPage, (activeCount - 1) / 6);
+    monsterInventoryRemoveConfirm = false;
+    hideFocusedEditorButtons();
+    buttonSpriteProperties(nullptr);
 }
 
 
@@ -4827,6 +4949,16 @@ void buttonMonsterItems(button_t* my)
 	{
 		butMonsterInventoryNext->visible = 0;
 		butMonsterInventoryNext->focused = 0;
+	}
+	if ( butMonsterInventoryAddSlot != NULL )
+	{
+		butMonsterInventoryAddSlot->visible = 0;
+		butMonsterInventoryAddSlot->focused = 0;
+	}
+	if ( butMonsterInventoryRemoveSlot != NULL )
+	{
+		butMonsterInventoryRemoveSlot->visible = 0;
+		butMonsterInventoryRemoveSlot->focused = 0;
 	}
 	if ( butMonsterEffectsOpenButton != NULL )
 	{
