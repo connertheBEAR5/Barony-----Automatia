@@ -10926,9 +10926,9 @@ bool itemTypeIsFoci(const ItemType type) { return false; } // dummy
 map_t copymap;
 
 int errorMessage = 0;
-int errorArr[12] =
+int errorArr[32] =
 {
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	0
 };
 
 /*
@@ -19983,7 +19983,7 @@ int main(int argc, char** argv)
 					if ( selectedEntity[0] != nullptr )
 					{
 						int numProperties = sizeof(customPortalPropertyNames) / sizeof(customPortalPropertyNames[0]); //find number of entries in property list
-						const int lenProperties = sizeof(customPortalPropertyNames[0]) / sizeof(char); //find length of entry in property list
+						const int lenProperties = 128; // Some custom-exit labels can fill the original 59-byte row width.
 						int spacing = 36; // 36 px between each item in the list.
 						int inputFieldHeader_y = suby1 + 28; // 28 px spacing from subwindow start.
 						int inputField_x = subx1 + 8; // 8px spacing from subwindow start.
@@ -19997,9 +19997,9 @@ int main(int argc, char** argv)
 
 						for ( int i = 0; i < numProperties; i++ )
 						{
-							int propertyInt = atoi(spriteProperties[i]);
+							int propertyInt = (i == 4) ? 0 : atoi(spriteProperties[i]);
 
-							strcpy(tmpPropertyName, customPortalPropertyNames[i]);
+							snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", customPortalPropertyNames[i]);
 							inputFieldHeader_y = suby1 + 28 + i * spacing;
 							inputField_y = inputFieldHeader_y + 16;
 							// box outlines then text
@@ -20086,7 +20086,7 @@ int main(int argc, char** argv)
 											{
 												strcat(shortName, "..");
 											}
-											printTextFormattedColor(font8x8_bmp, inputFieldFeedback_x, inputField_y, color, "move to first instance of map name %s", propertyInt, shortName);
+											printTextFormattedColor(font8x8_bmp, inputFieldFeedback_x, inputField_y, color, "move to first instance of map name %s", shortName);
 										}
 										else
 										{
@@ -20348,7 +20348,7 @@ int main(int argc, char** argv)
 
 						propertyPageTextAndInput(numProperties, inputFieldWidth);
 
-						if ( editproperty < numProperties )   // edit
+						if ( editproperty >= 0 && editproperty < numProperties )   // edit
 						{
 							if ( !SDL_IsTextInputActive() )
 							{
@@ -23356,6 +23356,16 @@ void propertyPageTextAndInput(int numProperties, int width)
 	int spacing = 36;
 	int pad_x2 = width;
 
+	if ( numProperties <= 0 )
+	{
+		return;
+	}
+	if ( editproperty < 0 || editproperty >= numProperties )
+	{
+		editproperty = 0;
+		inputstr = spriteProperties[0];
+	}
+
 	// Cycle properties with TAB.
 	if ( keystatus[SDLK_TAB] )
 	{
@@ -23394,6 +23404,10 @@ void propertyPageError(int rowIndex, int resetValue)
 
 void propertyPageCursorFlash(int rowSpacing)
 {
+	if ( editproperty < 0 || editproperty >= 32 )
+	{
+		return;
+	}
 	if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 	{
 		printText(font8x8_bmp, subx1 + 8 + strlen(spriteProperties[editproperty]) * 8, suby1 + 44 + editproperty * rowSpacing, "\26");

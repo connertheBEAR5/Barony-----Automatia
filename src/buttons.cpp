@@ -2472,31 +2472,26 @@ void buttonSpriteProperties(button_t* my)
 
 				char buf[64] = "";
 				int totalChars = 0;
-				for ( int i = 11; i <= 18; ++i )
+				for ( int i = 11; i <= 18 && totalChars < static_cast<int>(sizeof(buf)) - 1; ++i )
 				{
 					if ( selectedEntity[0]->skill[i] != 0 && i != 28 ) // skill[28] is circuit status.
 					{
-						for ( int c = 0; c < 4; ++c )
+						for ( int c = 0; c < 4 && totalChars < static_cast<int>(sizeof(buf)) - 1; ++c )
 						{
-							if ( static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF) == '\0'
-								&& i != 18 && selectedEntity[0]->skill[i + 1] != 0 )
+							const char value = static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF);
+							if ( value == '\0' && i != 18 && selectedEntity[0]->skill[i + 1] != 0 )
 							{
-								// don't add '\0' termination unless the next skill slot is empty as we have more data to read.
+								// Keep reading packed map-name bytes from the next skill slot.
+								continue;
 							}
-							else
-							{
-								buf[totalChars] = static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF);
-								++totalChars;
-							}
+							buf[totalChars++] = value;
 						}
 					}
 				}
-				if ( buf[totalChars] != '\0' )
-				{
-					buf[totalChars] = '\0';
-				}
-				strncpy(spriteProperties[4], buf, 32);
+				buf[std::min(totalChars, static_cast<int>(sizeof(buf)) - 1)] = '\0';
+				snprintf(spriteProperties[4], sizeof(spriteProperties[4]), "%s", buf);
 
+				editproperty = 0;
 				inputstr = spriteProperties[0];
 				cursorflash = ticks;
 				menuVisible = 0;
