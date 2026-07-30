@@ -70,6 +70,20 @@ button_t* butMonsterItem3;
 button_t* butMonsterItem4;
 button_t* butMonsterItem5;
 button_t* butMonsterItem6;
+button_t* butMonsterInventoryPrev;
+button_t* butMonsterInventoryNext;
+button_t* butMonsterEffectsOpenButton;
+button_t* monsterEffectButtons[8][7] = {};
+button_t* monsterEffectsAddButton;
+button_t* monsterEffectsToggleButton;
+button_t* monsterEffectsDoneButton;
+int monsterInventoryPage = 0;
+bool monsterEffectsShowAll = false;
+char monsterEffectSearchText[64] = "";
+char monsterEffectIdText[8] = "6";
+int monsterEffectSelectedId = EFF_BLIND;
+button_t* monsterEffectsPrevSelectButton = nullptr;
+button_t* monsterEffectsNextSelectButton = nullptr;
 button_t* butMonsterCloak;
 button_t* butMonsterMask;
 button_t* butMonsterOK;
@@ -3096,7 +3110,7 @@ void buttonSpriteProperties(button_t* my)
 					}
 					
 					pad_y2 += 32 + spacing * 2;
-					itemIndex = 12;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 2);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3112,14 +3126,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem3 = newButton();
 					strcpy(butMonsterItem3->label, tmpStr);
 					butMonsterItem3->x = pad_x4 - 10;
-					butMonsterItem3->y = pad_y2 + spacing - 4;
+					butMonsterItem3->y = pad_y2 + spacing + 4;
 					butMonsterItem3->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem3->sizey = 16;
 					butMonsterItem3->action = &buttonMonsterItems;
-					butMonsterItem3->visible = 1;
+					butMonsterItem3->visible = monsterInventoryPage * 6 + 2 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem3->focused = 1;
 
-					itemIndex = 15;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 5);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3135,15 +3149,15 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem6 = newButton();
 					strcpy(butMonsterItem6->label, tmpStr);
 					butMonsterItem6->x = pad_x4 - 10;
-					butMonsterItem6->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem6->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem6->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem6->sizey = 16;
 					butMonsterItem6->action = &buttonMonsterItems;
-					butMonsterItem6->visible = 1;
+					butMonsterItem6->visible = monsterInventoryPage * 6 + 5 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem6->focused = 1;
 
 					pad_x4 -= 64;
-					itemIndex = 11;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 1);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3159,14 +3173,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem2 = newButton();
 					strcpy(butMonsterItem2->label, tmpStr);
 					butMonsterItem2->x = pad_x4 - 10;
-					butMonsterItem2->y = pad_y2 + spacing - 4;
+					butMonsterItem2->y = pad_y2 + spacing + 4;
 					butMonsterItem2->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem2->sizey = 16;
 					butMonsterItem2->action = &buttonMonsterItems;
-					butMonsterItem2->visible = 1;
+					butMonsterItem2->visible = monsterInventoryPage * 6 + 1 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem2->focused = 1;
 
-					itemIndex = 14;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 4);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3182,15 +3196,15 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem5 = newButton();
 					strcpy(butMonsterItem5->label, tmpStr);
 					butMonsterItem5->x = pad_x4 - 10;
-					butMonsterItem5->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem5->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem5->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem5->sizey = 16;
 					butMonsterItem5->action = &buttonMonsterItems;
-					butMonsterItem5->visible = 1;
+					butMonsterItem5->visible = monsterInventoryPage * 6 + 4 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem5->focused = 1;
 
 					pad_x4 -= 64;
-					itemIndex = 10;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 0);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3206,14 +3220,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem1 = newButton();
 					strcpy(butMonsterItem1->label, tmpStr);
 					butMonsterItem1->x = pad_x4 - 10;
-					butMonsterItem1->y = pad_y2 + spacing - 4;
+					butMonsterItem1->y = pad_y2 + spacing + 4;
 					butMonsterItem1->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem1->sizey = 16;
 					butMonsterItem1->action = &buttonMonsterItems;
-					butMonsterItem1->visible = 1;
+					butMonsterItem1->visible = monsterInventoryPage * 6 + 0 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem1->focused = 1;
 
-					itemIndex = 13;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 3);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3229,12 +3243,43 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem4 = newButton();
 					strcpy(butMonsterItem4->label, tmpStr);
 					butMonsterItem4->x = pad_x4 - 10;
-					butMonsterItem4->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem4->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem4->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem4->sizey = 16;
 					butMonsterItem4->action = &buttonMonsterItems;
-					butMonsterItem4->visible = 1;
+					butMonsterItem4->visible = monsterInventoryPage * 6 + 3 < ITEM_SLOT_INVENTORY_COUNT;
 					butMonsterItem4->focused = 1;
+
+					butMonsterInventoryPrev = newButton();
+					strcpy(butMonsterInventoryPrev->label, "< Previous");
+					butMonsterInventoryPrev->x = pad_x4 - 10;
+					butMonsterInventoryPrev->y = pad_y2 + 2 * spacing + 24;
+					butMonsterInventoryPrev->sizex = 80;
+					butMonsterInventoryPrev->sizey = 16;
+					butMonsterInventoryPrev->action = &buttonMonsterInventoryPrevPage;
+					butMonsterInventoryPrev->visible = monsterInventoryPage > 0;
+					butMonsterInventoryPrev->focused = 1;
+
+					butMonsterInventoryNext = newButton();
+					strcpy(butMonsterInventoryNext->label, "Next >");
+					butMonsterInventoryNext->x = pad_x4 + 78;
+					butMonsterInventoryNext->y = pad_y2 + 2 * spacing + 24;
+					butMonsterInventoryNext->sizex = 64;
+					butMonsterInventoryNext->sizey = 16;
+					butMonsterInventoryNext->action = &buttonMonsterInventoryNextPage;
+					butMonsterInventoryNext->visible = monsterInventoryPage < (ITEM_SLOT_INVENTORY_COUNT - 1) / 6;
+					butMonsterInventoryNext->focused = 1;
+
+					butMonsterEffectsOpenButton = newButton();
+					strcpy(butMonsterEffectsOpenButton->label, "Effects...");
+					butMonsterEffectsOpenButton->x = subx2 - 160;
+					butMonsterEffectsOpenButton->y = suby2 - 24;
+					butMonsterEffectsOpenButton->sizex = 80;
+					butMonsterEffectsOpenButton->sizey = 16;
+					butMonsterEffectsOpenButton->action = &buttonMonsterEffectsOpen;
+					butMonsterEffectsOpenButton->visible = 1;
+					butMonsterEffectsOpenButton->focused = 1;
+
 				}
 				break;
 			case 3: //items
@@ -4041,8 +4086,18 @@ void buttonSpritePropertiesConfirm(button_t* my)
 	}
 }
 
+static void hideFocusedEditorButtons();
+
 void buttonCloseSpriteSubwindow(button_t* my)
 {
+	if ( newwindow == 39 )
+	{
+		hideFocusedEditorButtons();
+		newwindow = 2;
+		buttonSpriteProperties(nullptr);
+		return;
+	}
+
 	Stat* tmpSpriteStats = NULL;
 	// close window
 	if ( my == butMonsterItemCancel || my == butMonsterItemX )
@@ -4081,6 +4136,519 @@ void buttonCloseSpriteSubwindow(button_t* my)
 		editproperty = 0;
 		spritepalette = 0;
 	}
+}
+
+void buttonMonsterInventoryPrevPage(button_t* my)
+{
+	monsterInventoryPage = std::max(0, monsterInventoryPage - 1);
+	hideFocusedEditorButtons();
+	buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryNextPage(button_t* my)
+{
+	const int maxPage = (ITEM_SLOT_INVENTORY_COUNT - 1) / 6;
+	monsterInventoryPage = std::min(maxPage, monsterInventoryPage + 1);
+	hideFocusedEditorButtons();
+	buttonSpriteProperties(nullptr);
+}
+
+
+static const char* monsterEffectDisplayNames[135] =
+{
+    "Asleep", // 0
+    "Poisoned", // 1
+    "Stunned", // 2
+    "Confused", // 3
+    "Drunk", // 4
+    "Invisible", // 5
+    "Blind", // 6
+    "Greasy", // 7
+    "Messy", // 8
+    "Fast", // 9
+    "Paralyzed", // 10
+    "Levitating", // 11
+    "Telepathy", // 12
+    "Vomiting", // 13
+    "Bleeding", // 14
+    "Slow", // 15
+    "Magic Resistance", // 16
+    "Magic Reflection", // 17
+    "Vampiric Aura", // 18
+    "Shrine Red Buff", // 19
+    "Shrine Green Buff", // 20
+    "Shrine Blue Buff", // 21
+    "HP Regeneration", // 22
+    "MP Regeneration", // 23
+    "Pacify", // 24
+    "Polymorph", // 25
+    "Knockback", // 26
+    "Withdrawal", // 27
+    "Potion Strength", // 28
+    "Shapeshift", // 29
+    "Webbed", // 30
+    "Fear", // 31
+    "Magic Amplification", // 32
+    "Disoriented", // 33
+    "Shadow Tagged", // 34
+    "Troll's Blood", // 35
+    "Flutter", // 36
+    "Dash", // 37
+    "Distracted Cooldown", // 38
+    "Mimic Locked", // 39
+    "Rooted", // 40
+    "Nausea Protection", // 41
+    "Constitution Bonus", // 42
+    "Power", // 43
+    "Agility", // 44
+    "Rally", // 45
+    "Marigold", // 46
+    "Ensemble Flute", // 47
+    "Ensemble Lyre", // 48
+    "Ensemble Drum", // 49
+    "Ensemble Lute", // 50
+    "Ensemble Horn", // 51
+    "Lift", // 52
+    "Guard Spirit", // 53
+    "Guard Body", // 54
+    "Divine Guard", // 55
+    "Nimbleness", // 56
+    "Greater Might", // 57
+    "Counsel", // 58
+    "Sturdiness", // 59
+    "Bless Food", // 60
+    "Pinpoint", // 61
+    "Penance", // 62
+    "Sacred Path", // 63
+    "Detect Enemies", // 64
+    "Blood Ward", // 65
+    "True Blood", // 66
+    "Divine Zeal", // 67
+    "Maximise", // 68
+    "Minimise", // 69
+    "Weakness", // 70
+    "Incoherence", // 71
+    "Overcharge", // 72
+    "Envenom Weapon", // 73
+    "Magic Grease", // 74
+    "Command", // 75
+    "Mimic Void", // 76
+    "Curse Flesh", // 77
+    "Numbing Bolt", // 78
+    "Delay Pain", // 79
+    "Seek Creature", // 80
+    "Taboo", // 81
+    "Courage", // 82
+    "Cowardice", // 83
+    "Spores", // 84
+    "Abundance", // 85
+    "Greater Abundance", // 86
+    "Preserve", // 87
+    "Mist Form", // 88
+    "Force Shield", // 89
+    "Lighten Load", // 90
+    "Attract Items", // 91
+    "Return Item", // 92
+    "Demesne Door", // 93
+    "Reflector Shield", // 94
+    "Dizzy", // 95
+    "Spin", // 96
+    "Critical Spell", // 97
+    "Magic Well", // 98
+    "Static", // 99
+    "Absorb Magic", // 100
+    "Flame Cloak", // 101
+    "Dusted", // 102
+    "Noise Visibility", // 103
+    "Ration Spicy", // 104
+    "Ration Sour", // 105
+    "Ration Bitter", // 106
+    "Ration Hearty", // 107
+    "Ration Herbal", // 108
+    "Ration Sweet", // 109
+    "Growth", // 110
+    "Thorns", // 111
+    "Bladevines", // 112
+    "Bastion Mushroom", // 113
+    "Bastion Roots", // 114
+    "Foci Light Peace", // 115
+    "Foci Light Justice", // 116
+    "Foci Light Providence", // 117
+    "Foci Light Purity", // 118
+    "Foci Light Sanctuary", // 119
+    "Stasis", // 120
+    "Hp Mp Regen", // 121
+    "Disrupted", // 122
+    "Frost", // 123
+    "Magicians Armor", // 124
+    "Project Spirit", // 125
+    "Defy Flesh", // 126
+    "Pinpoint Damage", // 127
+    "Salamander Heart", // 128
+    "Divine Fire", // 129
+    "Healing Word", // 130
+    "Holy Fire", // 131
+    "Sigil", // 132
+    "Sanctuary", // 133
+    "Ducked", // 134
+};
+const char* monsterEffectDisplayName(int effect)
+{
+    if ( effect >= 0 && effect < 135 && monsterEffectDisplayNames[effect] != nullptr )
+    {
+        return monsterEffectDisplayNames[effect];
+    }
+    return "Unknown Effect";
+}
+
+static const int monsterSafeEffects[] = { EFF_ASLEEP, EFF_POISONED, EFF_STUNNED, EFF_CONFUSED, EFF_DRUNK, EFF_INVISIBLE, EFF_BLIND, EFF_FAST, EFF_PARALYZED, EFF_LEVITATING, EFF_TELEPATH, EFF_BLEEDING, EFF_SLOW, EFF_MAGICRESIST, EFF_MAGICREFLECT, EFF_HP_REGEN, EFF_MP_REGEN, EFF_PACIFY, EFF_WEBBED, EFF_FEAR, EFF_MAGICAMPLIFY, EFF_DISORIENTED, EFF_TROLLS_BLOOD, EFF_ROOTED, EFF_PWR, EFF_AGILITY, EFF_WEAKNESS, EFF_COURAGE, EFF_COWARDICE, EFF_FROST };
+static bool monsterEffectAllowed(int effect)
+{
+    if ( effect < 0 || effect >= 135 ) return false;
+    if ( monsterEffectsShowAll ) return true;
+    for ( int safeEffect : monsterSafeEffects ) if ( safeEffect == effect ) return true;
+    return false;
+}
+
+bool monsterEffectCanSelect(int effect)
+{
+    return monsterEffectAllowed(effect);
+}
+
+static std::string monsterEffectLower(const char* text)
+{
+    std::string result = text ? text : "";
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return result;
+}
+
+void monsterEffectsUpdateSelectionFromFields()
+{
+    if ( inputstr == monsterEffectIdText )
+    {
+        const int requested = atoi(monsterEffectIdText);
+        if ( monsterEffectAllowed(requested) ) monsterEffectSelectedId = requested;
+    }
+    else if ( inputstr == monsterEffectSearchText && monsterEffectSearchText[0] != '\0' )
+    {
+        const std::string query = monsterEffectLower(monsterEffectSearchText);
+        for ( int effect = 0; effect < 135; ++effect )
+        {
+            if ( !monsterEffectAllowed(effect) ) continue;
+            if ( monsterEffectLower(monsterEffectDisplayName(effect)).find(query) != std::string::npos )
+            {
+                monsterEffectSelectedId = effect;
+                snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", effect);
+                break;
+            }
+        }
+    }
+}
+
+static void monsterEffectsSelectDirection(int direction)
+{
+    std::vector<int> allowedEffects;
+    allowedEffects.reserve(135);
+    for ( int effect = 0; effect < 135; ++effect )
+    {
+        if ( monsterEffectAllowed(effect) )
+        {
+            allowedEffects.push_back(effect);
+        }
+    }
+
+    if ( allowedEffects.empty() )
+    {
+        return;
+    }
+
+    auto current = std::find(allowedEffects.begin(), allowedEffects.end(), monsterEffectSelectedId);
+    int selectedIndex = 0;
+    if ( current != allowedEffects.end() )
+    {
+        selectedIndex = static_cast<int>(std::distance(allowedEffects.begin(), current));
+    }
+
+    const int count = static_cast<int>(allowedEffects.size());
+    selectedIndex = (selectedIndex + direction + count) % count;
+    monsterEffectSelectedId = allowedEffects[selectedIndex];
+    snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+    snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+        monsterEffectDisplayName(monsterEffectSelectedId));
+
+    // Leave the search field after using the arrow buttons. Otherwise the
+    // next editor frame can reinterpret the selected effect name as a partial
+    // search and jump to a different earlier matching effect.
+    inputstr = monsterEffectIdText;
+    inputlen = 3;
+    editproperty = 1001;
+    cursorflash = ticks;
+}
+void buttonMonsterEffectsSelectPrev(button_t*) { monsterEffectsSelectDirection(-1); }
+void buttonMonsterEffectsSelectNext(button_t*) { monsterEffectsSelectDirection(1); }
+
+static Stat* monsterEffectsStats() { return selectedEntity[0] ? selectedEntity[0]->getStats() : nullptr; }
+static int monsterEffectAtRow(int target) { Stat* s=monsterEffectsStats(); if(!s) return -1; int row=0; for(int e=0;e<135;++e){ if(s->getEffectActive(e)){ if(row==target) return e; ++row; }} return -1; }
+static int monsterEffectRow(button_t* my,int col){ for(int r=0;r<8;++r) if(monsterEffectButtons[r][col]==my) return r; return -1; }
+static void rebuildMonsterEffectsButtons();
+static void hideFocusedEditorButtons()
+{
+    for ( node_t* node = button_l.first; node != nullptr; node = node->next )
+    {
+        button_t* button = static_cast<button_t*>(node->element);
+        if ( button != nullptr && button->focused )
+        {
+            button->visible = 0;
+            button->focused = 0;
+        }
+    }
+}
+void buttonMonsterEffectsOpen(button_t*)
+{
+    hideFocusedEditorButtons();
+    newwindow = 39;
+    subwindow = 1;
+    menuVisible = 0;
+    subx1 = xres / 2 - 300;
+    subx2 = xres / 2 + 300;
+    suby1 = yres / 2 - 220;
+    suby2 = yres / 2 + 220;
+    strcpy(subtext, "Monster Starting Effects:");
+    rebuildMonsterEffectsButtons();
+}
+void buttonMonsterEffectsDone(button_t*)
+{
+    hideFocusedEditorButtons();
+    newwindow = 2;
+    buttonSpriteProperties(nullptr);
+}
+void buttonMonsterEffectsAdd(button_t*)
+{
+    Stat* stats = monsterEffectsStats();
+    monsterEffectsUpdateSelectionFromFields();
+    if ( !stats || !monsterEffectAllowed(monsterEffectSelectedId) ) return;
+    int count = 0;
+    for ( int effect = 0; effect < 135; ++effect ) count += stats->getEffectActive(effect) ? 1 : 0;
+    if ( count >= 8 || stats->getEffectActive(monsterEffectSelectedId) ) return;
+    stats->setEffectActive(monsterEffectSelectedId, 1);
+    stats->EFFECTS_TIMERS[monsterEffectSelectedId] = 30 * TICKS_PER_SECOND;
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsRemove(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int row = monsterEffectRow(my, 6);
+    const int effect = monsterEffectAtRow(row);
+    if ( !stats || effect < 0 )
+    {
+        return;
+    }
+
+    // setEffectActive() preserves an existing nonzero strength, so it cannot
+    // reliably remove an editor-configured effect. Clear the effect value and
+    // timer directly, then rebuild the rows so the removed row disappears and
+    // all later effects shift upward immediately.
+    stats->setEffectValueUnsafe(effect, 0);
+    stats->EFFECTS_TIMERS[effect] = 0;
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsCycle(button_t* my)
+{
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 0));
+    if ( effect >= 0 )
+    {
+        monsterEffectSelectedId = effect;
+        snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", effect);
+        snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s", monsterEffectDisplayName(effect));
+    }
+}
+
+void buttonMonsterEffectsStrengthDown(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 1));
+    if ( stats && effect >= 0 )
+    {
+        const Uint8 currentStrength = stats->getEffectActive(effect);
+        const Uint8 newStrength = static_cast<Uint8>(std::max<int>(1, currentStrength - 1));
+        stats->setEffectValueUnsafe(effect, newStrength);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsStrengthUp(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 2));
+    if ( stats && effect >= 0 )
+    {
+        stats->setEffectActive(effect, std::min<int>(20, stats->getEffectActive(effect) + 1));
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsDurationDown(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 3));
+    if ( stats && effect >= 0 && stats->EFFECTS_TIMERS[effect] >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = std::max(5 * TICKS_PER_SECOND,
+            stats->EFFECTS_TIMERS[effect] - 5 * TICKS_PER_SECOND);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsDurationUp(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 4));
+    if ( stats && effect >= 0 && stats->EFFECTS_TIMERS[effect] >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = std::min(3600 * TICKS_PER_SECOND,
+            stats->EFFECTS_TIMERS[effect] + 5 * TICKS_PER_SECOND);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsPermanent(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 5));
+    if ( stats && effect >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = stats->EFFECTS_TIMERS[effect] < 0
+            ? 30 * TICKS_PER_SECOND : -1;
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsToggleAll(button_t* my)
+{
+    monsterEffectsShowAll = !monsterEffectsShowAll;
+
+    if ( !monsterEffectsShowAll && !monsterEffectAllowed(monsterEffectSelectedId) )
+    {
+        monsterEffectSelectedId = EFF_BLIND;
+        snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+        snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+            monsterEffectDisplayName(monsterEffectSelectedId));
+    }
+
+    if ( my )
+    {
+        strcpy(my->label, monsterEffectsShowAll ? "All Effects: ON" : "All Effects: OFF");
+    }
+}
+
+static void rebuildMonsterEffectsButtons()
+{
+    for ( int row = 0; row < 8; ++row )
+    {
+        for ( int column = 0; column < 7; ++column )
+        {
+            if ( monsterEffectButtons[row][column] )
+            {
+                monsterEffectButtons[row][column]->visible = 0;
+            }
+            monsterEffectButtons[row][column] = nullptr;
+        }
+    }
+
+    Stat* stats = monsterEffectsStats();
+    for ( int row = 0; row < 8; ++row )
+    {
+        const int effect = monsterEffectAtRow(row);
+        if ( effect < 0 )
+        {
+            break;
+        }
+
+        const int y = suby1 + 100 + row * 38;
+        char effectLabel[128];
+        snprintf(effectLabel, sizeof(effectLabel), "%s  (ID %d)", monsterEffectDisplayName(effect), effect);
+
+        const char* labels[7] =
+        {
+            effectLabel,
+            "-",
+            "+",
+            "-",
+            "+",
+            stats && stats->EFFECTS_TIMERS[effect] < 0 ? "[X] Perm" : "[ ] Perm",
+            "Remove"
+        };
+        const int xPositions[7] =
+        {
+            subx1 + 16,
+            subx1 + 288,
+            subx1 + 318,
+            subx1 + 390,
+            subx1 + 420,
+            subx1 + 458,
+            subx1 + 558
+        };
+        const int widths[7] = { 262, 24, 24, 24, 24, 92, 58 };
+        void (*actions[7])(button_t*) =
+        {
+            buttonMonsterEffectsCycle,
+            buttonMonsterEffectsStrengthDown,
+            buttonMonsterEffectsStrengthUp,
+            buttonMonsterEffectsDurationDown,
+            buttonMonsterEffectsDurationUp,
+            buttonMonsterEffectsPermanent,
+            buttonMonsterEffectsRemove
+        };
+
+        for ( int column = 0; column < 7; ++column )
+        {
+            button_t* button = newButton();
+            snprintf(button->label, sizeof(button->label), "%s", labels[column]);
+            button->x = xPositions[column];
+            button->y = y;
+            button->sizex = widths[column];
+            button->sizey = 16;
+            button->action = actions[column];
+            button->visible = 1;
+            button->focused = 1;
+            monsterEffectButtons[row][column] = button;
+        }
+    }
+
+
+    monsterEffectsAddButton = newButton();
+    strcpy(monsterEffectsAddButton->label, "Add Effect");
+    monsterEffectsAddButton->x = subx1 + 16;
+    monsterEffectsAddButton->y = suby2 - 30;
+    monsterEffectsAddButton->sizex = 144;
+    monsterEffectsAddButton->sizey = 16;
+    monsterEffectsAddButton->action = buttonMonsterEffectsAdd;
+    monsterEffectsAddButton->visible = 1;
+    monsterEffectsAddButton->focused = 1;
+
+    monsterEffectsToggleButton = newButton();
+    strcpy(monsterEffectsToggleButton->label,
+        monsterEffectsShowAll ? "All Effects: ON" : "All Effects: OFF");
+    monsterEffectsToggleButton->x = subx1 + 172;
+    monsterEffectsToggleButton->y = suby2 - 30;
+    monsterEffectsToggleButton->sizex = 176;
+    monsterEffectsToggleButton->sizey = 16;
+    monsterEffectsToggleButton->action = buttonMonsterEffectsToggleAll;
+    monsterEffectsToggleButton->visible = 1;
+    monsterEffectsToggleButton->focused = 1;
+
+    monsterEffectsDoneButton = newButton();
+    strcpy(monsterEffectsDoneButton->label, "Done");
+    monsterEffectsDoneButton->x = subx2 - 72;
+    monsterEffectsDoneButton->y = suby2 - 30;
+    monsterEffectsDoneButton->sizex = 56;
+    monsterEffectsDoneButton->sizey = 16;
+    monsterEffectsDoneButton->action = buttonMonsterEffectsDone;
+    monsterEffectsDoneButton->visible = 1;
+    monsterEffectsDoneButton->focused = 1;
 }
 
 void buttonMonsterItems(button_t* my)
@@ -4156,27 +4724,27 @@ void buttonMonsterItems(button_t* my)
 	}
 	else if ( my == butMonsterItem1 )
 	{
-		itemSlotSelected = 10;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 0;
 	}
 	else if ( my == butMonsterItem2 )
 	{
-		itemSlotSelected = 11;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 1;
 	}
 	else if ( my == butMonsterItem3 )
 	{
-		itemSlotSelected = 12;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 2;
 	}
 	else if ( my == butMonsterItem4 )
 	{
-		itemSlotSelected = 13;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 3;
 	}
 	else if ( my == butMonsterItem5 )
 	{
-		itemSlotSelected = 14;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 4;
 	}
 	else if ( my == butMonsterItem6 )
 	{
-		itemSlotSelected = 15;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 5;
 	}
 	else
 	{
@@ -4249,6 +4817,21 @@ void buttonMonsterItems(button_t* my)
 	if ( butMonsterItem6 != NULL )
 	{
 		butMonsterItem6->visible = 0;
+	}
+	if ( butMonsterInventoryPrev != NULL )
+	{
+		butMonsterInventoryPrev->visible = 0;
+		butMonsterInventoryPrev->focused = 0;
+	}
+	if ( butMonsterInventoryNext != NULL )
+	{
+		butMonsterInventoryNext->visible = 0;
+		butMonsterInventoryNext->focused = 0;
+	}
+	if ( butMonsterEffectsOpenButton != NULL )
+	{
+		butMonsterEffectsOpenButton->visible = 0;
+		butMonsterEffectsOpenButton->focused = 0;
 	}
 	if ( butMonsterOK != NULL )
 	{

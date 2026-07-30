@@ -42,6 +42,16 @@
 
 //#include "player.hpp"
 
+extern char monsterEffectSearchText[64];
+extern char monsterEffectIdText[8];
+extern int monsterEffectSelectedId;
+extern void monsterEffectsUpdateSelectionFromFields();
+extern const char* monsterEffectDisplayName(int effect);
+extern bool monsterEffectCanSelect(int effect);
+
+static int monsterEffectDropdownScroll = 0;
+static std::string monsterEffectDropdownLastQuery;
+
 std::map<int, std::string> modelFileNames;
 Entity* selectedEntity[MAXPLAYERS] = { nullptr };
 Entity* lastSelectedEntity[MAXPLAYERS] = { nullptr };
@@ -16133,9 +16143,15 @@ int main(int argc, char** argv)
 							pad_x4 -= 64 * 2;
 
 							pad_y2 += 32 + spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Inventory");
+							const int inventoryPageCount = (ITEM_SLOT_INVENTORY_COUNT + 5) / 6;
+							const int inventoryFirstSlot = monsterInventoryPage * 6 + 1;
+							const int inventoryLastSlot = std::min(ITEM_SLOT_INVENTORY_COUNT, inventoryFirstSlot + 5);
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color,
+								"Inventory Page %d of %d", monsterInventoryPage + 1, inventoryPageCount);
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2 + 12, color,
+								"Slots %d-%d of %d", inventoryFirstSlot, inventoryLastSlot, ITEM_SLOT_INVENTORY_COUNT);
 
-							pad_y2 += spacing * 3 + 8;
+							pad_y2 += spacing * 3 + 42;
 							if ( !strcmp(spriteProperties[31], "disable") )
 							{
 								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");
@@ -17748,6 +17764,204 @@ int main(int argc, char** argv)
 							propertyPageCursorFlash(spacing);
 						}
 					}
+				}
+				else if ( newwindow == 39 )
+				{
+                    Stat* stats = selectedEntity[0] ? selectedEntity[0]->getStats() : nullptr;
+                    monsterEffectsUpdateSelectionFromFields();
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 28, "Choose an effect below, then click Add Selected Effect.");
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 40, "Type in Search to filter the effect list, then click a result.");
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 54, "Search:");
+                    drawDepressed(subx1 + 72, suby1 + 50, subx1 + 286, suby1 + 66);
+                    printText(font8x8_bmp, subx1 + 76, suby1 + 54, monsterEffectSearchText);
+                    printText(font8x8_bmp, subx1 + 300, suby1 + 54, "Effect ID:");
+                    drawDepressed(subx1 + 380, suby1 + 50, subx1 + 428, suby1 + 66);
+                    printText(font8x8_bmp, subx1 + 384, suby1 + 54, monsterEffectIdText);
+
+                    const bool showEffectDropdown = inputstr == monsterEffectSearchText;
+                    std::vector<int> effectSearchMatches;
+                    const int effectDropdownVisibleRows = 8;
+                    std::string effectQuery = monsterEffectSearchText;
+                    std::transform(effectQuery.begin(), effectQuery.end(), effectQuery.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if ( showEffectDropdown )
+                    {
+                        for ( int effect = 0; effect < 135; ++effect )
+                        {
+                            if ( !monsterEffectCanSelect(effect) )
+                            {
+                                continue;
+                            }
+                            std::string effectName = monsterEffectDisplayName(effect);
+                            std::transform(effectName.begin(), effectName.end(), effectName.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if ( effectQuery.empty() || effectName.find(effectQuery) != std::string::npos
+                                || std::to_string(effect).find(effectQuery) != std::string::npos )
+                            {
+                                effectSearchMatches.push_back(effect);
+                            }
+                        }
+                        if ( effectQuery != monsterEffectDropdownLastQuery )
+                        {
+                            monsterEffectDropdownLastQuery = effectQuery;
+                            monsterEffectDropdownScroll = 0;
+                        }
+                        const int maxDropdownScroll = std::max(0,
+                            static_cast<int>(effectSearchMatches.size()) - effectDropdownVisibleRows);
+                        monsterEffectDropdownScroll = std::max(0,
+                            std::min(monsterEffectDropdownScroll, maxDropdownScroll));
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownY2 = dropdownY1 + effectDropdownVisibleRows * 16;
+                        const bool mouseOverDropdown = omousex >= dropdownX1 && omousex < dropdownX2
+                            && omousey >= dropdownY1 && omousey < dropdownY2;
+                        if ( mouseOverDropdown && scroll != 0 )
+                        {
+                            monsterEffectDropdownScroll += scroll;
+                            monsterEffectDropdownScroll = std::max(0,
+                                std::min(monsterEffectDropdownScroll, maxDropdownScroll));
+                            scroll = 0;
+                        }
+                    }
+
+                    printTextFormatted(font8x8_bmp, subx1 + 16, suby1 + 70, "Selected: %s (ID %d)", monsterEffectDisplayName(monsterEffectSelectedId), monsterEffectSelectedId);
+                    if ( monsterEffectsShowAll )
+                    {
+                        const Uint32 cautionColor = makeColorRGB(255, 192, 64);
+                        printTextFormattedColor(font8x8_bmp, subx1 + 172, suby2 - 42, cautionColor,
+                            "CAUTION: Not all effects are safe.");
+                    }
+                    printText(font8x8_bmp, subx1 + 288, suby1 + 88, "Strength");
+                    printText(font8x8_bmp, subx1 + 390, suby1 + 88, "Duration");
+                    if ( mousestatus[SDL_BUTTON_LEFT] )
+                    {
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownRowHeight = 16;
+                        const int dropdownY2 = dropdownY1
+                            + effectDropdownVisibleRows * dropdownRowHeight;
+                        const bool clickInsideSearch = omousex >= subx1 + 72 && omousex < subx1 + 286
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66;
+                        const bool clickInsideDropdown = showEffectDropdown
+                            && omousex >= dropdownX1 && omousex < dropdownX2
+                            && omousey >= dropdownY1 && omousey < dropdownY2;
+                        if ( showEffectDropdown && !clickInsideSearch && !clickInsideDropdown )
+                        {
+                            inputstr = monsterEffectIdText;
+                            inputlen = 3;
+                            editproperty = 1001;
+                        }
+                        if ( showEffectDropdown )
+                        {
+                            const int dropdownX1 = subx1 + 72;
+                            const int dropdownX2 = subx1 + 286;
+                            const int dropdownY1 = suby1 + 68;
+                            const int dropdownRowHeight = 16;
+                            const int visibleMatchCount = std::min(effectDropdownVisibleRows,
+                                static_cast<int>(effectSearchMatches.size()) - monsterEffectDropdownScroll);
+                            for ( int matchRow = 0; matchRow < visibleMatchCount; ++matchRow )
+                            {
+                                const int rowY = dropdownY1 + matchRow * dropdownRowHeight;
+                                if ( omousex >= dropdownX1 && omousex < dropdownX2
+                                    && omousey >= rowY && omousey < rowY + dropdownRowHeight )
+                                {
+                                    monsterEffectSelectedId = effectSearchMatches[monsterEffectDropdownScroll + matchRow];
+                                    snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+                                    snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+                                        monsterEffectDisplayName(monsterEffectSelectedId));
+                                    inputstr = monsterEffectIdText;
+                                    inputlen = 3;
+                                    editproperty = 1001;
+                                    cursorflash = ticks;
+                                    mousestatus[SDL_BUTTON_LEFT] = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        if ( mousestatus[SDL_BUTTON_LEFT]
+                            && omousex >= subx1 + 72 && omousex < subx1 + 286
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66 )
+                        {
+                            inputstr = monsterEffectSearchText;
+                            inputlen = 63;
+                            editproperty = 1000;
+                            cursorflash = ticks;
+                            if ( !SDL_IsTextInputActive() )
+                            {
+                                SDL_StartTextInput();
+                            }
+                        }
+                        else if ( mousestatus[SDL_BUTTON_LEFT]
+                            && omousex >= subx1 + 380 && omousex < subx1 + 428
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66 )
+                        {
+                            inputstr = monsterEffectIdText;
+                            inputlen = 3;
+                            editproperty = 1001;
+                            cursorflash = ticks;
+                            if ( !SDL_IsTextInputActive() )
+                            {
+                                SDL_StartTextInput();
+                            }
+                        }
+                    }
+                    if ( stats )
+                    {
+                        int row = 0;
+                        for ( int effect = 0; effect < 135 && row < 8; ++effect )
+                        {
+                            if ( !stats->getEffectActive(effect) ) continue;
+                            const int y = suby1 + 100 + row * 38;
+                            printTextFormatted(font8x8_bmp, subx1 + 286, y + 18, "Value: %d", (int)stats->getEffectActive(effect));
+                            if ( stats->EFFECTS_TIMERS[effect] < 0 ) printText(font8x8_bmp, subx1 + 370, y + 18, "Duration: permanent");
+                            else printTextFormatted(font8x8_bmp, subx1 + 370, y + 18, "Duration: %d sec", stats->EFFECTS_TIMERS[effect] / TICKS_PER_SECOND);
+                            ++row;
+                        }
+                        if ( row == 0 ) printText(font8x8_bmp, subx1 + 18, suby1 + 116, "No starting effects. Choose one above and click Add Selected Effect.");
+                    }
+
+                    // Draw the search results last so the dropdown stays above all labels and effect rows.
+                    if ( showEffectDropdown )
+                    {
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownRowHeight = 16;
+                        const int dropdownY2 = dropdownY1
+                            + effectDropdownVisibleRows * dropdownRowHeight;
+                        drawDepressed(dropdownX1, dropdownY1, dropdownX2, dropdownY2);
+                        if ( effectSearchMatches.empty() )
+                        {
+                            printText(font8x8_bmp, dropdownX1 + 4, dropdownY1 + 4, "No matching effects");
+                        }
+                        else
+                        {
+                            const int visibleMatchCount = std::min(effectDropdownVisibleRows,
+                                static_cast<int>(effectSearchMatches.size()) - monsterEffectDropdownScroll);
+                            for ( int matchRow = 0; matchRow < visibleMatchCount; ++matchRow )
+                            {
+                                const int effect = effectSearchMatches[monsterEffectDropdownScroll + matchRow];
+                                const int rowY = dropdownY1 + matchRow * dropdownRowHeight;
+                                if ( omousex >= dropdownX1 && omousex < dropdownX2
+                                    && omousey >= rowY && omousey < rowY + dropdownRowHeight )
+                                {
+                                    SDL_Rect highlight = { dropdownX1 + 2, rowY + 2,
+                                        dropdownX2 - dropdownX1 - 4, dropdownRowHeight - 2 };
+                                    drawRect(&highlight, makeColorRGB(64, 64, 64), 255);
+                                }
+                                printTextFormatted(font8x8_bmp, dropdownX1 + 4, rowY + 4, "%s (ID %d)",
+                                    monsterEffectDisplayName(effect), effect);
+                            }
+                            if ( static_cast<int>(effectSearchMatches.size()) > effectDropdownVisibleRows )
+                            {
+                                printTextFormatted(font8x8_bmp, dropdownX2 - 42, dropdownY2 - 12, "%d/%d",
+                                    monsterEffectDropdownScroll + 1,
+                                    std::max(1, static_cast<int>(effectSearchMatches.size()) - effectDropdownVisibleRows + 1));
+                            }
+                        }
+                    }
 				}
 				else if ( newwindow == 10 )
 				{

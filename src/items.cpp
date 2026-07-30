@@ -6288,8 +6288,7 @@ bool isPotionBad(const Item& potion)
 
 void createCustomInventory(Stat* const stats, const int itemLimit, BaronyRNG& rng)
 {
-	int itemSlots[6] = { ITEM_SLOT_INV_1, ITEM_SLOT_INV_2, ITEM_SLOT_INV_3, ITEM_SLOT_INV_4, ITEM_SLOT_INV_5, ITEM_SLOT_INV_6 };
-	int i = 0;
+		int i = 0;
 	Sint32 itemId = -1;
 	int itemAppearance = rng.rand();
 	int category = 0;
@@ -6299,10 +6298,11 @@ void createCustomInventory(Stat* const stats, const int itemLimit, BaronyRNG& rn
 
 	if ( stats != nullptr )
 	{
-		for ( i = 0; i < 6 && itemsGenerated <= itemLimit; ++i )
+		for ( i = 0; i < ITEM_SLOT_INVENTORY_COUNT && itemsGenerated <= itemLimit; ++i )
 		{
-			category = stats->EDITOR_ITEMS[itemSlots[i] + ITEM_SLOT_CATEGORY];
-			if ( category > 0 && stats->EDITOR_ITEMS[itemSlots[i]] == 1 )
+			const int itemSlot = ITEM_SLOT_INV_1 + i * ITEM_SLOT_NUMPROPERTIES;
+			category = stats->EDITOR_ITEMS[itemSlot + ITEM_SLOT_CATEGORY];
+			if ( category > 0 && stats->EDITOR_ITEMS[itemSlot] == 1 )
 			{
 				if ( category > 0 && category <= 13 )
 				{
@@ -6358,12 +6358,12 @@ void createCustomInventory(Stat* const stats, const int itemLimit, BaronyRNG& rn
 			}
 			else
 			{
-				itemId = static_cast<ItemType>(stats->EDITOR_ITEMS[itemSlots[i]] - 2);
+				itemId = static_cast<ItemType>(stats->EDITOR_ITEMS[itemSlot] - 2);
 			}
 
 			if ( itemId >= 0 )
 			{
-				Status itemStatus = static_cast<Status>(stats->EDITOR_ITEMS[itemSlots[i] + 1]);
+				Status itemStatus = static_cast<Status>(stats->EDITOR_ITEMS[itemSlot + 1]);
 				if ( itemStatus == 0 )
 				{
 					itemStatus = static_cast<Status>(DECREPIT + rng.rand() % 4);
@@ -6372,17 +6372,17 @@ void createCustomInventory(Stat* const stats, const int itemLimit, BaronyRNG& rn
 				{
 					itemStatus = static_cast<Status>(itemStatus - 1); // reserved '0' for random, so '1' is decrepit... etc to '5' being excellent.
 				}
-				int itemBless = stats->EDITOR_ITEMS[itemSlots[i] + 2];
+				int itemBless = stats->EDITOR_ITEMS[itemSlot + 2];
 				if ( itemBless == 10 )
 				{
 					itemBless = -1 + rng.rand() % 3;
 				}
-				const int itemCount = stats->EDITOR_ITEMS[itemSlots[i] + 3];
-				if ( stats->EDITOR_ITEMS[itemSlots[i] + 4] == 1 )
+				const int itemCount = stats->EDITOR_ITEMS[itemSlot + 3];
+				if ( stats->EDITOR_ITEMS[itemSlot + 4] == 1 )
 				{
 					itemIdentified = true;
 				}
-				else if ( stats->EDITOR_ITEMS[itemSlots[i] + 4] == 2 )
+				else if ( stats->EDITOR_ITEMS[itemSlot + 4] == 2 )
 				{
 					itemIdentified = rng.rand() % 2;
 				}
@@ -6391,7 +6391,7 @@ void createCustomInventory(Stat* const stats, const int itemLimit, BaronyRNG& rn
 					itemIdentified = false;
 				}
 				itemAppearance = rng.rand();
-				chance = stats->EDITOR_ITEMS[itemSlots[i] + 5];
+				chance = stats->EDITOR_ITEMS[itemSlot + 5];
 				if ( rng.rand() % 100 < chance )
 				{
 					newItem(static_cast<ItemType>(itemId), itemStatus, itemBless, itemCount, itemAppearance, itemIdentified, &stats->inventory);

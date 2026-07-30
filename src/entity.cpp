@@ -20125,7 +20125,7 @@ int countCustomItems(Stat* stats)
 	int x = 0;
 	int customItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] != 1 || (stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] != 0) )
 		{
@@ -20141,7 +20141,7 @@ int countDefaultItems(Stat* stats)
 	int x = 0;
 	int defaultItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] == 0 )
 		{
