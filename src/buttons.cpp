@@ -86,6 +86,15 @@ button_t* butMonsterItem3;
 button_t* butMonsterItem4;
 button_t* butMonsterItem5;
 button_t* butMonsterItem6;
+/*
+ * Authored squad fields use serialized Stat::MISC_FLAGS slots.
+ * Keep these indexes aligned with actmonster.cpp.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
 button_t* butMonsterInventoryPrev;
 button_t* butMonsterInventoryNext;
 button_t* butMonsterInventoryAddSlot;
@@ -4325,6 +4334,20 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						tmpSpriteStats->customDialogueID[
 							sizeof(tmpSpriteStats->customDialogueID) - 1
 						] = '\0';
+
+						/*
+						 * Persist the authored squad, elite, and defeat-tag fields.
+						 * These MISC_FLAGS entries are serialized with the monster Stat.
+						 */
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_ID] =
+							std::max(0, atoi(spriteProperties[27]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_OPTIONS] =
+							std::max(0, atoi(spriteProperties[28]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_ELITE_PRESET] =
+							std::max(0, atoi(spriteProperties[29]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID] =
+							std::max(0, atoi(spriteProperties[30]));
+
 						if ( !strcmp(spriteProperties[31], "disable") )
 						{
 							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] = 1;
@@ -6242,6 +6265,33 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 		spriteProperties[26][
 			sizeof(spriteProperties[26]) - 1
 		] = '\0';
+
+		/* Restore authored squad fields when reopening monster properties. */
+		snprintf(
+			spriteProperties[27],
+			sizeof(spriteProperties[27]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_ID]
+		);
+		snprintf(
+			spriteProperties[28],
+			sizeof(spriteProperties[28]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_OPTIONS]
+		);
+		snprintf(
+			spriteProperties[29],
+			sizeof(spriteProperties[29]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_ELITE_PRESET]
+		);
+		snprintf(
+			spriteProperties[30],
+			sizeof(spriteProperties[30]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID]
+		);
+
 		if ( tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] == 0 )
 		{
 			strcpy(spriteProperties[31], "");

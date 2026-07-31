@@ -30,6 +30,14 @@ static const char VERSION[] = "v5.0.2";
 static const char VERSION[] = "v5.0.2";
 
 /* Player-scoped mutable NPC dialogue memory. */
+void customDialogueCreditAuthoredDefeat(
+    const int defeatID,
+    const Uint32 defeatedUID
+);
+
+// Clears session-only custom dialogue state when restarting or starting a new game.
+void customDialogueResetRuntimeState();
+
 bool persistentStorySetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 nodeID);
 Sint32 persistentStoryGetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 fallbackNode);
 bool persistentStorySetNPCVariable(const int player, const std::string& mapName, const Sint32 persistentID, const std::string& variableID, const Sint32 value);

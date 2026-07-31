@@ -17793,6 +17793,16 @@ void Entity::awardXP(Entity* src, bool share, bool root)
 		return;
 	}
 
+	if ( root
+		&& src->behavior == &actMonster
+		&& srcStats->MISC_FLAGS[15] > 0 )
+	{
+		customDialogueCreditAuthoredDefeat(
+			srcStats->MISC_FLAGS[15],
+			src->getUID()
+		);
+	}
+
 	if ( src->behavior == &actPlayer && behavior == &actMonster && root )
 	{
 		Compendium_t::Events_t::eventUpdateMonster(src->skill[2], Compendium_t::CPDM_KILLED_BY, this, 1);

@@ -17602,6 +17602,30 @@ static void doConsoleCommands() {
 	Input& input = Input::inputs[clientnum]; // commands - uses local clientnum only
 	const bool controlEnabled = players[clientnum]->bControlEnabled && !movie;
 
+	/*
+	 * Custom dialogue owns Enter while a choice list is active. Do not let the
+	 * normal chat/console-command handler open behind the dialogue. Leave the
+	 * raw Return key untouched so WorldTooltipDialogue can consume it as the
+	 * selected-choice confirmation later in the frame.
+	 */
+	const bool customDialogueChoiceActive =
+		players[clientnum]
+		&& players[clientnum]->worldUI.worldTooltipDialogue
+			.playerDialogue.customChoiceActive;
+
+	if ( customDialogueChoiceActive )
+	{
+		if ( input.consumeBinaryToggle("Chat") )
+		{
+			input.consumeBindingsSharedWithBinding("Chat");
+		}
+		if ( input.consumeBinaryToggle("Console Command") )
+		{
+			input.consumeBindingsSharedWithBinding("Console Command");
+		}
+		return;
+	}
+
 #if defined(NINTENDO) && defined(NINTENDO_DEBUG)
 	// activate console
 	if (input.binaryToggle("ConsoleCommand1") &&

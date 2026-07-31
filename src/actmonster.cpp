@@ -30,6 +30,7 @@
 #include "ui/MainMenu.hpp"
 #include "menu.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <algorithm>
 #include <cctype>
@@ -116,6 +117,11 @@ struct CustomDialogueChoice
 	bool resetQuest = false;
 	bool recruitNPC = false;
 
+	bool hasPowerTileAction = false;
+	Sint32 powerTileX = 0;
+	Sint32 powerTileY = 0;
+	bool powerTileEnabled = true;
+
 	/*
 	 * Optional condition controlling whether this choice is visible.
 	 * Choice conditions never consume items or gold; they only filter
@@ -137,6 +143,9 @@ struct CustomDialogueChoice
 	std::string conditionComparison = "equals";
 
 	std::string conditionObjectiveID;
+
+    // Additional authored requirements. Every entry must pass (logical AND).
+    std::vector<CustomDialogueChoice> additionalConditions;
 };
 
 struct CustomDialogueNode
@@ -244,6 +253,7 @@ struct CustomDialogueQuestObjective
     std::string text;
     std::string completedText;
     std::string progressVariable;
+    Sint32 defeatID = 0;
 
     Sint32 stage = 0;
     Sint32 target = 1;
@@ -534,6 +544,58 @@ static bool consumeCustomDialoguePlayerItem(
 }
 
 
+static int applyCustomDialoguePowerTileAction(
+	const Sint32 tileX,
+	const Sint32 tileY,
+	const bool powered
+)
+{
+	int affected = 0;
+
+	if ( multiplayer == CLIENT || !map.entities )
+	{
+		return affected;
+	}
+
+	for ( node_t* node = map.entities->first;
+		node != nullptr;
+		node = node->next )
+	{
+		Entity* entity = static_cast<Entity*>(node->element);
+
+		if ( !entity )
+		{
+			continue;
+		}
+
+		const Sint32 entityTileX =
+			static_cast<Sint32>(entity->x / 16.0);
+		const Sint32 entityTileY =
+			static_cast<Sint32>(entity->y / 16.0);
+
+		if ( entityTileX != tileX || entityTileY != tileY )
+		{
+			continue;
+		}
+
+		if ( powered )
+		{
+			entity->circuitPowerOn();
+			entity->mechanismPowerOn();
+		}
+		else
+		{
+			entity->circuitPowerOff();
+			entity->mechanismPowerOff();
+		}
+
+		entity->updateCircuitNeighbors();
+		++affected;
+	}
+
+	return affected;
+}
+
 static bool evaluateCustomDialogueChoiceCondition(
 	const CustomDialogueChoice& choice,
 	const int player,
@@ -541,6 +603,15 @@ static bool evaluateCustomDialogueChoiceCondition(
 	const Sint32 npcPersistentID
 )
 {
+    for ( const CustomDialogueChoice& additional : choice.additionalConditions )
+    {
+        if ( !evaluateCustomDialogueChoiceCondition(
+                additional, player, sourceMap, npcPersistentID) )
+        {
+            return false;
+        }
+    }
+
 	if ( choice.conditionType.empty() )
 	{
 		return true;
@@ -717,6 +788,96 @@ static bool evaluateCustomDialogueChoiceCondition(
 	}
 
 	return false;
+}
+
+static bool parseCustomDialogueChoiceConditionValue(
+    const rapidjson::Value& condition,
+    CustomDialogueChoice& choice
+)
+{
+    if ( !condition.IsObject()
+        || !condition.HasMember("type")
+        || !condition["type"].IsString() )
+    {
+        return false;
+    }
+
+    choice.conditionType = normalizeCustomDialogueID(condition["type"].GetString());
+    if ( choice.conditionType == "has_item" )
+    {
+        if ( !condition.HasMember("item") || !condition["item"].IsString() ) return false;
+        choice.conditionItem = condition["item"].GetString();
+        choice.conditionItemCount = 1;
+        if ( condition.HasMember("count") )
+        {
+            if ( !condition["count"].IsInt() || condition["count"].GetInt() <= 0 ) return false;
+            choice.conditionItemCount = condition["count"].GetInt();
+        }
+        ItemType itemType = TOOL_TORCH;
+        if ( !resolveCustomDialogueItemType(choice.conditionItem, itemType) ) return false;
+    }
+    else if ( choice.conditionType == "has_gold" )
+    {
+        if ( !condition.HasMember("amount") || !condition["amount"].IsInt()
+            || condition["amount"].GetInt() < 0 ) return false;
+        choice.conditionGoldAmount = condition["amount"].GetInt();
+    }
+    else if ( choice.conditionType == "quest_started"
+        || choice.conditionType == "quest_accepted"
+        || choice.conditionType == "quest_completed"
+        || choice.conditionType == "quest_failed" )
+    {
+        if ( !condition.HasMember("quest") || !condition["quest"].IsString() ) return false;
+        choice.conditionQuestID = normalizeCustomDialogueID(condition["quest"].GetString());
+    }
+    else if ( choice.conditionType == "quest_stage" )
+    {
+        if ( !condition.HasMember("quest") || !condition["quest"].IsString()
+            || !condition.HasMember("stage") || !condition["stage"].IsInt() ) return false;
+        choice.conditionQuestID = normalizeCustomDialogueID(condition["quest"].GetString());
+        choice.conditionQuestStage = condition["stage"].GetInt();
+    }
+    else if ( choice.conditionType == "objective_completed"
+        || choice.conditionType == "objective_incomplete" )
+    {
+        if ( !condition.HasMember("quest") || !condition["quest"].IsString()
+            || !condition.HasMember("objective") || !condition["objective"].IsString() ) return false;
+        choice.conditionQuestID = normalizeCustomDialogueID(condition["quest"].GetString());
+        choice.conditionObjectiveID = normalizeCustomDialogueID(condition["objective"].GetString());
+        if ( choice.conditionQuestID.empty() || choice.conditionObjectiveID.empty() ) return false;
+    }
+    else if ( choice.conditionType == "world_flag" || choice.conditionType == "npc_flag" )
+    {
+        if ( !condition.HasMember("id") || !condition["id"].IsString() ) return false;
+        choice.conditionStoryID = normalizeCustomDialogueID(condition["id"].GetString());
+        choice.conditionFlagValue = true;
+        if ( condition.HasMember("value") )
+        {
+            if ( !condition["value"].IsBool() ) return false;
+            choice.conditionFlagValue = condition["value"].GetBool();
+        }
+    }
+    else if ( choice.conditionType == "world_variable" || choice.conditionType == "npc_variable" )
+    {
+        if ( !condition.HasMember("id") || !condition["id"].IsString()
+            || !condition.HasMember("value") || !condition["value"].IsInt() ) return false;
+        choice.conditionStoryID = normalizeCustomDialogueID(condition["id"].GetString());
+        choice.conditionStoryValue = condition["value"].GetInt();
+    }
+    else
+    {
+        return false;
+    }
+
+    if ( condition.HasMember("comparison") )
+    {
+        if ( !condition["comparison"].IsString() ) return false;
+        choice.conditionComparison = normalizeCustomDialogueID(condition["comparison"].GetString());
+    }
+    return choice.conditionComparison == "equals"
+        || choice.conditionComparison == "not_equals"
+        || choice.conditionComparison == "at_least"
+        || choice.conditionComparison == "at_most";
 }
 
 static CustomDialogueDefinition loadCustomDialogueDefinition(
@@ -1185,6 +1346,29 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                     objective.target = objectiveValue["target"].GetInt();
                 }
 
+                if ( objectiveValue.HasMember("defeat_id") )
+                {
+                    if ( !objectiveValue["defeat_id"].IsInt()
+                        || objectiveValue["defeat_id"].GetInt() <= 0 )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' quest objective '%s' has an invalid defeat_id.",
+                            realPath.c_str(),
+                            objective.id.c_str()
+                        );
+                        return definition;
+                    }
+
+                    objective.defeatID =
+                        objectiveValue["defeat_id"].GetInt();
+
+                    if ( objective.progressVariable.empty() )
+                    {
+                        objective.progressVariable =
+                            "defeat_" + objective.id;
+                    }
+                }
+
                 if ( objectiveValue.HasMember("map_marker") )
                 {
                     const rapidjson::Value& marker = objectiveValue["map_marker"];
@@ -1265,18 +1449,18 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         }
 
         /*
-         * Explicitly reject combinations that are authored correctly
-         * but do not yet have safe runtime ownership/reset semantics.
+         * Party/world ownership is not implemented yet. Older editor
+         * builds could still write those values, so load them safely as
+         * per-player quests instead of rejecting the entire dialogue.
          */
         if ( definition.questScope != "player" )
         {
             printlog(
-                "[Custom Dialogue] '%s' requests unsupported quest scope '%s'.",
+                "[Custom Dialogue] '%s' quest scope '%s' is not implemented; loading as player scope.",
                 realPath.c_str(),
                 definition.questScope.c_str()
             );
-
-            return definition;
+            definition.questScope = "player";
         }
 
         if ( definition.questID.empty() || definition.questTitle.empty() )
@@ -1967,219 +2151,60 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 				}
 
 				if ( choiceValue.HasMember("condition") )
-				{
-					const rapidjson::Value& condition =
-						choiceValue["condition"];
+                {
+                    if ( !parseCustomDialogueChoiceConditionValue(
+                            choiceValue["condition"], choice) )
+                    {
+                        printlog(
+                            "[Custom Dialogue] '%s' node %d choice '%s' has an invalid condition.",
+                            realPath.c_str(), node.id, choice.id.c_str()
+                        );
+                        return definition;
+                    }
+                }
 
-					if ( !condition.IsObject()
-						|| !condition.HasMember("type")
-						|| !condition["type"].IsString() )
-					{
-						printlog(
-							"[Custom Dialogue] '%s' node %d choice '%s' has an invalid condition.",
-							realPath.c_str(),
-							node.id,
-							choice.id.c_str()
-						);
+                if ( choiceValue.HasMember("conditions") )
+                {
+                    const rapidjson::Value& conditions = choiceValue["conditions"];
+                    if ( !conditions.IsArray() )
+                    {
+                        return definition;
+                    }
+                    for ( rapidjson::SizeType conditionIndex = 0;
+                        conditionIndex < conditions.Size(); ++conditionIndex )
+                    {
+                        CustomDialogueChoice parsedCondition;
+                        if ( !parseCustomDialogueChoiceConditionValue(
+                                conditions[conditionIndex], parsedCondition) )
+                        {
+                            printlog(
+                                "[Custom Dialogue] '%s' node %d choice '%s' condition %u is invalid.",
+                                realPath.c_str(), node.id, choice.id.c_str(),
+                                static_cast<unsigned int>(conditionIndex)
+                            );
+                            return definition;
+                        }
 
-						return definition;
-					}
-
-					choice.conditionType =
-						normalizeCustomDialogueID(
-							condition["type"].GetString()
-						);
-
-					if ( choice.conditionType == "has_item" )
-					{
-						if ( !condition.HasMember("item")
-							|| !condition["item"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.conditionItem =
-							condition["item"].GetString();
-
-						choice.conditionItemCount = 1;
-
-						if ( condition.HasMember("count") )
-						{
-							if ( !condition["count"].IsInt()
-								|| condition["count"].GetInt() <= 0 )
-							{
-								return definition;
-							}
-
-							choice.conditionItemCount =
-								condition["count"].GetInt();
-						}
-
-						ItemType itemType =
-							TOOL_TORCH;
-
-						if ( !resolveCustomDialogueItemType(
-								choice.conditionItem,
-								itemType
-							) )
-						{
-							return definition;
-						}
-					}
-					else if ( choice.conditionType == "has_gold" )
-					{
-						if ( !condition.HasMember("amount")
-							|| !condition["amount"].IsInt()
-							|| condition["amount"].GetInt() < 0 )
-						{
-							return definition;
-						}
-
-						choice.conditionGoldAmount =
-							condition["amount"].GetInt();
-					}
-					else if ( choice.conditionType == "quest_started"
-						|| choice.conditionType == "quest_accepted"
-						|| choice.conditionType == "quest_completed"
-						|| choice.conditionType == "quest_failed" )
-					{
-						if ( !condition.HasMember("quest")
-							|| !condition["quest"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.conditionQuestID =
-							normalizeCustomDialogueID(
-								condition["quest"].GetString()
-							);
-					}
-					else if ( choice.conditionType == "quest_stage" )
-					{
-						if ( !condition.HasMember("quest")
-							|| !condition["quest"].IsString()
-							|| !condition.HasMember("stage")
-							|| !condition["stage"].IsInt() )
-						{
-							return definition;
-						}
-
-						choice.conditionQuestID =
-							normalizeCustomDialogueID(
-								condition["quest"].GetString()
-							);
-
-						choice.conditionQuestStage =
-							condition["stage"].GetInt();
-					}
-					else if ( choice.conditionType == "objective_completed"
-						|| choice.conditionType == "objective_incomplete" )
-					{
-						if ( !condition.HasMember("quest")
-							|| !condition["quest"].IsString()
-							|| !condition.HasMember("objective")
-							|| !condition["objective"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.conditionQuestID =
-							normalizeCustomDialogueID(
-								condition["quest"].GetString()
-							);
-
-						choice.conditionObjectiveID =
-							normalizeCustomDialogueID(
-								condition["objective"].GetString()
-							);
-
-						if ( choice.conditionQuestID.empty()
-							|| choice.conditionObjectiveID.empty() )
-						{
-							return definition;
-						}
-					}
-
-					else if ( choice.conditionType == "world_flag"
-						|| choice.conditionType == "npc_flag" )
-					{
-						if ( !condition.HasMember("id")
-							|| !condition["id"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.conditionStoryID =
-							normalizeCustomDialogueID(
-								condition["id"].GetString()
-							);
-
-						choice.conditionFlagValue = true;
-
-						if ( condition.HasMember("value") )
-						{
-							if ( !condition["value"].IsBool() )
-							{
-								return definition;
-							}
-
-							choice.conditionFlagValue =
-								condition["value"].GetBool();
-						}
-					}
-					else if ( choice.conditionType == "world_variable"
-						|| choice.conditionType == "npc_variable" )
-					{
-						if ( !condition.HasMember("id")
-							|| !condition["id"].IsString()
-							|| !condition.HasMember("value")
-							|| !condition["value"].IsInt() )
-						{
-							return definition;
-						}
-
-						choice.conditionStoryID =
-							normalizeCustomDialogueID(
-								condition["id"].GetString()
-							);
-
-						choice.conditionStoryValue =
-							condition["value"].GetInt();
-					}
-					else
-					{
-						printlog(
-							"[Custom Dialogue] '%s' node %d choice '%s' uses unsupported condition '%s'.",
-							realPath.c_str(),
-							node.id,
-							choice.id.c_str(),
-							choice.conditionType.c_str()
-						);
-
-						return definition;
-					}
-
-					if ( condition.HasMember("comparison") )
-					{
-						if ( !condition["comparison"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.conditionComparison =
-							normalizeCustomDialogueID(
-								condition["comparison"].GetString()
-							);
-					}
-
-					if ( choice.conditionComparison != "equals"
-						&& choice.conditionComparison != "not_equals"
-						&& choice.conditionComparison != "at_least"
-						&& choice.conditionComparison != "at_most" )
-					{
-						return definition;
-					}
-				}
+                        if ( choice.conditionType.empty() )
+                        {
+                            choice.conditionType = parsedCondition.conditionType;
+                            choice.conditionItem = parsedCondition.conditionItem;
+                            choice.conditionItemCount = parsedCondition.conditionItemCount;
+                            choice.conditionQuestID = parsedCondition.conditionQuestID;
+                            choice.conditionQuestStage = parsedCondition.conditionQuestStage;
+                            choice.conditionStoryID = parsedCondition.conditionStoryID;
+                            choice.conditionStoryValue = parsedCondition.conditionStoryValue;
+                            choice.conditionFlagValue = parsedCondition.conditionFlagValue;
+                            choice.conditionGoldAmount = parsedCondition.conditionGoldAmount;
+                            choice.conditionComparison = parsedCondition.conditionComparison;
+                            choice.conditionObjectiveID = parsedCondition.conditionObjectiveID;
+                        }
+                        else
+                        {
+                            choice.additionalConditions.push_back(parsedCondition);
+                        }
+                    }
+                }
 
 				if ( choiceValue.HasMember("action") )
 				{
@@ -2479,6 +2504,29 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						}
 						choice.resetQuest =
 							choiceAction["quest_reset"].GetBool();
+					}
+
+					if ( choiceAction.HasMember("set_power") )
+					{
+						const rapidjson::Value& powerAction =
+							choiceAction["set_power"];
+
+						if ( !powerAction.IsObject()
+							|| !powerAction.HasMember("x")
+							|| !powerAction["x"].IsInt()
+							|| !powerAction.HasMember("y")
+							|| !powerAction["y"].IsInt()
+							|| !powerAction.HasMember("powered")
+							|| !powerAction["powered"].IsBool() )
+						{
+							return definition;
+						}
+
+						choice.hasPowerTileAction = true;
+						choice.powerTileX = powerAction["x"].GetInt();
+						choice.powerTileY = powerAction["y"].GetInt();
+						choice.powerTileEnabled =
+							powerAction["powered"].GetBool();
 					}
 
 					if ( choiceAction.HasMember("recruit_npc") )
@@ -3408,6 +3456,229 @@ static bool preloadCustomDialogueQuestManifest()
     return true;
 }
 
+static std::unordered_map<int, std::unordered_set<Uint32>>
+    customDialogueCreditedDefeatUIDs;
+
+/*
+ * Defeat credit must exist independently of whether a quest definition has
+ * already been loaded. A player can kill an authored target before speaking
+ * to the quest NPC, so retain the session count by Defeat ID and apply it as
+ * soon as the matching dialogue/quest definition becomes available.
+ */
+static std::unordered_map<int, Sint32>
+    customDialoguePendingDefeatCounts[MAXPLAYERS];
+
+void customDialogueResetRuntimeState()
+{
+    customDialogueCreditedDefeatUIDs.clear();
+
+    for ( int player = 0; player < MAXPLAYERS; ++player )
+    {
+        customDialoguePendingDefeatCounts[player].clear();
+        pendingCustomDialogueChoices[player] =
+            PendingCustomDialogueChoiceState{};
+    }
+}
+
+static Sint32 customDialogueCountAuthoredDefeatTargets(
+    const int defeatID
+)
+{
+    if ( defeatID <= 0 )
+    {
+        return 0;
+    }
+
+    std::unordered_set<Uint32> authoredUIDs;
+
+    const auto credited =
+        customDialogueCreditedDefeatUIDs.find(defeatID);
+
+    if ( credited != customDialogueCreditedDefeatUIDs.end() )
+    {
+        authoredUIDs.insert(
+            credited->second.begin(),
+            credited->second.end()
+        );
+    }
+
+    if ( map.creatures )
+    {
+        for ( node_t* node = map.creatures->first;
+            node != nullptr;
+            node = node->next )
+        {
+            Entity* entity = static_cast<Entity*>(node->element);
+            if ( !entity || entity->behavior != &actMonster )
+            {
+                continue;
+            }
+
+            Stat* stats = entity->getStats();
+            if ( stats
+                && stats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID]
+                    == defeatID )
+            {
+                authoredUIDs.insert(entity->getUID());
+            }
+        }
+    }
+
+    return static_cast<Sint32>(authoredUIDs.size());
+}
+
+void customDialogueCreditAuthoredDefeat(
+    const int defeatID,
+    const Uint32 defeatedUID
+)
+{
+    if ( multiplayer == CLIENT
+        || defeatID <= 0
+        || defeatedUID == 0 )
+    {
+        return;
+    }
+
+    std::unordered_set<Uint32>& creditedDefeatedUIDs =
+        customDialogueCreditedDefeatUIDs[defeatID];
+
+    if ( creditedDefeatedUIDs.find(defeatedUID)
+        != creditedDefeatedUIDs.end() )
+    {
+        return;
+    }
+
+    creditedDefeatedUIDs.insert(defeatedUID);
+
+    /*
+     * Record the kill first, before attempting to find a loaded quest. This
+     * is what allows a later conversation/quest acceptance to inherit kills
+     * that happened beforehand.
+     */
+    for ( int player = 0; player < MAXPLAYERS; ++player )
+    {
+        if ( client_disconnected[player] )
+        {
+            continue;
+        }
+
+        ++customDialoguePendingDefeatCounts[player][defeatID];
+    }
+
+    preloadCustomDialogueQuestManifest();
+
+    for ( const auto& definitionPair :
+        customDialogueDefinitionCache )
+    {
+        const CustomDialogueDefinition& definition =
+            definitionPair.second;
+
+        if ( !definition.loaded
+            || !definition.valid
+            || definition.questID.empty() )
+        {
+            continue;
+        }
+
+        for ( int player = 0;
+            player < MAXPLAYERS;
+            ++player )
+        {
+            if ( client_disconnected[player] )
+            {
+                continue;
+            }
+
+            for ( const CustomDialogueQuestObjective& objective :
+                definition.questObjectives )
+            {
+                if ( objective.defeatID != defeatID
+                    || persistentStoryQuestObjectiveIsCompleted(
+                        player,
+                        definition.questID,
+                        objective.id
+                    ) )
+                {
+                    continue;
+                }
+
+                const std::string progressVariable =
+                    objective.progressVariable.empty()
+                        ? "defeat_" + objective.id
+                        : objective.progressVariable;
+
+                const Sint32 authoredCount =
+                    customDialogueCountAuthoredDefeatTargets(defeatID);
+
+                const Sint32 target =
+                    std::max<Sint32>(
+                        std::max<Sint32>(1, objective.target),
+                        authoredCount
+                    );
+
+                persistentStorySetQuestVariable(
+                    player,
+                    definition.questID,
+                    progressVariable + "_target",
+                    target
+                );
+
+                const Sint32 previous =
+                    persistentStoryGetQuestVariable(
+                        player,
+                        definition.questID,
+                        progressVariable,
+                        0
+                    );
+
+                const auto pendingDefeat =
+                    customDialoguePendingDefeatCounts[player].find(
+                        defeatID
+                    );
+
+                const Sint32 pendingCount =
+                    pendingDefeat
+                        == customDialoguePendingDefeatCounts[player].end()
+                        ? 0
+                        : pendingDefeat->second;
+
+                const Sint32 current =
+                    std::min<Sint32>(
+                        target,
+                        std::max<Sint32>(previous, pendingCount)
+                    );
+
+                persistentStorySetQuestVariable(
+                    player,
+                    definition.questID,
+                    progressVariable,
+                    current
+                );
+
+                if ( current >= target )
+                {
+                    persistentStorySetQuestObjectiveCompleted(
+                        player,
+                        definition.questID,
+                        objective.id,
+                        true
+                    );
+                }
+
+                printlog(
+                    "[Custom Dialogue] Defeat ID %d advanced quest '%s' objective '%s' for player %d (%d/%d).",
+                    defeatID,
+                    definition.questID.c_str(),
+                    objective.id.c_str(),
+                    player,
+                    current,
+                    target
+                );
+            }
+        }
+    }
+}
+
 bool getCustomDialogueQuestJournalEntries(
     const int player,
     std::vector<CustomDialogueQuestJournalEntry>& entries
@@ -3626,8 +3897,33 @@ bool getCustomDialogueQuestJournalEntries(
             journalObjective.optional =
                 objective.optional;
 
+            const std::string progressVariable =
+                objective.progressVariable.empty()
+                    ? "defeat_" + objective.id
+                    : objective.progressVariable;
+
+            const Sint32 liveAuthoredCount =
+                objective.defeatID > 0
+                    ? customDialogueCountAuthoredDefeatTargets(
+                        objective.defeatID
+                    )
+                    : 0;
+
+            const Sint32 savedTarget =
+                objective.defeatID > 0
+                    ? persistentStoryGetQuestVariable(
+                        player,
+                        definition.questID,
+                        progressVariable + "_target",
+                        0
+                    )
+                    : 0;
+
             journalObjective.target =
-                std::max<Sint32>(1, objective.target);
+                std::max<Sint32>(
+                    std::max<Sint32>(1, objective.target),
+                    std::max<Sint32>(liveAuthoredCount, savedTarget)
+                );
 
             const bool explicitlyCompleted =
                 persistentStoryQuestObjectiveIsCompleted(
@@ -3637,14 +3933,21 @@ bool getCustomDialogueQuestJournalEntries(
                 );
 
             journalObjective.current =
-                objective.progressVariable.empty()
-                    ? (explicitlyCompleted ? 1 : 0)
-                    : persistentStoryGetQuestVariable(
+                objective.defeatID > 0
+                    ? persistentStoryGetQuestVariable(
                         player,
                         definition.questID,
-                        objective.progressVariable,
+                        progressVariable,
                         0
-                    );
+                    )
+                    : (objective.progressVariable.empty()
+                        ? (explicitlyCompleted ? 1 : 0)
+                        : persistentStoryGetQuestVariable(
+                            player,
+                            definition.questID,
+                            objective.progressVariable,
+                            0
+                        ));
 
             journalObjective.current =
                 std::max<Sint32>(
@@ -3656,7 +3959,8 @@ bool getCustomDialogueQuestJournalEntries(
                 );
 
             journalObjective.hasCounter =
-                !objective.progressVariable.empty()
+                objective.defeatID > 0
+                || !objective.progressVariable.empty()
                 || journalObjective.target > 1;
 
             journalObjective.markerMap = objective.markerMap;
@@ -12671,8 +12975,12 @@ timeToGoAgain:
 					my->yaw -= 2 * PI;
 				}
 
-				// abandon conversation if distance is too great
-				if ( sqrt( pow(my->x - target->x, 2) + pow(my->y - target->y, 2) ) > TOUCHRANGE )
+				// Custom/NPC conversations end once the player moves more than one map tile away.
+				const double talkDistanceX = my->x - target->x;
+				const double talkDistanceY = my->y - target->y;
+				constexpr double maximumTalkDistance = 32.0;
+				if ( talkDistanceX * talkDistanceX + talkDistanceY * talkDistanceY
+					> maximumTalkDistance * maximumTalkDistance )
 				{
 					my->monsterState = MONSTER_STATE_WAIT;
 					my->monsterTarget = 0;
@@ -12695,7 +13003,6 @@ timeToGoAgain:
 						net_packet->len = 8;
 						sendPacketSafe(net_sock, -1, net_packet, player - 1);
 					}
-					monsterMoveAside(my, target);
 				}
 			}
 			else
@@ -14469,7 +14776,9 @@ timeToGoAgain:
 			serverUpdateEntitySkill(my, 1); // update monsterTarget for player leaders.
 		}
 
-		if ( previousMonsterState == MONSTER_STATE_TALK && (myStats->type == SHOPKEEPER || my->monsterCanTradeWith(-1)) )
+		if ( previousMonsterState == MONSTER_STATE_TALK
+			&& my->monsterAllyIndex < 0
+			&& (myStats->type == SHOPKEEPER || my->monsterCanTradeWith(-1)) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -16451,6 +16760,23 @@ bool handleCustomMonsterDialogue(
         return false;
     }
 
+    /*
+     * Recruited followers must no longer enter the authored NPC dialogue
+     * path. Keeping the dialogue active on an ally can repeatedly reclaim
+     * GUI focus and immediately close menus such as the inventory.
+     */
+    if ( my->monsterAllyIndex >= 0
+        || (my->persistentID > 0
+            && persistentStoryGetNPCFlag(
+                monsterclicked,
+                map.filename[0] ? map.filename : map.name,
+                my->persistentID,
+                "recruited"
+            )) )
+    {
+        return false;
+    }
+
     if ( myStats->customDialogueID[0]
         == '\0' )
     {
@@ -16857,6 +17183,26 @@ bool handleCustomMonsterDialogue(
 
 	if ( !node.choices.empty() )
 	{
+		/*
+		 * Freeze only the NPC while the player is choosing a response. The player
+		 * keeps normal movement control. MONSTER_STATE_TALK already keeps the NPC
+		 * stationary and turns it toward the current player.
+		 */
+		if ( multiplayer != CLIENT )
+		{
+			my->monsterState = MONSTER_STATE_TALK;
+			my->monsterTarget = players[monsterclicked]->entity->getUID();
+			my->monsterTargetX = players[monsterclicked]->entity->x;
+			my->monsterTargetY = players[monsterclicked]->entity->y;
+			MONSTER_VELX = 0;
+			MONSTER_VELY = 0;
+			if ( multiplayer == SERVER )
+			{
+				serverUpdateEntitySkill(my, 0);
+				serverUpdateEntitySkill(my, 1);
+			}
+		}
+
 		std::vector<CustomDialogueChoice> availableChoices;
 		std::vector<std::string> choiceTexts;
 
@@ -16942,6 +17288,24 @@ bool handleCustomMonsterDialogue(
 			}
 
 			return true;
+		}
+	}
+
+	/*
+	 * A node without an available choice is not an active held conversation.
+	 * Release the NPC from TALK so its normal AI can move again.
+	 */
+	if ( multiplayer != CLIENT
+		&& my->monsterState == MONSTER_STATE_TALK )
+	{
+		my->monsterState = MONSTER_STATE_WAIT;
+		my->monsterTarget = 0;
+		my->monsterTargetX = my->x;
+		my->monsterTargetY = my->y;
+		if ( multiplayer == SERVER )
+		{
+			serverUpdateEntitySkill(my, 0);
+			serverUpdateEntitySkill(my, 1);
 		}
 	}
 
@@ -17502,6 +17866,90 @@ bool handleCustomMonsterDialogueChoice(
 				definition->questID,
 				true
 			);
+
+			/*
+			 * Reconcile stored Defeat ID credit after acceptance. A fully
+			 * completed pre-quest objective can otherwise be left at zero when
+			 * the quest state is first created by the acceptance action.
+			 */
+			for ( const CustomDialogueQuestObjective& objective :
+				definition->questObjectives )
+			{
+				if ( objective.defeatID <= 0 )
+				{
+					continue;
+				}
+
+				const auto pendingDefeat =
+					customDialoguePendingDefeatCounts[player].find(
+						objective.defeatID
+					);
+
+				const Sint32 pendingCount =
+					pendingDefeat
+						== customDialoguePendingDefeatCounts[player].end()
+						? 0
+						: pendingDefeat->second;
+
+				const std::string progressVariable =
+					objective.progressVariable.empty()
+						? "defeat_" + objective.id
+						: objective.progressVariable;
+
+				const Sint32 authoredCount =
+					customDialogueCountAuthoredDefeatTargets(
+						objective.defeatID
+					);
+
+				const Sint32 savedTarget =
+					persistentStoryGetQuestVariable(
+						player,
+						definition->questID,
+						progressVariable + "_target",
+						0
+					);
+
+				const Sint32 target =
+					std::max<Sint32>(
+						std::max<Sint32>(1, objective.target),
+						std::max<Sint32>(authoredCount, savedTarget)
+					);
+
+				persistentStorySetQuestVariable(
+					player,
+					definition->questID,
+					progressVariable + "_target",
+					target
+				);
+
+				const Sint32 previous =
+					persistentStoryGetQuestVariable(
+						player,
+						definition->questID,
+						progressVariable,
+						0
+					);
+
+				const Sint32 current =
+					std::min<Sint32>(
+						target,
+						std::max<Sint32>(previous, pendingCount)
+					);
+
+				persistentStorySetQuestVariable(
+					player,
+					definition->questID,
+					progressVariable,
+					current
+				);
+
+				persistentStorySetQuestObjectiveCompleted(
+					player,
+					definition->questID,
+					objective.id,
+					current >= target
+				);
+			}
 		}
 
 		if ( choice.questStage >= 0 )
@@ -17530,6 +17978,24 @@ bool handleCustomMonsterDialogueChoice(
 				true
 			);
 		}
+	}
+
+	if ( choice.hasPowerTileAction )
+	{
+		const int affected = applyCustomDialoguePowerTileAction(
+			choice.powerTileX,
+			choice.powerTileY,
+			choice.powerTileEnabled
+		);
+
+		printlog(
+			"[Custom Dialogue] %s tile %d,%d from choice '%s'; affected %d entity/entities.",
+			choice.powerTileEnabled ? "Powered" : "Unpowered",
+			choice.powerTileX,
+			choice.powerTileY,
+			choice.id.c_str(),
+			affected
+		);
 	}
 
 	const std::string sourceMap =
@@ -17572,6 +18038,13 @@ bool handleCustomMonsterDialogueChoice(
 			true
 		);
 
+		/*
+		 * The NPC is now a follower, so remove its authored dialogue from the
+		 * live Stat instance. The persistent recruited flag above provides the
+		 * durable guard when the NPC is reconstructed later.
+		 */
+		npc->getStats()->customDialogueID[0] = '\0';
+
 		messagePlayer(
 			player,
 			MESSAGE_INTERACTION,
@@ -17580,6 +18053,47 @@ bool handleCustomMonsterDialogueChoice(
 				? npc->getStats()->name
 				: "The NPC"
 		);
+
+		/*
+		 * Recruitment ends the conversation completely. In particular, clear the
+		 * TALK state and target that otherwise keep running the conversation's
+		 * abandonment/GUI-close path after the NPC has become a follower. Do not
+		 * call closeAllGUIs() here: the dialogue tooltip already deactivates when
+		 * the choice is submitted, and forcing another global GUI close can fight
+		 * with the next inventory-open input.
+		 */
+		/*
+		 * forceFollower() has already established the follower's correct ally
+		 * target and AI state. Do not overwrite those values with the old TALK
+		 * cleanup, because doing so can trigger the generic shop/dialogue GUI
+		 * shutdown path and immediately close a newly opened inventory.
+		 */
+		npc->vel_x = 0;
+		npc->vel_y = 0;
+
+		if ( multiplayer == SERVER )
+		{
+			serverUpdateEntitySkill(npc, 0);
+			serverUpdateEntitySkill(npc, 1);
+		}
+
+		pendingCustomDialogueChoices[player] =
+			PendingCustomDialogueChoiceState{};
+
+		if ( players[player] )
+		{
+			players[player]->worldUI.worldTooltipDialogue
+				.playerDialogue.deactivate();
+		}
+
+		/*
+		 * Consume the interaction that performed the recruitment. Otherwise the
+		 * same selected NPC can remain active for another tick and immediately
+		 * run follower interaction/UI code, which closes a newly opened inventory.
+		 */
+		selectedEntity[player] = nullptr;
+		client_selected[player] = nullptr;
+		inrange[player] = false;
 	}
 
 	if ( choice.removeGold > 0
@@ -17587,6 +18101,16 @@ bool handleCustomMonsterDialogueChoice(
 	{
 		stats[player]->GOLD -=
 			choice.removeGold;
+
+		/*
+		 * Dialogue payments are real transfers. Keep the paid gold on the
+		 * receiving NPC instead of deleting it from the world economy.
+		 */
+		if ( npc && npc->getStats() )
+		{
+			npc->getStats()->GOLD +=
+				choice.removeGold;
+		}
 
 		messagePlayer(
 			player,
@@ -17633,6 +18157,24 @@ bool handleCustomMonsterDialogueChoice(
 	if ( removeItemPointer
 		&& choice.removeItemCount > 0 )
 	{
+		/*
+		 * Copy the exact paid item data into the NPC inventory before the
+		 * player's stack is consumed. This preserves status, beatitude,
+		 * appearance, identification state, and the authored quantity.
+		 */
+		if ( npc && npc->getStats() )
+		{
+			newItem(
+				removeItemPointer->type,
+				removeItemPointer->status,
+				removeItemPointer->beatitude,
+				choice.removeItemCount,
+				removeItemPointer->appearance,
+				removeItemPointer->identified,
+				&npc->getStats()->inventory
+			);
+		}
+
 		consumeCustomDialoguePlayerItem(
 			player,
 			removeItemPointer,
