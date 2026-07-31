@@ -32,6 +32,12 @@
 
 #include <cassert>
 #include <functional>
+#ifdef WINDOWS
+#include <conio.h>
+#else
+#include <sys/select.h>
+#include <unistd.h>
+#endif
 #ifdef STEAMWORKS
 #include <nfd.h>
 #endif
@@ -24107,6 +24113,240 @@ failed:
 		createLobby(LobbyType::LobbyLAN);
 #endif
 	}
+
+
+    bool headlessStartDedicatedServer()
+    {
+        static bool attempted = false;
+        if ( attempted )
+        {
+            return multiplayer == SERVER && net_sock != nullptr;
+        }
+        attempted = true;
+
+        if ( !headless )
+        {
+            printlog("Headless server startup rejected: --headless was not supplied.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_LOOPBACK )
+        {
+            printlog("Headless server is idle: select --LAN, --private, or --public to open a listener.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_PUBLIC )
+        {
+            printlog("Headless public hosting rejected: public listing/authentication is not implemented safely yet.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_PRIVATE && !headlessPasswordRequested )
+        {
+            printlog("Headless private hosting rejected: --private requires --password=<value>.");
+            return false;
+        }
+        if ( headlessPasswordRequested )
+        {
+            printlog("Headless password hosting rejected: password challenge-response is not implemented yet.");
+            return false;
+        }
+        if ( headlessLateJoinRequested )
+        {
+            printlog("Headless startup rejected: --late-join is unavailable until full world-state snapshots are implemented.");
+            return false;
+        }
+
+        closeNetworkInterfaces();
+        randomizeHostname();
+        setHostname(headlessServerName);
+        directConnect = true;
+        portnumber = headlessServerPort;
+
+        const Uint16 port = headlessServerPort;
+        if ( SDLNet_ResolveHost(&net_server, nullptr, port) == -1 )
+        {
+            printlog("Headless LAN startup failed: could not resolve local endpoint on port %u: %s", port, SDLNet_GetError());
+            return false;
+        }
+        net_sock = SDLNet_UDP_Open(port);
+        if ( !net_sock )
+        {
+            printlog("Headless LAN startup failed: could not open UDP port %u: %s", port, SDLNet_GetError());
+            return false;
+        }
+
+        createLobby(LobbyType::LobbyLAN);
+        printlog("HEADLESS SERVER LISTENING: UDP 0.0.0.0:%u", port);
+        printlog("HEADLESS SERVER MODE: LAN direct-connect lobby; clients may join before game start.");
+        printlog("HEADLESS SERVER NAME: %s", headlessServerName);
+
+        char statusPath[PATH_MAX];
+        snprintf(statusPath, sizeof(statusPath), "%s/headless_server_status.txt", outputdir);
+        FILE* statusFile = fopen(statusPath, "w");
+        if ( statusFile )
+        {
+            fprintf(statusFile, "Barony Automatia Headless Server Status\n");
+            fprintf(statusFile, "State: listening in pre-game LAN lobby\n");
+            fprintf(statusFile, "Server name: %s\n", headlessServerName);
+            fprintf(statusFile, "Visibility: LAN direct-connect\n");
+            fprintf(statusFile, "Listening endpoint: 0.0.0.0:%u UDP\n", port);
+            fprintf(statusFile, "Autostart: %s\n", headlessAutoStart ? "enabled" : "disabled");
+            fprintf(statusFile, "Late join after game start: unavailable\n");
+            fclose(statusFile);
+        }
+        return true;
+    }
+
+    static void headlessPrintAdminStatus()
+    {
+        const char* state = multiplayer == SERVER && net_sock ? "listening" : "not listening";
+        printlog("HEADLESS STATUS: %s, UDP port %u, ticks %u.", state, headlessServerPort, ticks);
+        printlog("HEADLESS STATUS: in-progress late join unavailable; password/public modes unavailable.");
+    }
+
+    static void headlessExecuteAdminCommand(const char* command)
+    {
+        if ( !command )
+        {
+            return;
+        }
+
+        if ( !strcmp(command, "help") )
+        {
+            printlog("HEADLESS ADMIN: help | status | start | shutdown");
+        }
+        else if ( !strcmp(command, "status") )
+        {
+            headlessPrintAdminStatus();
+        }
+        else if ( !strcmp(command, "start") )
+        {
+            if ( multiplayer == SERVER && net_sock )
+            {
+                printlog("HEADLESS ADMIN: starting game.");
+                startGame();
+            }
+            else
+            {
+                printlog("HEADLESS ADMIN: cannot start; no active server lobby.");
+            }
+        }
+        else if ( !strcmp(command, "shutdown") )
+        {
+            printlog("HEADLESS ADMIN: graceful shutdown requested.");
+            mainloop = 0;
+        }
+        else if ( command[0] != '\0' )
+        {
+            printlog("HEADLESS ADMIN: unknown command '%s'. Type help.", command);
+        }
+    }
+
+    static void headlessProcessAdminConsole()
+    {
+        static bool announced = false;
+        if ( !announced )
+        {
+            announced = true;
+            printlog("HEADLESS ADMIN: commands are help, status, start, shutdown.");
+        }
+
+#ifdef WINDOWS
+        static char command[256] = {};
+        static size_t length = 0;
+
+        while ( _kbhit() )
+        {
+            const int input = _getch();
+            if ( input == '\r' || input == '\n' )
+            {
+                command[length] = '\0';
+                printlog("> %s", command);
+                headlessExecuteAdminCommand(command);
+                length = 0;
+                command[0] = '\0';
+            }
+            else if ( input == '\b' )
+            {
+                if ( length > 0 )
+                {
+                    --length;
+                    command[length] = '\0';
+                }
+            }
+            else if ( input == 0 || input == 224 )
+            {
+                if ( _kbhit() )
+                {
+                    (void)_getch();
+                }
+            }
+            else if ( input >= 32 && input <= 126 && length + 1 < sizeof(command) )
+            {
+                command[length++] = static_cast<char>(input);
+                command[length] = '\0';
+            }
+        }
+#else
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(STDIN_FILENO, &readSet);
+        timeval timeout{};
+        const int ready = select(STDIN_FILENO + 1, &readSet, nullptr, nullptr, &timeout);
+        if ( ready <= 0 || !FD_ISSET(STDIN_FILENO, &readSet) )
+        {
+            return;
+        }
+
+        char command[256] = {};
+        if ( !fgets(command, sizeof(command), stdin) )
+        {
+            return;
+        }
+        size_t length = strlen(command);
+        while ( length > 0 && (command[length - 1] == '\n' || command[length - 1] == '\r') )
+        {
+            command[--length] = '\0';
+        }
+        headlessExecuteAdminCommand(command);
+#endif
+    }
+
+    void headlessDedicatedServerTick()
+    {
+        static bool initialized = false;
+        static Uint32 listeningSince = 0;
+        static bool autostarted = false;
+
+        if ( headless )
+        {
+            headlessProcessAdminConsole();
+        }
+
+        if ( !headless || initialized )
+        {
+            if ( initialized && headlessAutoStart && !autostarted && multiplayer == SERVER && net_sock )
+            {
+                const Uint32 delayTicks = headlessAutoStartDelaySeconds * TICKS_PER_SECOND;
+                if ( ticks - listeningSince >= delayTicks )
+                {
+                    autostarted = true;
+                    printlog("HEADLESS SERVER: autostarting game after %u seconds.", headlessAutoStartDelaySeconds);
+                    startGame();
+                }
+            }
+            return;
+        }
+        if ( !main_menu_frame )
+        {
+            return;
+        }
+
+        initialized = true;
+        if ( headlessStartDedicatedServer() )
+        {
+            listeningSince = ticks;
+        }
+    }
 
 	static void createLocalOrNetworkMenu() {
 		allSettings.classic_mode_enabled = svFlags & SV_FLAG_CLASSIC;

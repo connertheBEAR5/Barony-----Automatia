@@ -18,6 +18,7 @@
 #include "input.hpp"
 #include "ui/Frame.hpp"
 #include "ui/Field.hpp"
+#include "world_instance.hpp"
 
 
 //Splitscreen support stuff.
@@ -674,6 +675,12 @@ public:
 	SplitScreenTypes splitScreenType = SPLITSCREEN_DEFAULT;
 	bool bControlEnabled = true; // disabled if dead waiting for gameover prompt etc
 	bool was_connected_to_game = false;
+
+    // DIVERGENT-1A: Stable location identity independent of the global loaded map.
+    WorldInstanceIdentity worldInstance;
+    bool setWorldInstance(const std::string& mapFile, const std::string& instanceId);
+    bool sharesWorldInstanceWith(const Player& other) const;
+
 	Player(int playernum = 0, bool local_host = true);
 	~Player();
 

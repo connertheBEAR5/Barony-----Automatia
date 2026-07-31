@@ -1,22 +1,35 @@
-# HEADLESS-1A Dedicated Server Startup Skeleton
+HEADLESS CROSS-PLATFORM COMPLETION PACKAGE
+==========================================
 
-Install into the maindev worktree root:
+Install from the maindev worktree:
 
-```bash
-cd ~/maindev
-unzip -o ~/Downloads/HEADLESS-1A_dedicated_server_startup_skeleton.zip -d ~/maindev
-```
+Linux:
+  cd ~/maindev
+  unzip -o ~/Downloads/HEADLESS_CROSS_PLATFORM_completion.zip -d ~/maindev
 
-Launch the first-stage headless mode with:
+Windows PowerShell example:
+  Set-Location C:\path\to\maindev
+  Expand-Archive -Force "$HOME\Downloads\HEADLESS_CROSS_PLATFORM_completion.zip" .
 
-```bash
-./barony --headless
-```
+Launch a LAN server:
 
-Existing map and data arguments can be combined with it, for example:
+Linux:
+  ./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-```bash
-./barony --headless -map=start
-```
+Windows Command Prompt or PowerShell:
+  .\barony.exe --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-This first stage uses a hidden OpenGL window/context for compatibility with existing resource loading. It disables visible presentation, sound initialization, controller/haptic initialization, controller mapping loading, and splash music. It does not yet automatically create and configure a multiplayer server lobby.
+Optional delayed startup:
+  --autostart=30
+
+Terminal commands on Linux and Windows:
+  help
+  status
+  start
+  shutdown
+
+Windows may display a Microsoft Defender Firewall prompt the first time the UDP listener opens. Permit Private networks for LAN use. Do not permit Public networks unless you intentionally understand and accept the exposure.
+
+CURRENT SECURITY BOUNDARY
+-------------------------
+Plain --headless opens no listener. --LAN explicitly opens the existing direct-connect UDP lobby. Public listing, password authentication, and in-progress late joining remain fail-closed because the required authentication and full-state snapshot protocols are not yet implemented.

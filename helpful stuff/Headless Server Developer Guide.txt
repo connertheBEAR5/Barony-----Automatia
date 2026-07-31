@@ -1,250 +1,120 @@
 BARONY AUTOMATIA HEADLESS SERVER DEVELOPER GUIDE
 ================================================
 
-Purpose
--------
+IMPLEMENTED LAUNCH MODES
 
-This file records the intended architecture, command-line interface, security
-rules, implementation order, testing requirements, and known limitations for
-the Barony Automatia dedicated/headless server project.
+Safe idle mode:
+  ./barony --headless
 
-Current stage
--------------
+This suppresses the visible window, sound, and controller initialization. It does not open a network listener.
 
-HEADLESS-1B provides:
+LAN lobby:
+  ./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-- --headless startup detection.
-- Hidden-window compatibility startup.
-- Audio and controller suppression.
-- Dedicated-server option parsing.
-- Explicit visibility and endpoint logging.
-- A human-readable status file.
-- Safe loopback-only defaults.
+This opens the existing Barony direct-connect UDP lobby on 0.0.0.0:<port>. Clients may join before the game begins.
 
-HEADLESS-1B does not yet create or listen on a network socket.
+Autostart immediately:
+  ./barony --headless --LAN --autostart
 
-Command-line interface
-----------------------
+Autostart after a delay:
+  ./barony --headless --LAN --autostart=30
 
---headless
-    Enables dedicated-server startup behavior.
+The delay is in seconds. Without --autostart, the server remains in the pre-game lobby.
 
---LAN or --lan
-    Requests direct LAN hosting.
-    Default requested bind address becomes 0.0.0.0.
+SECURITY BEHAVIOR
 
---private
-    Requests private/unlisted online hosting.
+Plain --headless fails closed and opens no socket.
+--LAN explicitly opens the direct-connect UDP listener.
+--public is rejected because public listing and platform authentication are not yet implemented safely.
+--private requires a password, and password hosting is rejected until challenge-response authentication exists.
+The plaintext password is never written to logs or the status file.
+--late-join records intent, but joining a game already in progress is not implemented. Joining the pre-game lobby works.
 
---public
-    Requests public/listed online hosting.
+STATUS
 
---password=<value>
-    Requests password protection.
-    Never print the password in logs, status files, lobby metadata, crash logs,
-    or ordinary console output.
+Terminal output clearly prints whether a listener opened and the actual UDP port.
+A status file is written to ~/.barony/headless_server_status.txt.
 
---late-join
-    Requests support for clients joining after gameplay has begun.
+CURRENT ARCHITECTURAL LIMITATIONS
 
---port=<1-65535>
-    Sets the requested game port.
+The process still creates a hidden OpenGL context because game resource initialization is not fully separated from rendering.
+There is no stdin administrative console yet.
+There is no public lobby registration, password challenge-response, in-progress late join, or crash-safe dedicated save restart yet.
+These are not represented as complete or secure.
 
---bind=<address>
-    Sets the requested local bind address.
+DEVELOPER REQUIREMENTS
 
---server-name=<name>
-    Sets the server display name.
+Never expose a port unless an explicit hosting argument was supplied.
+Never claim password protection unless the server validates a challenge before accepting JOIN.
+Never log plaintext passwords.
+Late join must synchronize map identity, entities, players, mechanisms, quests, followers, containers, shops, and S.A.M. stable IDs before enabling player control.
+All custom items must use stable_id as authoritative identity. Runtime item IDs are session-local mappings.
 
-Safe defaults
--------------
+HEADLESS-2 ADMINISTRATION AND RELIABILITY
+=========================================
+The combined follow-up package adds a POSIX terminal administration console.
+Commands are entered in the same terminal that launched the server:
 
-Plain ./barony --headless must not silently imply public exposure.
+  help
+  status
+  start
+  shutdown
 
-Default configuration:
+"start" begins the game from the waiting LAN lobby. "shutdown" exits through
+the normal main-loop cleanup path. The server never accepts --late-join,
+--public, or password hosting as if those features were complete.
 
-- Visibility: loopback-only.
-- Bind address: 127.0.0.1.
-- Port: 57165.
-- Password: disabled.
-- Late join: disabled.
+FAIL-CLOSED FEATURE BOUNDARIES
+==============================
+The following options remain intentionally unavailable:
 
-The process must clearly log whether it has opened a socket, which address and
-port it is using, whether discovery/listing is enabled, and whether password
-checks are active.
+* Public listing: requires Steam/EOS/platform lobby registration and identity.
+* Password protection: requires a nonce-based authenticated handshake and rate
+  limiting. A plaintext command-line password must never be sent in an ordinary
+  gameplay packet.
+* In-progress late join: requires a versioned full-state snapshot containing
+  maps, entities, players, mechanisms, quests, followers, shops, containers,
+  and S.A.M. stable IDs.
+* True renderless operation: simulation data loading is still coupled to an
+  OpenGL-backed resource startup path. The current server uses a hidden context.
+* Automatic save/restart recovery: belongs to the final disk-backed world-save
+  project so it can use authoritative stable IDs and versioned migrations.
 
-Security requirements
----------------------
+A developer must not remove these rejections until the underlying mechanism is
+implemented and tested. Logging an option is not equivalent to enforcing it.
 
-1. Never claim the server is protected until password verification is actually
-   enforced server-side.
-2. Never log plaintext passwords.
-3. Do not trust a client-supplied player slot, item ID, stable_id, quest state,
-   map state, or permission claim.
-4. Password checks must use a challenge/response or other non-plaintext network
-   design before public deployment.
-5. Add connection attempt rate limiting before public hosting.
-6. Add maximum packet lengths and bounds validation to every new packet.
-7. Reject unsupported protocol versions clearly.
-8. Reject mismatched S.A.M. catalogs before custom items synchronize.
-9. Public listing must be opt-in.
-10. Administrative commands must be authenticated and separated from ordinary
-    player chat or console commands.
-11. Shutdown must save safely or clearly state that persistence is unavailable.
-12. Status files must not include secrets.
+CROSS-PLATFORM CONSOLE SUPPORT
+==============================
 
-Recommended implementation stages
----------------------------------
+The headless administrator console supports both Linux/POSIX and Windows builds.
 
-HEADLESS-1C: Actual LAN listener and server startup
+Linux/POSIX uses select() on standard input so the game loop is never blocked waiting for a command.
 
-- Initialize direct networking without menu interaction.
-- Set multiplayer = SERVER safely.
-- Allocate server client slots and packets.
-- Bind to the requested address and port.
-- Print LISTENING only after bind succeeds.
-- Fail closed when bind fails.
-- Keep player slot 0 handling explicit; do not assume a local graphical player.
+Windows uses _kbhit() and _getch() from conio.h. Input is accumulated without blocking the simulation. Enter submits a command, Backspace edits the current command, and extended keyboard codes are ignored safely.
 
-HEADLESS-1D: Server lifecycle and administration
+The shared command dispatcher implements:
 
-- Console input loop or safe command channel.
-- status, players, kick, save, shutdown, say, map, and help commands.
-- Signal handling for graceful shutdown.
-- Periodic status logging without log spam.
-- Exit codes suitable for service managers.
+  help
+  status
+  start
+  shutdown
 
-HEADLESS-1E: Private/public online modes
+Windows launch example:
 
-- Private/unlisted lobby support.
-- Public lobby publication.
-- Server name, tags, version, map, player count, and mod fingerprint metadata.
-- Explicit opt-in public visibility.
-- Clear failure handling when Steam/EOS services are unavailable.
+  barony.exe --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-HEADLESS-1F: Password protection
+Windows Firewall notes:
 
-- Server-side verification before assigning a playable slot.
-- Never transmit or store plaintext passwords if avoidable.
-- Rate limiting and temporary lockout for repeated failures.
-- Clear client-facing rejection reason.
-- Password changes should invalidate pending unauthenticated joins.
+- The first listener startup may trigger a Microsoft Defender Firewall prompt.
+- For a LAN-only server, permit the executable on Private networks only.
+- Do not instruct users to disable Windows Firewall.
+- UDP port forwarding is not needed for machines on the same LAN.
+- Internet hosting requires router/firewall configuration and is outside the security guarantees of the current LAN-only implementation.
 
-HEADLESS-1G: Late joining
+Build portability requirements:
 
-- Join while a map is already active.
-- Full authoritative state snapshot.
-- Player/follower/entity/chest/shop/quest/dialogue synchronization.
-- S.A.M. catalog fingerprint validation before item snapshots.
-- Stable-ID-based custom item reconstruction.
-- Persistent IDs for all synchronized entities.
-- Safe handling while the server changes maps during a join.
-- Reconnect flow for a previously connected player.
-
-HEADLESS-1H: True renderless startup
-
-- Separate simulation data from textures, shaders, framebuffers, and fonts.
-- Remove the hidden OpenGL window requirement.
-- Allow SDL events/timers/networking without SDL video.
-- Keep editor and graphical-client startup unchanged.
-
-HEADLESS-1I: Save/restart integration
-
-- Save world, map, player, follower, quest, dialogue, shop, chest, and dynamic
-  item state.
-- Preserve unknown custom items by stable_id.
-- Recover after controlled restart.
-- Detect incomplete or incompatible saves safely.
-
-Late-join state checklist
--------------------------
-
-A joining client will eventually need, in a deterministic order:
-
-1. Protocol and build version.
-2. Mod/S.A.M. catalog fingerprint.
-3. Server rules and visibility information.
-4. Assigned player slot and permissions.
-5. Current map identity, seed, and transition state.
-6. Tiles and persistent tile modifications.
-7. Entity snapshot with persistent IDs.
-8. Ground items using stable_id.
-9. Chests, shops, followers, NPCs, and equipment.
-10. Mechanism and circuit state.
-11. Per-player and party/global quest state.
-12. Dialogue memory and objective progress.
-13. Time, timers, traps, and other dynamic world state.
-14. A final snapshot sequence number before live packets resume.
-
-A client must not process ordinary live gameplay packets until its authoritative
-snapshot is complete.
-
-Logging requirements
---------------------
-
-At startup, print:
-
-- Headless stage/version.
-- Server name.
-- Requested and actual bind endpoint.
-- Requested and actual visibility.
-- Whether a socket is listening.
-- Whether password enforcement is active.
-- Whether late join is active.
-- S.A.M. fingerprint status.
-- Save slot and map when those features exist.
-
-Do not print:
-
-- Plaintext passwords.
-- Authentication tokens.
-- Private platform credentials.
-- Full personally identifying network information unless required for an
-  administrator-only diagnostic mode.
-
-Testing matrix
---------------
-
-Every networking stage should test:
-
-- Plain --headless safe default.
-- LAN bind success.
-- Port already in use.
-- Invalid port.
-- Invalid bind address.
-- Normal graphical startup without --headless.
-- Vanilla client compatibility where intended.
-- Matching and mismatching S.A.M. catalogs.
-- Client disconnect and reconnect.
-- Malformed packets.
-- Full player slots.
-- Graceful shutdown.
-- No visible window, audio, controller, or haptic initialization.
-
-Build/style requirements
-------------------------
-
-- C++ source additions must use spaces, not literal tab characters.
-- Do not insert the two-character escape sequence backslash-t as indentation.
-- Do not clamp arbitrary registered S.A.M. item IDs to NUMITEMS - 1.
-- stable_id remains authoritative for custom items.
-- Unknown custom items must not silently become another item.
-- Packages install directly into the worktree root.
-- Do not create backup files during installation.
-- Keep documentation in the helpful stuff folder.
-
-Known architectural risks
--------------------------
-
-- Existing startup initializes graphical resources globally.
-- Some server logic assumes player 0 is a local host.
-- Some lobby setup functions are private/static inside the main-menu code.
-- Save/load and map transitions may assume an interactive menu.
-- Late joining requires a complete state snapshot, not only allowing a JOIN
-  packet after the game starts.
-- Public hosting requires stronger abuse controls than LAN hosting.
-
-Do not mark a feature complete until its log messages and behavior match the
-actual implementation. In particular, configuration parsing alone is not a
-listening server, a stored password is not password protection, and accepting a
-JOIN packet is not complete late joining.
+- Keep Windows-only headers inside WINDOWS preprocessor guards.
+- Keep POSIX-only headers and APIs outside Windows builds.
+- Do not introduce pthread-only, fork(), daemon(), or Unix-domain-socket assumptions into the shared server loop.
+- Use SDL and SDL_net abstractions for networking and timing where practical.
+- Test MinGW and Visual Studio builds separately because their runtime and console behavior can differ.

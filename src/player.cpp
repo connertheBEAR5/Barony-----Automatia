@@ -3223,6 +3223,16 @@ Player::Player(int in_playernum, bool in_local_host) :
 	cam = &cameras[playernum];
 }
 
+bool Player::setWorldInstance(const std::string& mapFile, const std::string& instanceId)
+{
+    return worldInstance.set(mapFile, instanceId);
+}
+
+bool Player::sharesWorldInstanceWith(const Player& other) const
+{
+    return worldInstance.matches(other.worldInstance);
+}
+
 Player::~Player()
 {
 	clearGUIPointers();

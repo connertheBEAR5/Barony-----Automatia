@@ -802,3 +802,61 @@ Important limitations in HEADLESS-1B:
 The terminal log and headless_server_status.txt deliberately state these
 limitations so an administrator can tell that the process is not silently
 listening or exposed.
+
+HEADLESS SERVER LAUNCH OPTIONS
+==============================
+
+Safe non-listening startup:
+  ./barony --headless
+
+LAN direct-connect lobby:
+  ./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+Immediate game start:
+  ./barony --headless --LAN --autostart
+
+Delayed game start:
+  ./barony --headless --LAN --autostart=30
+
+Important limitations: public listing, password authentication, joining after gameplay begins, true renderless startup, and dedicated save/restart recovery are not complete. Unsupported security modes fail closed rather than pretending to protect the server.
+
+HEADLESS ADMIN CONSOLE
+======================
+On Linux/POSIX builds, type these commands into the launch terminal:
+
+  help      Show commands.
+  status    Print listener and feature status.
+  start     Start the game from the waiting LAN lobby.
+  shutdown  Request graceful termination.
+
+Public listing, password authentication, in-progress late joining, true
+renderless startup, and automatic save/restart recovery remain intentionally
+unavailable until their required platform, protocol, snapshot, and save-system
+work is implemented.
+
+HEADLESS SERVER ON WINDOWS
+==========================
+
+Launch a LAN server from Command Prompt or PowerShell:
+
+  barony.exe --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+Start automatically after 30 seconds:
+
+  barony.exe --headless --LAN --autostart=30
+
+The administrator terminal accepts the same commands on Windows and Linux:
+
+  help
+  status
+  start
+  shutdown
+
+On first launch, Windows may ask whether Barony may communicate through Microsoft Defender Firewall. Select Private networks for LAN hosting. Public network permission is not required for normal LAN use.
+
+DIVERGENT PATHS / LATE JOIN FOUNDATION
+--------------------------------------
+DIVERGENT-1A adds validated per-player map-instance identity. Every player now
+has a map filename, instance ID, and revision counter. New players default to
+start.lmp#world. Multi-map simulation and late joining are not yet enabled;
+see "Divergent Paths and Late Join Developer Guide.txt" for the required order.

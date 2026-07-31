@@ -18024,6 +18024,20 @@ int main(int argc, char** argv)
                     {
                         headlessLateJoinRequested = true;
                     }
+                    else if ( !strcmp(argv[c], "--autostart") )
+                    {
+                        headlessAutoStart = true;
+                        headlessAutoStartDelaySeconds = 0;
+                    }
+                    else if ( !strncmp(argv[c], "--autostart=", 12) )
+                    {
+                        const int delay = atoi(argv[c] + 12);
+                        if ( delay >= 0 )
+                        {
+                            headlessAutoStart = true;
+                            headlessAutoStartDelaySeconds = static_cast<Uint32>(delay);
+                        }
+                    }
                     else if ( !strncmp(argv[c], "--port=", 7) )
                     {
                         const int requestedPort = atoi(argv[c] + 7);
@@ -18125,8 +18139,8 @@ int main(int argc, char** argv)
             printlog("Requested bind endpoint: %s:%u", headlessBindAddress, headlessServerPort);
             printlog("Password requested: %s", headlessPasswordRequested ? "yes" : "no");
             printlog("Late joining requested: %s", headlessLateJoinRequested ? "yes" : "no");
-            printlog("SECURITY STATUS: no listening socket is opened by HEADLESS-1B yet.");
-            printlog("SECURITY STATUS: password, listing visibility, and late joining are configuration-only until later networking stages.");
+            printlog("SECURITY STATUS: plain --headless opens no socket; explicit hosting mode is required.");
+            printlog("SECURITY STATUS: --LAN opens the existing direct-connect UDP lobby. Public/password modes fail closed until implemented safely.");
             printlog("HEADLESS-1B note: rendering resources are still initialized through a hidden OpenGL context for compatibility.");
 
             char statusPath[PATH_MAX];
@@ -18135,13 +18149,13 @@ int main(int argc, char** argv)
             if ( statusFile )
             {
                 fprintf(statusFile, "Barony Automatia Headless Server Status\n");
-                fprintf(statusFile, "State: startup configuration loaded; network listener not implemented yet\n");
+                fprintf(statusFile, "State: startup configuration loaded; listener opens only for supported explicit hosting modes\n");
                 fprintf(statusFile, "Server name: %s\n", headlessServerName);
                 fprintf(statusFile, "Visibility: %s\n", visibilityName);
                 fprintf(statusFile, "Bind endpoint: %s:%u\n", headlessBindAddress, headlessServerPort);
                 fprintf(statusFile, "Password requested: %s\n", headlessPasswordRequested ? "yes" : "no");
                 fprintf(statusFile, "Late joining requested: %s\n", headlessLateJoinRequested ? "yes" : "no");
-                fprintf(statusFile, "Important: this stage does not open a server socket.\n");
+                fprintf(statusFile, "Important: --LAN opens the direct-connect UDP listener; plain --headless stays idle.\n");
                 fclose(statusFile);
                 printlog("Headless status file: %s", statusPath);
             }
@@ -18376,6 +18390,11 @@ int main(int argc, char** argv)
 					}
 				}
 			}
+
+            if ( headless )
+            {
+                MainMenu::headlessDedicatedServerTick();
+            }
 
 			if ( intro )
 			{

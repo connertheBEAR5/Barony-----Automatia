@@ -927,6 +927,8 @@ extern Uint16 headlessServerPort;
 extern char headlessBindAddress[64];
 extern char headlessServerName[64];
 extern char headlessServerPassword[128];
+extern bool headlessAutoStart;
+extern Uint32 headlessAutoStartDelaySeconds;
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

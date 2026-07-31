@@ -1,0 +1,85 @@
+BARONY AUTOMATIA - DIVERGENT PATHS AND LATE JOIN DEVELOPER GUIDE
+================================================================
+
+CURRENT IMPLEMENTED STAGE
+-------------------------
+DIVERGENT-1A adds a stable world-instance identity to every Player object.
+
+Each identity contains:
+- mapFile, such as start.lmp or village.lmp
+- instanceId, initially world
+- revision, incremented whenever the identity changes
+
+The canonical identity is written as:
+
+    mapFile#instanceId
+
+Examples:
+
+    start.lmp#world
+    village.lmp#world
+    caves.lmp#world
+
+A brand-new player defaults to start.lmp#world.
+
+IMPORTANT LIMITATION
+--------------------
+This stage does not yet simulate several maps at once. The engine still has the
+single global map object. DIVERGENT-1A establishes identity and validation so
+later code can migrate safely without confusing a map filename with a loaded
+map instance.
+
+VALIDATION RULES
+----------------
+- mapFile must be nonempty, no longer than 255 characters, end in .lmp, and
+  must not contain a parent-directory traversal component.
+- instanceId must be 1 through 63 characters.
+- instanceId may contain letters, numbers, hyphen, and underscore.
+- Invalid values must be rejected rather than silently changed.
+- A filename is not enough to determine co-location. Both mapFile and
+  instanceId must match.
+
+REQUIRED DEVELOPMENT ORDER
+--------------------------
+1. DIVERGENT-1A - player map-instance identity foundation. Implemented.
+2. DIVERGENT-1B - packet envelope and per-map recipient filtering.
+3. DIVERGENT-1C - MapInstance runtime container around map, entities, and lists.
+4. DIVERGENT-1D - server transition manager and occupied-map activation.
+5. DIVERGENT-1E - save/unload empty instances and restore on entry.
+6. DIVERGENT-1F - per-player saved location and reconnect placement.
+7. LATEJOIN-1A - connection handshake and catalog validation during gameplay.
+8. LATEJOIN-1B - map-instance snapshot transfer.
+9. LATEJOIN-1C - entity, mechanism, quest, follower, shop, chest, and item sync.
+10. LATEJOIN-1D - new players begin at start.lmp; returning players resume their
+    saved map instance.
+11. HEADLESS-PERSIST - restart recovery and automatic server saves.
+
+NETWORKING INVARIANT
+--------------------
+Map-local packets must eventually be delivered only to players whose complete
+WorldInstanceIdentity matches the packet's source instance.
+
+Packets that may remain global include:
+- server announcements
+- player join and leave notices
+- intentionally global chat
+- party or world quest events explicitly marked global
+
+Packets that must become map-local include:
+- entity creation, movement, and deletion
+- items and combat
+- mechanisms and traps
+- chest and shop state
+- local sounds and effects
+- follower simulation
+
+SAVE-FILE INVARIANT
+-------------------
+Save data must store mapFile and instanceId separately for every player and
+MapInstance. Runtime pointers, entity list addresses, and temporary network IDs
+must never be used as persistent map identity.
+
+S.A.M. INVARIANT
+----------------
+Custom items in snapshots and saves remain authoritative by stable_id. Runtime
+item IDs are only local session mappings.

@@ -535,6 +535,8 @@ Uint16 headlessServerPort = 57165;
 char headlessBindAddress[64] = "127.0.0.1";
 char headlessServerName[64] = "Barony Dedicated Server";
 char headlessServerPassword[128] = "";
+bool headlessAutoStart = false;
+Uint32 headlessAutoStartDelaySeconds = 0;
 
 //Entity *players[4];
 
