@@ -17602,30 +17602,6 @@ static void doConsoleCommands() {
 	Input& input = Input::inputs[clientnum]; // commands - uses local clientnum only
 	const bool controlEnabled = players[clientnum]->bControlEnabled && !movie;
 
-	/*
-	 * Custom dialogue owns Enter while a choice list is active. Do not let the
-	 * normal chat/console-command handler open behind the dialogue. Leave the
-	 * raw Return key untouched so WorldTooltipDialogue can consume it as the
-	 * selected-choice confirmation later in the frame.
-	 */
-	const bool customDialogueChoiceActive =
-		players[clientnum]
-		&& players[clientnum]->worldUI.worldTooltipDialogue
-			.playerDialogue.customChoiceActive;
-
-	if ( customDialogueChoiceActive )
-	{
-		if ( input.consumeBinaryToggle("Chat") )
-		{
-			input.consumeBindingsSharedWithBinding("Chat");
-		}
-		if ( input.consumeBinaryToggle("Console Command") )
-		{
-			input.consumeBindingsSharedWithBinding("Console Command");
-		}
-		return;
-	}
-
 #if defined(NINTENDO) && defined(NINTENDO_DEBUG)
 	// activate console
 	if (input.binaryToggle("ConsoleCommand1") &&
@@ -18030,6 +18006,52 @@ int main(int argc, char** argv)
                         xres = 320;
                         yres = 200;
                     }
+                    else if ( !strcmp(argv[c], "--LAN") || !strcmp(argv[c], "--lan") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_LAN;
+                        strncpy(headlessBindAddress, "0.0.0.0", sizeof(headlessBindAddress) - 1);
+                        headlessBindAddress[sizeof(headlessBindAddress) - 1] = '\0';
+                    }
+                    else if ( !strcmp(argv[c], "--private") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_PRIVATE;
+                    }
+                    else if ( !strcmp(argv[c], "--public") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_PUBLIC;
+                    }
+                    else if ( !strcmp(argv[c], "--late-join") )
+                    {
+                        headlessLateJoinRequested = true;
+                    }
+                    else if ( !strncmp(argv[c], "--port=", 7) )
+                    {
+                        const int requestedPort = atoi(argv[c] + 7);
+                        if ( requestedPort > 0 && requestedPort <= 65535 )
+                        {
+                            headlessServerPort = static_cast<Uint16>(requestedPort);
+                        }
+                        else
+                        {
+                            printlog("Headless option error: invalid --port value '%s'. Using %u.", argv[c] + 7, headlessServerPort);
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--bind=", 7) )
+                    {
+                        strncpy(headlessBindAddress, argv[c] + 7, sizeof(headlessBindAddress) - 1);
+                        headlessBindAddress[sizeof(headlessBindAddress) - 1] = '\0';
+                    }
+                    else if ( !strncmp(argv[c], "--server-name=", 14) )
+                    {
+                        strncpy(headlessServerName, argv[c] + 14, sizeof(headlessServerName) - 1);
+                        headlessServerName[sizeof(headlessServerName) - 1] = '\0';
+                    }
+                    else if ( !strncmp(argv[c], "--password=", 11) )
+                    {
+                        strncpy(headlessServerPassword, argv[c] + 11, sizeof(headlessServerPassword) - 1);
+                        headlessServerPassword[sizeof(headlessServerPassword) - 1] = '\0';
+                        headlessPasswordRequested = headlessServerPassword[0] != '\0';
+                    }
 					else if ( !strcmp(argv[c], "-windowed") )
 					{
 						fullscreen = 0;
@@ -18083,8 +18105,50 @@ int main(int argc, char** argv)
         printlog("Output path is %s", outputdir);
         if ( headless )
         {
-            printlog("HEADLESS-1A enabled: hidden-window dedicated-server startup skeleton.");
-            printlog("HEADLESS-1A note: rendering resources are still initialized for compatibility in this stage.");
+            const char* visibilityName = "loopback-only";
+            if ( headlessServerVisibility == HEADLESS_VISIBILITY_LAN )
+            {
+                visibilityName = "LAN";
+            }
+            else if ( headlessServerVisibility == HEADLESS_VISIBILITY_PRIVATE )
+            {
+                visibilityName = "private/unlisted";
+            }
+            else if ( headlessServerVisibility == HEADLESS_VISIBILITY_PUBLIC )
+            {
+                visibilityName = "public/listed";
+            }
+
+            printlog("HEADLESS-1B enabled: dedicated-server configuration and visibility reporting.");
+            printlog("Headless server name: %s", headlessServerName);
+            printlog("Requested visibility: %s", visibilityName);
+            printlog("Requested bind endpoint: %s:%u", headlessBindAddress, headlessServerPort);
+            printlog("Password requested: %s", headlessPasswordRequested ? "yes" : "no");
+            printlog("Late joining requested: %s", headlessLateJoinRequested ? "yes" : "no");
+            printlog("SECURITY STATUS: no listening socket is opened by HEADLESS-1B yet.");
+            printlog("SECURITY STATUS: password, listing visibility, and late joining are configuration-only until later networking stages.");
+            printlog("HEADLESS-1B note: rendering resources are still initialized through a hidden OpenGL context for compatibility.");
+
+            char statusPath[PATH_MAX];
+            snprintf(statusPath, sizeof(statusPath), "%s/headless_server_status.txt", outputdir);
+            FILE* statusFile = fopen(statusPath, "w");
+            if ( statusFile )
+            {
+                fprintf(statusFile, "Barony Automatia Headless Server Status\n");
+                fprintf(statusFile, "State: startup configuration loaded; network listener not implemented yet\n");
+                fprintf(statusFile, "Server name: %s\n", headlessServerName);
+                fprintf(statusFile, "Visibility: %s\n", visibilityName);
+                fprintf(statusFile, "Bind endpoint: %s:%u\n", headlessBindAddress, headlessServerPort);
+                fprintf(statusFile, "Password requested: %s\n", headlessPasswordRequested ? "yes" : "no");
+                fprintf(statusFile, "Late joining requested: %s\n", headlessLateJoinRequested ? "yes" : "no");
+                fprintf(statusFile, "Important: this stage does not open a server socket.\n");
+                fclose(statusFile);
+                printlog("Headless status file: %s", statusPath);
+            }
+            else
+            {
+                printlog("Warning: could not write headless status file '%s'.", statusPath);
+            }
         }
         
         // init sdl

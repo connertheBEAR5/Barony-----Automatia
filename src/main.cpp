@@ -528,6 +528,13 @@ bool splitscreen = false;
 
 bool no_sound = false;
 bool headless = false;
+HeadlessServerVisibility headlessServerVisibility = HEADLESS_VISIBILITY_LOOPBACK;
+bool headlessLateJoinRequested = false;
+bool headlessPasswordRequested = false;
+Uint16 headlessServerPort = 57165;
+char headlessBindAddress[64] = "127.0.0.1";
+char headlessServerName[64] = "Barony Dedicated Server";
+char headlessServerPassword[128] = "";
 
 //Entity *players[4];
 

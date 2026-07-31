@@ -911,7 +911,22 @@ extern char const *cursor_fill[];
 GLuint create_shader(const char* filename, GLenum type);
 
 extern bool no_sound; //False means sound initialized properly. True means sound failed to initialize.
+enum HeadlessServerVisibility
+{
+    HEADLESS_VISIBILITY_LOOPBACK = 0,
+    HEADLESS_VISIBILITY_LAN,
+    HEADLESS_VISIBILITY_PRIVATE,
+    HEADLESS_VISIBILITY_PUBLIC
+};
+
 extern bool headless; // Dedicated-server startup mode. HEADLESS-1A still uses a hidden GL context for compatibility.
+extern HeadlessServerVisibility headlessServerVisibility;
+extern bool headlessLateJoinRequested;
+extern bool headlessPasswordRequested;
+extern Uint16 headlessServerPort;
+extern char headlessBindAddress[64];
+extern char headlessServerName[64];
+extern char headlessServerPassword[128];
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

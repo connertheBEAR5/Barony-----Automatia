@@ -727,3 +727,78 @@ Planned:
 - Cross-session quest state
 - Mass sprite copy/paste
 - Flame-specific culling improvements
+
+
+======================================================================
+34. HEADLESS SERVER LAUNCH OPTIONS
+======================================================================
+
+Current implementation level: HEADLESS-1B configuration and visibility reporting.
+
+Basic launch:
+
+./barony --headless
+
+Current behavior:
+
+- Starts with a hidden compatibility OpenGL context.
+- Disables audio and controller initialization.
+- Does not display a normal game window.
+- Defaults to loopback-only configuration at 127.0.0.1:57165.
+- Prints an explicit security/status summary to the terminal and log.
+- Writes ~/.barony/headless_server_status.txt on normal Linux builds.
+- Does not open a listening server socket yet.
+
+LAN configuration:
+
+./barony --headless --LAN
+
+This requests LAN mode and changes the requested bind endpoint to:
+
+0.0.0.0:57165
+
+Optional arguments:
+
+--port=57165
+    Select the requested UDP/TCP game port. Valid range: 1 through 65535.
+
+--bind=127.0.0.1
+    Select the requested local bind address.
+
+--server-name=MyServer
+    Set the displayed/logged dedicated-server name.
+
+--private
+    Request a private or unlisted online server mode.
+
+--public
+    Request a public or listed online server mode.
+
+--password=ExamplePassword
+    Record that password protection is requested. The password is never printed
+    into the log or status file.
+
+--late-join
+    Record that late joining is requested.
+
+Examples:
+
+./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+./barony --headless --private --password=ExamplePassword --server-name=PrivateWorld
+
+./barony --headless --public --port=57165 --server-name=PublicAutomatia
+
+Important limitations in HEADLESS-1B:
+
+- LAN/private/public are configuration requests only.
+- Password enforcement is not implemented yet.
+- Public lobby publication is not implemented yet.
+- Private/unlisted lobby creation is not implemented yet.
+- Late joining is not implemented yet.
+- No listening server socket is opened by this stage.
+- The hidden OpenGL context is still required by existing resource startup code.
+
+The terminal log and headless_server_status.txt deliberately state these
+limitations so an administrator can tell that the process is not silently
+listening or exposed.
