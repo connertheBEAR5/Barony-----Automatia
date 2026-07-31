@@ -26,6 +26,9 @@ See LICENSE for details.
 #endif
 #include "init.hpp"
 #include "ui/LoadingScreen.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_foundation.hpp"
+#endif
 #include <thread>
 #include <future>
 #include <fstream>
@@ -2481,8 +2484,25 @@ std::string ItemTooltips_t::getSpellDescriptionText(const int player, Item& item
 std::string& ItemTooltips_t::getIconLabel(Item& item)
 {
 #ifndef EDITOR
-	if ( item.type == SPELL_ITEM && !item.spellNotifyIcon ) { return defaultString; }
-	return tmpItems[item.type].iconLabelPath;
+    if ( item.type == SPELL_ITEM
+        && !item.spellNotifyIcon )
+    {
+        return defaultString;
+    }
+
+    const int visualType =
+        itemVisualTemplateType(
+            static_cast<int>(item.type)
+        );
+    if ( visualType < 0
+        || visualType >= NUMITEMS )
+    {
+        return defaultString;
+    }
+
+    return tmpItems[visualType].iconLabelPath;
+#else
+    return defaultString;
 #endif
 }
 
@@ -11615,6 +11635,10 @@ void Mods::loadModels(int start, int end) {
 void Mods::unloadMods(bool force)
 {
 #ifndef EDITOR
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMFoundation::onModUnload();
+#endif
+
 	isLoading = true;
 	loading = true;
 	createLoadingScreen(5);
@@ -11813,6 +11837,14 @@ void Mods::unloadMods(bool force)
 void Mods::loadMods()
 {
 #ifndef EDITOR
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMFoundation::onModLoad(
+		Mods::mountedFilepaths,
+		VERSION,
+		outputdir
+	);
+#endif
+
 	Mods::disableSteamAchievements = false;
 	Mods::verifyAchievements(nullptr, false);
 

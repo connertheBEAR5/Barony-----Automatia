@@ -22,6 +22,9 @@
 #include "magic/magic.hpp"
 #include "engine/audio/sound.hpp"
 #include "items.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #include "shops.hpp"
 #include "menu.hpp"
 #include "scores.hpp"
@@ -75,6 +78,75 @@ namespace
 
 		return player;
 	}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+    static bool resolveSAMItemTypeFromPacket(
+        const int transmittedType,
+        const int stableIdOffset,
+        const char* packetName,
+        int& resolvedType
+    )
+    {
+        resolvedType = transmittedType;
+
+        if ( net_packet->len > stableIdOffset )
+        {
+            const int payloadLength = net_packet->len - stableIdOffset;
+            int stableIdLength = 0;
+            while ( stableIdLength < payloadLength
+                && net_packet->data[stableIdOffset + stableIdLength] != '\0' )
+            {
+                ++stableIdLength;
+            }
+
+            if ( stableIdLength <= 0
+                || stableIdLength >= payloadLength )
+            {
+                printlog(
+                    "[S.A.M] Refusing malformed %s stable-id payload.\n",
+                    packetName
+                );
+                return false;
+            }
+
+            const std::string stableId(
+                reinterpret_cast<const char*>(
+                    &net_packet->data[stableIdOffset]
+                ),
+                stableIdLength
+            );
+            resolvedType =
+                SAMItemRegistryFoundation::
+                    runtimeIdForStableId(stableId);
+            if ( resolvedType < 0
+                || !SAMItemRegistryFoundation::
+                    isRegisteredRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] %s custom item unavailable locally: [%s]. Item rejected.\n",
+                    packetName,
+                    stableId.c_str()
+                );
+                return false;
+            }
+
+            return true;
+        }
+
+        if ( SAMItemRegistryFoundation::
+            isSAMRuntimeItemId(transmittedType) )
+        {
+            printlog(
+                "[S.A.M] Refusing numeric-only %s custom runtime %d.\n",
+                packetName,
+                transmittedType
+            );
+            return false;
+        }
+
+        return true;
+    }
+#endif
 
 	static Uint16 nextHeloTransferIdForPlayer(const int player)
 	{
@@ -1674,8 +1746,13 @@ void serverSendItemToPickupAndEquip(int player, Item* item)
 	{
 		return;
 	}
+	if ( !item )
+	{
+		return;
+	}
 
-	// send the client info on the item it just picked up
+	// Send the ordinary item fields first. Vanilla packets remain exactly
+	// 29 bytes for compatibility with older Barony clients.
 	strcpy((char*)net_packet->data, "ITEQ");
 	SDLNet_Write32((Uint32)item->type, &net_packet->data[4]);
 	SDLNet_Write32((Uint32)item->status, &net_packet->data[8]);
@@ -1684,9 +1761,59 @@ void serverSendItemToPickupAndEquip(int player, Item* item)
 	SDLNet_Write32((Uint32)item->appearance, &net_packet->data[20]);
 	SDLNet_Write32((Uint32)item->ownerUid, &net_packet->data[24]);
 	net_packet->data[28] = item->identified;
+	net_packet->len = 29;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	const int runtimeType =
+		static_cast<int>(item->type);
+	if ( SAMItemRegistryFoundation::
+		isRegisteredRuntimeItemId(runtimeType) )
+	{
+		const std::string& stableId =
+			SAMItemRegistryFoundation::
+				stableIdForRuntimeId(runtimeType);
+
+		if ( stableId.empty() )
+		{
+			printlog(
+				"[S.A.M] Refusing ITEQ custom item runtime %d: no stable id.\n",
+				runtimeType
+			);
+			return;
+		}
+
+		const int available =
+			NET_PACKET_SIZE - 30;
+		if ( available <= 0
+			|| static_cast<int>(stableId.size()) > available )
+		{
+			printlog(
+				"[S.A.M] Refusing ITEQ custom item [%s]: stable id is too long.\n",
+				stableId.c_str()
+			);
+			return;
+		}
+
+		memcpy(
+			&net_packet->data[29],
+			stableId.c_str(),
+			stableId.size()
+		);
+		net_packet->data[29 + stableId.size()] = '\0';
+		net_packet->len =
+			30 + static_cast<int>(stableId.size());
+
+		printlog(
+			"[S.A.M] Sending ITEQ custom item [%s] runtime %d to player %d.\n",
+			stableId.c_str(),
+			runtimeType,
+			player
+		);
+	}
+#endif
+
 	net_packet->address.host = net_clients[player - 1].host;
 	net_packet->address.port = net_clients[player - 1].port;
-	net_packet->len = 29;
 	sendPacketSafe(net_sock, -1, net_packet, player - 1);
 }
 
@@ -3525,24 +3652,106 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		return;
 	}},
 
-	// server sent item details.
-	{'ITMU', [](){
-		Uint32 uid = SDLNet_Read32(&net_packet->data[4]);
-		Entity* entity = uidToEntity(uid);
-		if ( entity )
-		{
-			Uint32 itemTypeAndIdentified = SDLNet_Read32(&net_packet->data[8]);
-			Uint32 statusBeatitudeQuantityAppearance = SDLNet_Read32(&net_packet->data[12]);
+    // server sent item details.
+    {'ITMU', [](){
+        if ( net_packet->len < 16 )
+        {
+            printlog(
+                "[NET]: ignoring malformed ITMU packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-			entity->skill[10] = static_cast<ItemType>((itemTypeAndIdentified >> 16) & 0xFFFF); //type
-			entity->skill[15] = (itemTypeAndIdentified) & 0xFFFF;
+        Uint32 uid = SDLNet_Read32(&net_packet->data[4]);
+        Entity* entity = uidToEntity(uid);
+        if ( entity )
+        {
+            Uint32 itemTypeAndIdentified = SDLNet_Read32(&net_packet->data[8]);
+            Uint32 statusBeatitudeQuantityAppearance = SDLNet_Read32(&net_packet->data[12]);
+            int resolvedType =
+                static_cast<int>((itemTypeAndIdentified >> 16) & 0xFFFF);
+            bool hasSAMStableIdPayload = false;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+            constexpr int samWorldItemTypeSentinel = 0xFFFF;
+            if ( resolvedType == samWorldItemTypeSentinel )
+            {
+                hasSAMStableIdPayload = true;
+                const int stableIdOffset = 16;
+                const int payloadLength =
+                    net_packet->len - stableIdOffset;
+                int stableIdLength = 0;
+                while ( stableIdLength < payloadLength
+                    && net_packet->data[stableIdOffset + stableIdLength] != '\0' )
+                {
+                    ++stableIdLength;
+                }
+
+                if ( stableIdLength <= 0
+                    || stableIdLength >= payloadLength )
+                {
+                    printlog(
+                        "[S.A.M] Refusing malformed ITMU stable-id payload for entity %u.\n",
+                        uid
+                    );
+                    return;
+                }
+
+                const std::string stableId(
+                    reinterpret_cast<const char*>(
+                        &net_packet->data[stableIdOffset]
+                    ),
+                    stableIdLength
+                );
+
+                resolvedType =
+                    SAMItemRegistryFoundation::
+                        runtimeIdForStableId(stableId);
+                if ( resolvedType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(resolvedType) )
+                {
+                    printlog(
+                        "[S.A.M] ITMU world item unavailable locally: [%s]. Entity %u rejected.\n",
+                        stableId.c_str(),
+                        uid
+                    );
+                    entity->flags[INVISIBLE] = true;
+                    entity->itemReceivedDetailsFromServer = 0;
+                    return;
+                }
+
+                printlog(
+                    "[S.A.M] Resolved ITMU world item [%s] to local runtime %d for entity %u.\n",
+                    stableId.c_str(),
+                    resolvedType,
+                    uid
+                );
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only ITMU custom runtime %d for entity %u.\n",
+                    resolvedType,
+                    uid
+                );
+                entity->flags[INVISIBLE] = true;
+                entity->itemReceivedDetailsFromServer = 0;
+                return;
+            }
+#endif
+
+            entity->skill[10] = resolvedType;
+            entity->skill[15] = (itemTypeAndIdentified) & 0xFFFF;
 			entity->skill[11] = static_cast<Uint8>((statusBeatitudeQuantityAppearance >> 24) & 0xFF); // status
 			entity->skill[12] = static_cast<Sint8>((statusBeatitudeQuantityAppearance >> 16) & 0xFF); // beatitude
 			entity->skill[13] = static_cast<Uint8>((statusBeatitudeQuantityAppearance >> 8) & 0xFF); // quantity
 			entity->skill[14] = static_cast<Uint8>((statusBeatitudeQuantityAppearance) & 0xFF); // appearance
-			if ( net_packet->len >= 16 )
-			{
-				if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
+            if ( !hasSAMStableIdPayload && net_packet->len >= 18 )
+            {
+                if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
 				{
 					if ( items[entity->skill[10]].category == TOME_SPELL )
 					{
@@ -4938,10 +5147,19 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 	}},
 
-	// steal armor (destroy it)
-	{'STLA', [](){
-	    Item* item = nullptr;
-		int armornum = net_packet->data[4];
+    // steal armor or weapon (destroy it)
+    {'STLA', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog(
+                "[NET]: ignoring malformed STLA packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        Item* item = nullptr;
+        int armornum = net_packet->data[4];
 		switch ( armornum )
 		{
 			case 0:
@@ -4980,8 +5198,26 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 
 		
-		ItemType checkType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
-		Status checkStatus = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            26,
+            "STLA",
+            resolvedType
+        ) )
+        {
+            messagePlayer(
+                clientnum,
+                MESSAGE_MISC,
+                "A custom equipment update was rejected because its stable ID was unavailable."
+            );
+            return;
+        }
+#endif
+        ItemType checkType = static_cast<ItemType>(resolvedType);
+        Status checkStatus = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		Sint16 checkBeatitude = static_cast<Sint16>(SDLNet_Read32(&net_packet->data[13]));
 		Sint16 checkCount = static_cast<Sint16>(SDLNet_Read32(&net_packet->data[17]));
 		Uint32 checkAppearance = static_cast<Uint32>(SDLNet_Read32(&net_packet->data[21]));
@@ -5231,16 +5467,37 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		combat = assailant;
 	}},
 
-	// get item
-	{'ITEM', [](){
-		Item* item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[28],
-		    NULL);
+    // get item
+    {'ITEM', [](){
+        if ( net_packet->len < 29 )
+        {
+            printlog("[NET]: refusing malformed ITEM packet.\n");
+            return;
+        }
+
+        int resolvedType = static_cast<int>(
+            SDLNet_Read32(&net_packet->data[4])
+        );
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            29,
+            "ITEM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        Item* item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[28],
+            NULL);
 		item->ownerUid = SDLNet_Read32(&net_packet->data[24]);
 		Item* pickedUp = itemPickup(clientnum, item);
 		free(item);
@@ -5388,13 +5645,33 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// shop item
 	{'SHPI', [](){
+        if ( net_packet->len < 18 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		if ( !shopInv[clientnum] )
 		{
 			return;
 		}
 
-		ItemType type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4]));
-		Status status = static_cast<Status>((Sint8)net_packet->data[8]);
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            18,
+            "SHPI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        ItemType type = static_cast<ItemType>(resolvedType);
+        Status status = static_cast<Status>((Sint8)net_packet->data[8]);
 		Sint16 beatitude = (Sint8)net_packet->data[9];
 		Sint16 count = (unsigned char)net_packet->data[10];
 		Uint32 appearance = SDLNet_Read32(&net_packet->data[11]);
@@ -5510,11 +5787,42 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 				net_packet->data[24] = item->identified;
 				net_packet->data[25] = clientnum;
 				net_packet->data[26] = (Uint8)cameras[clientnum].x;
-				net_packet->data[27] = (Uint8)cameras[clientnum].y;
-				net_packet->address.host = net_server.host;
-				net_packet->address.port = net_server.port;
-				net_packet->len = 28;
-				sendPacketSafe(net_sock, -1, net_packet, 0);
+                net_packet->data[27] = (Uint8)cameras[clientnum].y;
+                net_packet->len = 28;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+                const int runtimeType = static_cast<int>(item->type);
+                if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeType) )
+                {
+                    const std::string& stableId =
+                        SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeType);
+                    const int available = NET_PACKET_SIZE - 29;
+                    if ( stableId.empty() )
+                    {
+                        printlog(
+                            "[S.A.M] Refusing DIEI custom item runtime %d: no stable id.\n",
+                            runtimeType
+                        );
+                        continue;
+                    }
+                    if ( available <= 0
+                        || static_cast<int>(stableId.size()) > available )
+                    {
+                        printlog(
+                            "[S.A.M] Refusing DIEI custom item [%s]: stable id is too long.\n",
+                            stableId.c_str()
+                        );
+                        continue;
+                    }
+                    memcpy(&net_packet->data[28], stableId.c_str(), stableId.size());
+                    net_packet->data[28 + stableId.size()] = '\0';
+                    net_packet->len = 29 + static_cast<int>(stableId.size());
+                }
+#endif
+
+                net_packet->address.host = net_server.host;
+                net_packet->address.port = net_server.port;
+                sendPacketSafe(net_sock, -1, net_packet, 0);
 			}
 		}
 		else
@@ -5548,12 +5856,45 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 					net_packet->data[24] = item->identified;
 					net_packet->data[25] = clientnum;
 					net_packet->data[26] = (Uint8)cameras[clientnum].x;
-					net_packet->data[27] = (Uint8)cameras[clientnum].y;
-					net_packet->address.host = net_server.host;
-					net_packet->address.port = net_server.port;
-					net_packet->len = 28;
-					sendPacketSafe(net_sock, -1, net_packet, 0);
-					list_RemoveNode(node);
+                    net_packet->data[27] = (Uint8)cameras[clientnum].y;
+                    net_packet->len = 28;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+                    const int runtimeType = static_cast<int>(item->type);
+                    if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeType) )
+                    {
+                        const std::string& stableId =
+                            SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeType);
+                        const int available = NET_PACKET_SIZE - 29;
+                        if ( stableId.empty() )
+                        {
+                            printlog(
+                                "[S.A.M] Refusing DIEI custom item runtime %d: no stable id.\n",
+                                runtimeType
+                            );
+                            list_RemoveNode(node);
+                            continue;
+                        }
+                        if ( available <= 0
+                            || static_cast<int>(stableId.size()) > available )
+                        {
+                            printlog(
+                                "[S.A.M] Refusing DIEI custom item [%s]: stable id is too long.\n",
+                                stableId.c_str()
+                            );
+                            list_RemoveNode(node);
+                            continue;
+                        }
+                        memcpy(&net_packet->data[28], stableId.c_str(), stableId.size());
+                        net_packet->data[28 + stableId.size()] = '\0';
+                        net_packet->len = 29 + static_cast<int>(stableId.size());
+                    }
+#endif
+
+                    net_packet->address.host = net_server.host;
+                    net_packet->address.port = net_server.port;
+                    sendPacketSafe(net_sock, -1, net_packet, 0);
+                    list_RemoveNode(node);
 				}
 			}
 		}
@@ -7442,28 +7783,61 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 	}},
 
-	//Add an item to the chest.
-	{'CITM', [](){
-		ItemType itemType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4]));
-		Status status = static_cast<Status>(SDLNet_Read32(&net_packet->data[8]));
-		Sint16 beatitude = SDLNet_Read32(&net_packet->data[12]);
-		Sint16 count = SDLNet_Read32(&net_packet->data[16]);
-		Uint32 appearance = SDLNet_Read32(&net_packet->data[20]);
-		bool identified = false;
-		if ( net_packet->data[24])   //TODO: Is this right?
-		{
-			identified = true;
-		}
-		else
-		{
-			identified = false;
-		}
-		Item* newitem = newItem(itemType, status, beatitude, count, appearance, identified, nullptr);
-		bool forceNewStack = net_packet->data[25] ? true : false;
-		newitem->x = (Sint8)net_packet->data[26];
-		newitem->y = (Sint8)net_packet->data[27];
-		addItemToChestClientside(clientnum, newitem, forceNewStack, nullptr);
-	}},
+    //Add an item to the chest.
+    {'CITM', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed CITM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "CITM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        const Status status =
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8]));
+        const Sint16 beatitude = SDLNet_Read32(&net_packet->data[12]);
+        const Sint16 count = SDLNet_Read32(&net_packet->data[16]);
+        const Uint32 appearance = SDLNet_Read32(&net_packet->data[20]);
+        const bool identified = net_packet->data[24] != 0;
+        Item* newitem = newItem(
+            static_cast<ItemType>(resolvedType),
+            status,
+            beatitude,
+            count,
+            appearance,
+            identified,
+            nullptr
+        );
+        if ( !newitem )
+        {
+            return;
+        }
+
+        const bool forceNewStack = net_packet->data[25] != 0;
+        newitem->x = static_cast<Sint8>(net_packet->data[26]);
+        newitem->y = static_cast<Sint8>(net_packet->data[27]);
+        addItemToChestClientside(
+            clientnum,
+            newitem,
+            forceNewStack,
+            nullptr
+        );
+    }},
 
 	//Close the chest.
 	{'CCLS', [](){
@@ -7904,14 +8278,109 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// get item
 	{'ITEQ', [](){
+		if ( net_packet->len < 29 )
+		{
+			printlog(
+				"[NET]: ignoring malformed ITEQ packet with length %d.\n",
+				net_packet->len
+			);
+			return;
+		}
+
+		int resolvedType =
+			static_cast<int>(
+				SDLNet_Read32(&net_packet->data[4])
+			);
+
+#ifdef SAM_FRAMEWORK_ENABLED
+		if ( SAMItemRegistryFoundation::
+			isSAMRuntimeItemId(resolvedType) )
+		{
+			if ( net_packet->len <= 29 )
+			{
+				printlog(
+					"[S.A.M] Refusing legacy numeric-only ITEQ custom item runtime %d.\n",
+					resolvedType
+				);
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"A custom multiplayer item was rejected because it had no stable ID."
+				);
+				return;
+			}
+
+			const int payloadLength =
+				net_packet->len - 29;
+			int stableLength = 0;
+			while ( stableLength < payloadLength
+				&& net_packet->data[29 + stableLength] != '\0' )
+			{
+				++stableLength;
+			}
+
+			if ( stableLength <= 0
+				|| stableLength >= payloadLength )
+			{
+				printlog(
+					"[S.A.M] Refusing malformed ITEQ stable-id payload.\n"
+				);
+				return;
+			}
+
+			const std::string stableId(
+				reinterpret_cast<const char*>(
+					&net_packet->data[29]
+				),
+				stableLength
+			);
+
+			resolvedType =
+				SAMItemRegistryFoundation::
+					runtimeIdForStableId(stableId);
+
+			if ( resolvedType < 0
+				|| !SAMItemRegistryFoundation::
+					isRegisteredRuntimeItemId(resolvedType) )
+			{
+				printlog(
+					"[S.A.M] ITEQ custom item unavailable locally: [%s]. Item rejected.\n",
+					stableId.c_str()
+				);
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Required custom item is unavailable: %s",
+					stableId.c_str()
+				);
+				return;
+			}
+
+			printlog(
+				"[S.A.M] Resolved ITEQ custom item [%s] to local runtime %d.\n",
+				stableId.c_str(),
+				resolvedType
+			);
+		}
+#endif
+
 		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+		    static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
 		    SDLNet_Read32(&net_packet->data[20]),
 		    net_packet->data[28],
 		    NULL);
+		if ( !item )
+		{
+			printlog(
+				"[NET]: ITEQ failed to construct item type %d.\n",
+				resolvedType
+			);
+			return;
+		}
+
 		item->ownerUid = SDLNet_Read32(&net_packet->data[24]);
 		Item* pickedUp = itemPickup(clientnum, item);
 		free(item);
@@ -9035,13 +9504,38 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
-			strcpy((char*)net_packet->data, "ITMU");
-			SDLNet_Write32(uid, &net_packet->data[4]);
+            strcpy((char*)net_packet->data, "ITMU");
+            SDLNet_Write32(uid, &net_packet->data[4]);
 
-			Uint32 itemTypeAndIdentified = ((static_cast<Uint16>(entity->skill[10]) & 0xFFFF) << 16); // type
-			itemTypeAndIdentified |= (static_cast<Uint16>(entity->skill[15]) & 0xFFFF); // identified
+            int transmittedType = entity->skill[10];
+            std::string stableId;
+#ifdef SAM_FRAMEWORK_ENABLED
+            constexpr int samWorldItemTypeSentinel = 0xFFFF;
+            if ( SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(entity->skill[10]) )
+            {
+                stableId =
+                    SAMItemRegistryFoundation::
+                        stableIdForRuntimeId(entity->skill[10]);
+                if ( stableId.empty() )
+                {
+                    printlog(
+                        "[S.A.M] Refusing ITMU world item runtime %d for entity %u: no stable id.\n",
+                        entity->skill[10],
+                        uid
+                    );
+                    return;
+                }
+                transmittedType = samWorldItemTypeSentinel;
+            }
+#endif
 
-			SDLNet_Write32(itemTypeAndIdentified, &net_packet->data[8]);
+            Uint32 itemTypeAndIdentified =
+                ((static_cast<Uint16>(transmittedType) & 0xFFFF) << 16);
+            itemTypeAndIdentified |=
+                (static_cast<Uint16>(entity->skill[15]) & 0xFFFF);
+
+            SDLNet_Write32(itemTypeAndIdentified, &net_packet->data[8]);
 
 			Uint32 statusBeatitudeQuantityAppearance = 0;
 			statusBeatitudeQuantityAppearance |= ((static_cast<Uint8>(entity->skill[11]) & 0xFF) << 24); // status
@@ -9063,17 +9557,53 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			statusBeatitudeQuantityAppearance |= (static_cast<Uint8>(appearance) & 0xFF); // appearance
 			SDLNet_Write32(statusBeatitudeQuantityAppearance, &net_packet->data[12]);
 
-			net_packet->len = 16;
-			if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
-			{
-				if ( items[entity->skill[10]].category == TOME_SPELL )
-				{
-					SDLNet_Write16(entity->skill[14] % TOME_APPEARANCE_MAX, &net_packet->data[16]);
-					net_packet->len = 18;
-				}
-			}
+            net_packet->len = 16;
+#ifdef SAM_FRAMEWORK_ENABLED
+            if ( !stableId.empty() )
+            {
+                const int available = NET_PACKET_SIZE - 17;
+                if ( available <= 0
+                    || static_cast<int>(stableId.size()) > available )
+                {
+                    printlog(
+                        "[S.A.M] Refusing ITMU world item [%s]: stable id is too long.\n",
+                        stableId.c_str()
+                    );
+                    return;
+                }
 
-			net_packet->address.host = net_clients[x - 1].host;
+                memcpy(
+                    &net_packet->data[16],
+                    stableId.c_str(),
+                    stableId.size()
+                );
+                net_packet->data[16 + stableId.size()] = '\0';
+                net_packet->len =
+                    17 + static_cast<int>(stableId.size());
+
+                printlog(
+                    "[S.A.M] Sending ITMU world item [%s] runtime %d for entity %u to player %d.\n",
+                    stableId.c_str(),
+                    entity->skill[10],
+                    uid,
+                    x
+                );
+            }
+            else
+#endif
+            if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
+            {
+                if ( items[entity->skill[10]].category == TOME_SPELL )
+                {
+                    SDLNet_Write16(
+                        entity->skill[14] % TOME_APPEARANCE_MAX,
+                        &net_packet->data[16]
+                    );
+                    net_packet->len = 18;
+                }
+            }
+
+            net_packet->address.host = net_clients[x - 1].host;
 			net_packet->address.port = net_clients[x - 1].port;
 			sendPacketSafe(net_sock, -1, net_packet, x - 1);
 		}
@@ -9813,46 +10343,102 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	}},
 
-	// item drop
-	{'DROP', [](){
-	    const int player =
-	    	decodeGameplayPacketPlayerIndex(
-	    		net_packet->data[25]
-	    	);
-	    if ( player < 0 )
-	    {
-	    	return;
-	    }
-		client_keepalive[player] = ticks;
-		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    &stats[player]->inventory);
-		dropItem(item, player);
-	}},
+    // Item drop. Custom items append stable_id at byte 26.
+    {'DROP', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog(
+                "[NET]: ignoring malformed DROP packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-	// item drop (greasy)
-	{ 'GRES', []() {
-		const int player =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( player < 0 )
-		{
-			return;
-		}
-		client_keepalive[player] = ticks;
-		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-			SDLNet_Read32(&net_packet->data[12]),
-			SDLNet_Read32(&net_packet->data[16]),
-			SDLNet_Read32(&net_packet->data[20]),
-			net_packet->data[24],
-			&stats[player]->inventory);
-		playerGreasyDropItem(player, item);
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            26,
+            "DROP",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        client_keepalive[player] = ticks;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[player]->inventory
+        );
+        if ( !item )
+        {
+            return;
+        }
+        dropItem(item, player);
+    }},
+
+    // Greasy equipment drop. Custom items append stable_id at byte 27.
+    { 'GRES', []() {
+        if ( net_packet->len < 27 )
+        {
+            printlog(
+                "[NET]: ignoring malformed GRES packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            27,
+            "GRES",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        client_keepalive[player] = ticks;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[player]->inventory
+        );
+        if ( !item )
+        {
+            return;
+        }
+        playerGreasyDropItem(player, item);
 		if ( net_packet->data[26] == 1 )
 		{
 			// shield
@@ -9921,66 +10507,110 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	} },
 
-	// item drop (on death)
-	{'DIEI', [](){
-	    const int player =
-	    	decodeGameplayPacketPlayerIndex(
-	    		net_packet->data[25]
-	    	);
-	    if ( player < 0 )
-	    {
-	    	return;
-	    }
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    nullptr);
+    // item drop (on death)
+    {'DIEI', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed DIEI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-		real_t x = net_packet->data[26];
-		x = (x * 16) + 8;
-		real_t y = net_packet->data[27];
-		y = (y * 16) + 8;
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] || !stats[0] )
+        {
+            return;
+        }
 
-		stats[0]->addItemToLootingBag(player, x, y, *item);
-		if ( item->node )
-		{
-			list_RemoveNode(item->node);
-		}
-		else
-		{
-			free(item);
-		}
-		//{
-		//	auto entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
-		//	entity->x = net_packet->data[26];
-		//	entity->x = entity->x * 16 + 8;
-		//	entity->y = net_packet->data[27];
-		//	entity->y = entity->y * 16 + 8;
-		//	entity->flags[NOUPDATE] = true;
-		//	entity->flags[PASSABLE] = true;
-		//	entity->flags[INVISIBLE] = true;
-		//	for ( int c = item->count; c > 0; c-- )
-		//	{
-		//		int qtyToDrop = 1;
-		//		if ( c >= 10 && (item->type == TOOL_METAL_SCRAP || item->type == TOOL_MAGIC_SCRAP) )
-		//		{
-		//			qtyToDrop = 10;
-		//			c -= 9;
-		//		}
-		//		else if ( itemTypeIsQuiver(item->type) )
-		//		{
-		//			qtyToDrop = item->count;
-		//			c -= item->count;
-		//		}
-		//		dropItemMonster(item, entity, stats[player], qtyToDrop);
-		//	}
-		//	list_RemoveNode(entity->mynode);
-		//}
-	}},
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(resolvedType) )
+        {
+            if ( net_packet->len <= 28 )
+            {
+                printlog(
+                    "[S.A.M] Refusing legacy numeric-only DIEI custom item runtime %d.\n",
+                    resolvedType
+                );
+                return;
+            }
+
+            const int payloadLength = net_packet->len - 28;
+            int stableLength = 0;
+            while ( stableLength < payloadLength
+                && net_packet->data[28 + stableLength] != '\0' )
+            {
+                ++stableLength;
+            }
+            if ( stableLength <= 0 || stableLength >= payloadLength )
+            {
+                printlog(
+                    "[S.A.M] Refusing malformed DIEI stable-id payload.\n"
+                );
+                return;
+            }
+
+            const std::string stableId(
+                reinterpret_cast<const char*>(&net_packet->data[28]),
+                stableLength
+            );
+            resolvedType =
+                SAMItemRegistryFoundation::runtimeIdForStableId(stableId);
+            if ( resolvedType < 0
+                || !SAMItemRegistryFoundation::isRegisteredRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] DIEI custom item unavailable on server: [%s]. Drop rejected.\n",
+                    stableId.c_str()
+                );
+                return;
+            }
+            printlog(
+                "[S.A.M] Resolved DIEI custom item [%s] to server runtime %d.\n",
+                stableId.c_str(),
+                resolvedType
+            );
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            nullptr
+        );
+        if ( !item )
+        {
+            printlog(
+                "[NET]: DIEI failed to construct item type %d.\n",
+                resolvedType
+            );
+            return;
+        }
+
+        real_t x = net_packet->data[26];
+        x = (x * 16) + 8;
+        real_t y = net_packet->data[27];
+        y = (y * 16) + 8;
+
+        stats[0]->addItemToLootingBag(player, x, y, *item);
+        if ( item->node )
+        {
+            list_RemoveNode(item->node);
+        }
+        else
+        {
+            free(item);
+        }
+    }},
 
 	// raise/lower shield
 	{'SHLD', [](){
@@ -10070,6 +10700,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// buy item from shop
 	{'SHPB', [](){
+        if ( net_packet->len < 30 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPB packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
 		const int client =
 			decodeGameplayPacketPlayerIndex(
@@ -10091,8 +10729,20 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			printlog("[Shops]: warning: client %d bought item from a \"shop\" that has no stats! (uid=%d)\n", client, uidnum);
 			return;
 		}
-		Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		item->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[8]));
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[8]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            30,
+            "SHPB",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
+        item->type = static_cast<ItemType>(resolvedType);
 		item->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[12]));
 		item->beatitude = SDLNet_Read16(&net_packet->data[16]);
 		item->appearance = SDLNet_Read32(&net_packet->data[20]);
@@ -10259,6 +10909,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// sell item to shop
 	{'SHPS', [](){
+        if ( net_packet->len < 30 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPS packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
 		const int client =
 			decodeGameplayPacketPlayerIndex(
@@ -10281,9 +10939,21 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			return;
 		}
 
-		bool identified = net_packet->data[28] == 1;
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[8])),
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[8]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            30,
+            "SHPS",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        bool identified = net_packet->data[28] == 1;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[12])),
 			SDLNet_Read16(&net_packet->data[16]),
 			SDLNet_Read32(&net_packet->data[24]),
@@ -10342,26 +11012,54 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		//}
 	}},
 
-	// use item
-	{'USEI', [](){
-		const int client =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( client < 0 )
-		{
-			return;
-		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    &stats[client]->inventory);
-		useItem(item, client, nullptr, false, true);
-	}},
+    // Use item. Custom items append stable_id at byte 26.
+    {'USEI', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog("[NET]: refusing malformed USEI packet.\n");
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[25]
+            );
+        if ( client < 0 )
+        {
+            return;
+        }
+
+        const int transmittedType = static_cast<int>(
+            SDLNet_Read32(&net_packet->data[4])
+        );
+        int resolvedType = transmittedType;
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            transmittedType,
+            26,
+            "USEI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[client]->inventory);
+        if ( !item )
+        {
+            printlog("[NET]: USEI failed to construct item type %d.\n", resolvedType);
+            return;
+        }
+        useItem(item, client, nullptr, false, true);
+    }},
 
 	// use loot bag
 	{ 'LOOT', []() {
@@ -10377,18 +11075,40 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		Stat::emptyLootingBag(client, appearance);
 	} },
 
-	// equip item (as a weapon)
-	{'EQUI', [](){
-		const int client =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( client < 0 )
-		{
-			return;
-		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item as a weapon. Custom items append stable_id at byte 28.
+    {'EQUI', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -10413,18 +11133,40 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	}},
 
-	// equip item (as a shield)
-	{'EQUS', [](){
-		const int client =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( client < 0 )
-		{
-			return;
-		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item as a shield. Custom items append stable_id at byte 28.
+    {'EQUS', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUS packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUS",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -10500,18 +11242,40 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	} },
 
-	// equip item (any other slot)
-	{'EQUM', [](){
-		const int client =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( client < 0 )
-		{
-			return;
-		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item in another slot. Custom items append stable_id at byte 28.
+    {'EQUM', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -10583,8 +11347,26 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
-		auto item = newItem(
-			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+        if ( net_packet->len < 28 )
+        {
+            printlog("[NET]: refusing short EQUA packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            28,
+            "EQUA",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 			SDLNet_Read32(&net_packet->data[12]),
 			SDLNet_Read32(&net_packet->data[16]),
@@ -10654,75 +11436,185 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	} },
 
 	// update itemType of item
-	{ 'EQUT', []() {
-		const int client =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[25]
-			);
-		if ( client < 0 )
-		{
-			return;
-		}
-		auto item = newItem(
-			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-			SDLNet_Read32(&net_packet->data[12]),
-			SDLNet_Read32(&net_packet->data[16]),
-			SDLNet_Read32(&net_packet->data[20]),
-			net_packet->data[24],
-			nullptr);
+    { 'EQUT', []() {
+        if ( net_packet->len < 31 )
+        {
+            printlog("[NET]: refusing short EQUT packet.\n");
+            return;
+        }
+        const int client =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[25]
+            );
+        if ( client < 0 )
+        {
+            return;
+        }
 
-		Item* slot = nullptr;
-		ItemType newType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[27]));
+        int previousType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+        int newType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[27]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( net_packet->len > 31 )
+        {
+            if ( net_packet->len < 37 )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT payload.\n");
+                return;
+            }
+            const bool oldIsCustom = net_packet->data[31] != 0;
+            const bool newIsCustom = net_packet->data[32] != 0;
+            const int oldLength =
+                static_cast<int>(SDLNet_Read16(&net_packet->data[33]));
+            int offset = 35;
+            if ( oldLength < 0
+                || offset + oldLength + 2 > net_packet->len )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT old stable id.\n");
+                return;
+            }
+            std::string oldStableId;
+            if ( oldLength > 0 )
+            {
+                oldStableId.assign(
+                    reinterpret_cast<const char*>(&net_packet->data[offset]),
+                    oldLength
+                );
+            }
+            offset += oldLength;
+            const int newLength =
+                static_cast<int>(SDLNet_Read16(&net_packet->data[offset]));
+            offset += 2;
+            if ( newLength < 0
+                || offset + newLength != net_packet->len )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT new stable id.\n");
+                return;
+            }
+            std::string newStableId;
+            if ( newLength > 0 )
+            {
+                newStableId.assign(
+                    reinterpret_cast<const char*>(&net_packet->data[offset]),
+                    newLength
+                );
+            }
+            if ( oldIsCustom )
+            {
+                previousType =
+                    SAMItemRegistryFoundation::runtimeIdForStableId(
+                        oldStableId
+                    );
+                if ( previousType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(previousType) )
+                {
+                    printlog(
+                        "[S.A.M] EQUT old item unavailable locally: [%s].\n",
+                        oldStableId.c_str()
+                    );
+                    return;
+                }
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(previousType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only EQUT old runtime %d.\n",
+                    previousType
+                );
+                return;
+            }
+            if ( newIsCustom )
+            {
+                newType =
+                    SAMItemRegistryFoundation::runtimeIdForStableId(
+                        newStableId
+                    );
+                if ( newType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(newType) )
+                {
+                    printlog(
+                        "[S.A.M] EQUT new item unavailable locally: [%s].\n",
+                        newStableId.c_str()
+                    );
+                    return;
+                }
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(newType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only EQUT new runtime %d.\n",
+                    newType
+                );
+                return;
+            }
+        }
+        else if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(previousType)
+            || SAMItemRegistryFoundation::isSAMRuntimeItemId(newType) )
+        {
+            printlog("[S.A.M] Refusing numeric-only EQUT custom item.\n");
+            return;
+        }
+#endif
 
-		switch ( net_packet->data[26] )
-		{
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_WEAPON:
-				slot = stats[client]->weapon;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD:
-				slot = stats[client]->shield;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_MASK:
-				slot = stats[client]->mask;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_HELM:
-				slot = stats[client]->helmet;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_GLOVES:
-				slot = stats[client]->gloves;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BOOTS:
-				slot = stats[client]->shoes;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BREASTPLATE:
-				slot = stats[client]->breastplate;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_CLOAK:
-				slot = stats[client]->cloak;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_AMULET:
-				slot = stats[client]->amulet;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_RING:
-				slot = stats[client]->ring;
-				break;
-			default:
-				break;
-		}
+        auto item = newItem(
+            static_cast<ItemType>(previousType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            nullptr);
 
-		if ( slot )
-		{
-			if ( !itemCompare(item, slot, false, false) )
-			{
-				slot->type = newType;
-				slot->appearance = item->appearance;
-			}
-		}
+        Item* slot = nullptr;
+        switch ( net_packet->data[26] )
+        {
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_WEAPON:
+                slot = stats[client]->weapon;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD:
+                slot = stats[client]->shield;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_MASK:
+                slot = stats[client]->mask;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_HELM:
+                slot = stats[client]->helmet;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_GLOVES:
+                slot = stats[client]->gloves;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BOOTS:
+                slot = stats[client]->shoes;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BREASTPLATE:
+                slot = stats[client]->breastplate;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_CLOAK:
+                slot = stats[client]->cloak;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_AMULET:
+                slot = stats[client]->amulet;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_RING:
+                slot = stats[client]->ring;
+                break;
+            default:
+                break;
+        }
 
-		free(item);
-		item = nullptr;
-	} },
+        if ( slot && !itemCompare(item, slot, false, false) )
+        {
+            slot->type = static_cast<ItemType>(newType);
+            slot->appearance = item->appearance;
+        }
+
+        free(item);
+    } },
 
 	// apply item to entity
 	{'APIT', [](){
@@ -10734,8 +11626,26 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+        if ( net_packet->len < 30 )
+        {
+            printlog("[NET]: refusing short APIT packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            30,
+            "APIT",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -10764,8 +11674,26 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+        if ( net_packet->len < 30 )
+        {
+            printlog("[NET]: refusing short APIW packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            30,
+            "APIW",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -10950,6 +11878,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client added an item to the chest.
 	{'CITM', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed client CITM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
 	    const int player =
 	    	decodeGameplayPacketPlayerIndex(
 	    		net_packet->data[4]
@@ -10963,8 +11900,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			return;
 		}
 
-		Item* newitem = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		newitem->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "CITM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* newitem = newItem(
+            static_cast<ItemType>(resolvedType),
+            BROKEN,
+            0,
+            1,
+            0,
+            true,
+            nullptr
+        );
 		newitem->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		newitem->beatitude = SDLNet_Read32(&net_packet->data[13]);
 		newitem->count = SDLNet_Read32(&net_packet->data[17]);
@@ -10991,6 +11948,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client removed an item from the chest.
 	{'RCIT', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed RCIT packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
 	    const int player =
 	    	decodeGameplayPacketPlayerIndex(
 	    		net_packet->data[4]
@@ -11004,8 +11970,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			return;
 		}
 
-		Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		item->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "RCIT",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* item = newItem(
+            static_cast<ItemType>(resolvedType),
+            BROKEN,
+            0,
+            1,
+            0,
+            true,
+            nullptr
+        );
 		item->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		item->beatitude = SDLNet_Read32(&net_packet->data[13]);
 		item->count = SDLNet_Read32(&net_packet->data[17]);

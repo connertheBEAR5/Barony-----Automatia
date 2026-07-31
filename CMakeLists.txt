@@ -11,6 +11,12 @@ option(
 	OFF
 )
 
+option(
+	SAM_FRAMEWORK_ENABLED
+	"Build the Automatia S.A.M framework integration"
+	ON
+)
+
 if (BARONY_SUPER_MULTIPLAYER)
 	add_definitions(-DBARONY_SUPER_MULTIPLAYER)
 	message(STATUS "Building with 15-player multiplayer support")
@@ -553,6 +559,37 @@ else()
 endif(APPLE)
 
 if (GAME_ENABLED)
+  if (SAM_FRAMEWORK_ENABLED)
+	target_sources(
+		barony
+		PRIVATE
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_class_registry_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_registry_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_content_catalog.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_catalog_exporter.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_definition_bridge.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_logger.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_errors.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_workshop.cpp"
+	)
+	target_include_directories(
+		barony
+		PRIVATE
+			"${PROJECT_SOURCE_DIR}/src/sam"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework"
+	)
+	target_compile_definitions(
+		barony
+		PRIVATE
+			SAM_FRAMEWORK_ENABLED=1
+	)
+	message(
+		STATUS
+		"Building Automatia with S.A.M 1.10.0 foundation support"
+	)
+  endif()
+
   if(WIN32)
     # Only for MinGW...
 	# target_link_libraries(barony -lmingw32)

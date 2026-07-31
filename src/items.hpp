@@ -549,6 +549,26 @@ typedef enum ItemType
 } ItemType;
 const int NUMITEMS = ITEM_ENUM_MAX;
 
+// Total item-definition storage capacity.
+//
+// NUMITEMS remains the vanilla item count and must continue to be used by
+// vanilla enumeration, random loot generation, achievements, and balance
+// logic. NUM_ITEM_SLOTS is only for validated direct item-definition storage.
+constexpr int SAM_ITEM_ID_BASE = 5000;
+constexpr int NUM_ITEM_SLOTS = 25000;
+constexpr int SAM_ITEM_ID_LIMIT = NUM_ITEM_SLOTS;
+constexpr int SAM_ITEM_CAPACITY =
+    SAM_ITEM_ID_LIMIT - SAM_ITEM_ID_BASE;
+
+static_assert(
+    NUMITEMS <= SAM_ITEM_ID_BASE,
+    "Vanilla item IDs overlap the reserved S.A.M item range"
+);
+static_assert(
+    SAM_ITEM_CAPACITY == 20000,
+    "Automatia must provide exactly 20,000 S.A.M item slots"
+);
+
 typedef enum Category
 {
 	WEAPON,
@@ -799,7 +819,10 @@ public:
 		}
 	}
 };
-extern ItemGeneric items[NUMITEMS];
+extern ItemGeneric items[NUM_ITEM_SLOTS];
+
+int itemVisualTemplateType(int runtimeItemType);
+const ItemGeneric& itemVisualDefinition(int runtimeItemType);
 
 //----------Item usage functions----------
 bool item_PotionWater(Item*& item, Entity* entity, Entity* usedBy);

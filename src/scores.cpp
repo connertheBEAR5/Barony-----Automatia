@@ -27,9 +27,66 @@
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "shops.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #ifdef USE_PLAYFAB
 #include "playfab.hpp"
 #endif
+
+namespace
+{
+    std::string savedStableItemId(const Item* item)
+    {
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( item )
+        {
+            const int runtimeId =
+                static_cast<int>(item->type);
+            if ( SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(runtimeId) )
+            {
+                return SAMItemRegistryFoundation::
+                    stableIdForRuntimeId(runtimeId);
+            }
+        }
+#endif
+        return "";
+    }
+
+    int resolveSavedItemType(
+        const SaveGameInfo::Player::stat_t::item_t& item
+    )
+    {
+        if ( item.stable_id.empty() )
+        {
+            const int legacyType =
+                static_cast<int>(item.type);
+            return legacyType >= 0
+                && legacyType < NUM_ITEM_SLOTS
+                ? legacyType
+                : -1;
+        }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        const int runtimeId =
+            SAMItemRegistryFoundation::
+                runtimeIdForStableId(item.stable_id);
+        if ( runtimeId >= 0
+            && SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(runtimeId) )
+        {
+            return runtimeId;
+        }
+#endif
+
+        printlog(
+            "[S.A.M] Saved custom item unavailable: [%s]. Item skipped.\n",
+            item.stable_id.c_str()
+        );
+        return -1;
+    }
+}
 
 // definitions
 list_t topscores_json;
@@ -5599,6 +5656,13 @@ void SaveGameInfo::Player::stat_t::item_t::computeHash(Uint32& hash, Uint32& shi
 	hash += (Uint32)((Uint32)identified << (shift % 32)); ++shift;
 	hash += (Uint32)((Uint32)x << (shift % 32)); ++shift;
 	hash += (Uint32)((Uint32)y << (shift % 32)); ++shift;
+	if ( !stable_id.empty() )
+	{
+		hash += djb2Hash(
+			const_cast<char*>(stable_id.c_str())
+		);
+		++shift;
+	}
 }
 
 int SaveGameInfo::populateFromSession(const int playernum)
@@ -5898,7 +5962,8 @@ int SaveGameInfo::populateFromSession(const int playernum)
 						item.count,
 						item.identified,
 						0,
-						0));
+						0,
+						savedStableItemId(&item)));
 				}
 			}
 
@@ -5939,6 +6004,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 								slot.second->identified,
 								slot.second->x,
 								slot.second->y,
+								savedStableItemId(slot.second),
 							}));
 					}
 				}
@@ -5964,6 +6030,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 					item->identified,
 					item->x,
 					item->y,
+					savedStableItemId(item),
 					});
 			}
 
@@ -5981,6 +6048,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 					item->identified,
 					item->x,
 					item->y,
+					savedStableItemId(item),
 					});
 			}
 
@@ -6054,6 +6122,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 									slot.second->identified,
 									slot.second->x,
 									slot.second->y,
+									savedStableItemId(slot.second),
 								}));
 						}
 					}
@@ -6072,6 +6141,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 							item->identified,
 							item->x,
 							item->y,
+							savedStableItemId(item),
 							});
 					}
 
@@ -6616,10 +6686,17 @@ int loadGame(int player, const SaveGameInfo& info) {
 
 		for ( auto& _item : loot.second.items )
 		{
+			const int resolvedType =
+				resolveSavedItemType(_item);
+			if ( resolvedType < 0 )
+			{
+				continue;
+			}
+
 			player_lootbag.items.push_back(Item());
 			auto& item = player_lootbag.items.back();
 
-			item.type = static_cast<ItemType>(_item.type);
+			item.type = static_cast<ItemType>(resolvedType);
 			item.status = static_cast<Status>(_item.status);
 			item.beatitude = _item.beatitude;
 			item.count = _item.count;
@@ -6643,7 +6720,14 @@ int loadGame(int player, const SaveGameInfo& info) {
 	int inventory_index = -1;
 	for (auto& item : p.inventory) {
 		++inventory_index;
-		ItemType type = static_cast<ItemType>(item.type);
+		const int resolvedType =
+			resolveSavedItemType(item);
+		if ( resolvedType < 0 )
+		{
+			continue;
+		}
+		ItemType type =
+			static_cast<ItemType>(resolvedType);
 		Status status = static_cast<Status>(item.status);
 		Sint16 beatitude = item.beatitude;
 		Sint16 count = item.count;
@@ -6662,7 +6746,14 @@ int loadGame(int player, const SaveGameInfo& info) {
 
 	// void chest inventory
 	for ( auto& item : p.void_chest_inventory ) {
-		ItemType type = static_cast<ItemType>(item.type);
+		const int resolvedType =
+			resolveSavedItemType(item);
+		if ( resolvedType < 0 )
+		{
+			continue;
+		}
+		ItemType type =
+			static_cast<ItemType>(resolvedType);
 		Status status = static_cast<Status>(item.status);
 		Sint16 beatitude = item.beatitude;
 		Sint16 count = item.count;
@@ -6710,7 +6801,15 @@ int loadGame(int player, const SaveGameInfo& info) {
 			auto find = slots.find(item.first);
 			if (find != slots.end()) {
 				auto& slot = find->second;
-				ItemType type = (ItemType)item.second.type;
+				const int resolvedType =
+					resolveSavedItemType(item.second);
+				if ( resolvedType < 0 )
+				{
+					slot = nullptr;
+					continue;
+				}
+				ItemType type =
+					static_cast<ItemType>(resolvedType);
 				Status status = (Status)item.second.status;
 				Sint16 beatitude = item.second.beatitude;
 				Sint16 count = item.second.count;
@@ -7005,7 +7104,15 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 
 			// read follower inventory
 			for (auto& item : follower.inventory) {
-				ItemType type = (ItemType)item.type;
+				const int resolvedType =
+					resolveSavedItemType(item);
+				if ( resolvedType < 0 )
+				{
+					continue;
+				}
+
+				ItemType type =
+					static_cast<ItemType>(resolvedType);
 				Status status = (Status)item.status;
 				Sint16 beatitude = item.beatitude;
 				Sint16 count = item.count;
@@ -7034,7 +7141,16 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 				auto find = slots.find(item.first);
 				if (find != slots.end()) {
 					auto& slot = find->second;
-					ItemType type = (ItemType)item.second.type;
+					const int resolvedType =
+						resolveSavedItemType(item.second);
+					if ( resolvedType < 0 )
+					{
+						slot = nullptr;
+						continue;
+					}
+
+					ItemType type =
+						static_cast<ItemType>(resolvedType);
 					Status status = (Status)item.second.status;
 					Sint16 beatitude = item.second.beatitude;
 					Sint16 count = item.second.count;

@@ -580,7 +580,8 @@ struct SaveGameInfo {
 					int _count,
 					bool _identified,
 					int _x,
-					int _y)
+					int _y,
+					const std::string& _stable_id = "")
 				{
 					type = _type;
 					status = _status;
@@ -590,6 +591,7 @@ struct SaveGameInfo {
 					identified = _identified;
 					x = _x;
 					y = _y;
+					stable_id = _stable_id;
 				}
 
 				Uint32 type = 0;
@@ -600,6 +602,7 @@ struct SaveGameInfo {
 				bool identified = false;
 				int x = 0;
 				int y = 0;
+				std::string stable_id;
 				bool serialize(FileInterface* fp) {
 					fp->property("type", type);
 					fp->property("status", status);
@@ -609,6 +612,7 @@ struct SaveGameInfo {
 					fp->property("identified", identified);
 					fp->property("x", x);
 					fp->property("y", y);
+					fp->property("stable_id", stable_id);
 					return true;
 				}
 				void computeHash(Uint32& hash, Uint32& shift);

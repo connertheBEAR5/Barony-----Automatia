@@ -26,11 +26,50 @@
 #include "player.hpp"
 #include "mod_tools.hpp"
 #include "player_slot_map.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 
 #include <assert.h>
 
 Uint32 itemuids = 1;
-ItemGeneric items[NUMITEMS];
+ItemGeneric items[NUM_ITEM_SLOTS];
+
+int itemVisualTemplateType(const int runtimeItemType)
+{
+    if ( runtimeItemType >= 0
+        && runtimeItemType < NUMITEMS )
+    {
+        return runtimeItemType;
+    }
+
+    if ( runtimeItemType >= 0
+        && runtimeItemType < NUM_ITEM_SLOTS )
+    {
+        const auto& definition = items[runtimeItemType];
+        const auto found = definition.attributes.find(
+            "SAM_VISUAL_TEMPLATE_ID"
+        );
+        if ( found != definition.attributes.end() )
+        {
+            const int templateId = found->second;
+            if ( templateId >= 0
+                && templateId < NUMITEMS )
+            {
+                return templateId;
+            }
+        }
+    }
+
+    return GEM_ROCK;
+}
+
+const ItemGeneric& itemVisualDefinition(
+    const int runtimeItemType
+)
+{
+    return items[itemVisualTemplateType(runtimeItemType)];
+}
 const real_t potionDamageSkillMultipliers[6] = { 1.f, 1.1, 1.25, 1.5, 2.5, 4.f };
 const real_t thrownDamageSkillMultipliers[6] = { 1.f, 1.1, 1.25, 1.5, 2.f, 3.f };
 Uint32 enchantedFeatherScrollSeed;
@@ -40,6 +79,74 @@ int decoyBoxRange = 15;
 
 namespace
 {
+bool isValidRuntimeItemType(
+    const int type
+)
+{
+    if ( type >= 0 && type < NUMITEMS )
+    {
+        return true;
+    }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+    return SAMItemRegistryFoundation::
+        isRegisteredRuntimeItemId(type);
+#else
+    return false;
+#endif
+}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+bool appendSAMStableIdToGameplayPacket(
+    const int runtimeType,
+    const int stableIdOffset,
+    const char* packetName
+)
+{
+    if ( !SAMItemRegistryFoundation::
+        isRegisteredRuntimeItemId(runtimeType) )
+    {
+        return true;
+    }
+
+    const std::string& stableId =
+        SAMItemRegistryFoundation::
+            stableIdForRuntimeId(runtimeType);
+    if ( stableId.empty() )
+    {
+        printlog(
+            "[S.A.M] Refusing %s custom runtime %d: no stable id.\n",
+            packetName,
+            runtimeType
+        );
+        return false;
+    }
+
+    const int available =
+        NET_PACKET_SIZE - stableIdOffset - 1;
+    if ( available <= 0
+        || static_cast<int>(stableId.size()) > available )
+    {
+        printlog(
+            "[S.A.M] Refusing %s custom item [%s]: stable id is too long.\n",
+            packetName,
+            stableId.c_str()
+        );
+        return false;
+    }
+
+    memcpy(
+        &net_packet->data[stableIdOffset],
+        stableId.c_str(),
+        stableId.size()
+    );
+    net_packet->data[stableIdOffset + stableId.size()] = '\0';
+    net_packet->len =
+        stableIdOffset + 1 + static_cast<int>(stableId.size());
+    return true;
+}
+#endif
+
 constexpr int kLootBagFallbackPlayer = 0;
 constexpr int kLootBagFallbackVariation = 4;
 constexpr int kLootBagFallbackLightPalette = 4;
@@ -366,7 +473,10 @@ Item* newItem(const ItemType type, const Status status, const Sint16 beatitude, 
 
 	// now set all of my data elements
 	// try to sanitize these a bit so that corrupt data doesn't crash the whole game
-	item->type = (type >= 0 && type < NUMITEMS) ? type : ItemType::GEM_ROCK;
+	item->type =
+		isValidRuntimeItemType(static_cast<int>(type))
+			? type
+			: ItemType::GEM_ROCK;
 	item->status = (int)status < Status::BROKEN ?
 		Status::BROKEN : ((int)status > EXCELLENT ? EXCELLENT : status);
 	item->beatitude = std::min(std::max((Sint16)-100, beatitude), (Sint16)100);
@@ -1292,11 +1402,14 @@ char* Item::description() const
 
 Category itemCategory(const Item* const item)
 {
-	if ( !item || item->type < 0 || item->type >= NUMITEMS )
+	if ( !item
+		|| !isValidRuntimeItemType(
+			static_cast<int>(item->type)
+		) )
 	{
 		return GEM;
 	}
-	return items[item->type].category;
+	return items[static_cast<int>(item->type)].category;
 }
 
 /*-------------------------------------------------------------------------------
@@ -1309,7 +1422,9 @@ Category itemCategory(const Item* const item)
 
 char* Item::getName() const
 {
-	if ( type >= 0 && type < NUMITEMS )
+	if ( isValidRuntimeItemType(
+		static_cast<int>(type)
+	) )
 	{
 		if ( identified )
 		{
@@ -1429,7 +1544,49 @@ int getItemVariationFromSpellbookOrTome(const Item& item)
 
 Sint32 itemModel(const Item* const item, bool shortModel, Entity* creature)
 {
-	if ( !item || item->type < 0 || item->type >= NUMITEMS )
+	if ( !item )
+	{
+		return 0;
+	}
+
+	const int runtimeType =
+		static_cast<int>(item->type);
+
+	// S.A.M items keep their custom runtime identity but borrow their voxel
+	// model definition from a validated vanilla visual template.
+	if ( runtimeType >= SAM_ITEM_ID_BASE
+		&& runtimeType < NUM_ITEM_SLOTS )
+	{
+		const int visualType =
+			itemVisualTemplateType(runtimeType);
+		if ( visualType < 0
+			|| visualType >= NUMITEMS )
+		{
+			return 0;
+		}
+
+		const ItemGeneric& visualDefinition =
+			items[visualType];
+		if ( visualDefinition.variations <= 0 )
+		{
+			return 0;
+		}
+
+		const int baseIndex = shortModel
+			? visualDefinition.indexShort
+			: visualDefinition.index;
+
+		if ( baseIndex < 0 )
+		{
+			return 0;
+		}
+
+		return baseIndex
+			+ item->appearance
+				% visualDefinition.variations;
+	}
+
+	if ( runtimeType < 0 || runtimeType >= NUMITEMS )
 	{
 		return 0;
 	}
@@ -1537,7 +1694,41 @@ Sint32 itemModel(const Item* const item, bool shortModel, Entity* creature)
 
 Sint32 itemModelFirstperson(const Item* const item)
 {
-	if ( !item || item->type < 0 || item->type >= NUMITEMS )
+	if ( !item )
+	{
+		return 0;
+	}
+
+	const int runtimeType =
+		static_cast<int>(item->type);
+
+	// Custom S.A.M items borrow only the first-person model of their
+	// validated vanilla visual template.
+	if ( runtimeType >= SAM_ITEM_ID_BASE
+		&& runtimeType < NUM_ITEM_SLOTS )
+	{
+		const int visualType =
+			itemVisualTemplateType(runtimeType);
+		if ( visualType < 0
+			|| visualType >= NUMITEMS )
+		{
+			return 0;
+		}
+
+		const ItemGeneric& visualDefinition =
+			items[visualType];
+		if ( visualDefinition.fpindex < 0
+			|| visualDefinition.variations <= 0 )
+		{
+			return 0;
+		}
+
+		return visualDefinition.fpindex
+			+ item->appearance
+				% visualDefinition.variations;
+	}
+
+	if ( runtimeType < 0 || runtimeType >= NUMITEMS )
 	{
 		return 0;
 	}
@@ -1821,10 +2012,20 @@ bool playerGreasyDropItem(const int player, Item* const item)
 				net_packet->data[24] = item->identified;
 				net_packet->data[25] = clientnum;
 				net_packet->data[26] = (slot == &stats[player]->weapon) ? 0 : 1;
-				net_packet->address.host = net_server.host;
-				net_packet->address.port = net_server.port;
-				net_packet->len = 27;
-				sendPacketSafe(net_sock, -1, net_packet, 0);
+                net_packet->address.host = net_server.host;
+                net_packet->address.port = net_server.port;
+                net_packet->len = 27;
+#ifdef SAM_FRAMEWORK_ENABLED
+                if ( !appendSAMStableIdToGameplayPacket(
+                    static_cast<int>(item->type),
+                    27,
+                    "GRES"
+                ) )
+                {
+                    return false;
+                }
+#endif
+                sendPacketSafe(net_sock, -1, net_packet, 0);
 
 				if ( slot == &stats[player]->weapon )
 				{
@@ -1955,10 +2156,20 @@ bool dropItem(Item* const item, const int player, const bool notifyMessage, cons
 		SDLNet_Write32(static_cast<Uint32>(item->appearance), &net_packet->data[20]);
 		net_packet->data[24] = item->identified;
 		net_packet->data[25] = clientnum;
-		net_packet->address.host = net_server.host;
-		net_packet->address.port = net_server.port;
-		net_packet->len = 26;
-		sendPacketSafe(net_sock, -1, net_packet, 0);
+        net_packet->address.host = net_server.host;
+        net_packet->address.port = net_server.port;
+        net_packet->len = 26;
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !appendSAMStableIdToGameplayPacket(
+            static_cast<int>(item->type),
+            26,
+            "DROP"
+        ) )
+        {
+            return false;
+        }
+#endif
+        sendPacketSafe(net_sock, -1, net_packet, 0);
 		if ( item == players[player]->bookGUI.openBookItem )
 		{
 			players[player]->bookGUI.closeBookGUI();
@@ -2123,10 +2334,37 @@ Entity* dropItemMonster(Item* const item, Entity* const monster, Stat* const mon
 	Entity* entity = nullptr;
 	bool itemDroppable = true;
 
-	if ( !item || !monster )
-	{
-		return nullptr;
-	}
+    if ( !item || !monster )
+    {
+        return nullptr;
+    }
+
+    const int runtimeType = static_cast<int>(item->type);
+    if ( !isValidRuntimeItemType(runtimeType) )
+    {
+        printlog(
+            "[S.A.M] Refusing monster or follower drop with unavailable runtime item %d.\n",
+            runtimeType
+        );
+        return nullptr;
+    }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+    if ( runtimeType >= NUMITEMS )
+    {
+        const std::string stableId =
+            SAMItemRegistryFoundation::
+                stableIdForRuntimeId(runtimeType);
+        if ( stableId.empty() )
+        {
+            printlog(
+                "[S.A.M] Refusing monster or follower drop with numeric-only custom runtime %d.\n",
+                runtimeType
+            );
+            return nullptr;
+        }
+    }
+#endif
 
 	if ( monster->behavior == &actPlayer && players[monster->skill[2]]->isLocalPlayer() )
 	{
@@ -2823,10 +3061,20 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 			SDLNet_Write32(static_cast<Uint32>(appearance), &net_packet->data[20]);
 			net_packet->data[24] = identified;
 			net_packet->data[25] = clientnum;
-			net_packet->address.host = net_server.host;
-			net_packet->address.port = net_server.port;
-			net_packet->len = 26;
-			sendPacketSafe(net_sock, -1, net_packet, 0);
+            net_packet->address.host = net_server.host;
+            net_packet->address.port = net_server.port;
+            net_packet->len = 26;
+#ifdef SAM_FRAMEWORK_ENABLED
+            if ( !appendSAMStableIdToGameplayPacket(
+                static_cast<int>(type),
+                26,
+                "USEI"
+            ) )
+            {
+                return;
+            }
+#endif
+            sendPacketSafe(net_sock, -1, net_packet, 0);
 		}
 	};
 	ItemDetailsForServer itemDetailsForServer;
@@ -4044,19 +4292,57 @@ Item* itemPickup(const int player, Item* const item, Item* addToSpecificInventor
 
 	if ( player != 0 && multiplayer == SERVER && !players[player]->isLocalPlayer() )
 	{
-		// send the client info on the item it just picked up
-		strcpy((char*)net_packet->data, "ITEM");
-		SDLNet_Write32(static_cast<Uint32>(item->type), &net_packet->data[4]);
-		SDLNet_Write32(static_cast<Uint32>(item->status), &net_packet->data[8]);
-		SDLNet_Write32(static_cast<Uint32>(item->beatitude), &net_packet->data[12]);
-		SDLNet_Write32(static_cast<Uint32>(item->count), &net_packet->data[16]);
-		SDLNet_Write32(static_cast<Uint32>(item->appearance), &net_packet->data[20]);
-		SDLNet_Write32(static_cast<Uint32>(item->ownerUid), &net_packet->data[24]);
-		net_packet->data[28] = item->identified ? 1 : 0;
-		net_packet->address.host = net_clients[player - 1].host;
-		net_packet->address.port = net_clients[player - 1].port;
-		net_packet->len = 29;
-		sendPacketSafe(net_sock, -1, net_packet, player - 1);
+        // Send the client information for the item it just picked up.
+        // Vanilla ITEM packets remain exactly 29 bytes.
+        strcpy((char*)net_packet->data, "ITEM");
+        SDLNet_Write32(static_cast<Uint32>(item->type), &net_packet->data[4]);
+        SDLNet_Write32(static_cast<Uint32>(item->status), &net_packet->data[8]);
+        SDLNet_Write32(static_cast<Uint32>(item->beatitude), &net_packet->data[12]);
+        SDLNet_Write32(static_cast<Uint32>(item->count), &net_packet->data[16]);
+        SDLNet_Write32(static_cast<Uint32>(item->appearance), &net_packet->data[20]);
+        SDLNet_Write32(static_cast<Uint32>(item->ownerUid), &net_packet->data[24]);
+        net_packet->data[28] = item->identified ? 1 : 0;
+        net_packet->len = 29;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        const int runtimeType = static_cast<int>(item->type);
+        if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeType) )
+        {
+            const std::string& stableId =
+                SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeType);
+            if ( stableId.empty() )
+            {
+                printlog(
+                    "[S.A.M] Refusing ITEM custom runtime %d: no stable id.\n",
+                    runtimeType
+                );
+                return nullptr;
+            }
+
+            const int available = NET_PACKET_SIZE - 30;
+            if ( available <= 0
+                || static_cast<int>(stableId.size()) > available )
+            {
+                printlog(
+                    "[S.A.M] Refusing ITEM custom item [%s]: stable id is too long.\n",
+                    stableId.c_str()
+                );
+                return nullptr;
+            }
+
+            memcpy(
+                &net_packet->data[29],
+                stableId.c_str(),
+                stableId.size()
+            );
+            net_packet->data[29 + stableId.size()] = '\0';
+            net_packet->len = 30 + static_cast<int>(stableId.size());
+        }
+#endif
+
+        net_packet->address.host = net_clients[player - 1].host;
+        net_packet->address.port = net_clients[player - 1].port;
+        sendPacketSafe(net_sock, -1, net_packet, player - 1);
 	}
 	else
 	{
@@ -4588,12 +4874,42 @@ ItemStackResult getItemStackingBehavior(const int player, Item* itemToCheck, Ite
 
 Item* newItemFromEntity(const Entity* const entity, bool discardUid)
 {
-	if ( entity == nullptr )
-	{
-		return nullptr;
-	}
-	Uint32 oldUids = itemuids;
-	Item* item = newItem(static_cast<ItemType>(entity->skill[10]), static_cast<Status>(entity->skill[11]), entity->skill[12], entity->skill[13], entity->skill[14], entity->skill[15], nullptr);
+    if ( entity == nullptr )
+    {
+        return nullptr;
+    }
+
+    const int runtimeType = entity->skill[10];
+    if ( !isValidRuntimeItemType(runtimeType) )
+    {
+        printlog(
+            "[S.A.M] Refusing world-item entity %u with unavailable runtime item %d.\n",
+            entity->getUID(),
+            runtimeType
+        );
+        return nullptr;
+    }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+    if ( runtimeType >= NUMITEMS )
+    {
+        const std::string stableId =
+            SAMItemRegistryFoundation::
+                stableIdForRuntimeId(runtimeType);
+        if ( stableId.empty() )
+        {
+            printlog(
+                "[S.A.M] Refusing world-item entity %u with numeric-only custom runtime %d.\n",
+                entity->getUID(),
+                runtimeType
+            );
+            return nullptr;
+        }
+    }
+#endif
+
+    Uint32 oldUids = itemuids;
+    Item* item = newItem(static_cast<ItemType>(runtimeType), static_cast<Status>(entity->skill[11]), entity->skill[12], entity->skill[13], entity->skill[14], entity->skill[15], nullptr);
 	if ( !item )
 	{
 		return nullptr;
@@ -4738,6 +5054,27 @@ bool itemIsEquipped(const Item* const item, const int player)
 
 Sint32 Item::weaponGetAttack(const Stat* const wielder) const
 {
+	const int runtimeType =
+		static_cast<int>(type);
+
+	// Stage SAM-1O: custom melee items borrow the basic attack calculation
+	// from their validated vanilla visual template. The custom item keeps its
+	// own runtime id, status, beatitude, count, appearance and identity.
+	if ( runtimeType >= SAM_ITEM_ID_BASE
+		&& runtimeType < NUM_ITEM_SLOTS )
+	{
+		const int visualType =
+			itemVisualTemplateType(runtimeType);
+		if ( visualType >= 0
+			&& visualType < NUMITEMS )
+		{
+			Item visualItem = *this;
+			visualItem.type =
+				static_cast<ItemType>(visualType);
+			return visualItem.weaponGetAttack(wielder);
+		}
+	}
+
 	Sint32 attack = beatitude;
 	if ( wielder )
 	{
@@ -6236,9 +6573,19 @@ void Item::apply(const int player, Entity* const entity)
 		SDLNet_Write32(static_cast<Uint32>(entity->getUID()), &net_packet->data[26]);
 		net_packet->address.host = net_server.host;
 		net_packet->address.port = net_server.port;
-		net_packet->len = 30;
-		sendPacketSafe(net_sock, -1, net_packet, 0);
-		if ( type >= ARTIFACT_ORB_BLUE && type <= ARTIFACT_ORB_GREEN )
+        net_packet->len = 30;
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !appendSAMStableIdToGameplayPacket(
+            static_cast<int>(type),
+            30,
+            "APIT"
+        ) )
+        {
+            return;
+        }
+#endif
+        sendPacketSafe(net_sock, -1, net_packet, 0);
+        if ( type >= ARTIFACT_ORB_BLUE && type <= ARTIFACT_ORB_GREEN )
 		{
 			applyOrb(player, type, *entity);
 		}
@@ -6285,8 +6632,18 @@ void Item::applyLockpickToWall(const int player, const int x, const int y) const
 		SDLNet_Write16(y, &net_packet->data[28]);
 		net_packet->address.host = net_server.host;
 		net_packet->address.port = net_server.port;
-		net_packet->len = 30;
-		sendPacketSafe(net_sock, -1, net_packet, 0);
+        net_packet->len = 30;
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !appendSAMStableIdToGameplayPacket(
+            static_cast<int>(type),
+            30,
+            "APIW"
+        ) )
+        {
+            return;
+        }
+#endif
+        sendPacketSafe(net_sock, -1, net_packet, 0);
 		return;
 	}
 
@@ -7106,11 +7463,32 @@ bool isItemEquippableInShieldSlot(const Item* const item)
 		return false;
 	}
 
-	if ( item->type < 0 || item->type >= NUMITEMS )
+	const int runtimeType =
+		static_cast<int>(item->type);
+	if ( runtimeType < 0
+		|| runtimeType >= NUM_ITEM_SLOTS )
 	{
 		return false;
 	}
-	return (items[item->type].item_slot == EQUIPPABLE_IN_SLOT_SHIELD);
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	if ( runtimeType >= NUMITEMS
+		&& !SAMItemRegistryFoundation::
+			isRegisteredRuntimeItemId(runtimeType) )
+	{
+		return false;
+	}
+#else
+	if ( runtimeType >= NUMITEMS )
+	{
+		return false;
+	}
+#endif
+
+	return (
+		items[runtimeType].item_slot
+			== EQUIPPABLE_IN_SLOT_SHIELD
+	);
 }
 
 bool Item::usableWhileShapeshifted(const Stat* const wielder) const
@@ -7713,8 +8091,18 @@ void clientSendAppearanceUpdateToServer(const int player, Item* item, const bool
 	net_packet->data[27] = onIdentify;
 	net_packet->address.host = net_server.host;
 	net_packet->address.port = net_server.port;
-	net_packet->len = 28;
-	sendPacketSafe(net_sock, -1, net_packet, 0);
+    net_packet->len = 28;
+#ifdef SAM_FRAMEWORK_ENABLED
+    if ( !appendSAMStableIdToGameplayPacket(
+        static_cast<int>(item->type),
+        28,
+        "EQUA"
+    ) )
+    {
+        return;
+    }
+#endif
+    sendPacketSafe(net_sock, -1, net_packet, 0);
 }
 
 void clientSendItemTypeUpdateToServer(const int player, Item* item, ItemType prevItemType)
@@ -7734,10 +8122,84 @@ void clientSendItemTypeUpdateToServer(const int player, Item* item, ItemType pre
 	net_packet->data[25] = player;
 	net_packet->data[26] = items[item->type].item_slot;
 	SDLNet_Write32(static_cast<Uint32>(item->type), &net_packet->data[27]);
-	net_packet->address.host = net_server.host;
-	net_packet->address.port = net_server.port;
-	net_packet->len = 31;
-	sendPacketSafe(net_sock, -1, net_packet, 0);
+    net_packet->address.host = net_server.host;
+    net_packet->address.port = net_server.port;
+    net_packet->len = 31;
+#ifdef SAM_FRAMEWORK_ENABLED
+    const bool oldIsCustom =
+        SAMItemRegistryFoundation::isRegisteredRuntimeItemId(
+            static_cast<int>(prevItemType)
+        );
+    const bool newIsCustom =
+        SAMItemRegistryFoundation::isRegisteredRuntimeItemId(
+            static_cast<int>(item->type)
+        );
+    if ( oldIsCustom || newIsCustom )
+    {
+        const std::string oldStableId = oldIsCustom
+            ? SAMItemRegistryFoundation::stableIdForRuntimeId(
+                static_cast<int>(prevItemType)
+            )
+            : std::string();
+        const std::string newStableId = newIsCustom
+            ? SAMItemRegistryFoundation::stableIdForRuntimeId(
+                static_cast<int>(item->type)
+            )
+            : std::string();
+        if ( (oldIsCustom && oldStableId.empty())
+            || (newIsCustom && newStableId.empty())
+            || oldStableId.size() > 0xFFFF
+            || newStableId.size() > 0xFFFF )
+        {
+            printlog(
+                "[S.A.M] Refusing EQUT custom item with invalid stable id.\n"
+            );
+            return;
+        }
+        const int required = 37
+            + static_cast<int>(oldStableId.size())
+            + static_cast<int>(newStableId.size());
+        if ( required > NET_PACKET_SIZE )
+        {
+            printlog(
+                "[S.A.M] Refusing EQUT custom item: stable-id payload is too long.\n"
+            );
+            return;
+        }
+        net_packet->data[31] = oldIsCustom ? 1 : 0;
+        net_packet->data[32] = newIsCustom ? 1 : 0;
+        SDLNet_Write16(
+            static_cast<Uint16>(oldStableId.size()),
+            &net_packet->data[33]
+        );
+        int offset = 35;
+        if ( !oldStableId.empty() )
+        {
+            memcpy(
+                &net_packet->data[offset],
+                oldStableId.data(),
+                oldStableId.size()
+            );
+            offset += static_cast<int>(oldStableId.size());
+        }
+        SDLNet_Write16(
+            static_cast<Uint16>(newStableId.size()),
+            &net_packet->data[offset]
+        );
+        offset += 2;
+        if ( !newStableId.empty() )
+        {
+            memcpy(
+                &net_packet->data[offset],
+                newStableId.data(),
+                newStableId.size()
+            );
+            offset += static_cast<int>(newStableId.size());
+        }
+        net_packet->len = offset;
+    }
+#endif
+    sendPacketSafe(net_sock, -1, net_packet, 0);
 }
 
 void clientSendEquipUpdateToServer(const EquipItemSendToServerSlot slot, const EquipItemResult equipType, const int player,
@@ -7764,10 +8226,20 @@ void clientSendEquipUpdateToServer(const EquipItemSendToServerSlot slot, const E
 	net_packet->data[25] = player;
 	net_packet->data[26] = equipType;
 	net_packet->data[27] = slot;
-	net_packet->address.host = net_server.host;
-	net_packet->address.port = net_server.port;
-	net_packet->len = 28;
-	sendPacketSafe(net_sock, -1, net_packet, 0);
+    net_packet->address.host = net_server.host;
+    net_packet->address.port = net_server.port;
+    net_packet->len = 28;
+#ifdef SAM_FRAMEWORK_ENABLED
+    if ( !appendSAMStableIdToGameplayPacket(
+        static_cast<int>(type),
+        28,
+        reinterpret_cast<const char*>(net_packet->data)
+    ) )
+    {
+        return;
+    }
+#endif
+    sendPacketSafe(net_sock, -1, net_packet, 0);
 }
 
 void clientUnequipSlotAndUpdateServer(const int player, const EquipItemSendToServerSlot slot, Item* const item)

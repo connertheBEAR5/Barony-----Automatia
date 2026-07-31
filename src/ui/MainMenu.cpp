@@ -19,6 +19,9 @@
 #include "../draw.hpp"
 #include "../engine/audio/sound.hpp"
 #include "../classdescriptions.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "../sam/sam_class_registry_foundation.hpp"
+#endif
 #include "../lobbies.hpp"
 #include "../interface/consolecommand.hpp"
 #include "../interface/ui.hpp"
@@ -17474,6 +17477,17 @@ failed:
 	        (*difficulty_stars->getTickCallback())(*difficulty_stars);
         } else {
 		    static auto class_name_fn = [](Field& field, int index){
+#ifdef SAM_FRAMEWORK_ENABLED
+			    if ( const SAMFoundationClassDef* definition =
+					SAMClassRegistryFoundation::getClass(
+						client_classes[index]
+					) )
+			    {
+				    field.setText(definition->name.c_str());
+				    field.setColor(color_dlc0);
+				    return;
+			    }
+#endif
 			    const int i = std::min(std::max(0, client_classes[index]), num_classes - 1);
 			    field.setText(Language::get(playerClassLangEntryCapitalized(i)));
 			    if (i < CLASS_CONJURER) {
@@ -17644,8 +17658,14 @@ failed:
             saveLastCharacter(index, multiplayer);
         });
 
-		const int current_class = std::min(std::max(0, client_classes[index]), num_classes - 1);
-		auto current_class_name = classes_in_order[current_class];
+		const int current_class = client_classes[index];
+		const char* current_class_name =
+			(
+				current_class >= 0
+				&& current_class < num_classes
+			)
+				? classes_in_order[current_class]
+				: "";
 
         bool selected_button = false;
 		static const std::string prefix = "*images/ui/Main Menus/Play/PlayerCreation/ClassSelection/";
@@ -17923,6 +17943,132 @@ failed:
 				}
 			    });
 		}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+		for ( const SAMFoundationClassDef& definition :
+			SAMClassRegistryFoundation::classes() )
+		{
+			const int customIndex =
+				definition.runtimeId - 1000;
+			auto button =
+				subframe->addButton(
+					definition.stableId.c_str()
+				);
+
+			button->setText(definition.name.c_str());
+			button->setFont(smallfont_outline);
+			button->setBackground(
+				(prefix + "ClassSelect_IconBGBase_00.png").c_str()
+			);
+			button->setBackgroundHighlighted(
+				(prefix + "ClassSelect_IconBGBaseHigh_00.png").c_str()
+			);
+			button->setBackgroundActivated(
+				(prefix + "ClassSelect_IconBGBasePress_00.png").c_str()
+			);
+			button->setColor(
+				makeColor(255, 255, 255, 255)
+			);
+			button->setHighlightColor(
+				makeColor(255, 255, 255, 255)
+			);
+
+			const int visualIndex =
+				num_classes + customIndex;
+			button->setSize(
+				SDL_Rect{
+					8 + (visualIndex % 4) * 54,
+					6 + (visualIndex / 4) * 54,
+					54,
+					54
+				}
+			);
+			button->setOwner(index);
+			button->setWidgetSearchParent(
+				(
+					std::string("card")
+					+ std::to_string(index)
+				).c_str()
+			);
+			button->addWidgetAction(
+				"MenuStart",
+				"confirm"
+			);
+			button->addWidgetAction(
+				"MenuAlt1",
+				"randomize_class"
+			);
+			button->addWidgetAction(
+				"MenuAlt2",
+				"class_info"
+			);
+			button->setWidgetBack("back_button");
+
+			if ( current_class == definition.runtimeId )
+			{
+				button->select();
+				button->scrollParent();
+				selected_button = true;
+			}
+
+			button->setCallback([](Button& clicked) {
+				const int player = clicked.getOwner();
+				const int classId =
+					SAMClassRegistryFoundation::
+						runtimeIdForStableId(
+							clicked.getName()
+						);
+				if ( classId < 0 )
+				{
+					soundError();
+					return;
+				}
+
+				soundActivate();
+				client_classes[player] = classId;
+				class_selection[player] = classId;
+				stats[player]->clearStats();
+				initClass(player);
+				sendPlayerOverNet();
+				saveLastCharacter(
+					player,
+					multiplayer
+				);
+			});
+
+			button->setTickCallback([](Widget& widget) {
+				auto button =
+					static_cast<Button*>(&widget);
+				const int player = widget.getOwner();
+				const int classId =
+					SAMClassRegistryFoundation::
+						runtimeIdForStableId(
+							button->getName()
+						);
+				if ( classId < 0 )
+				{
+					return;
+				}
+
+				if ( button->isSelected() )
+				{
+					class_selection[player] = classId;
+				}
+
+				if ( inputs.hasController(player)
+					&& (
+						button->isSelected()
+						|| button->isHighlighted()
+					)
+					&& client_classes[player] != classId )
+				{
+					client_classes[player] = classId;
+					stats[player]->clearStats();
+					initClass(player);
+				}
+			});
+		}
+#endif
 
         if (!selected_button) {
 		    auto first_button = subframe->findButton(reduced_class_list[0]);

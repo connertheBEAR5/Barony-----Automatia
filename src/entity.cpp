@@ -14,6 +14,9 @@ See LICENSE for details.
 #include "stat.hpp"
 #include "entity.hpp"
 #include "items.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #include "monster.hpp"
 #include "engine/audio/sound.hpp"
 #include "magic/magic.hpp"
@@ -14474,7 +14477,35 @@ void Entity::attack(int pose, int charge, Entity* target)
 									net_packet->address.host = net_clients[playerhit - 1].host;
 									net_packet->address.port = net_clients[playerhit - 1].port;
 									net_packet->len = 26;
-									sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
+#ifdef SAM_FRAMEWORK_ENABLED
+                                    if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(armor->type) )
+                                    {
+                                        const std::string& stableId =
+                                            SAMItemRegistryFoundation::stableIdForRuntimeId(armor->type);
+                                        const int available = NET_PACKET_SIZE - 27;
+                                        if ( !stableId.empty()
+                                            && static_cast<int>(stableId.size()) <= available )
+                                        {
+                                            memcpy(
+                                                &net_packet->data[26],
+                                                stableId.c_str(),
+                                                stableId.size()
+                                            );
+                                            net_packet->data[26 + stableId.size()] = '\0';
+                                            net_packet->len =
+                                                27 + static_cast<int>(stableId.size());
+                                        }
+                                        else
+                                        {
+                                            printlog(
+                                                "[S.A.M] STLA could not serialize custom item runtime %d. "
+                                                "The remote removal update will be rejected safely.\n",
+                                                static_cast<int>(armor->type)
+                                            );
+                                        }
+                                    }
+#endif
+                                    sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
 								}
 
 								if ( armor->count <= 0 )
@@ -14629,7 +14660,35 @@ void Entity::attack(int pose, int charge, Entity* target)
 									net_packet->address.host = net_clients[playerhit - 1].host;
 									net_packet->address.port = net_clients[playerhit - 1].port;
 									net_packet->len = 26;
-									sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
+#ifdef SAM_FRAMEWORK_ENABLED
+                                    if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(armor->type) )
+                                    {
+                                        const std::string& stableId =
+                                            SAMItemRegistryFoundation::stableIdForRuntimeId(armor->type);
+                                        const int available = NET_PACKET_SIZE - 27;
+                                        if ( !stableId.empty()
+                                            && static_cast<int>(stableId.size()) <= available )
+                                        {
+                                            memcpy(
+                                                &net_packet->data[26],
+                                                stableId.c_str(),
+                                                stableId.size()
+                                            );
+                                            net_packet->data[26 + stableId.size()] = '\0';
+                                            net_packet->len =
+                                                27 + static_cast<int>(stableId.size());
+                                        }
+                                        else
+                                        {
+                                            printlog(
+                                                "[S.A.M] STLA could not serialize custom item runtime %d. "
+                                                "The remote removal update will be rejected safely.\n",
+                                                static_cast<int>(armor->type)
+                                            );
+                                        }
+                                    }
+#endif
+                                    sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
 								}
 
 								if ( armor->count <= 0 )
