@@ -1,11 +1,22 @@
-# SAM-1Q3B8 — Remote Equipment Stable-ID Synchronization
+# HEADLESS-1A Dedicated Server Startup Skeleton
 
-Replacement files for the Barony `maindev` worktree.
+Install into the maindev worktree root:
 
-This cumulative package preserves the prior SAM-1Q3 changes and adds authoritative `stable_id` payloads to remote client equipment requests:
+```bash
+cd ~/maindev
+unzip -o ~/Downloads/HEADLESS-1A_dedicated_server_startup_skeleton.zip -d ~/maindev
+```
 
-- `EQUI` weapon equipment
-- `EQUS` shield or spellbook equipment
-- `EQUM` armor, mask, cloak, amulet, ring, and other equipment slots
+Launch the first-stage headless mode with:
 
-Vanilla packets remain 28 bytes. Registered S.A.M. items append a bounded null-terminated `stable_id` beginning at byte 28. The server resolves the identity through its own registry and rejects malformed, unavailable, or numeric-only custom identities.
+```bash
+./barony --headless
+```
+
+Existing map and data arguments can be combined with it, for example:
+
+```bash
+./barony --headless -map=start
+```
+
+This first stage uses a hidden OpenGL window/context for compatibility with existing resource loading. It disables visible presentation, sound initialization, controller/haptic initialization, controller mapping loading, and splash music. It does not yet automatically create and configure a multiplayer server lobby.

@@ -17997,7 +17997,16 @@ int main(int argc, char** argv)
 #endif
 				if ( argv[c] != NULL )
 				{
-					if ( !strcmp(argv[c], "-windowed") )
+                    if ( !strcmp(argv[c], "--headless") || !strcmp(argv[c], "-headless") )
+                    {
+                        headless = true;
+                        no_sound = true;
+                        fullscreen = 0;
+                        borderless = false;
+                        xres = 320;
+                        yres = 200;
+                    }
+					else if ( !strcmp(argv[c], "-windowed") )
 					{
 						fullscreen = 0;
 					}
@@ -18046,12 +18055,20 @@ int main(int argc, char** argv)
 				}
 			}
 		}
-		printlog("Data path is %s", datadir);
-		printlog("Output path is %s", outputdir);
+        printlog("Data path is %s", datadir);
+        printlog("Output path is %s", outputdir);
+        if ( headless )
+        {
+            printlog("HEADLESS-1A enabled: hidden-window dedicated-server startup skeleton.");
+            printlog("HEADLESS-1A note: rendering resources are still initialized for compatibility in this stage.");
+        }
         
         // init sdl
         Uint32 init_flags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
-        init_flags |= SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC;
+        if ( !headless )
+        {
+            init_flags |= SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC;
+        }
         if (SDL_Init(init_flags) == -1)
         {
             printlog("failed to initialize SDL: %s\n", SDL_GetError());
@@ -18156,7 +18173,10 @@ int main(int argc, char** argv)
 
 		// play splash sound
 #ifdef MUSIC
-		playMusic(splashmusic, false, false, false);
+        if ( !headless )
+        {
+            playMusic(splashmusic, false, false, false);
+        }
 #endif
 
 		int indev_timer = 0;

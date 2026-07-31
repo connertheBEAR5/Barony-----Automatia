@@ -911,6 +911,7 @@ extern char const *cursor_fill[];
 GLuint create_shader(const char* filename, GLenum type);
 
 extern bool no_sound; //False means sound initialized properly. True means sound failed to initialize.
+extern bool headless; // Dedicated-server startup mode. HEADLESS-1A still uses a hidden GL context for compatibility.
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

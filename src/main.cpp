@@ -527,6 +527,7 @@ Uint32 cursorflash = 0;
 bool splitscreen = false;
 
 bool no_sound = false;
+bool headless = false;
 
 //Entity *players[4];
 
