@@ -2410,6 +2410,23 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	if ( strncmp(
 			valid_data,
+			"BARONY LMPV4.8",
+			strlen("BARONY LMPV4.8")
+		) == 0 )
+	{
+		editorVersion = 48;
+	}
+	else if ( strncmp(
+			valid_data,
+			"BARONY LMPV4.7",
+			strlen("BARONY LMPV4.7")
+		) == 0 )
+	{
+		// Expanded editor-authored monster inventory slots.
+		editorVersion = 47;
+	}
+	else if ( strncmp(
+			valid_data,
 			"BARONY LMPV4.6",
 			strlen("BARONY LMPV4.6")
 		) == 0 )
@@ -2925,9 +2942,13 @@ fp->read(&numentities, sizeof(Uint32), 1);
 						fp->read(&myStats->RANDOM_LVL, sizeof(Sint32), 1);
 						fp->read(&myStats->RANDOM_GOLD, sizeof(Sint32), 1);
 
-						if ( editorVersion >= 22 )
+						if ( editorVersion >= 47 )
 						{
 							fp->read(&myStats->EDITOR_ITEMS, sizeof(Sint32), ITEM_SLOT_NUM);
+						}
+						else if ( editorVersion >= 22 )
+						{
+							fp->read(&myStats->EDITOR_ITEMS, sizeof(Sint32), ITEM_SLOT_LEGACY_NUM);
 						}
 						else
 						{
@@ -2956,6 +2977,17 @@ fp->read(&numentities, sizeof(Uint32), 1);
 							* Legacy maps have no custom dialogue assignment.
 							*/
 							myStats->customDialogueID[0] = '\0';
+						}
+
+						if ( editorVersion >= 48 )
+						{
+							for ( int effect = 0; effect < NUMEFFECTS; ++effect )
+							{
+								Uint8 strength = 0;
+								fp->read(&strength, sizeof(Uint8), 1);
+								myStats->setEffectActive(effect, strength);
+							}
+							fp->read(&myStats->EFFECTS_TIMERS, sizeof(Sint32), NUMEFFECTS);
 						}
 					}
 					//Read dummy values to move fp for the client
@@ -2991,9 +3023,13 @@ fp->read(&numentities, sizeof(Uint32), 1);
 						fp->read(&dummyStats->RANDOM_LVL, sizeof(Sint32), 1);
 						fp->read(&dummyStats->RANDOM_GOLD, sizeof(Sint32), 1);
 
-						if ( editorVersion >= 22 )
+						if ( editorVersion >= 47 )
 						{
 							fp->read(&dummyStats->EDITOR_ITEMS, sizeof(Sint32), ITEM_SLOT_NUM);
+						}
+						else if ( editorVersion >= 22 )
+						{
+							fp->read(&dummyStats->EDITOR_ITEMS, sizeof(Sint32), ITEM_SLOT_LEGACY_NUM);
 						}
 						else
 						{
@@ -3024,6 +3060,17 @@ fp->read(&numentities, sizeof(Uint32), 1);
 						else
 						{
 							dummyStats->customDialogueID[0] = '\0';
+						}
+
+						if ( editorVersion >= 48 )
+						{
+							for ( int effect = 0; effect < NUMEFFECTS; ++effect )
+							{
+								Uint8 strength = 0;
+								fp->read(&strength, sizeof(Uint8), 1);
+								dummyStats->setEffectActive(effect, strength);
+							}
+							fp->read(&dummyStats->EFFECTS_TIMERS, sizeof(Sint32), NUMEFFECTS);
 						}
 
 						delete dummyStats;
@@ -3874,13 +3921,13 @@ int saveMap(const char* filename2)
 		);
 
 		/*
-		* Saving produces a V4.6 32-layer map with stable entity IDs and
-		* editor-authored custom monster dialogue IDs.
+		* Saving produces a V4.8 32-layer map with expanded editor-authored
+		* monster inventories and custom dialogue IDs.
 		*/
 		fp->write(
-			"BARONY LMPV4.6",
+			"BARONY LMPV4.8",
 			sizeof(char),
-			strlen("BARONY LMPV4.6")
+			strlen("BARONY LMPV4.8")
 		);
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
@@ -3973,6 +4020,13 @@ int saveMap(const char* filename2)
 						sizeof(myStats->customDialogueID),
 						1
 					);
+
+					for ( int effect = 0; effect < NUMEFFECTS; ++effect )
+					{
+						const Uint8 strength = myStats->getEffectActive(effect);
+						fp->write(&strength, sizeof(Uint8), 1);
+					}
+					fp->write(&myStats->EFFECTS_TIMERS, sizeof(Sint32), NUMEFFECTS);
 
 					break;
 				case 2:

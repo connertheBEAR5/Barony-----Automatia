@@ -8576,6 +8576,10 @@ void doQuitGame() {
 }
 
 void doNewGame(bool makeHighscore) {
+	// Entity UIDs restart from 1 for a new session, so clear dialogue defeat
+	// credit and pending-choice caches before any new-game state is created.
+	customDialogueResetRuntimeState();
+
 	bool bWasOnMainMenu = intro;
 	introstage = 1;
 	fadefinished = false;

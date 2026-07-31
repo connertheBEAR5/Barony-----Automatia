@@ -44571,8 +44571,32 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::update()
             rebuildCustomChoiceText();
         }
 
-        if ( Input::inputs[player].consumeBinaryToggle("MenuConfirm")
-            || Input::inputs[player].consumeBinaryToggle("MenuLeftClick") )
+        bool confirmChoice = false;
+
+        if ( keystatus[SDLK_RETURN] )
+        {
+            keystatus[SDLK_RETURN] = 0;
+            confirmChoice = true;
+        }
+
+        if ( Input::inputs[player].consumeBinaryToggle("MenuLeftClick") )
+        {
+            confirmChoice = true;
+        }
+
+        if ( inputs.hasController(player)
+            && Input::inputs[player].consumeBinaryToggle("MenuConfirm") )
+        {
+            confirmChoice = true;
+        }
+
+        // Spacebar is intentionally not accepted for custom dialogue choices.
+        if ( keystatus[SDLK_SPACE] )
+        {
+            keystatus[SDLK_SPACE] = 0;
+        }
+
+        if ( confirmChoice )
         {
             const Uint32 selectedParent =
                 parent;

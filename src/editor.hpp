@@ -16,6 +16,8 @@
 
 #include "draw.hpp"
 
+class Stat;
+
 static const unsigned int MAXWIDTH = 2000;
 static const unsigned int MAXHEIGHT = 2000;
 static const unsigned int MINWIDTH = 1;
@@ -222,6 +224,32 @@ void buttonSpriteProperties(button_t* my);
 void buttonSpritePropertiesConfirm(button_t* my);
 void buttonCloseSpriteSubwindow(button_t* my);
 void buttonMonsterItems(button_t* my);
+void buttonMonsterInventoryPrevPage(button_t* my);
+void buttonMonsterInventoryNextPage(button_t* my);
+void buttonMonsterInventoryAddSlot(button_t* my);
+void buttonMonsterInventoryRemoveSlot(button_t* my);
+void buttonMonsterInventorySaveTemplateFile(button_t* my);
+void buttonMonsterInventoryLoadTemplateFile(button_t* my);
+void buttonMonsterEquipmentSaveTemplateFile(button_t* my);
+void buttonMonsterEquipmentLoadTemplateFile(button_t* my);
+void drawMonsterTemplateBrowser();
+bool editorDescribeSAMItem(Sint32 runtimeID, const char* stableID,
+    char* nameOut, size_t nameOutSize, char* detailOut, size_t detailOutSize);
+const char* editorGetMonsterSlotStableID(Stat* stats, int itemSlot);
+void buttonMonsterEffectsOpen(button_t* my);
+void buttonMonsterEffectsDone(button_t* my);
+void buttonMonsterEffectsAdd(button_t* my);
+void buttonMonsterEffectsRemove(button_t* my);
+void buttonMonsterEffectsCycle(button_t* my);
+void buttonMonsterEffectsStrengthDown(button_t* my);
+void buttonMonsterEffectsStrengthUp(button_t* my);
+void buttonMonsterEffectsDurationDown(button_t* my);
+void buttonMonsterEffectsDurationUp(button_t* my);
+void buttonMonsterEffectsPermanent(button_t* my);
+void buttonMonsterEffectsToggleAll(button_t* my);
+extern int monsterInventoryPage;
+extern bool monsterEffectsShowAll;
+void monsterEffectsSetRowsVisible(bool visible);
 void initMonsterPropertiesWindow();
 void buttonOpenDirectory(button_t* my);
 void buttonOpenPrevMap(button_t* my);

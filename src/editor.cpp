@@ -42,6 +42,17 @@
 
 //#include "player.hpp"
 
+extern char monsterEffectSearchText[64];
+extern char monsterEffectIdText[8];
+extern int monsterEffectSelectedId;
+extern void monsterEffectsUpdateSelectionFromFields();
+extern const char* monsterEffectDisplayName(int effect);
+extern bool monsterEffectCanSelect(int effect);
+extern void monsterEffectsSetRowsVisible(bool visible);
+
+static int monsterEffectDropdownScroll = 0;
+static std::string monsterEffectDropdownLastQuery;
+
 std::map<int, std::string> modelFileNames;
 Entity* selectedEntity[MAXPLAYERS] = { nullptr };
 Entity* lastSelectedEntity[MAXPLAYERS] = { nullptr };
@@ -145,6 +156,199 @@ static Uint32 questEditorStatusUntil = 0;
 static bool questEditorCreateMarkers = false;
 
 
+/*
+ * Searchable editor palette state.
+ *
+ * These fields are UI-only and deliberately remain local to editor.cpp so the
+ * palette update does not alter map data, editor file formats, or entity data.
+ */
+static char editorSpritePaletteSearch[128] = "";
+static char editorTilePaletteSearch[128] = "";
+static char editorMonsterItemSearch[128] = "";
+static char editorOpenMapSearch[128] = "";
+static char editorDirectorySearch[128] = "";
+static std::string editorMonsterItemSearchLastKey;
+static std::string editorPaletteLastFilter;
+static std::vector<int> editorPaletteMatches;
+static int editorPaletteSelectedMatch = 0;
+static int editorPaletteFirstVisible = 0;
+static int editorPaletteActiveType = 0; // 1 = sprites, 2 = tiles.
+
+static std::string editorPaletteLowercase(const std::string& text)
+{
+    std::string result = text;
+    for ( char& character : result )
+    {
+        character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return result;
+}
+
+static bool editorPaletteTextMatches(const char* displayName, int index, const char* filter)
+{
+    if ( filter == nullptr || filter[0] == '\0' )
+    {
+        return true;
+    }
+
+    const std::string loweredFilter = editorPaletteLowercase(filter);
+    const std::string loweredName = editorPaletteLowercase(displayName != nullptr ? displayName : "");
+    if ( loweredName.find(loweredFilter) != std::string::npos )
+    {
+        return true;
+    }
+
+    const std::string indexText = std::to_string(index);
+    return indexText.find(loweredFilter) != std::string::npos;
+}
+
+static void editorPaletteRebuildMatches(int paletteType)
+{
+    const char* filter = paletteType == 1 ? editorSpritePaletteSearch : editorTilePaletteSearch;
+    const std::string filterKey = std::to_string(paletteType) + ":" + filter;
+    if ( editorPaletteActiveType == paletteType && editorPaletteLastFilter == filterKey )
+    {
+        return;
+    }
+
+    editorPaletteMatches.clear();
+    if ( paletteType == 1 )
+    {
+        const int count = std::min<int>(numsprites, static_cast<int>(spriteEditorNameStrings.size()));
+        for ( int index = 0; index < count; ++index )
+        {
+            if ( editorPaletteTextMatches(spriteEditorNameStrings[index], index, filter) )
+            {
+                editorPaletteMatches.push_back(index);
+            }
+        }
+    }
+    else
+    {
+        const int namedTileCount = static_cast<int>(sizeof(tileEditorNameStrings) / sizeof(tileEditorNameStrings[0]));
+        const int count = std::min<int>(static_cast<int>(numtiles), namedTileCount);
+        for ( int index = 0; index < count; ++index )
+        {
+            if ( editorPaletteTextMatches(tileEditorNameStrings[index], index, filter) )
+            {
+                editorPaletteMatches.push_back(index);
+            }
+        }
+    }
+
+    editorPaletteActiveType = paletteType;
+    editorPaletteLastFilter = filterKey;
+    editorPaletteSelectedMatch = 0;
+    editorPaletteFirstVisible = 0;
+}
+
+static void editorPaletteKeepSelectionVisible(int columns, int visibleRows)
+{
+    if ( editorPaletteMatches.empty() )
+    {
+        editorPaletteSelectedMatch = 0;
+        editorPaletteFirstVisible = 0;
+        return;
+    }
+
+    editorPaletteSelectedMatch = std::max(0,
+        std::min(editorPaletteSelectedMatch, static_cast<int>(editorPaletteMatches.size()) - 1));
+
+    const int pageSize = std::max(1, columns * visibleRows);
+    const int selectedRow = editorPaletteSelectedMatch / columns;
+    int firstRow = editorPaletteFirstVisible / columns;
+    if ( selectedRow < firstRow )
+    {
+        firstRow = selectedRow;
+    }
+    else if ( selectedRow >= firstRow + visibleRows )
+    {
+        firstRow = selectedRow - visibleRows + 1;
+    }
+
+    const int maxFirstRow = std::max(0,
+        (static_cast<int>(editorPaletteMatches.size()) - 1) / columns - visibleRows + 1);
+    firstRow = std::max(0, std::min(firstRow, maxFirstRow));
+    editorPaletteFirstVisible = firstRow * columns;
+    editorPaletteFirstVisible = std::min(editorPaletteFirstVisible,
+        std::max(0, static_cast<int>(editorPaletteMatches.size()) - pageSize));
+    editorPaletteFirstVisible -= editorPaletteFirstVisible % columns;
+}
+
+static void editorPaletteHandleKeyboard(int columns, int visibleRows)
+{
+    if ( editorPaletteMatches.empty() )
+    {
+        return;
+    }
+
+    const int pageSize = std::max(1, columns * visibleRows);
+    if ( keystatus[SDLK_LEFT] )
+    {
+        keystatus[SDLK_LEFT] = 0;
+        --editorPaletteSelectedMatch;
+    }
+    if ( keystatus[SDLK_RIGHT] )
+    {
+        keystatus[SDLK_RIGHT] = 0;
+        ++editorPaletteSelectedMatch;
+    }
+    if ( keystatus[SDLK_UP] )
+    {
+        keystatus[SDLK_UP] = 0;
+        editorPaletteSelectedMatch -= columns;
+    }
+    if ( keystatus[SDLK_DOWN] )
+    {
+        keystatus[SDLK_DOWN] = 0;
+        editorPaletteSelectedMatch += columns;
+    }
+    if ( keystatus[SDLK_PAGEUP] )
+    {
+        keystatus[SDLK_PAGEUP] = 0;
+        editorPaletteSelectedMatch -= pageSize;
+    }
+    if ( keystatus[SDLK_PAGEDOWN] )
+    {
+        keystatus[SDLK_PAGEDOWN] = 0;
+        editorPaletteSelectedMatch += pageSize;
+    }
+    if ( keystatus[SDLK_HOME] )
+    {
+        keystatus[SDLK_HOME] = 0;
+        editorPaletteSelectedMatch = 0;
+    }
+    if ( keystatus[SDLK_END] )
+    {
+        keystatus[SDLK_END] = 0;
+        editorPaletteSelectedMatch = static_cast<int>(editorPaletteMatches.size()) - 1;
+    }
+
+    editorPaletteKeepSelectionVisible(columns, visibleRows);
+}
+
+static void editorPaletteBeginTextInput(char* searchBuffer)
+{
+    if ( inputstr != searchBuffer || !SDL_IsTextInputActive() )
+    {
+        SDL_StartTextInput();
+        inputstr = searchBuffer;
+        inputlen = 127;
+    }
+}
+
+static void editorPaletteEndTextInput()
+{
+    if ( SDL_IsTextInputActive() )
+    {
+        SDL_StopTextInput();
+    }
+    inputstr = nullptr;
+    editorPaletteActiveType = 0;
+    editorPaletteLastFilter.clear();
+}
+
+
 struct QuestDialogueEditorNodePreview
 {
 	int id = 0;
@@ -199,10 +403,15 @@ enum QuestDialogueEditableField
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_ID,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT,
 	QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+	QUEST_DIALOGUE_FIELD_CONDITION_QUEST,
 	QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+	QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
 	QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+	QUEST_DIALOGUE_FIELD_POWER_X,
+	QUEST_DIALOGUE_FIELD_POWER_Y,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET,
+	QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID,
 	QUEST_DIALOGUE_FIELD_MARKER_X,
 	QUEST_DIALOGUE_FIELD_MARKER_Y,
 	QUEST_DIALOGUE_FIELD_NUM_FIELDS
@@ -229,8 +438,23 @@ static QuestDialogueFieldCategory
 
 static char questDialogueEditorEditBuffer[512] = "";
 static bool questDialogueEditorEditingField = false;
+static QuestDialogueEditableField questDialogueEditorLockedEditableField =
+    QUEST_DIALOGUE_FIELD_QUEST_TITLE;
+static QuestDialogueFieldCategory questDialogueEditorLockedFieldCategory =
+    QUEST_DIALOGUE_CATEGORY_FILE_QUEST;
 static bool questDialogueEditorDeleteFileConfirm = false;
 static Uint32 questDialogueEditorDeleteFileConfirmUntil = 0;
+
+enum QuestDialogueInspectorSelection
+{
+    QUEST_DIALOGUE_INSPECTOR_NONE = 0,
+    QUEST_DIALOGUE_INSPECTOR_CONDITION,
+    QUEST_DIALOGUE_INSPECTOR_ACTION
+};
+
+static QuestDialogueInspectorSelection
+    questDialogueEditorInspectorSelection =
+        QUEST_DIALOGUE_INSPECTOR_NONE;
 
 enum QuestDialogueActionGroup
 {
@@ -241,6 +465,7 @@ enum QuestDialogueActionGroup
 	QUEST_DIALOGUE_ACTION_GROUP_FLAGS,
 	QUEST_DIALOGUE_ACTION_GROUP_VARIABLES,
 	QUEST_DIALOGUE_ACTION_GROUP_NPC,
+	QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS,
 	QUEST_DIALOGUE_ACTION_GROUP_STATUS,
 	QUEST_DIALOGUE_ACTION_GROUP_COUNT
 };
@@ -249,10 +474,26 @@ static QuestDialogueActionGroup
 	questDialogueEditorActionGroup =
 		QUEST_DIALOGUE_ACTION_GROUP_QUEST;
 
+enum QuestDialogueConditionGroup
+{
+	QUEST_DIALOGUE_CONDITION_GROUP_ITEMS = 0,
+	QUEST_DIALOGUE_CONDITION_GROUP_QUEST,
+	QUEST_DIALOGUE_CONDITION_GROUP_OBJECTIVES,
+	QUEST_DIALOGUE_CONDITION_GROUP_FLAGS,
+	QUEST_DIALOGUE_CONDITION_GROUP_VARIABLES,
+	QUEST_DIALOGUE_CONDITION_GROUP_COUNT
+};
+
+static QuestDialogueConditionGroup
+	questDialogueEditorConditionGroup =
+		QUEST_DIALOGUE_CONDITION_GROUP_ITEMS;
+
 static int questDialogueEditorSelectedItemID = 0;
 static int questDialogueEditorSelectedItemCount = 1;
 static int questDialogueEditorSelectedConditionQuest = 0;
+static int questDialogueEditorSelectedActionIndex = 0;
 static int questDialogueEditorGoldAmount = 100;
+static int questDialogueEditorSelectedConditionIndex = 0;
 static int questDialogueEditorSelectedEffectID = 0;
 static int questDialogueEditorEffectDurationSeconds = 30;
 static int questDialogueEditorEffectStrength = 1;
@@ -574,6 +815,85 @@ static void questDialogueEditorSetMessage(
 		ticks + TICKS_PER_SECOND * 4;
 }
 
+static void questDialogueEditorRepairObjectiveConditionQuestIDs()
+{
+    if ( !questDialogueEditorDocument.IsObject()
+        || !questDialogueEditorDocument.HasMember("nodes")
+        || !questDialogueEditorDocument["nodes"].IsArray() )
+    {
+        return;
+    }
+
+    std::string questID = "quest_id";
+    if ( questDialogueEditorDocument.HasMember("quest_id")
+        && questDialogueEditorDocument["quest_id"].IsString()
+        && questDialogueEditorDocument["quest_id"].GetStringLength() > 0 )
+    {
+        questID = questDialogueEditorDocument["quest_id"].GetString();
+    }
+
+    auto& allocator = questDialogueEditorDocument.GetAllocator();
+    rapidjson::Value& nodes = questDialogueEditorDocument["nodes"];
+
+    for ( rapidjson::SizeType nodeIndex = 0;
+        nodeIndex < nodes.Size();
+        ++nodeIndex )
+    {
+        rapidjson::Value& node = nodes[nodeIndex];
+        if ( !node.IsObject()
+            || !node.HasMember("choices")
+            || !node["choices"].IsArray() )
+        {
+            continue;
+        }
+
+        rapidjson::Value& choices = node["choices"];
+        for ( rapidjson::SizeType choiceIndex = 0;
+            choiceIndex < choices.Size();
+            ++choiceIndex )
+        {
+            rapidjson::Value& choice = choices[choiceIndex];
+            if ( !choice.IsObject()
+                || !choice.HasMember("condition")
+                || !choice["condition"].IsObject() )
+            {
+                continue;
+            }
+
+            rapidjson::Value& condition = choice["condition"];
+            if ( !condition.HasMember("type")
+                || !condition["type"].IsString() )
+            {
+                continue;
+            }
+
+            const std::string type = condition["type"].GetString();
+            if ( type != "objective_completed"
+                && type != "objective_incomplete" )
+            {
+                continue;
+            }
+
+            if ( condition.HasMember("quest") )
+            {
+                if ( !condition["quest"].IsString()
+                    || condition["quest"].GetStringLength() == 0 )
+                {
+                    rapidjson::Value replacement;
+                    replacement.SetString(questID.c_str(), allocator);
+                    condition["quest"] = replacement;
+                }
+            }
+            else
+            {
+                rapidjson::Value questValue;
+                questValue.SetString(questID.c_str(), allocator);
+                condition.AddMember("quest", questValue, allocator);
+            }
+        }
+    }
+}
+
 static bool questDialogueEditorSaveDocument()
 {
 	if ( questDialogueEditorSelectedFile < 0
@@ -588,6 +908,8 @@ static bool questDialogueEditorSaveDocument()
 		);
 		return false;
 	}
+
+	questDialogueEditorRepairObjectiveConditionQuestIDs();
 
 	rapidjson::StringBuffer buffer;
 	rapidjson::PrettyWriter<
@@ -881,8 +1203,17 @@ static bool questDialogueEditorDeleteNode()
 			questDialogueEditorSelectedNode
 		);
 
-	for ( const auto& node : nodes.GetArray() )
+	for ( rapidjson::SizeType nodeIndex = 0;
+		nodeIndex < nodes.Size();
+		++nodeIndex )
 	{
+		if ( static_cast<int>(nodeIndex)
+			== questDialogueEditorSelectedNode )
+		{
+			continue;
+		}
+
+		const rapidjson::Value& node = nodes[nodeIndex];
 		if ( !node.IsObject() )
 		{
 			continue;
@@ -1518,6 +1849,84 @@ static bool questDialogueEditorCycleChoiceNext()
 	}
 
 	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorCycleChoicePrevious()
+{
+    rapidjson::Value* node =
+        questDialogueEditorSelectedNodeValue();
+
+    if ( !node
+        || !node->IsObject()
+        || !node->HasMember("choices")
+        || !(*node)["choices"].IsArray()
+        || questDialogueEditorSelectedChoice < 0
+        || questDialogueEditorSelectedChoice
+            >= static_cast<int>((*node)["choices"].Size())
+        || !questDialogueEditorDocument.HasMember("nodes")
+        || !questDialogueEditorDocument["nodes"].IsArray()
+        || questDialogueEditorDocument["nodes"].Empty() )
+    {
+        questDialogueEditorSetMessage(
+            "Select a choice first."
+        );
+        return false;
+    }
+
+    rapidjson::Value& choice =
+        (*node)["choices"][
+            static_cast<rapidjson::SizeType>(
+                questDialogueEditorSelectedChoice
+            )
+        ];
+
+    int currentID = 0;
+    if ( choice.HasMember("next")
+        && choice["next"].IsInt() )
+    {
+        currentID = choice["next"].GetInt();
+    }
+
+    rapidjson::Value& nodes =
+        questDialogueEditorDocument["nodes"];
+
+    int previousIndex =
+        static_cast<int>(nodes.Size()) - 1;
+
+    for ( rapidjson::SizeType index = 0;
+        index < nodes.Size();
+        ++index )
+    {
+        if ( nodes[index].IsObject()
+            && nodes[index].HasMember("id")
+            && nodes[index]["id"].IsInt()
+            && nodes[index]["id"].GetInt() == currentID )
+        {
+            previousIndex =
+                (static_cast<int>(index)
+                    + static_cast<int>(nodes.Size()) - 1)
+                % static_cast<int>(nodes.Size());
+            break;
+        }
+    }
+
+    const int previousID =
+        questDialogueEditorNodeIDAt(previousIndex);
+
+    if ( choice.HasMember("next") )
+    {
+        choice["next"].SetInt(previousID);
+    }
+    else
+    {
+        choice.AddMember(
+            "next",
+            previousID,
+            questDialogueEditorDocument.GetAllocator()
+        );
+    }
+
+    return questDialogueEditorSaveDocument();
 }
 
 static bool questDialogueEditorToggleRecruit()
@@ -2462,147 +2871,173 @@ static rapidjson::Value* questDialogueEditorSelectedChoiceValue()
 	];
 }
 
+static rapidjson::Value* questDialogueEditorSelectedConditionValue()
+{
+    rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+    if ( !choice || !choice->IsObject() )
+    {
+        return nullptr;
+    }
+
+    if ( choice->HasMember("conditions")
+        && (*choice)["conditions"].IsArray() )
+    {
+        rapidjson::Value& conditions = (*choice)["conditions"];
+        if ( conditions.Empty() )
+        {
+            return nullptr;
+        }
+        questDialogueEditorSelectedConditionIndex = std::max(
+            0,
+            std::min(
+                questDialogueEditorSelectedConditionIndex,
+                static_cast<int>(conditions.Size()) - 1
+            )
+        );
+        return &conditions[static_cast<rapidjson::SizeType>(
+            questDialogueEditorSelectedConditionIndex
+        )];
+    }
+
+    if ( choice->HasMember("condition")
+        && (*choice)["condition"].IsObject() )
+    {
+        questDialogueEditorSelectedConditionIndex = 0;
+        return &(*choice)["condition"];
+    }
+
+    return nullptr;
+}
+
+static rapidjson::Value& questDialogueEditorEnsureConditionArray(
+    rapidjson::Value& choice
+)
+{
+    auto& allocator = questDialogueEditorDocument.GetAllocator();
+    if ( !choice.HasMember("conditions") )
+    {
+        rapidjson::Value conditions(rapidjson::kArrayType);
+        if ( choice.HasMember("condition")
+            && choice["condition"].IsObject() )
+        {
+            rapidjson::Value migrated;
+            migrated.CopyFrom(choice["condition"], allocator);
+            conditions.PushBack(migrated, allocator);
+            choice.RemoveMember("condition");
+        }
+        choice.AddMember("conditions", conditions, allocator);
+    }
+    else if ( !choice["conditions"].IsArray() )
+    {
+        choice["conditions"].SetArray();
+    }
+    return choice["conditions"];
+}
+
+static void questDialogueEditorCycleSelectedCondition(const int direction)
+{
+    rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+    if ( !choice || !choice->IsObject()
+        || !choice->HasMember("conditions")
+        || !(*choice)["conditions"].IsArray()
+        || (*choice)["conditions"].Empty() )
+    {
+        questDialogueEditorSelectedConditionIndex = 0;
+        return;
+    }
+    const int count = static_cast<int>((*choice)["conditions"].Size());
+    questDialogueEditorSelectedConditionIndex =
+        (questDialogueEditorSelectedConditionIndex + direction + count) % count;
+}
+
 static std::string questDialogueEditorChoiceConditionName()
 {
-	rapidjson::Value* choice =
-		questDialogueEditorSelectedChoiceValue();
+    rapidjson::Value* condition = questDialogueEditorSelectedConditionValue();
+    if ( !condition || !condition->IsObject()
+        || !condition->HasMember("type")
+        || !(*condition)["type"].IsString() )
+    {
+        return "None";
+    }
+    return (*condition)["type"].GetString();
+}
 
-	if ( !choice
-		|| !choice->IsObject()
-		|| !choice->HasMember("condition")
-		|| !(*choice)["condition"].IsObject()
-		|| !(*choice)["condition"].HasMember("type")
-		|| !(*choice)["condition"]["type"].IsString() )
-	{
-		return "None";
-	}
+static std::vector<std::string> questDialogueEditorChoiceActionMembers()
+{
+    std::vector<std::string> members;
+    rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+    if ( !choice || !choice->IsObject()
+        || !choice->HasMember("action")
+        || !(*choice)["action"].IsObject() )
+    {
+        return members;
+    }
 
-	return (*choice)["condition"]["type"].GetString();
+    const rapidjson::Value& action = (*choice)["action"];
+    for ( auto member = action.MemberBegin(); member != action.MemberEnd(); ++member )
+    {
+        members.emplace_back(member->name.GetString());
+    }
+    return members;
+}
+
+static std::string questDialogueEditorActionDisplayName(const std::string& member)
+{
+    if ( member == "recruit_npc" ) { return "Recruit NPC"; }
+    if ( member == "quest_start" ) { return "Start Quest"; }
+    if ( member == "quest_accept" ) { return "Accept Quest"; }
+    if ( member == "quest_complete" ) { return "Complete Quest"; }
+    if ( member == "quest_fail" ) { return "Fail Quest"; }
+    if ( member == "quest_reset" ) { return "Reset Quest"; }
+    if ( member == "quest_stage" ) { return "Set Quest Stage"; }
+    if ( member == "reward_gold" ) { return "Reward Gold"; }
+    if ( member == "reward_item" ) { return "Reward Item"; }
+    if ( member == "remove_gold" ) { return "Remove Gold"; }
+    if ( member == "remove_item" ) { return "Remove Item"; }
+    if ( member == "objective_complete" ) { return "Complete Objective"; }
+    if ( member == "objective_clear" ) { return "Clear Objective"; }
+    if ( member == "set_world_flag" ) { return "Set World Flag"; }
+    if ( member == "set_npc_flag" ) { return "Set NPC Flag"; }
+    if ( member == "set_world_variable" || member == "add_world_variable" ) { return "World Variable"; }
+    if ( member == "set_npc_variable" || member == "add_npc_variable" ) { return "NPC Variable"; }
+    if ( member == "set_quest_variable" || member == "add_quest_variable" ) { return "Quest Variable"; }
+    if ( member == "status_effect" ) { return "Status Effect"; }
+    if ( member == "set_power" ) { return "Power Tile"; }
+    return member;
+}
+
+static void questDialogueEditorCycleSelectedAction(const int direction)
+{
+    const std::vector<std::string> members = questDialogueEditorChoiceActionMembers();
+    if ( members.empty() )
+    {
+        questDialogueEditorSelectedActionIndex = 0;
+        return;
+    }
+    const int count = static_cast<int>(members.size());
+    questDialogueEditorSelectedActionIndex =
+        (questDialogueEditorSelectedActionIndex + direction + count) % count;
 }
 
 static std::string questDialogueEditorChoiceActionName()
 {
-	rapidjson::Value* choice =
-		questDialogueEditorSelectedChoiceValue();
-
-	if ( !choice
-		|| !choice->IsObject()
-		|| !choice->HasMember("action")
-		|| !(*choice)["action"].IsObject() )
-	{
-		return "None";
-	}
-
-	const rapidjson::Value& action =
-		(*choice)["action"];
-
-	if ( action.HasMember("recruit_npc")
-		&& action["recruit_npc"].IsBool()
-		&& action["recruit_npc"].GetBool() )
-	{
-		return "Recruit NPC";
-	}
-
-	if ( action.HasMember("quest_accept")
-		&& action["quest_accept"].IsBool()
-		&& action["quest_accept"].GetBool() )
-	{
-		return "Accept Quest";
-	}
-
-	if ( action.HasMember("quest_complete")
-		&& action["quest_complete"].IsBool()
-		&& action["quest_complete"].GetBool() )
-	{
-		return "Complete Quest";
-	}
-
-	if ( action.HasMember("reward_gold")
-		&& action["reward_gold"].IsInt() )
-	{
-		return "Reward Gold";
-	}
-
-	if ( action.HasMember("reward_item") )
-	{
-		return "Reward Item";
-	}
-
-	if ( action.HasMember("remove_gold") )
-	{
-		return "Remove Gold";
-	}
-
-	if ( action.HasMember("remove_item") )
-	{
-		return "Remove Item";
-	}
-
-	if ( action.HasMember("quest_start") )
-	{
-		return "Start Quest";
-	}
-
-	if ( action.HasMember("quest_fail") )
-	{
-		return "Fail Quest";
-	}
-
-	if ( action.HasMember("quest_reset") )
-	{
-		return "Reset Quest";
-	}
-
-	if ( action.HasMember("quest_stage") )
-	{
-		return "Set Quest Stage";
-	}
-
-	if ( action.HasMember("objective_complete") )
-	{
-		return "Complete Objective";
-	}
-
-	if ( action.HasMember("objective_clear") )
-	{
-		return "Clear Objective";
-	}
-
-	if ( action.HasMember("set_world_flag") )
-	{
-		return "Set World Flag";
-	}
-
-	if ( action.HasMember("set_npc_flag") )
-	{
-		return "Set NPC Flag";
-	}
-
-	if ( action.HasMember("set_world_variable")
-		|| action.HasMember("add_world_variable") )
-	{
-		return "World Variable";
-	}
-
-	if ( action.HasMember("set_npc_variable")
-		|| action.HasMember("add_npc_variable") )
-	{
-		return "NPC Variable";
-	}
-
-	if ( action.HasMember("set_quest_variable")
-		|| action.HasMember("add_quest_variable") )
-	{
-		return "Quest Variable";
-	}
-
-	if ( action.HasMember("status_effect") )
-	{
-		return "Status Effect";
-	}
-
-	return "Custom";
+    const std::vector<std::string> members = questDialogueEditorChoiceActionMembers();
+    if ( members.empty() )
+    {
+        questDialogueEditorSelectedActionIndex = 0;
+        return "None";
+    }
+    questDialogueEditorSelectedActionIndex = std::max(
+        0,
+        std::min(questDialogueEditorSelectedActionIndex,
+            static_cast<int>(members.size()) - 1)
+    );
+    return questDialogueEditorActionDisplayName(
+        members[questDialogueEditorSelectedActionIndex]
+    );
 }
+
+static bool questDialogueEditorClearChoiceCondition();
 
 static bool questDialogueEditorSetChoiceCondition(
 	const int direction
@@ -2679,16 +3114,10 @@ static bool questDialogueEditorSetChoiceCondition(
 	const std::string next =
 		conditionTypes[index];
 
-	if ( next == "none" )
-	{
-		choice->RemoveMember("condition");
-
-		questDialogueEditorSetMessage(
-			"Choice requirement cleared."
-		);
-
-		return questDialogueEditorSaveDocument();
-	}
+    if ( next == "none" )
+    {
+        return questDialogueEditorClearChoiceCondition();
+    }
 
 	auto& allocator =
 		questDialogueEditorDocument.GetAllocator();
@@ -2772,6 +3201,18 @@ static bool questDialogueEditorSetChoiceCondition(
 	else if ( next == "objective_completed"
 		|| next == "objective_incomplete" )
 	{
+		rapidjson::Value questValue;
+		questValue.SetString(
+			questID.c_str(),
+			allocator
+		);
+
+		condition.AddMember(
+			"quest",
+			questValue,
+			allocator
+		);
+
 		std::string objectiveID =
 			"objective_id";
 
@@ -2854,19 +3295,11 @@ static bool questDialogueEditorSetChoiceCondition(
 		);
 	}
 
-	if ( choice->HasMember("condition") )
-	{
-		(*choice)["condition"] =
-			std::move(condition);
-	}
-	else
-	{
-		choice->AddMember(
-			"condition",
-			condition,
-			allocator
-		);
-	}
+    rapidjson::Value& conditions =
+        questDialogueEditorEnsureConditionArray(*choice);
+    conditions.PushBack(condition, allocator);
+    questDialogueEditorSelectedConditionIndex =
+        static_cast<int>(conditions.Size()) - 1;
 
 	questDialogueEditorSetMessage(
 		"Condition selected: "
@@ -2887,26 +3320,155 @@ static bool questDialogueEditorPreviousChoiceCondition()
 	return questDialogueEditorSetChoiceCondition(-1);
 }
 
+static bool questDialogueEditorSelectChoiceConditionType(
+    const char* targetType
+)
+{
+    if ( !targetType )
+    {
+        return false;
+    }
+
+    static const char* conditionTypes[] =
+    {
+        "none", "has_item", "has_gold", "quest_started",
+        "quest_accepted", "quest_completed", "quest_failed",
+        "quest_stage", "objective_completed", "objective_incomplete",
+        "world_flag", "npc_flag", "world_variable", "npc_variable"
+    };
+    const int conditionTypeCount = static_cast<int>(
+        sizeof(conditionTypes) / sizeof(conditionTypes[0])
+    );
+
+    int targetIndex = -1;
+    for ( int index = 0; index < conditionTypeCount; ++index )
+    {
+        if ( std::string(conditionTypes[index]) == targetType )
+        {
+            targetIndex = index;
+            break;
+        }
+    }
+    if ( targetIndex <= 0 )
+    {
+        return false;
+    }
+
+    rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+    if ( !choice || !choice->IsObject() )
+    {
+        questDialogueEditorSetMessage("Select a choice first.");
+        return false;
+    }
+
+    int originalCount = 0;
+    if ( choice->HasMember("conditions")
+        && (*choice)["conditions"].IsArray() )
+    {
+        originalCount = static_cast<int>((*choice)["conditions"].Size());
+    }
+    else if ( choice->HasMember("condition")
+        && (*choice)["condition"].IsObject() )
+    {
+        originalCount = 1;
+    }
+
+    const std::string current = questDialogueEditorChoiceConditionName();
+    int currentIndex = 0;
+    for ( int index = 0; index < conditionTypeCount; ++index )
+    {
+        if ( current == conditionTypes[index] )
+        {
+            currentIndex = index;
+            break;
+        }
+    }
+
+    int steps = (targetIndex - currentIndex + conditionTypeCount)
+        % conditionTypeCount;
+    if ( steps == 0 )
+    {
+        steps = conditionTypeCount;
+    }
+
+    bool found = false;
+    for ( int step = 0; step < steps; ++step )
+    {
+        if ( !questDialogueEditorSetChoiceCondition(1) )
+        {
+            return false;
+        }
+        if ( questDialogueEditorChoiceConditionName() == targetType )
+        {
+            found = true;
+            break;
+        }
+    }
+
+    choice = questDialogueEditorSelectedChoiceValue();
+    if ( !found || !choice || !choice->IsObject()
+        || !choice->HasMember("conditions")
+        || !(*choice)["conditions"].IsArray() )
+    {
+        return false;
+    }
+
+    rapidjson::Value& conditions = (*choice)["conditions"];
+    while ( static_cast<int>(conditions.Size()) > originalCount + 1 )
+    {
+        conditions.Erase(conditions.Begin() + originalCount);
+    }
+    questDialogueEditorSelectedConditionIndex =
+        static_cast<int>(conditions.Size()) - 1;
+
+    questDialogueEditorSetMessage(
+        std::string("Added requirement: ") + targetType
+    );
+    return questDialogueEditorSaveDocument();
+}
+
 static bool questDialogueEditorClearChoiceCondition()
 {
-	rapidjson::Value* choice =
-		questDialogueEditorSelectedChoiceValue();
+    rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+    if ( !choice || !choice->IsObject() )
+    {
+        questDialogueEditorSetMessage("Select a choice first.");
+        return false;
+    }
 
-	if ( !choice || !choice->IsObject() )
-	{
-		questDialogueEditorSetMessage(
-			"Select a choice first."
-		);
-		return false;
-	}
+    if ( choice->HasMember("conditions")
+        && (*choice)["conditions"].IsArray()
+        && !(*choice)["conditions"].Empty() )
+    {
+        rapidjson::Value& conditions = (*choice)["conditions"];
+        questDialogueEditorSelectedConditionIndex = std::max(
+            0,
+            std::min(questDialogueEditorSelectedConditionIndex,
+                static_cast<int>(conditions.Size()) - 1)
+        );
+        conditions.Erase(conditions.Begin()
+            + questDialogueEditorSelectedConditionIndex);
+        if ( conditions.Empty() )
+        {
+            choice->RemoveMember("conditions");
+            questDialogueEditorSelectedConditionIndex = 0;
+        }
+        else
+        {
+            questDialogueEditorSelectedConditionIndex = std::min(
+                questDialogueEditorSelectedConditionIndex,
+                static_cast<int>(conditions.Size()) - 1
+            );
+        }
+    }
+    else
+    {
+        choice->RemoveMember("condition");
+        questDialogueEditorSelectedConditionIndex = 0;
+    }
 
-	choice->RemoveMember("condition");
-
-	questDialogueEditorSetMessage(
-		"Choice requirement cleared."
-	);
-
-	return questDialogueEditorSaveDocument();
+    questDialogueEditorSetMessage("Selected choice requirement removed.");
+    return questDialogueEditorSaveDocument();
 }
 
 static bool questDialogueEditorCycleChoiceAction()
@@ -3057,17 +3619,32 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE:
 			return "Condition Reference";
 
+		case QUEST_DIALOGUE_FIELD_CONDITION_QUEST:
+			return "Required Quest";
+
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
 			return "Condition Number";
 
+		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
+			return "Action Reference";
+
 		case QUEST_DIALOGUE_FIELD_ACTION_NUMBER:
 			return "Action Number";
+
+		case QUEST_DIALOGUE_FIELD_POWER_X:
+			return "Power Tile X";
+
+		case QUEST_DIALOGUE_FIELD_POWER_Y:
+			return "Power Tile Y";
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE:
 			return "Objective Stage";
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET:
 			return "Objective Target";
+
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID:
+			return "Objective Defeat ID";
 
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 			return "Marker X";
@@ -3302,6 +3879,23 @@ static std::string questDialogueEditorReadEditableField()
 			break;
 		}
 
+		case QUEST_DIALOGUE_FIELD_CONDITION_QUEST:
+		{
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("condition")
+				&& (*choice)["condition"].IsObject()
+				&& (*choice)["condition"].HasMember("quest")
+				&& (*choice)["condition"]["quest"].IsString() )
+			{
+				return (*choice)["condition"]["quest"].GetString();
+			}
+			break;
+		}
+
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
 		{
 			rapidjson::Value* choice =
@@ -3331,6 +3925,60 @@ static std::string questDialogueEditorReadEditableField()
 						return std::to_string(
 							condition[candidate].GetInt()
 						);
+					}
+				}
+			}
+			break;
+		}
+
+		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
+		{
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("action")
+				&& (*choice)["action"].IsObject() )
+			{
+				rapidjson::Value& action = (*choice)["action"];
+				const char* stringMembers[] =
+				{
+					"objective_complete",
+					"objective_clear"
+				};
+				for ( const char* member : stringMembers )
+				{
+					if ( action.HasMember(member)
+						&& action[member].IsString() )
+					{
+						return action[member].GetString();
+					}
+				}
+
+				const char* objectMembers[] =
+				{
+					"reward_item", "remove_item",
+					"set_world_flag", "set_npc_flag",
+					"set_world_variable", "add_world_variable",
+					"set_npc_variable", "add_npc_variable",
+					"set_quest_variable", "add_quest_variable"
+				};
+				for ( const char* member : objectMembers )
+				{
+					if ( !action.HasMember(member)
+						|| !action[member].IsObject() )
+					{
+						continue;
+					}
+					rapidjson::Value& object = action[member];
+					const char* key =
+						(std::string(member) == "reward_item"
+							|| std::string(member) == "remove_item")
+							? "item" : "id";
+					if ( object.HasMember(key) && object[key].IsString() )
+					{
+						return object[key].GetString();
 					}
 				}
 			}
@@ -3373,17 +4021,24 @@ static std::string questDialogueEditorReadEditableField()
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE:
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID:
 		{
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
 
 			if ( objective && objective->IsObject() )
 			{
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE
-							? "stage"
-							: "target";
+				const char* member = "target";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE )
+				{
+					member = "stage";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID )
+				{
+					member = "defeat_id";
+				}
 
 				if ( objective->HasMember(member)
 					&& (*objective)[member].IsInt() )
@@ -3393,10 +4048,44 @@ static std::string questDialogueEditorReadEditableField()
 					);
 				}
 
-				return questDialogueEditorEditableField
-					== QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET
-						? "1"
-						: "0";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET )
+				{
+					return "1";
+				}
+				return "0";
+			}
+			break;
+		}
+
+		case QUEST_DIALOGUE_FIELD_POWER_X:
+		case QUEST_DIALOGUE_FIELD_POWER_Y:
+		{
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("action")
+				&& (*choice)["action"].IsObject()
+				&& (*choice)["action"].HasMember("set_power")
+				&& (*choice)["action"]["set_power"].IsObject() )
+			{
+				rapidjson::Value& powerAction =
+					(*choice)["action"]["set_power"];
+				const char* member =
+					questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_POWER_X
+							? "x"
+							: "y";
+
+				if ( powerAction.HasMember(member)
+					&& powerAction[member].IsInt() )
+				{
+					return std::to_string(
+						powerAction[member].GetInt()
+					);
+				}
 			}
 			break;
 		}
@@ -3735,6 +4424,24 @@ static bool questDialogueEditorApplyEditableField()
 			break;
 		}
 
+		case QUEST_DIALOGUE_FIELD_CONDITION_QUEST:
+		{
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("condition")
+				&& (*choice)["condition"].IsObject() )
+			{
+				success = questDialogueEditorWriteStringMember(
+					(*choice)["condition"],
+					"quest",
+					questEditorNormalizeID(value)
+				);
+			}
+			break;
+		}
+
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
 		{
 			int number = 0;
@@ -3800,6 +4507,53 @@ static bool questDialogueEditorApplyEditableField()
 			break;
 		}
 
+		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
+		{
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("action")
+				&& (*choice)["action"].IsObject() )
+			{
+				rapidjson::Value& action = (*choice)["action"];
+				const std::string normalized = questEditorNormalizeID(value);
+				if ( action.HasMember("objective_complete") )
+				{
+					success = questDialogueEditorWriteStringMember(action, "objective_complete", normalized);
+				}
+				else if ( action.HasMember("objective_clear") )
+				{
+					success = questDialogueEditorWriteStringMember(action, "objective_clear", normalized);
+				}
+				else
+				{
+					const char* objectMembers[] =
+					{
+						"reward_item", "remove_item",
+						"set_world_flag", "set_npc_flag",
+						"set_world_variable", "add_world_variable",
+						"set_npc_variable", "add_npc_variable",
+						"set_quest_variable", "add_quest_variable"
+					};
+					for ( const char* member : objectMembers )
+					{
+						if ( !action.HasMember(member) || !action[member].IsObject() )
+						{
+							continue;
+						}
+						const bool itemObject =
+							std::string(member) == "reward_item"
+							|| std::string(member) == "remove_item";
+						success = questDialogueEditorWriteStringMember(
+							action[member], itemObject ? "item" : "id", normalized);
+						break;
+					}
+				}
+			}
+			break;
+		}
+
 		case QUEST_DIALOGUE_FIELD_ACTION_NUMBER:
 		{
 			int number = 0;
@@ -3857,6 +4611,7 @@ static bool questDialogueEditorApplyEditableField()
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE:
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID:
 		{
 			int number = 0;
 			if ( !questDialogueEditorParseInteger(
@@ -3875,11 +4630,18 @@ static bool questDialogueEditorApplyEditableField()
 
 			if ( objective )
 			{
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE
-							? "stage"
-							: "target";
+				const char* member = "target";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE )
+				{
+					member = "stage";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID )
+				{
+					member = "defeat_id";
+					number = std::max(0, number);
+				}
 
 				if ( questDialogueEditorEditableField
 					== QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET )
@@ -3891,6 +4653,46 @@ static bool questDialogueEditorApplyEditableField()
 					questDialogueEditorWriteIntegerMember(
 						*objective,
 						member,
+						number
+					);
+			}
+			break;
+		}
+
+		case QUEST_DIALOGUE_FIELD_POWER_X:
+		case QUEST_DIALOGUE_FIELD_POWER_Y:
+		{
+			int number = 0;
+			if ( !questDialogueEditorParseInteger(
+					value,
+					number
+				) )
+			{
+				questDialogueEditorSetMessage(
+					"Power tile coordinate must be an integer."
+				);
+				return false;
+			}
+
+			number = std::max(0, number);
+
+			rapidjson::Value* choice =
+				questDialogueEditorSelectedChoiceValueForEdit();
+
+			if ( choice
+				&& choice->IsObject()
+				&& choice->HasMember("action")
+				&& (*choice)["action"].IsObject()
+				&& (*choice)["action"].HasMember("set_power")
+				&& (*choice)["action"]["set_power"].IsObject() )
+			{
+				success =
+					questDialogueEditorWriteIntegerMember(
+						(*choice)["action"]["set_power"],
+						questDialogueEditorEditableField
+							== QUEST_DIALOGUE_FIELD_POWER_X
+								? "x"
+								: "y",
 						number
 					);
 			}
@@ -4122,6 +4924,11 @@ static bool questDialogueEditorRenameSelectedFile()
 
 static void questDialogueEditorBeginEditingField()
 {
+    questDialogueEditorLockedEditableField =
+        questDialogueEditorEditableField;
+    questDialogueEditorLockedFieldCategory =
+        questDialogueEditorFieldCategory;
+
 	const std::string currentValue =
 		questDialogueEditorReadEditableField();
 
@@ -4192,15 +4999,22 @@ questDialogueEditorCategoryFields()
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_ID,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE,
-				QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET
+				QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET,
+				QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID
 			};
 		case QUEST_DIALOGUE_CATEGORY_CONDITION:
 			return {
 				QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+				QUEST_DIALOGUE_FIELD_CONDITION_QUEST,
 				QUEST_DIALOGUE_FIELD_CONDITION_NUMBER
 			};
 		case QUEST_DIALOGUE_CATEGORY_ACTION:
-			return { QUEST_DIALOGUE_FIELD_ACTION_NUMBER };
+			return {
+				QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
+				QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+				QUEST_DIALOGUE_FIELD_POWER_X,
+				QUEST_DIALOGUE_FIELD_POWER_Y
+			};
 		case QUEST_DIALOGUE_CATEGORY_MARKER:
 			return {
 				QUEST_DIALOGUE_FIELD_MARKER_X,
@@ -4300,15 +5114,15 @@ static bool questDialogueEditorCycleScopeDirect()
 		scope = (*quest)["scope"].GetString();
 	}
 
-	scope =
-		scope == "player" ? "party"
-		: scope == "party" ? "world"
-		: "player";
+	// Only per-player quest ownership is currently supported by the
+	// runtime dialogue loader. Keep the editor from authoring scopes
+	// that would make the dialogue file unloadable.
+	scope = "player";
 
 	questDialogueEditorWriteStringMember(
 		*quest, "scope", scope
 	);
-	questDialogueEditorSetMessage("Scope: " + scope);
+	questDialogueEditorSetMessage("Scope: player");
 	return questDialogueEditorSaveDocument();
 }
 
@@ -4566,6 +5380,8 @@ static const char* questDialogueEditorActionGroupName()
 			return "Variables";
 		case QUEST_DIALOGUE_ACTION_GROUP_NPC:
 			return "NPC";
+		case QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS:
+			return "Mechanisms";
 		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
 			return "Status";
 		default:
@@ -4824,8 +5640,6 @@ static void questDialogueEditorApplyGuidedAction(
 		return;
 	}
 
-	action->SetObject();
-
 	const std::string objectiveID =
 		questDialogueEditorDefaultObjectiveID();
 
@@ -5055,6 +5869,32 @@ static void questDialogueEditorApplyGuidedAction(
 			}
 			break;
 
+		case QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS:
+		{
+			rapidjson::Value& powerAction =
+				questDialogueEditorSetObjectMember(
+					*action,
+					"set_power"
+				);
+
+			questDialogueEditorSetIntMember(
+				powerAction,
+				"x",
+				0
+			);
+			questDialogueEditorSetIntMember(
+				powerAction,
+				"y",
+				0
+			);
+			questDialogueEditorSetBoolMember(
+				powerAction,
+				"powered",
+				slot == 0
+			);
+			break;
+		}
+
 		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
 		{
 			rapidjson::Value& status =
@@ -5226,21 +6066,9 @@ questDialogueEditorAvailableQuestReferences()
 	return references;
 }
 
-static rapidjson::Value*
-questDialogueEditorSelectedChoiceCondition()
+static rapidjson::Value* questDialogueEditorSelectedChoiceCondition()
 {
-	rapidjson::Value* choice =
-		questDialogueEditorSelectedChoiceValueForEdit();
-
-	if ( !choice
-		|| !choice->IsObject()
-		|| !choice->HasMember("condition")
-		|| !(*choice)["condition"].IsObject() )
-	{
-		return nullptr;
-	}
-
-	return &(*choice)["condition"];
+    return questDialogueEditorSelectedConditionValue();
 }
 
 static std::string questDialogueEditorSelectedConditionType()
@@ -6292,6 +7120,19 @@ static std::string questDialogueEditorChoiceActionSummaryShort(
 		return "Reset quest";
 	}
 
+	if ( action.HasMember("set_power")
+		&& action["set_power"].IsObject() )
+	{
+		const rapidjson::Value& powerAction =
+			action["set_power"];
+		const bool powered =
+			powerAction.HasMember("powered")
+			&& powerAction["powered"].IsBool()
+				? powerAction["powered"].GetBool()
+				: true;
+		return powered ? "Power tile" : "Unpower tile";
+	}
+
 	if ( action.HasMember("recruit_npc") )
 	{
 		return "Recruit NPC";
@@ -6426,6 +7267,11 @@ static const char* questDialogueEditorGuidedActionLabel(
 			return slot == 0
 				? "RECRUIT NPC"
 				: "EMPTY ACTION";
+
+		case QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS:
+			return slot == 0
+				? "POWER TILE"
+				: "UNPOWER TILE";
 
 		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
 			return slot == 0
@@ -7373,7 +8219,7 @@ void openQuestDialogueEditor()
 	savewindow = 0;
 
 	const int desiredHalfWidth =
-		std::max(390, std::min(560, xres / 2 - 20));
+		std::max(470, std::min(700, xres / 2 - 12));
 	const int desiredHalfHeight =
 		std::max(470, std::min(610, yres / 2 - 2));
 
@@ -7450,6 +8296,7 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "DUPLICATE CHOICE", "Copy the selected choice, including its requirements and actions, with a unique ID." },
 		{ "CHOICE UP", "Move the selected choice earlier in the displayed response order." },
 		{ "CHOICE DOWN", "Move the selected choice later in the displayed response order." },
+		{ "<BEFORE", "Change the selected choice destination to the previous dialogue node." },
 		{ "NEXT>", "Change the selected choice destination to the next dialogue node." },
 		{ "ONCE", "Allow the selected choice to be used only once by this player for this NPC." },
 		{ "+OBJECT", "Add a new quest objective." },
@@ -7540,6 +8387,8 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "SET QUEST", "Set a persistent variable belonging to this quest." },
 		{ "ADD QUEST", "Add to a persistent quest variable." },
 		{ "RECRUIT NPC", "Recruit the dialogue NPC as a follower." },
+		{ "POWER TILE", "Add a power action, then enter its tile X and Y coordinates in the Action Inspector." },
+		{ "UNPOWER TILE", "Add an unpower action, then enter its tile X and Y coordinates in the Action Inspector." },
 		{ "EMPTY ACTION", "Create an empty action object for advanced fields." },
 		{ "APPLY STATUS", "Apply the displayed status effect, duration, and strength." },
 		{ "CLEAR STATUS", "Remove the displayed status effect from the player." }
@@ -7560,6 +8409,14 @@ static std::string questDialogueEditorButtonTooltip(
 
 static void drawQuestDialogueEditor()
 {
+    if ( questDialogueEditorEditingField )
+    {
+        questDialogueEditorEditableField =
+            questDialogueEditorLockedEditableField;
+        questDialogueEditorFieldCategory =
+            questDialogueEditorLockedFieldCategory;
+    }
+
 	const int contentX1 = subx1 + 8;
 	const int contentX2 = subx2 - 8;
 	const int panelY1 = suby1 + 24;
@@ -7610,12 +8467,12 @@ static void drawQuestDialogueEditor()
 			);
 	}
 
-	const int minimumFileListWidth = 132;
-	const int maximumFileListWidth = 236;
-	const int minimumToolboxWidth = 202;
-	const int minimumDetailWidth = 210;
-	const int maximumDetailWidth = 300;
-	const int minimumTreeWidth = 205;
+	const int minimumFileListWidth = 150;
+	const int maximumFileListWidth = 260;
+	const int minimumToolboxWidth = 236;
+	const int minimumDetailWidth = 228;
+	const int maximumDetailWidth = 340;
+	const int minimumTreeWidth = 240;
 
 	int fileListWidth =
 		std::max(
@@ -7701,6 +8558,21 @@ static void drawQuestDialogueEditor()
 	drawDepressed(detailX1, panelY1, detailX2, panelY2);
 
 	std::string hoveredDialogueEditorTooltip;
+
+	enum QuestDialogueDeferredInspectorCommand
+	{
+		QUEST_DIALOGUE_DEFERRED_NONE = 0,
+		QUEST_DIALOGUE_DEFERRED_CONDITION_PREVIOUS,
+		QUEST_DIALOGUE_DEFERRED_CONDITION_NEXT,
+		QUEST_DIALOGUE_DEFERRED_ACTION_PREVIOUS,
+		QUEST_DIALOGUE_DEFERRED_ACTION_NEXT,
+		QUEST_DIALOGUE_DEFERRED_REMOVE_CONDITION,
+		QUEST_DIALOGUE_DEFERRED_REMOVE_ACTION
+	};
+
+	QuestDialogueDeferredInspectorCommand
+		deferredInspectorCommand =
+			QUEST_DIALOGUE_DEFERRED_NONE;
 
 	auto dialogueEditorButton =
 		[
@@ -7996,6 +8868,45 @@ static void drawQuestDialogueEditor()
 
 	int toolboxY = toolboxY1;
 
+	std::string selectionStatus = "Selected: nothing";
+	if ( questDialogueEditorSelectedNode >= 0 )
+	{
+		selectionStatus =
+			"Selected: node "
+			+ std::to_string(questDialogueEditorSelectedNode + 1);
+
+		if ( questDialogueEditorSelectedChoice >= 0 )
+		{
+			selectionStatus +=
+				", choice "
+				+ std::to_string(questDialogueEditorSelectedChoice + 1);
+		}
+	}
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		toolboxX1,
+		toolboxY + 2,
+		makeColorRGB(128, 255, 160),
+		"%.31s",
+		selectionStatus.c_str()
+	);
+	toolboxY += 14;
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		toolboxX1,
+		toolboxY + 2,
+		questDialogueEditorEditingField
+			? makeColorRGB(255, 230, 96)
+			: makeColorRGB(176, 176, 176),
+		"Editing: %.21s",
+		questDialogueEditorEditingField
+			? questDialogueEditorEditableFieldName()
+			: "click a field"
+	);
+	toolboxY += 17;
+
 	toolboxButtonPair(
 		toolboxY,
 		"NEW",
@@ -8109,17 +9020,28 @@ static void drawQuestDialogueEditor()
 
 	toolboxButtonPair(
 		toolboxY,
+		"<BEFORE",
 		"NEXT>",
-		"ONCE",
 		[]()
 		{
-			questDialogueEditorCycleChoiceNext();
+			questDialogueEditorCycleChoicePrevious();
 		},
 		[]()
 		{
-			questDialogueEditorToggleChoiceOnce();
+			questDialogueEditorCycleChoiceNext();
 		}
 	);
+	toolboxY += toolboxRowHeight;
+
+	if ( dialogueEditorButton(
+		toolboxX1,
+		toolboxY,
+		toolboxX2 - toolboxX1,
+		"ONCE"
+	) )
+	{
+		questDialogueEditorToggleChoiceOnce();
+	}
 	toolboxY += toolboxRowHeight + 3;
 
 	toolboxButtonPair(
@@ -8225,23 +9147,111 @@ static void drawQuestDialogueEditor()
 
 	toolboxButtonPair(
 		toolboxY,
-		"COND <",
-		"COND >",
+		"CONDITION <",
+		"CONDITION >",
 		[]()
 		{
-			questDialogueEditorPreviousChoiceCondition();
+			int group =
+				static_cast<int>(questDialogueEditorConditionGroup) - 1;
+			if ( group < 0 )
+			{
+				group = QUEST_DIALOGUE_CONDITION_GROUP_COUNT - 1;
+			}
+			questDialogueEditorConditionGroup =
+				static_cast<QuestDialogueConditionGroup>(group);
 		},
 		[]()
 		{
-			questDialogueEditorCycleChoiceCondition();
+			int group =
+				static_cast<int>(questDialogueEditorConditionGroup) + 1;
+			if ( group >= QUEST_DIALOGUE_CONDITION_GROUP_COUNT )
+			{
+				group = 0;
+			}
+			questDialogueEditorConditionGroup =
+				static_cast<QuestDialogueConditionGroup>(group);
 		}
+	);
+	toolboxY += toolboxRowHeight;
+
+	const char* conditionGroupNames[] =
+	{
+		"Items / Gold",
+		"Quest State",
+		"Objectives",
+		"Flags",
+		"Variables"
+	};
+
+	const char* conditionGroupTypes[][2] =
+	{
+		{ "has_item", "has_gold" },
+		{ "quest_accepted", "quest_stage" },
+		{ "objective_completed", "objective_incomplete" },
+		{ "world_flag", "npc_flag" },
+		{ "world_variable", "npc_variable" }
+	};
+
+	const char* conditionGroupLabels[][2] =
+	{
+		{ "REQUIRE ITEM", "REQUIRE GOLD" },
+		{ "QUEST ACCEPTED", "QUEST STAGE" },
+		{ "OBJ COMPLETE", "OBJ INCOMPLETE" },
+		{ "WORLD FLAG", "NPC FLAG" },
+		{ "WORLD VARIABLE", "NPC VARIABLE" }
+	};
+
+	const int conditionGroupIndex =
+		static_cast<int>(questDialogueEditorConditionGroup);
+
+	printTextFormattedColor(
+		font8x8_bmp,
+		toolboxX1,
+		toolboxY + 4,
+		makeColorRGB(128, 255, 160),
+		"Condition group: %s",
+		conditionGroupNames[conditionGroupIndex]
 	);
 	toolboxY += toolboxRowHeight;
 
 	toolboxButtonPair(
 		toolboxY,
-		"CLEAR CONDITION",
-		"CLEAR ACTION",
+		conditionGroupLabels[conditionGroupIndex][0],
+		conditionGroupLabels[conditionGroupIndex][1],
+		[conditionGroupIndex, &conditionGroupTypes]()
+		{
+			questDialogueEditorSelectChoiceConditionType(
+				conditionGroupTypes[conditionGroupIndex][0]
+			);
+		},
+		[conditionGroupIndex, &conditionGroupTypes]()
+		{
+			questDialogueEditorSelectChoiceConditionType(
+				conditionGroupTypes[conditionGroupIndex][1]
+			);
+		}
+	);
+	toolboxY += toolboxRowHeight;
+
+    toolboxButtonPair(
+        toolboxY,
+        "REQ <",
+        "REQ >",
+        []()
+        {
+            questDialogueEditorCycleSelectedCondition(-1);
+        },
+        []()
+        {
+            questDialogueEditorCycleSelectedCondition(1);
+        }
+    );
+    toolboxY += toolboxRowHeight;
+
+	toolboxButtonPair(
+		toolboxY,
+		"REMOVE REQ",
+		"CLEAR ACTIONS",
 		[]()
 		{
 			questDialogueEditorClearChoiceCondition();
@@ -8265,6 +9275,94 @@ static void drawQuestDialogueEditor()
 
 	const std::string selectedConditionType =
 		questDialogueEditorSelectedConditionType();
+
+	const bool conditionHasReference =
+		selectedConditionType == "has_item"
+		|| selectedConditionType == "quest_started"
+		|| selectedConditionType == "quest_accepted"
+		|| selectedConditionType == "quest_completed"
+		|| selectedConditionType == "quest_failed"
+		|| selectedConditionType == "quest_stage"
+		|| selectedConditionType == "objective_completed"
+		|| selectedConditionType == "objective_incomplete"
+		|| selectedConditionType == "world_flag"
+		|| selectedConditionType == "npc_flag"
+		|| selectedConditionType == "world_variable"
+		|| selectedConditionType == "npc_variable";
+
+	const bool conditionHasNumber =
+		selectedConditionType == "has_item"
+		|| selectedConditionType == "has_gold"
+		|| selectedConditionType == "quest_stage"
+		|| selectedConditionType == "world_variable"
+		|| selectedConditionType == "npc_variable";
+
+	if ( conditionHasReference || conditionHasNumber )
+	{
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 3,
+			makeColorRGB(128, 192, 255),
+			"Condition parameters (click to type)"
+		);
+		toolboxY += toolboxRowHeight;
+
+		if ( conditionHasReference )
+		{
+			questDialogueEditorFieldCategory =
+				QUEST_DIALOGUE_CATEGORY_CONDITION;
+			questDialogueEditorEditableField =
+				QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE;
+
+			const std::string referenceValue =
+				questDialogueEditorReadEditableField();
+
+			if ( dialogueEditorButton(
+				toolboxX1,
+				toolboxY,
+				toolboxX2 - toolboxX1,
+				("REFERENCE: "
+					+ dialogueEditorClippedText(
+						referenceValue.empty()
+							? "(click to set)"
+							: referenceValue,
+						toolboxX2 - toolboxX1 - 16
+					)
+				).c_str()
+			) )
+			{
+				questDialogueEditorOpenConditionReferenceEditor();
+			}
+			toolboxY += toolboxRowHeight;
+		}
+
+		if ( conditionHasNumber )
+		{
+			questDialogueEditorFieldCategory =
+				QUEST_DIALOGUE_CATEGORY_CONDITION;
+			questDialogueEditorEditableField =
+				QUEST_DIALOGUE_FIELD_CONDITION_NUMBER;
+
+			const std::string numberValue =
+				questDialogueEditorReadEditableField();
+
+			if ( dialogueEditorButton(
+				toolboxX1,
+				toolboxY,
+				toolboxX2 - toolboxX1,
+				("VALUE / ID: "
+					+ (numberValue.empty()
+						? "(click to set)"
+						: numberValue)
+				).c_str()
+			) )
+			{
+				questDialogueEditorOpenConditionNumberEditor();
+			}
+			toolboxY += toolboxRowHeight;
+		}
+	}
 
 	if ( selectedConditionType == "has_item" )
 	{
@@ -8691,6 +9789,21 @@ static void drawQuestDialogueEditor()
 		}
 	);
 	toolboxY += toolboxRowHeight;
+
+	if ( questDialogueEditorActionGroup
+		== QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS )
+	{
+		printTextFormattedColor(
+			font8x8_bmp,
+			toolboxX1,
+			toolboxY + 4,
+			makeColorRGB(255, 230, 96),
+			"Cursor tile: %d, %d",
+			drawx,
+			drawy
+		);
+		toolboxY += toolboxRowHeight;
+	}
 
 	if ( questDialogueEditorActionGroup
 		== QUEST_DIALOGUE_ACTION_GROUP_REWARDS
@@ -9235,6 +10348,7 @@ static void drawQuestDialogueEditor()
 		{
 			const auto& node =
 				questDialogueEditorPreview.nodes[nodeIndex];
+			const int nodeStartY = treeY;
 
 			if ( treeY + 14 >= panelY2 )
 			{
@@ -9281,13 +10395,19 @@ static void drawQuestDialogueEditor()
 			if ( mousestatus[SDL_BUTTON_LEFT]
 				&& omousex >= treeX1 + 4
 				&& omousex < treeX2 - 4
-				&& omousey >= treeY - 2
-				&& omousey < treeY + 14 )
+				&& omousey >= nodeStartY - 2
+				&& omousey < treeY )
 			{
 				mousestatus[SDL_BUTTON_LEFT] = 0;
 				questDialogueEditorSelectedNode =
 					nodeIndex;
 				questDialogueEditorSelectedChoice = -1;
+                questDialogueEditorInspectorSelection =
+                    QUEST_DIALOGUE_INSPECTOR_NONE;
+				questDialogueEditorFieldCategory =
+					QUEST_DIALOGUE_CATEGORY_TEXT;
+				questDialogueEditorEditableField =
+					QUEST_DIALOGUE_FIELD_NODE_TEXT;
 			}
 
 			treeY += 4;
@@ -9296,6 +10416,8 @@ static void drawQuestDialogueEditor()
 				choiceIndex < node.choices.size();
 				++choiceIndex )
 			{
+                const int choiceStartY = treeY;
+
 				if ( treeY + 14 >= panelY2 )
 				{
 					break;
@@ -9380,14 +10502,49 @@ static void drawQuestDialogueEditor()
 
 						if ( conditionSummary != "None" )
 						{
+                            const int conditionRowY = treeY;
+                            const bool conditionSelected =
+                                nodeIndex == questDialogueEditorSelectedNode
+                                && static_cast<int>(choiceIndex)
+                                    == questDialogueEditorSelectedChoice
+                                && questDialogueEditorInspectorSelection
+                                    == QUEST_DIALOGUE_INSPECTOR_CONDITION;
+
+                            if ( conditionSelected )
+                            {
+                                drawDepressed(
+                                    treeX1 + 24,
+                                    conditionRowY - 2,
+                                    treeX2 - 4,
+                                    conditionRowY + 10
+                                );
+                            }
+
 							printTextFormattedColor(
 								font8x8_bmp,
 								treeX1 + 28,
-								treeY,
+								conditionRowY,
 								makeColorRGB(128, 255, 160),
 								"Requires: %.24s",
 								conditionSummary.c_str()
 							);
+
+                            if ( mousestatus[SDL_BUTTON_LEFT]
+                                && omousex >= treeX1 + 24
+                                && omousex < treeX2 - 4
+                                && omousey >= conditionRowY - 2
+                                && omousey < conditionRowY + 11 )
+                            {
+                                mousestatus[SDL_BUTTON_LEFT] = 0;
+                                questDialogueEditorSelectedNode = nodeIndex;
+                                questDialogueEditorSelectedChoice =
+                                    static_cast<int>(choiceIndex);
+                                questDialogueEditorInspectorSelection =
+                                    QUEST_DIALOGUE_INSPECTOR_CONDITION;
+                                questDialogueEditorFieldCategory =
+                                    QUEST_DIALOGUE_CATEGORY_CONDITION;
+                            }
+
 							treeY += 12;
 						}
 
@@ -9416,14 +10573,51 @@ static void drawQuestDialogueEditor()
 
 						if ( actionSummary != "None" )
 						{
+                            const int actionRowY = treeY;
+                            const bool actionSelected =
+                                nodeIndex == questDialogueEditorSelectedNode
+                                && static_cast<int>(choiceIndex)
+                                    == questDialogueEditorSelectedChoice
+                                && questDialogueEditorInspectorSelection
+                                    == QUEST_DIALOGUE_INSPECTOR_ACTION;
+
+                            if ( actionSelected )
+                            {
+                                drawDepressed(
+                                    treeX1 + 24,
+                                    actionRowY - 2,
+                                    treeX2 - 4,
+                                    actionRowY + 10
+                                );
+                            }
+
 							printTextFormattedColor(
 								font8x8_bmp,
 								treeX1 + 28,
-								treeY,
+								actionRowY,
 								makeColorRGB(255, 128, 128),
 								"Action: %.26s",
 								actionSummary.c_str()
 							);
+
+                            if ( mousestatus[SDL_BUTTON_LEFT]
+                                && omousex >= treeX1 + 24
+                                && omousex < treeX2 - 4
+                                && omousey >= actionRowY - 2
+                                && omousey < actionRowY + 11 )
+                            {
+                                mousestatus[SDL_BUTTON_LEFT] = 0;
+                                questDialogueEditorSelectedNode = nodeIndex;
+                                questDialogueEditorSelectedChoice =
+                                    static_cast<int>(choiceIndex);
+                                questDialogueEditorInspectorSelection =
+                                    QUEST_DIALOGUE_INSPECTOR_ACTION;
+                                questDialogueEditorFieldCategory =
+                                    QUEST_DIALOGUE_CATEGORY_ACTION;
+                                questDialogueEditorEditableField =
+                                    QUEST_DIALOGUE_FIELD_ACTION_NUMBER;
+                            }
+
 							treeY += 12;
 						}
 					}
@@ -9432,14 +10626,21 @@ static void drawQuestDialogueEditor()
 				if ( mousestatus[SDL_BUTTON_LEFT]
 					&& omousex >= treeX1 + 16
 					&& omousex < treeX2 - 4
-					&& omousey >= treeY - 2
-					&& omousey < treeY + 14 )
+                    && omousey >= choiceStartY - 2
+                    && omousey < choiceStartY
+                        + static_cast<int>(choiceLines.size()) * 12 )
 				{
 					mousestatus[SDL_BUTTON_LEFT] = 0;
 					questDialogueEditorSelectedNode =
 						nodeIndex;
 					questDialogueEditorSelectedChoice =
 						static_cast<int>(choiceIndex);
+                    questDialogueEditorInspectorSelection =
+                        QUEST_DIALOGUE_INSPECTOR_NONE;
+					questDialogueEditorFieldCategory =
+						QUEST_DIALOGUE_CATEGORY_TEXT;
+					questDialogueEditorEditableField =
+						QUEST_DIALOGUE_FIELD_CHOICE_TEXT;
 				}
 
 				treeY += 2;
@@ -9566,6 +10767,89 @@ static void drawQuestDialogueEditor()
 				% questDialogueEditorPreview.objectiveCount;
 		}
 		detailY += 22;
+
+		rapidjson::Value* selectedObjective =
+			questDialogueEditorSelectedObjectiveValue();
+		if ( selectedObjective && selectedObjective->IsObject() )
+		{
+			printTextFormattedColor(
+				font8x8_bmp,
+				detailX1 + 8,
+				detailY,
+				makeColorRGB(128, 192, 255),
+				"OBJECTIVE INSPECTOR"
+			);
+			detailY += 14;
+
+			struct ObjectiveInspectorField
+			{
+				QuestDialogueEditableField field;
+				const char* label;
+			};
+
+			const ObjectiveInspectorField objectiveFields[] =
+			{
+				{ QUEST_DIALOGUE_FIELD_OBJECTIVE_ID, "Objective ID" },
+				{ QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT, "Objective text" },
+				{ QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE, "Required stage" },
+				{ QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET, "Required target" },
+				{ QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID, "Defeat ID" }
+			};
+
+			for ( const auto& objectiveField : objectiveFields )
+			{
+				const QuestDialogueFieldCategory previousCategory =
+					questDialogueEditorFieldCategory;
+				const QuestDialogueEditableField previousField =
+					questDialogueEditorEditableField;
+
+				questDialogueEditorFieldCategory =
+					QUEST_DIALOGUE_CATEGORY_OBJECTIVE;
+				questDialogueEditorEditableField = objectiveField.field;
+				const std::string objectiveValue =
+					questDialogueEditorReadEditableField();
+
+				questDialogueEditorFieldCategory = previousCategory;
+				questDialogueEditorEditableField = previousField;
+
+				if ( dialogueEditorButton(
+					detailX1 + 8,
+					detailY,
+					detailX2 - detailX1 - 16,
+					(std::string(objectiveField.label) + ": "
+						+ dialogueEditorClippedText(
+							objectiveValue.empty()
+								? "(click to set)"
+								: objectiveValue,
+							detailX2 - detailX1 - 136
+						)
+					).c_str()
+				) )
+				{
+					questDialogueEditorFieldCategory =
+						QUEST_DIALOGUE_CATEGORY_OBJECTIVE;
+					questDialogueEditorEditableField = objectiveField.field;
+					questDialogueEditorBeginEditingField();
+					break;
+				}
+				detailY += 20;
+			}
+
+			const bool objectiveOptional =
+				selectedObjective->HasMember("optional")
+				&& (*selectedObjective)["optional"].IsBool()
+				&& (*selectedObjective)["optional"].GetBool();
+
+			printTextFormatted(
+				font8x8_bmp,
+				detailX1 + 12,
+				detailY,
+				"Optional: %s | Marker: %s",
+				objectiveOptional ? "Yes" : "No",
+				selectedObjective->HasMember("map_marker") ? "Yes" : "No"
+			);
+			detailY += 18;
+		}
 	}
 
 	printTextFormatted(
@@ -9643,14 +10927,42 @@ static void drawQuestDialogueEditor()
 		);
 		detailY += 12;
 
+		const int nodeTextY = detailY;
+		const bool editingNodeText =
+			questDialogueEditorEditingField
+			&& questDialogueEditorEditableField
+				== QUEST_DIALOGUE_FIELD_NODE_TEXT;
+
+		const std::string nodeTextDisplay =
+			editingNodeText
+				? std::string(questDialogueEditorEditBuffer) + "|"
+				: node.text;
+
 		dialogueEditorDrawWrappedText(
 			detailX1 + 12,
 			detailY,
 			detailX2 - detailX1 - 24,
-			node.text,
+			nodeTextDisplay,
 			5,
-			makeColorRGB(224, 224, 224)
+			editingNodeText
+				? makeColorRGB(255, 230, 96)
+				: makeColorRGB(224, 224, 224)
 		);
+
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= detailX1 + 8
+			&& omousex < detailX2 - 8
+			&& omousey >= nodeTextY - 2
+			&& omousey < nodeTextY + 58 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorFieldCategory =
+				QUEST_DIALOGUE_CATEGORY_TEXT;
+			questDialogueEditorEditableField =
+				QUEST_DIALOGUE_FIELD_NODE_TEXT;
+			questDialogueEditorBeginEditingField();
+		}
+
 		detailY += 6;
 
 		printTextFormatted(
@@ -9712,14 +11024,340 @@ static void drawQuestDialogueEditor()
 				detailY += 16;
 			}
 
-			printTextFormatted(
-				font8x8_bmp,
-				detailX1 + 8,
-				detailY,
-				"Choice action: %.19s",
-				questDialogueEditorChoiceActionName().c_str()
-			);
-			detailY += 24;
+            const std::vector<std::string> visibleActions =
+                questDialogueEditorChoiceActionMembers();
+            printTextFormatted(
+                font8x8_bmp,
+                detailX1 + 8,
+                detailY,
+                "Choice action %d/%d: %.15s",
+                visibleActions.empty() ? 0 : questDialogueEditorSelectedActionIndex + 1,
+                static_cast<int>(visibleActions.size()),
+                questDialogueEditorChoiceActionName().c_str()
+            );
+            detailY += 24;
+
+            if ( questDialogueEditorInspectorSelection
+                != QUEST_DIALOGUE_INSPECTOR_NONE )
+            {
+                const bool inspectCondition =
+                    questDialogueEditorInspectorSelection
+                        == QUEST_DIALOGUE_INSPECTOR_CONDITION;
+
+                printTextFormattedColor(
+                    font8x8_bmp,
+                    detailX1 + 8,
+                    detailY,
+                    inspectCondition
+                        ? makeColorRGB(128, 255, 160)
+                        : makeColorRGB(255, 128, 128),
+                    "%s INSPECTOR",
+                    inspectCondition ? "CONDITION" : "ACTION"
+                );
+                detailY += 14;
+
+                printTextFormatted(
+                    font8x8_bmp,
+                    detailX1 + 12,
+                    detailY,
+                    "Type: %.24s",
+                    inspectCondition
+                        ? questDialogueEditorChoiceConditionName().c_str()
+                        : questDialogueEditorChoiceActionName().c_str()
+                );
+                detailY += 16;
+
+                const int inspectorButtonWidth =
+                    (detailX2 - detailX1 - 28) / 2;
+
+                if ( dialogueEditorButton(
+                    detailX1 + 8,
+                    detailY,
+                    inspectorButtonWidth,
+                    "PREVIOUS TYPE"
+                ) )
+                {
+                    if ( inspectCondition )
+                    {
+                        deferredInspectorCommand =
+                            QUEST_DIALOGUE_DEFERRED_CONDITION_PREVIOUS;
+                    }
+                    else
+                    {
+                        deferredInspectorCommand =
+                            QUEST_DIALOGUE_DEFERRED_ACTION_PREVIOUS;
+                    }
+                }
+
+                if ( dialogueEditorButton(
+                    detailX1 + 16 + inspectorButtonWidth,
+                    detailY,
+                    inspectorButtonWidth,
+                    "NEXT TYPE"
+                ) )
+                {
+                    if ( inspectCondition )
+                    {
+                        deferredInspectorCommand =
+                            QUEST_DIALOGUE_DEFERRED_CONDITION_NEXT;
+                    }
+                    else
+                    {
+                        deferredInspectorCommand =
+                            QUEST_DIALOGUE_DEFERRED_ACTION_NEXT;
+                    }
+                }
+                detailY += 20;
+
+                if ( inspectCondition )
+                {
+                    const std::string type =
+                        questDialogueEditorSelectedConditionType();
+                    const bool hasReference =
+                        type == "has_item"
+                        || type == "quest_started"
+                        || type == "quest_accepted"
+                        || type == "quest_completed"
+                        || type == "quest_failed"
+                        || type == "quest_stage"
+                        || type == "objective_completed"
+                        || type == "objective_incomplete"
+                        || type == "world_flag"
+                        || type == "npc_flag"
+                        || type == "world_variable"
+                        || type == "npc_variable";
+                    const bool hasNumber =
+                        type == "has_item"
+                        || type == "has_gold"
+                        || type == "quest_stage"
+                        || type == "world_variable"
+                        || type == "npc_variable";
+
+                    if ( type == "objective_completed"
+                        || type == "objective_incomplete" )
+                    {
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_CONDITION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_CONDITION_QUEST;
+                        const std::string questValue =
+                            questDialogueEditorReadEditableField();
+                        if ( dialogueEditorButton(
+                            detailX1 + 8, detailY,
+                            detailX2 - detailX1 - 16,
+                            ("REQUIRED QUEST: "
+                                + dialogueEditorClippedText(
+                                    questValue.empty() ? "(click to set)" : questValue,
+                                    detailX2 - detailX1 - 140
+                                )
+                            ).c_str()
+                        ) )
+                        {
+                            questDialogueEditorBeginEditingField();
+                        }
+                        detailY += 20;
+                    }
+
+                    if ( hasReference )
+                    {
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_CONDITION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE;
+                        const std::string value =
+                            questDialogueEditorReadEditableField();
+                        const std::string referenceLabel =
+                            std::string(
+                                (type == "objective_completed" || type == "objective_incomplete")
+                                    ? "REQUIRED OBJECTIVE: "
+                                    : (type == "has_item" ? "REQUIRED ITEM: " : "REQUIRED ID: ")
+                            )
+                            + dialogueEditorClippedText(
+                                value.empty() ? "(click to set)" : value,
+                                detailX2 - detailX1 - 100
+                            );
+                        if ( dialogueEditorButton(
+                            detailX1 + 8,
+                            detailY,
+                            detailX2 - detailX1 - 16,
+                            referenceLabel.c_str()
+                        ) )
+                        {
+                            questDialogueEditorOpenConditionReferenceEditor();
+                        }
+                        detailY += 20;
+                    }
+
+                    if ( hasNumber )
+                    {
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_CONDITION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_CONDITION_NUMBER;
+                        const std::string value =
+                            questDialogueEditorReadEditableField();
+                        if ( dialogueEditorButton(
+                            detailX1 + 8,
+                            detailY,
+                            detailX2 - detailX1 - 16,
+                            ("VALUE / ID: "
+                                + (value.empty() ? "(click to set)" : value)
+                            ).c_str()
+                        ) )
+                        {
+                            questDialogueEditorOpenConditionNumberEditor();
+                        }
+                        detailY += 20;
+                    }
+                }
+                else
+                {
+                    rapidjson::Value* selectedChoice =
+                        questDialogueEditorSelectedChoiceValueForEdit();
+                    const std::vector<std::string> selectedActionMembers =
+                        questDialogueEditorChoiceActionMembers();
+                    const bool selectedPowerAction =
+                        questDialogueEditorSelectedActionIndex >= 0
+                        && questDialogueEditorSelectedActionIndex
+                            < static_cast<int>(selectedActionMembers.size())
+                        && selectedActionMembers[
+                            questDialogueEditorSelectedActionIndex
+                        ] == "set_power";
+
+                    if ( selectedPowerAction )
+                    {
+                        const QuestDialogueFieldCategory savedCategory =
+                            questDialogueEditorFieldCategory;
+                        const QuestDialogueEditableField savedField =
+                            questDialogueEditorEditableField;
+
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_ACTION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_POWER_X;
+                        const std::string powerX =
+                            questDialogueEditorReadEditableField();
+
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_POWER_Y;
+                        const std::string powerY =
+                            questDialogueEditorReadEditableField();
+
+                        questDialogueEditorFieldCategory = savedCategory;
+                        questDialogueEditorEditableField = savedField;
+
+                        if ( dialogueEditorButton(
+                            detailX1 + 8, detailY,
+                            detailX2 - detailX1 - 16,
+                            ("POWER TILE X: " + powerX).c_str()
+                        ) )
+                        {
+                            questDialogueEditorFieldCategory =
+                                QUEST_DIALOGUE_CATEGORY_ACTION;
+                            questDialogueEditorEditableField =
+                                QUEST_DIALOGUE_FIELD_POWER_X;
+                            questDialogueEditorBeginEditingField();
+                        }
+                        detailY += 20;
+
+                        if ( dialogueEditorButton(
+                            detailX1 + 8, detailY,
+                            detailX2 - detailX1 - 16,
+                            ("POWER TILE Y: " + powerY).c_str()
+                        ) )
+                        {
+                            questDialogueEditorFieldCategory =
+                                QUEST_DIALOGUE_CATEGORY_ACTION;
+                            questDialogueEditorEditableField =
+                                QUEST_DIALOGUE_FIELD_POWER_Y;
+                            questDialogueEditorBeginEditingField();
+                        }
+                        detailY += 20;
+                    }
+
+                    const QuestDialogueFieldCategory previousCategory =
+                        questDialogueEditorFieldCategory;
+                    const QuestDialogueEditableField previousField =
+                        questDialogueEditorEditableField;
+
+                    questDialogueEditorFieldCategory =
+                        QUEST_DIALOGUE_CATEGORY_ACTION;
+                    questDialogueEditorEditableField =
+                        QUEST_DIALOGUE_FIELD_ACTION_REFERENCE;
+                    const std::string referenceValue =
+                        questDialogueEditorReadEditableField();
+
+                    questDialogueEditorFieldCategory = previousCategory;
+                    questDialogueEditorEditableField = previousField;
+
+                    if ( !referenceValue.empty()
+                        && dialogueEditorButton(
+                            detailX1 + 8, detailY,
+                            detailX2 - detailX1 - 16,
+                            ("ID / REFERENCE: "
+                                + dialogueEditorClippedText(
+                                    referenceValue,
+                                    detailX2 - detailX1 - 132
+                                )
+                            ).c_str()
+                        ) )
+                    {
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_ACTION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_ACTION_REFERENCE;
+                        questDialogueEditorBeginEditingField();
+                    }
+                    if ( !referenceValue.empty() )
+                    {
+                        detailY += 20;
+                    }
+
+                    questDialogueEditorFieldCategory =
+                        QUEST_DIALOGUE_CATEGORY_ACTION;
+                    questDialogueEditorEditableField =
+                        QUEST_DIALOGUE_FIELD_ACTION_NUMBER;
+                    const std::string value =
+                        questDialogueEditorReadEditableField();
+
+                    questDialogueEditorFieldCategory = previousCategory;
+                    questDialogueEditorEditableField = previousField;
+
+                    if ( !value.empty()
+                        && dialogueEditorButton(
+                            detailX1 + 8, detailY,
+                            detailX2 - detailX1 - 16,
+                            ("VALUE / COUNT: " + value).c_str()
+                        ) )
+                    {
+                        questDialogueEditorFieldCategory =
+                            QUEST_DIALOGUE_CATEGORY_ACTION;
+                        questDialogueEditorEditableField =
+                            QUEST_DIALOGUE_FIELD_ACTION_NUMBER;
+                        questDialogueEditorBeginEditingField();
+                    }
+                    if ( !value.empty() )
+                    {
+                        detailY += 20;
+                    }
+                }
+
+                if ( dialogueEditorButton(
+                    detailX1 + 8,
+                    detailY,
+                    detailX2 - detailX1 - 16,
+                    inspectCondition
+                        ? "REMOVE CONDITION"
+                        : "REMOVE ACTION"
+                ) )
+                {
+                    deferredInspectorCommand =
+                        inspectCondition
+                            ? QUEST_DIALOGUE_DEFERRED_REMOVE_CONDITION
+                            : QUEST_DIALOGUE_DEFERRED_REMOVE_ACTION;
+                }
+                detailY += 24;
+            }
 
 			printTextFormattedColor(
 				font8x8_bmp,
@@ -9780,16 +11418,38 @@ static void drawQuestDialogueEditor()
 				);
 				detailY += 12;
 
+				const int choiceTextY = detailY;
+				const bool editingChoiceText =
+					questDialogueEditorEditingField
+					&& questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_CHOICE_TEXT;
+
+				const std::string choiceTextDisplay =
+					editingChoiceText
+						? std::string(questDialogueEditorEditBuffer) + "|"
+						: node.choices[
+							questDialogueEditorSelectedChoice
+						];
+
 				dialogueEditorDrawWrappedText(
 					detailX1 + 12,
 					detailY,
 					detailX2 - detailX1 - 24,
-					node.choices[
-						questDialogueEditorSelectedChoice
-					],
+					choiceTextDisplay,
 					5,
 					makeColorRGB(255, 230, 96)
 				);
+
+				if ( mousestatus[SDL_BUTTON_LEFT]
+					&& omousex >= detailX1 + 8
+					&& omousex < detailX2 - 8
+					&& omousey >= choiceTextY - 2
+					&& omousey < choiceTextY + 58 )
+				{
+					mousestatus[SDL_BUTTON_LEFT] = 0;
+					questDialogueEditorEditChoiceTextDirect();
+				}
+
 				detailY += 6;
 			}
 		}
@@ -9850,6 +11510,91 @@ static void drawQuestDialogueEditor()
 			category
 		);
 		detailY += 14;
+	}
+
+	if ( deferredInspectorCommand
+		!= QUEST_DIALOGUE_DEFERRED_NONE )
+	{
+		const int preservedNode = questDialogueEditorSelectedNode;
+		const int preservedChoice = questDialogueEditorSelectedChoice;
+		const int preservedObjective = questDialogueEditorSelectedObjective;
+		const QuestDialogueInspectorSelection preservedInspector =
+			questDialogueEditorInspectorSelection;
+
+		switch ( deferredInspectorCommand )
+		{
+			case QUEST_DIALOGUE_DEFERRED_CONDITION_PREVIOUS:
+				questDialogueEditorPreviousChoiceCondition();
+				break;
+			case QUEST_DIALOGUE_DEFERRED_CONDITION_NEXT:
+				questDialogueEditorCycleChoiceCondition();
+				break;
+			case QUEST_DIALOGUE_DEFERRED_ACTION_PREVIOUS:
+                questDialogueEditorCycleSelectedAction(-1);
+                break;
+            case QUEST_DIALOGUE_DEFERRED_ACTION_NEXT:
+                questDialogueEditorCycleSelectedAction(1);
+                break;
+			case QUEST_DIALOGUE_DEFERRED_REMOVE_CONDITION:
+				questDialogueEditorClearChoiceCondition();
+				questDialogueEditorInspectorSelection =
+					QUEST_DIALOGUE_INSPECTOR_NONE;
+				break;
+			case QUEST_DIALOGUE_DEFERRED_REMOVE_ACTION:
+				questDialogueEditorClearChoiceAction();
+				questDialogueEditorInspectorSelection =
+					QUEST_DIALOGUE_INSPECTOR_NONE;
+				break;
+			default:
+				break;
+		}
+
+		if ( !questDialogueEditorPreview.nodes.empty() )
+		{
+			questDialogueEditorSelectedNode = std::max(
+				0,
+				std::min(
+					preservedNode,
+					static_cast<int>(questDialogueEditorPreview.nodes.size()) - 1
+				)
+			);
+
+			const auto& preservedNodePreview =
+				questDialogueEditorPreview.nodes[questDialogueEditorSelectedNode];
+			if ( !preservedNodePreview.choices.empty() )
+			{
+				questDialogueEditorSelectedChoice = std::max(
+					0,
+					std::min(
+						preservedChoice,
+						static_cast<int>(preservedNodePreview.choices.size()) - 1
+					)
+				);
+			}
+			else
+			{
+				questDialogueEditorSelectedChoice = -1;
+			}
+		}
+
+		if ( questDialogueEditorPreview.objectiveCount > 0 )
+		{
+			questDialogueEditorSelectedObjective = std::max(
+				0,
+				std::min(
+					preservedObjective,
+					questDialogueEditorPreview.objectiveCount - 1
+				)
+			);
+		}
+
+		if ( deferredInspectorCommand
+			!= QUEST_DIALOGUE_DEFERRED_REMOVE_CONDITION
+			&& deferredInspectorCommand
+				!= QUEST_DIALOGUE_DEFERRED_REMOVE_ACTION )
+		{
+			questDialogueEditorInspectorSelection = preservedInspector;
+		}
 	}
 
 	if ( !questDialogueEditorMessage.empty()
@@ -10723,9 +12468,9 @@ bool itemTypeIsFoci(const ItemType type) { return false; } // dummy
 map_t copymap;
 
 int errorMessage = 0;
-int errorArr[12] =
+int errorArr[32] =
 {
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	0
 };
 
 /*
@@ -14299,181 +16044,333 @@ int main(int argc, char** argv)
 					printText(font8x8_bmp, subx1 + 8, suby1 + 8, subtext);
 				}
 
-				// open and save windows
+				// Open/save map browser with live search filtering.
 				if ( (openwindow == 1 || savewindow) )
 				{
-					drawDepressed(subx1 + 4, suby1 + 20, subx2 - 20, suby2 - 52);
-					drawDepressed(subx2 - 20, suby1 + 20, subx2 - 4, suby2 - 52);
-					if ( !mapNames.empty() )
-					{
-						slidersize = std::min<int>(((suby2 - 53) - (suby1 + 21)), ((suby2 - 53) - (suby1 + 21)) / ((real_t)mapNames.size() / 20)); //TODO: Why are int and real_t being compared?
-						slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 53 - slidersize);
-						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
+					const int searchLabelX = subx1 + 8;
+					const int searchY = suby1 + 28;
+					const int searchBoxX1 = subx1 + 64;
+					const int searchBoxX2 = subx2 - 8;
+					const int listTop = suby1 + 44;
+					const int listBottom = suby2 - 52;
+					const int visibleRows = std::max(1, (listBottom - listTop - 8) / 8);
 
-						// directory list offset from slider
-						y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 52) - (suby1 + 20))) * (mapNames.size() + 1);
-						if ( scroll )
+					printText(font8x8_bmp, searchLabelX, searchY, "Search:");
+					drawDepressed(searchBoxX1, searchY - 4, searchBoxX2, searchY + 12);
+					printText(font8x8_bmp, searchBoxX1 + 4, searchY, editorOpenMapSearch);
+					if ( inputstr == editorOpenMapSearch
+						&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+					{
+						printText(font8x8_bmp, searchBoxX1 + 4 + strlen(editorOpenMapSearch) * 8, searchY, "|");
+					}
+
+					std::vector<const std::string*> filteredMapNames;
+					const std::string loweredSearch = editorPaletteLowercase(editorOpenMapSearch);
+					for ( const std::string& mapName : mapNames )
+					{
+						if ( loweredSearch.empty()
+							|| editorPaletteLowercase(mapName).find(loweredSearch) != std::string::npos )
 						{
-							slidery -= 8 * scroll;
-							slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 53 - slidersize);
-							y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 52) - (suby1 + 20))) * (mapNames.size() + 1);
-							selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(mapNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-							strcpy(filename, mapNames[selectedFile].c_str());
-							inputstr = filename;
+							filteredMapNames.push_back(&mapName);
+						}
+					}
+
+					drawDepressed(subx1 + 4, listTop, subx2 - 20, listBottom);
+					drawDepressed(subx2 - 20, listTop, subx2 - 4, listBottom);
+
+					if ( filteredMapNames.empty() )
+					{
+						selectedFile = 0;
+						y2 = 0;
+						printText(font8x8_bmp, subx1 + 8, listTop + 4, "No matching maps.");
+					}
+					else
+					{
+						selectedFile = std::max(0, std::min(selectedFile,
+							static_cast<int>(filteredMapNames.size()) - 1));
+						const int maxFirst = std::max(0,
+							static_cast<int>(filteredMapNames.size()) - visibleRows);
+						y2 = std::max(0, std::min(y2, maxFirst));
+
+						if ( selectedFile < y2 )
+						{
+							y2 = selectedFile;
+						}
+						else if ( selectedFile >= y2 + visibleRows )
+						{
+							y2 = selectedFile - visibleRows + 1;
+						}
+
+						if ( scroll && mousex >= subx1 + 4 && mousex < subx2 - 4
+							&& mousey >= listTop && mousey < listBottom )
+						{
+							y2 = std::max(0, std::min(maxFirst, y2 - scroll));
+							selectedFile = std::max(y2,
+								std::min(selectedFile, y2 + visibleRows - 1));
 							scroll = 0;
 						}
-						if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= subx2 - 20 && omousex < subx2 - 4 && omousey >= suby1 + 20 && omousey < suby2 - 52 )
+
+						const int listHeight = listBottom - listTop - 2;
+						slidersize = filteredMapNames.size() <= static_cast<size_t>(visibleRows)
+							? listHeight
+							: std::max(8, listHeight * visibleRows
+								/ static_cast<int>(filteredMapNames.size()));
+						const int sliderTravel = std::max(0, listHeight - slidersize);
+						slidery = listTop + 1 + (maxFirst > 0 ? sliderTravel * y2 / maxFirst : 0);
+						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
+
+						if ( mousestatus[SDL_BUTTON_LEFT]
+							&& omousex >= subx2 - 20 && omousex < subx2 - 4
+							&& omousey >= listTop && omousey < listBottom )
 						{
-							slidery = oslidery + mousey - omousey;
-							slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 53 - slidersize);
-							y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 52) - (suby1 + 20))) * (mapNames.size() + 1);
+							const int requestedSlider = std::max(listTop + 1,
+								std::min(listBottom - 1 - slidersize,
+								oslidery + mousey - omousey));
+							y2 = sliderTravel > 0
+								? (requestedSlider - listTop - 1) * maxFirst / sliderTravel
+								: 0;
+							selectedFile = std::max(y2,
+								std::min(selectedFile, y2 + visibleRows - 1));
 							mclick = 1;
-							selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(mapNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-							strcpy(filename, mapNames[selectedFile].c_str());
-							inputstr = filename;
 						}
 						else
 						{
 							oslidery = slidery;
 						}
 
-						// select a file
-						if ( mousestatus[SDL_BUTTON_LEFT] )
+						if ( mousestatus[SDL_BUTTON_LEFT]
+							&& omousex >= subx1 + 8 && omousex < subx2 - 24
+							&& omousey >= listTop + 4 && omousey < listBottom - 4 )
 						{
-							if ( omousex >= subx1 + 8 && omousex < subx2 - 24 && omousey >= suby1 + 24 && omousey < suby2 - 56 )
+							const int clicked = y2 + ((omousey - listTop - 4) >> 3);
+							if ( clicked >= 0 && clicked < static_cast<int>(filteredMapNames.size()) )
 							{
-								selectedFile = y2 + ((omousey - suby1 - 24) >> 3);
-								selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(mapNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-								strcpy(filename, mapNames[selectedFile].c_str());
+								selectedFile = clicked;
+								snprintf(filename, sizeof(filename), "%s",
+									filteredMapNames[selectedFile]->c_str());
 								inputstr = filename;
+								cursorflash = ticks;
 							}
 						}
+
 						pos.x = subx1 + 8;
-						pos.y = suby1 + 24 + (std::max(selectedFile - y2, 0)) * 8;
+						pos.y = listTop + 4 + (selectedFile - y2) * 8;
 						pos.w = subx2 - subx1 - 32;
 						pos.h = 8;
-						drawRect(&pos, makeColorRGB(64, 64, 64), 255);
-
-						// print all the files within the directory
-						x = subx1 + 8;
-						y = suby1 + 24;
-						c = std::min<long unsigned int>(mapNames.size(), 20 + y2); //TODO: Why are long unsigned int and int being compared?
-						for (z = y2; z < c; z++)
+						if ( selectedFile >= y2 && selectedFile < y2 + visibleRows )
 						{
-							printText(font8x8_bmp, x, y, mapNames[z].c_str());
+							drawRect(&pos, makeColorRGB(64, 64, 64), 255);
+						}
+
+						x = subx1 + 8;
+						y = listTop + 4;
+						const int lastVisible = std::min(static_cast<int>(filteredMapNames.size()),
+							y2 + visibleRows);
+						for ( int index = y2; index < lastVisible; ++index )
+						{
+							printText(font8x8_bmp, x, y, filteredMapNames[index]->c_str());
 							y += 8;
 						}
 					}
 
-					// text box to enter file
+					// Filename field remains separate from the search filter.
 					drawDepressed(subx1 + 4, suby2 - 48, subx2 - 68, suby2 - 32);
 					printText(font8x8_bmp, subx1 + 8, suby2 - 44, filename);
+					if ( inputstr == filename
+						&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+					{
+						printText(font8x8_bmp, subx1 + 8 + strlen(filename) * 8, suby2 - 44, "|");
+					}
 
-					// enter filename
+					if ( mousestatus[SDL_BUTTON_LEFT] )
+					{
+						if ( omousex >= searchBoxX1 && omousex < searchBoxX2
+							&& omousey >= searchY - 4 && omousey < searchY + 12 )
+						{
+							inputstr = editorOpenMapSearch;
+							inputlen = 127;
+							cursorflash = ticks;
+							selectedFile = 0;
+							y2 = 0;
+						}
+						else if ( omousex >= subx1 + 4 && omousex < subx2 - 68
+							&& omousey >= suby2 - 48 && omousey < suby2 - 32 )
+						{
+							inputstr = filename;
+							inputlen = 28;
+							cursorflash = ticks;
+						}
+					}
+
 					if ( !SDL_IsTextInputActive() )
 					{
 						SDL_StartTextInput();
+					}
+					if ( inputstr != editorOpenMapSearch && inputstr != filename )
+					{
 						inputstr = filename;
 					}
-					//strncpy(filename,inputstr,28);
-					inputlen = 28;
-					if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
-					{
-						printText(font8x8_bmp, subx1 + 8 + strlen(filename) * 8, suby2 - 44, "\26");
-					}
+					inputlen = inputstr == editorOpenMapSearch ? 127 : 28;
 				}
 				else if ( openwindow == 2 )
 				{
-					drawDepressed(subx1 + 4, suby1 + 20, subx2 - 20, suby2 - 112);
-					drawDepressed(subx2 - 20, suby1 + 20, subx2 - 4, suby2 - 112);
-					if ( !modFolderNames.empty() )
-					{
-						slidersize = std::min<int>(((suby2 - 113) - (suby1 + 21)), ((suby2 - 113) - (suby1 + 21)) / ((real_t)modFolderNames.size() / 20)); //TODO: Why are int and real_t being compared?
-						slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 113 - slidersize);
-						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
+					const int searchLabelX = subx1 + 8;
+					const int searchY = suby1 + 28;
+					const int searchBoxX1 = subx1 + 64;
+					const int searchBoxX2 = subx2 - 8;
+					const int listTop = suby1 + 44;
+					const int listBottom = suby2 - 112;
+					const int visibleRows = std::max(1, (listBottom - listTop - 8) / 8);
 
-						// directory list offset from slider
-						y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 52) - (suby1 + 20))) * modFolderNames.size();
-						if ( scroll )
+					printText(font8x8_bmp, searchLabelX, searchY, "Search:");
+					drawDepressed(searchBoxX1, searchY - 4, searchBoxX2, searchY + 12);
+					printText(font8x8_bmp, searchBoxX1 + 4, searchY, editorDirectorySearch);
+					if ( inputstr == editorDirectorySearch
+						&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+					{
+						printText(font8x8_bmp, searchBoxX1 + 4 + strlen(editorDirectorySearch) * 8, searchY, "|");
+					}
+
+					std::vector<std::string> filteredFolders;
+					const std::string loweredSearch = editorPaletteLowercase(editorDirectorySearch);
+					for ( const std::string& folder : modFolderNames )
+					{
+						if ( loweredSearch.empty()
+							|| editorPaletteLowercase(folder).find(loweredSearch) != std::string::npos )
 						{
-							slidery -= 8 * scroll;
-							slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 113 - slidersize);
-							y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 112) - (suby1 + 20))) * modFolderNames.size();
-							selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(modFolderNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-							std::list<std::string>::iterator it = modFolderNames.begin();
-							std::advance(it, selectedFile);
-							strcpy(foldername, it->c_str());
-							inputstr = foldername;
+							filteredFolders.push_back(folder);
+						}
+					}
+
+					drawDepressed(subx1 + 4, listTop, subx2 - 20, listBottom);
+					drawDepressed(subx2 - 20, listTop, subx2 - 4, listBottom);
+					if ( filteredFolders.empty() )
+					{
+						selectedFile = 0;
+						y2 = 0;
+						printText(font8x8_bmp, subx1 + 8, listTop + 4, "No matching directories.");
+					}
+					else
+					{
+						selectedFile = std::max(0, std::min(selectedFile,
+							static_cast<int>(filteredFolders.size()) - 1));
+						const int maxFirst = std::max(0,
+							static_cast<int>(filteredFolders.size()) - visibleRows);
+						y2 = std::max(0, std::min(y2, maxFirst));
+						if ( scroll && mousex >= subx1 + 4 && mousex < subx2 - 4
+							&& mousey >= listTop && mousey < listBottom )
+						{
+							y2 = std::max(0, std::min(maxFirst, y2 - scroll));
+							selectedFile = std::max(y2,
+								std::min(selectedFile, y2 + visibleRows - 1));
 							scroll = 0;
 						}
-						if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= subx2 - 20 && omousex < subx2 - 4 && omousey >= suby1 + 20 && omousey < suby2 - 113 )
+
+						const int listHeight = listBottom - listTop - 2;
+						slidersize = filteredFolders.size() <= static_cast<size_t>(visibleRows)
+							? listHeight
+							: std::max(8, listHeight * visibleRows
+								/ static_cast<int>(filteredFolders.size()));
+						const int sliderTravel = std::max(0, listHeight - slidersize);
+						slidery = listTop + 1 + (maxFirst > 0 ? sliderTravel * y2 / maxFirst : 0);
+						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
+
+						if ( mousestatus[SDL_BUTTON_LEFT]
+							&& omousex >= subx2 - 20 && omousex < subx2 - 4
+							&& omousey >= listTop && omousey < listBottom )
 						{
-							slidery = oslidery + mousey - omousey;
-							slidery = std::min(std::max(suby1 + 21, slidery), suby2 - 113 - slidersize);
-							y2 = ((real_t)(slidery - suby1 - 20) / ((suby2 - 112) - (suby1 + 20))) * modFolderNames.size();
+							const int requestedSlider = std::max(listTop + 1,
+								std::min(listBottom - 1 - slidersize,
+								oslidery + mousey - omousey));
+							y2 = sliderTravel > 0
+								? (requestedSlider - listTop - 1) * maxFirst / sliderTravel
+								: 0;
+							selectedFile = std::max(y2,
+								std::min(selectedFile, y2 + visibleRows - 1));
 							mclick = 1;
-							selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(modFolderNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-							std::list<std::string>::iterator it = modFolderNames.begin();
-							std::advance(it, selectedFile);
-							strcpy(foldername, it->c_str());
-							inputstr = foldername;
 						}
 						else
 						{
 							oslidery = slidery;
 						}
 
-						// select a file
-						if ( mousestatus[SDL_BUTTON_LEFT] )
+						if ( mousestatus[SDL_BUTTON_LEFT]
+							&& omousex >= subx1 + 8 && omousex < subx2 - 24
+							&& omousey >= listTop + 4 && omousey < listBottom - 4 )
 						{
-							if ( omousex >= subx1 + 8 && omousex < subx2 - 24 && omousey >= suby1 + 24 && omousey < suby2 - 116 )
+							const int clicked = y2 + ((omousey - listTop - 4) >> 3);
+							if ( clicked >= 0 && clicked < static_cast<int>(filteredFolders.size()) )
 							{
-								selectedFile = y2 + ((omousey - suby1 - 24) >> 3);
-								selectedFile = std::min<long unsigned int>(std::max(y2, selectedFile), std::min<long unsigned int>(modFolderNames.size() - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
-								std::list<std::string>::iterator it = modFolderNames.begin();
-								std::advance(it, selectedFile);
-								strcpy(foldername, it->c_str());
+								selectedFile = clicked;
+								snprintf(foldername, sizeof(foldername), "%s",
+									filteredFolders[selectedFile].c_str());
 								inputstr = foldername;
+								cursorflash = ticks;
 							}
 						}
+
 						pos.x = subx1 + 8;
-						pos.y = suby1 + 24 + (selectedFile - y2) * 8;
+						pos.y = listTop + 4 + (selectedFile - y2) * 8;
 						pos.w = subx2 - subx1 - 32;
 						pos.h = 8;
-						drawRect(&pos, makeColorRGB(64, 64, 64), 255);
-
-						// print all the files within the directory
-						x = subx1 + 8;
-						y = suby1 + 24;
-						c = std::min<long unsigned int>(modFolderNames.size(), 20 + y2); //TODO: Why are long unsigned int and int being compared?
-						for ( z = y2; z < c; z++ )
+						if ( selectedFile >= y2 && selectedFile < y2 + visibleRows )
 						{
-							std::list<std::string>::iterator it = modFolderNames.begin();
-							std::advance(it, z);
-							printText(font8x8_bmp, x, y, it->c_str());
+							drawRect(&pos, makeColorRGB(64, 64, 64), 255);
+						}
+						x = subx1 + 8;
+						y = listTop + 4;
+						const int lastVisible = std::min(static_cast<int>(filteredFolders.size()),
+							y2 + visibleRows);
+						for ( int index = y2; index < lastVisible; ++index )
+						{
+							printText(font8x8_bmp, x, y, filteredFolders[index].c_str());
 							y += 8;
 						}
 					}
 
-					// text box to enter file
 					drawDepressed(subx1 + 4, suby2 - 108, subx2 - 4, suby2 - 92);
 					printText(font8x8_bmp, subx1 + 8, suby2 - 104, foldername);
+					if ( inputstr == foldername
+						&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+					{
+						printText(font8x8_bmp, subx1 + 8 + strlen(foldername) * 8,
+							suby2 - 104, "|");
+					}
 
-					printTextFormatted(font8x8_bmp, subx1 + 8, suby2 - 32, "Save Dir: %smaps/", physfs_saveDirectory.c_str());
-					printTextFormatted(font8x8_bmp, subx1 + 8, suby2 - 16, "Load Dir: %smaps/", physfs_openDirectory.c_str());
+					printTextFormatted(font8x8_bmp, subx1 + 8, suby2 - 32,
+						"Save Dir: %smaps/", physfs_saveDirectory.c_str());
+					printTextFormatted(font8x8_bmp, subx1 + 8, suby2 - 16,
+						"Load Dir: %smaps/", physfs_openDirectory.c_str());
 
-					// enter filename
+					if ( mousestatus[SDL_BUTTON_LEFT] )
+					{
+						if ( omousex >= searchBoxX1 && omousex < searchBoxX2
+							&& omousey >= searchY - 4 && omousey < searchY + 12 )
+						{
+							inputstr = editorDirectorySearch;
+							inputlen = 127;
+							cursorflash = ticks;
+							selectedFile = 0;
+							y2 = 0;
+						}
+						else if ( omousex >= subx1 + 4 && omousex < subx2 - 4
+							&& omousey >= suby2 - 108 && omousey < suby2 - 92 )
+						{
+							inputstr = foldername;
+							inputlen = 28;
+							cursorflash = ticks;
+						}
+					}
+
 					if ( !SDL_IsTextInputActive() )
 					{
 						SDL_StartTextInput();
+					}
+					if ( inputstr != editorDirectorySearch && inputstr != foldername )
+					{
 						inputstr = foldername;
 					}
-					//strncpy(filename,inputstr,28);
-					inputlen = 28;
-					if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
-					{
-						printText(font8x8_bmp, subx1 + 8 + strlen(foldername) * 8, suby2 - 104, "\26");
-					}
+					inputlen = inputstr == editorDirectorySearch ? 127 : 28;
 				}
 
 				// new map and attributes windows
@@ -15584,6 +17481,41 @@ int main(int argc, char** argv)
 							const int authoredStartY =
 								dialogueFieldY2 + 18;
 
+							// Keep the miniboss toggle with the authored monster fields
+							// instead of below the inventory template buttons.
+							const int disableMinibossX = subx2 - 176;
+							const int disableMinibossY = authoredStartY;
+							printTextFormattedColor(
+								font8x8_bmp,
+								disableMinibossX,
+								disableMinibossY,
+								color,
+								!strcmp(spriteProperties[31], "disable")
+									? "Disable Miniboss: [x]"
+									: "Disable Miniboss: [ ]"
+							);
+							if ( mousestatus[SDL_BUTTON_LEFT] )
+							{
+								const int checkboxX1 = disableMinibossX
+									+ static_cast<int>(strlen("Disable Miniboss: ")) * 8;
+								const int checkboxX2 = checkboxX1 + 3 * 8;
+								if ( omousex >= checkboxX1
+									&& omousex < checkboxX2
+									&& omousey >= disableMinibossY
+									&& omousey < disableMinibossY + 8 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									if ( !strcmp(spriteProperties[31], "disable") )
+									{
+										strcpy(spriteProperties[31], "");
+									}
+									else
+									{
+										strcpy(spriteProperties[31], "disable");
+									}
+								}
+							}
+
 							for ( int authoredIndex = 0;
 								authoredIndex < 4;
 								++authoredIndex )
@@ -15942,34 +17874,24 @@ int main(int argc, char** argv)
 							pad_x4 -= 64 * 2;
 
 							pad_y2 += 32 + spacing * 2;
-							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Inventory");
-
-							pad_y2 += spacing * 3 + 8;
-							if ( !strcmp(spriteProperties[31], "disable") )
+							int activeInventorySlots = 6;
+							Stat* inventoryStats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+							if ( inventoryStats != nullptr )
 							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [x]");
-							}
-							else
-							{
-								printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color, "Disable Miniboss: [ ]");
-							}
-							if ( mousestatus[SDL_BUTTON_LEFT] )
-							{
-								int checkbox_x1 = pad_x4 - 8 + strlen("Disable Miniboss: ") * 8;
-								int checkbox_x2 = checkbox_x1 + strlen("[ ]") * 8;
-								if ( omousex >= checkbox_x1 && omousey >= pad_y2 && omousex < checkbox_x2 && omousey < pad_y2 + 8 )
+								activeInventorySlots = inventoryStats->MISC_FLAGS[31];
+								if ( activeInventorySlots < 1 || activeInventorySlots > ITEM_SLOT_INVENTORY_COUNT )
 								{
-									mousestatus[SDL_BUTTON_LEFT] = 0;
-									if ( !strcmp(spriteProperties[31], "disable") )
-									{
-										strcpy(spriteProperties[31], "");
-									}
-									else
-									{
-										strcpy(spriteProperties[31], "disable");
-									}
+									activeInventorySlots = 6;
 								}
 							}
+							const int inventoryPageCount = (activeInventorySlots + 5) / 6;
+							const int inventoryFirstSlot = monsterInventoryPage * 6 + 1;
+							const int inventoryLastSlot = std::min(activeInventorySlots, inventoryFirstSlot + 5);
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2, color,
+								"Inventory Page %d of %d", monsterInventoryPage + 1, inventoryPageCount);
+							printTextFormattedColor(font8x8_bmp, pad_x4 - 8, pad_y2 + 12, color,
+								"Slots %d-%d of %d active", inventoryFirstSlot, inventoryLastSlot, activeInventorySlots);
+
 
 							if ( editproperty <= 30 )
 							{
@@ -16323,7 +18245,13 @@ int main(int argc, char** argv)
 				}
 				else if ( newwindow == 4 || newwindow == 5 )
 				{
-					if ( selectedEntity[0] != NULL )
+					if ( newwindow == 5
+						&& (itemSlotSelected < 0 || itemSlotSelected >= 16) )
+					{
+						itemSlotSelected = -1;
+						buttonCloseSpriteSubwindow(nullptr);
+					}
+					else if ( selectedEntity[0] != NULL )
 					{
 						int numProperties;
 
@@ -16335,12 +18263,18 @@ int main(int argc, char** argv)
 						{
 							numProperties = sizeof(monsterItemPropertyNames) / sizeof(monsterItemPropertyNames[0]); //find number of entries in property list
 						}
-						const int lenProperties = 32;
+						/*
+						 * Some monster inventory property labels are longer than 31
+						 * characters. The previous 32-byte temporary buffer overflowed
+						 * when copying "Category: (0-16, if default_random)", causing
+						 * glibc's fortified strcpy check to abort the editor.
+						 */
+						const int lenProperties = 64;
 
 						int spacing = 36; // 36 px between each item in the list.
-						int verticalOffset = 20;
+						int verticalOffset = 0;
 						int pad_x1 = subx1 + 8 + 96 + 80; // 104 px spacing from subwindow start. handles right side item list
-						int pad_y1 = suby1 + 20 + verticalOffset; // 20 px spacing from subwindow start. handles right side item list
+						int pad_y1 = suby1 + 40 + verticalOffset; // right-side item list starts directly under its heading.
 						int pad_x2 = 64; // handles right side item list
 
 						int pad_y2 = (suby2 - 52 - 36) + verticalOffset - 4; //handles right side item list
@@ -16348,27 +18282,62 @@ int main(int argc, char** argv)
 						int pad_y3 = suby1 + 28; // 28 px spacing from subwindow start, handles left side menu
 						int pad_x4 = 64; //handles left side menu-end
 						int pad_y4; //handles left side menu-end
-						int totalNumItems = (sizeof(itemNameStrings) / sizeof(itemNameStrings[0]));
-						int editorNumItems = totalNumItems /* - 1*/;
-						switch ( itemSlotSelected )
+						const int totalNumItems =
+							static_cast<int>(sizeof(itemNameStrings) / sizeof(itemNameStrings[0]));
+						int editorNumItems = totalNumItems;
+						if ( newwindow == 5
+							&& itemSlotSelected >= 0
+							&& itemSlotSelected < 10 )
 						{
-							case -1:
-								break;
-							default:
-								if ( itemSlotSelected < 10 )
+							const int typedCapacity =
+								static_cast<int>(sizeof(itemStringsByType[itemSlotSelected])
+								/ sizeof(itemStringsByType[itemSlotSelected][0]));
+							editorNumItems = 0;
+							while ( editorNumItems < typedCapacity
+								&& itemStringsByType[itemSlotSelected][editorNumItems][0] != '\0' )
+							{
+								++editorNumItems;
+							}
+						}
+						editorNumItems = std::max(1, editorNumItems);
+						const std::string itemSearchKey = std::to_string(newwindow)
+							+ ":" + std::to_string(itemSlotSelected)
+							+ ":" + editorMonsterItemSearch;
+						if ( itemSearchKey != editorMonsterItemSearchLastKey )
+						{
+							editorMonsterItemSearchLastKey = itemSearchKey;
+							const std::string loweredFilter = editorPaletteLowercase(editorMonsterItemSearch);
+							if ( !loweredFilter.empty() )
+							{
+								for ( int searchIndex = 0; searchIndex < editorNumItems; ++searchIndex )
 								{
-									editorNumItems = 0;
-									for ( int i = 0; i < (sizeof(itemStringsByType[itemSlotSelected]) / sizeof(itemStringsByType[itemSlotSelected][0])); i++ )
+									const char* searchName = nullptr;
+									if ( newwindow == 5 && searchIndex == 1 )
 									{
-										if ( strcmp(itemStringsByType[itemSlotSelected][i], "") == 0) //look for the end of the array
-										{
-											i = totalNumItems;
-										}
-										editorNumItems++;
+										searchName = "default_random";
+									}
+									else if ( newwindow == 5 && itemSlotSelected >= 0 && itemSlotSelected < 10 )
+									{
+										searchName = itemStringsByType[itemSlotSelected][searchIndex];
+									}
+									else
+									{
+										searchName = itemNameStrings[searchIndex];
+									}
+									const std::string loweredName = editorPaletteLowercase(searchName != nullptr ? searchName : "");
+									if ( loweredName.find(loweredFilter) != std::string::npos
+										|| std::to_string(searchIndex).find(loweredFilter) != std::string::npos )
+									{
+										itemSelect = searchIndex;
+										break;
 									}
 								}
-								break;
+							}
 						}
+						auto safeGlobalItemIndex = [totalNumItems](int value)
+						{
+							return std::max(0, std::min(value, totalNumItems - 1));
+						};
 						int propertyInt = 0;
 						char tmpPropertyName[lenProperties] = "";
 						Uint32 color = makeColorRGB(0, 255, 0);
@@ -16377,12 +18346,12 @@ int main(int argc, char** argv)
 						{
 							if ( newwindow == 4 )
 							{
-								strcpy(tmpPropertyName, itemPropertyNames[i]);
+								snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", itemPropertyNames[i]);
 
 							}
 							else if ( newwindow == 5 )
 							{
-								strcpy(tmpPropertyName, monsterItemPropertyNames[i]);
+								snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", monsterItemPropertyNames[i]);
 							}
 							pad_y3 = suby1 + 40 + spacing + i * spacing;
 							pad_y4 = suby1 + 44 + 12 + spacing + i * spacing;
@@ -16585,18 +18554,22 @@ int main(int argc, char** argv)
 
 						drawDepressed(pad_x1, pad_y1, subx2 - 20, pad_y2);
 						drawDepressed(subx2 - 20, pad_y1, subx2 - 4, pad_y2);
-						slidersize = std::min<int>(((pad_y2 - 1) - (pad_y1 + 1)), ((pad_y2 - 1) - (pad_y1 + 1)) / ((real_t)(editorNumItems + 1) / 20)); //TODO: Why are int and real_t being compared?
+						const int visibleItemRows = std::max(1, (pad_y2 - (pad_y1 + 4)) / 8);
+						slidersize = std::min<int>(((pad_y2 - 1) - (pad_y1 + 1)), ((pad_y2 - 1) - (pad_y1 + 1)) / ((real_t)(editorNumItems + 1) / visibleItemRows));
 						slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
 
 						// directory list offset from slider
 						y2 = ((real_t)(slidery - (pad_y1)) / (pad_y2 - (pad_y1))) * editorNumItems;
+						y2 = std::max(0, std::min(y2, editorNumItems - 1));
+						itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
 						if ( scroll )
 						{
 							slidery -= 8 * scroll;
 							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
-							itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+							y2 = std::max(0, std::min(y2, editorNumItems - 1));
+							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
 							scroll = 0;
 						}
 						if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= subx2 - 20 && omousex < subx2 - 4 && omousey >= (pad_y1) && omousey < pad_y2 )
@@ -16604,8 +18577,9 @@ int main(int argc, char** argv)
 							slidery = oslidery + mousey - omousey;
 							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
 							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
+							y2 = std::max(0, std::min(y2, editorNumItems - 1));
 							mclick = 1;
-							itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 1, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
 						}
 						else
 						{
@@ -16621,14 +18595,7 @@ int main(int argc, char** argv)
 						// print all the items
 						x = pad_x1;
 						y = pad_y1 + 4;
-						if ( newwindow == 4 )
-						{
-							c = std::min<long unsigned int>(editorNumItems, 20 + y2); //TODO: Why are long unsigned int and int being compared?
-						}
-						else
-						{
-							c = std::min<long unsigned int>(editorNumItems, 24 + y2); //TODO: Why are long unsigned int and int being compared?
-						}
+						c = std::min(editorNumItems, y2 + visibleItemRows);
 						for ( z = y2; z < c; z++ )
 						{
 							if ( newwindow == 5 && z == 1 )
@@ -16637,6 +18604,7 @@ int main(int argc, char** argv)
 							}
 							else
 							{
+								itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
 								switch ( itemSlotSelected )
 								{
 									case -1:
@@ -16658,6 +18626,19 @@ int main(int argc, char** argv)
 							y += 8;
 						}
 
+						// Search field underneath the selectable item list.
+						const int itemSearchY = pad_y2 + 16;
+						printText(font8x8_bmp, pad_x1, itemSearchY, "Search:");
+						drawDepressed(pad_x1 + 56, itemSearchY - 4, subx2 - 24, itemSearchY + 12);
+						printText(font8x8_bmp, pad_x1 + 60, itemSearchY, editorMonsterItemSearch);
+						if ( inputstr == editorMonsterItemSearch
+							&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							printText(font8x8_bmp,
+								pad_x1 + 60 + strlen(editorMonsterItemSearch) * 8,
+								itemSearchY, "\26");
+						}
+
 						// item selection box
 						pad_y3 = suby1 + 40;
 						pad_y4 = suby1 + 44 + 12;
@@ -16665,24 +18646,51 @@ int main(int argc, char** argv)
 						drawDepressed(pad_x3 - 4, pad_y3, pad_x3 - 4 + pad_x2 + 112, pad_y4);
 						// print values on top of boxes
 						printText(font8x8_bmp, pad_x3, pad_y3 - 12, "Item Name");
-						printText(font8x8_bmp, pad_x1, pad_y3 - 12, "Click to select item");
+						printText(font8x8_bmp, pad_x1, pad_y1 - 12, "Click to select item");
 						printText(font8x8_bmp, pad_x3, pad_y3 + 4, itemName);
+                        {
+                            const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
+                            char samName[128] = "";
+                            char samDetail[256] = "";
+                            const char* slotStableID = editorGetMonsterSlotStableID(
+                                selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
+                                itemSlotSelected
+                            );
+                            if ( editorDescribeSAMItem(displayedItemID, slotStableID,
+                                samName, sizeof(samName), samDetail, sizeof(samDetail))
+                                && samDetail[0] != '\0' )
+                            {
+                                printText(font8x8_bmp, pad_x3, pad_y3 + 20, samDetail);
+                            }
+                        }
 						//drawDepressed(pad_x1, suby2 - 48, subx2 - 4, suby2 - 32);
 						//printText(font8x8_bmp, pad_x1, suby2 - 44, itemName);
 
 						// select a file
 						if ( mousestatus[SDL_BUTTON_LEFT] )
 						{
-							if ( omousex >= pad_x1 && omousex < subx2 - 24 && omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
+							if ( omousex >= pad_x1 + 56 && omousex < subx2 - 24
+								&& omousey >= itemSearchY - 4 && omousey < itemSearchY + 12 )
+							{
+								if ( !SDL_IsTextInputActive() )
+								{
+									SDL_StartTextInput();
+								}
+								inputstr = editorMonsterItemSearch;
+								inputlen = 127;
+								editproperty = numProperties;
+								cursorflash = ticks;
+							}
+							else if ( omousex >= pad_x1 && omousex < subx2 - 24 && omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
 							{
 								itemSelect = y2 + ((omousey - (pad_y1 + 4)) >> 3);
 								if ( newwindow == 4 )
 								{
-									itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 2, y2 + 19)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
 								}
 								else
 								{
-									itemSelect = std::min<long unsigned int>(std::max(y2, itemSelect), std::min<long unsigned int>(editorNumItems - 2, y2 + 23)); //TODO: Why are long unsigned int and int being compared? TWICE. On the same line.
+									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
 								}
 								switch ( itemSlotSelected )
 								{
@@ -16731,10 +18739,17 @@ int main(int argc, char** argv)
 						{
 							keystatus[SDLK_TAB] = 0;
 							cursorflash = ticks;
-							editproperty++;
-							if ( editproperty == numProperties )
+							if ( inputstr == editorMonsterItemSearch || editproperty >= numProperties )
 							{
 								editproperty = 0;
+							}
+							else
+							{
+								editproperty++;
+								if ( editproperty == numProperties )
+								{
+									editproperty = 0;
+								}
 							}
 
 							inputstr = spriteProperties[editproperty];
@@ -16750,16 +18765,28 @@ int main(int argc, char** argv)
 
 							if ( editproperty == 0 )
 							{
-								inputlen = 3;
+                                inputlen = 10;
 								//update the item name when the ID changes.
-								if ( newwindow == 5 && atoi(spriteProperties[0]) == 1 )
-								{
-									strcpy(itemName, "default_random");
-								}
-								else
-								{
-									strcpy(itemName, itemNameStrings[atoi(spriteProperties[0])]);
-								}
+                                const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
+                                char samName[128] = "";
+                                char samDetail[256] = "";
+                                const char* slotStableID = editorGetMonsterSlotStableID(
+                                    selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
+                                    itemSlotSelected
+                                );
+                                if ( editorDescribeSAMItem(displayedItemID, slotStableID,
+                                    samName, sizeof(samName), samDetail, sizeof(samDetail)) )
+                                {
+                                    snprintf(itemName, sizeof(itemName), "%s", samName);
+                                }
+                                else if ( newwindow == 5 && displayedItemID == 1 )
+                                {
+                                    strcpy(itemName, "default_random");
+                                }
+                                else
+                                {
+                                    strcpy(itemName, itemNameStrings[safeGlobalItemIndex(displayedItemID)]);
+                                }
 							}
 							else if( editproperty == 2 || editproperty == 3 )
 							{
@@ -17479,6 +19506,205 @@ int main(int argc, char** argv)
 							propertyPageCursorFlash(spacing);
 						}
 					}
+				}
+				else if ( newwindow == 39 )
+				{
+                    Stat* stats = selectedEntity[0] ? selectedEntity[0]->getStats() : nullptr;
+                    monsterEffectsUpdateSelectionFromFields();
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 28, "Choose an effect below, then click Add Selected Effect.");
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 40, "Type in Search to filter the effect list, then click a result.");
+                    printText(font8x8_bmp, subx1 + 16, suby1 + 54, "Search:");
+                    drawDepressed(subx1 + 72, suby1 + 50, subx1 + 286, suby1 + 66);
+                    printText(font8x8_bmp, subx1 + 76, suby1 + 54, monsterEffectSearchText);
+                    printText(font8x8_bmp, subx1 + 300, suby1 + 54, "Effect ID:");
+                    drawDepressed(subx1 + 380, suby1 + 50, subx1 + 428, suby1 + 66);
+                    printText(font8x8_bmp, subx1 + 384, suby1 + 54, monsterEffectIdText);
+
+                    const bool showEffectDropdown = inputstr == monsterEffectSearchText;
+                    monsterEffectsSetRowsVisible(!showEffectDropdown);
+                    std::vector<int> effectSearchMatches;
+                    const int effectDropdownVisibleRows = 8;
+                    std::string effectQuery = monsterEffectSearchText;
+                    std::transform(effectQuery.begin(), effectQuery.end(), effectQuery.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if ( showEffectDropdown )
+                    {
+                        for ( int effect = 0; effect < 135; ++effect )
+                        {
+                            if ( !monsterEffectCanSelect(effect) )
+                            {
+                                continue;
+                            }
+                            std::string effectName = monsterEffectDisplayName(effect);
+                            std::transform(effectName.begin(), effectName.end(), effectName.begin(),
+                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                            if ( effectQuery.empty() || effectName.find(effectQuery) != std::string::npos
+                                || std::to_string(effect).find(effectQuery) != std::string::npos )
+                            {
+                                effectSearchMatches.push_back(effect);
+                            }
+                        }
+                        if ( effectQuery != monsterEffectDropdownLastQuery )
+                        {
+                            monsterEffectDropdownLastQuery = effectQuery;
+                            monsterEffectDropdownScroll = 0;
+                        }
+                        const int maxDropdownScroll = std::max(0,
+                            static_cast<int>(effectSearchMatches.size()) - effectDropdownVisibleRows);
+                        monsterEffectDropdownScroll = std::max(0,
+                            std::min(monsterEffectDropdownScroll, maxDropdownScroll));
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownY2 = dropdownY1 + effectDropdownVisibleRows * 16;
+                        const bool mouseOverDropdown = omousex >= dropdownX1 && omousex < dropdownX2
+                            && omousey >= dropdownY1 && omousey < dropdownY2;
+                        if ( mouseOverDropdown && scroll != 0 )
+                        {
+                            monsterEffectDropdownScroll += scroll;
+                            monsterEffectDropdownScroll = std::max(0,
+                                std::min(monsterEffectDropdownScroll, maxDropdownScroll));
+                            scroll = 0;
+                        }
+                    }
+
+                    printTextFormatted(font8x8_bmp, subx1 + 16, suby1 + 70, "Selected: %s (ID %d)", monsterEffectDisplayName(monsterEffectSelectedId), monsterEffectSelectedId);
+                    if ( monsterEffectsShowAll )
+                    {
+                        const Uint32 cautionColor = makeColorRGB(255, 192, 64);
+                        printTextFormattedColor(font8x8_bmp, subx1 + 172, suby2 - 42, cautionColor,
+                            "CAUTION: Not all effects are safe.");
+                    }
+                    printText(font8x8_bmp, subx1 + 288, suby1 + 88, "Strength");
+                    printText(font8x8_bmp, subx1 + 390, suby1 + 88, "Duration");
+                    if ( mousestatus[SDL_BUTTON_LEFT] )
+                    {
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownRowHeight = 16;
+                        const int dropdownY2 = dropdownY1
+                            + effectDropdownVisibleRows * dropdownRowHeight;
+                        const bool clickInsideSearch = omousex >= subx1 + 72 && omousex < subx1 + 286
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66;
+                        const bool clickInsideDropdown = showEffectDropdown
+                            && omousex >= dropdownX1 && omousex < dropdownX2
+                            && omousey >= dropdownY1 && omousey < dropdownY2;
+                        if ( showEffectDropdown && !clickInsideSearch && !clickInsideDropdown )
+                        {
+                            inputstr = monsterEffectIdText;
+                            inputlen = 3;
+                            editproperty = 1001;
+                        }
+                        if ( showEffectDropdown )
+                        {
+                            const int dropdownX1 = subx1 + 72;
+                            const int dropdownX2 = subx1 + 286;
+                            const int dropdownY1 = suby1 + 68;
+                            const int dropdownRowHeight = 16;
+                            const int visibleMatchCount = std::min(effectDropdownVisibleRows,
+                                static_cast<int>(effectSearchMatches.size()) - monsterEffectDropdownScroll);
+                            for ( int matchRow = 0; matchRow < visibleMatchCount; ++matchRow )
+                            {
+                                const int rowY = dropdownY1 + matchRow * dropdownRowHeight;
+                                if ( omousex >= dropdownX1 && omousex < dropdownX2
+                                    && omousey >= rowY && omousey < rowY + dropdownRowHeight )
+                                {
+                                    monsterEffectSelectedId = effectSearchMatches[monsterEffectDropdownScroll + matchRow];
+                                    snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+                                    snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+                                        monsterEffectDisplayName(monsterEffectSelectedId));
+                                    inputstr = monsterEffectIdText;
+                                    inputlen = 3;
+                                    editproperty = 1001;
+                                    cursorflash = ticks;
+                                    mousestatus[SDL_BUTTON_LEFT] = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        if ( mousestatus[SDL_BUTTON_LEFT]
+                            && omousex >= subx1 + 72 && omousex < subx1 + 286
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66 )
+                        {
+                            inputstr = monsterEffectSearchText;
+                            inputlen = 63;
+                            editproperty = 1000;
+                            cursorflash = ticks;
+                            if ( !SDL_IsTextInputActive() )
+                            {
+                                SDL_StartTextInput();
+                            }
+                        }
+                        else if ( mousestatus[SDL_BUTTON_LEFT]
+                            && omousex >= subx1 + 380 && omousex < subx1 + 428
+                            && omousey >= suby1 + 50 && omousey < suby1 + 66 )
+                        {
+                            inputstr = monsterEffectIdText;
+                            inputlen = 3;
+                            editproperty = 1001;
+                            cursorflash = ticks;
+                            if ( !SDL_IsTextInputActive() )
+                            {
+                                SDL_StartTextInput();
+                            }
+                        }
+                    }
+                    if ( stats )
+                    {
+                        int row = 0;
+                        for ( int effect = 0; effect < 135 && row < 8; ++effect )
+                        {
+                            if ( !stats->getEffectActive(effect) ) continue;
+                            const int y = suby1 + 100 + row * 38;
+                            printTextFormatted(font8x8_bmp, subx1 + 286, y + 18, "Value: %d", (int)stats->getEffectActive(effect));
+                            if ( stats->EFFECTS_TIMERS[effect] < 0 ) printText(font8x8_bmp, subx1 + 370, y + 18, "Duration: permanent");
+                            else printTextFormatted(font8x8_bmp, subx1 + 370, y + 18, "Duration: %d sec", stats->EFFECTS_TIMERS[effect] / TICKS_PER_SECOND);
+                            ++row;
+                        }
+                        if ( row == 0 ) printText(font8x8_bmp, subx1 + 18, suby1 + 116, "No starting effects. Choose one above and click Add Selected Effect.");
+                    }
+
+                    // Draw the search results last so the dropdown stays above all labels and effect rows.
+                    if ( showEffectDropdown )
+                    {
+                        const int dropdownX1 = subx1 + 72;
+                        const int dropdownX2 = subx1 + 286;
+                        const int dropdownY1 = suby1 + 68;
+                        const int dropdownRowHeight = 16;
+                        const int dropdownY2 = dropdownY1
+                            + effectDropdownVisibleRows * dropdownRowHeight;
+                        drawDepressed(dropdownX1, dropdownY1, dropdownX2, dropdownY2);
+                        if ( effectSearchMatches.empty() )
+                        {
+                            printText(font8x8_bmp, dropdownX1 + 4, dropdownY1 + 4, "No matching effects");
+                        }
+                        else
+                        {
+                            const int visibleMatchCount = std::min(effectDropdownVisibleRows,
+                                static_cast<int>(effectSearchMatches.size()) - monsterEffectDropdownScroll);
+                            for ( int matchRow = 0; matchRow < visibleMatchCount; ++matchRow )
+                            {
+                                const int effect = effectSearchMatches[monsterEffectDropdownScroll + matchRow];
+                                const int rowY = dropdownY1 + matchRow * dropdownRowHeight;
+                                if ( omousex >= dropdownX1 && omousex < dropdownX2
+                                    && omousey >= rowY && omousey < rowY + dropdownRowHeight )
+                                {
+                                    SDL_Rect highlight = { dropdownX1 + 2, rowY + 2,
+                                        dropdownX2 - dropdownX1 - 4, dropdownRowHeight - 2 };
+                                    drawRect(&highlight, makeColorRGB(64, 64, 64), 255);
+                                }
+                                printTextFormatted(font8x8_bmp, dropdownX1 + 4, rowY + 4, "%s (ID %d)",
+                                    monsterEffectDisplayName(effect), effect);
+                            }
+                            if ( static_cast<int>(effectSearchMatches.size()) > effectDropdownVisibleRows )
+                            {
+                                printTextFormatted(font8x8_bmp, dropdownX2 - 42, dropdownY2 - 12, "%d/%d",
+                                    monsterEffectDropdownScroll + 1,
+                                    std::max(1, static_cast<int>(effectSearchMatches.size()) - effectDropdownVisibleRows + 1));
+                            }
+                        }
+                    }
 				}
 				else if ( newwindow == 10 )
 				{
@@ -19336,7 +21562,7 @@ int main(int argc, char** argv)
 					if ( selectedEntity[0] != nullptr )
 					{
 						int numProperties = sizeof(customPortalPropertyNames) / sizeof(customPortalPropertyNames[0]); //find number of entries in property list
-						const int lenProperties = sizeof(customPortalPropertyNames[0]) / sizeof(char); //find length of entry in property list
+						const int lenProperties = 128; // Some custom-exit labels can fill the original 59-byte row width.
 						int spacing = 36; // 36 px between each item in the list.
 						int inputFieldHeader_y = suby1 + 28; // 28 px spacing from subwindow start.
 						int inputField_x = subx1 + 8; // 8px spacing from subwindow start.
@@ -19350,9 +21576,9 @@ int main(int argc, char** argv)
 
 						for ( int i = 0; i < numProperties; i++ )
 						{
-							int propertyInt = atoi(spriteProperties[i]);
+							int propertyInt = (i == 4) ? 0 : atoi(spriteProperties[i]);
 
-							strcpy(tmpPropertyName, customPortalPropertyNames[i]);
+							snprintf(tmpPropertyName, sizeof(tmpPropertyName), "%s", customPortalPropertyNames[i]);
 							inputFieldHeader_y = suby1 + 28 + i * spacing;
 							inputField_y = inputFieldHeader_y + 16;
 							// box outlines then text
@@ -19439,7 +21665,7 @@ int main(int argc, char** argv)
 											{
 												strcat(shortName, "..");
 											}
-											printTextFormattedColor(font8x8_bmp, inputFieldFeedback_x, inputField_y, color, "move to first instance of map name %s", propertyInt, shortName);
+											printTextFormattedColor(font8x8_bmp, inputFieldFeedback_x, inputField_y, color, "move to first instance of map name %s", shortName);
 										}
 										else
 										{
@@ -19701,7 +21927,7 @@ int main(int argc, char** argv)
 
 						propertyPageTextAndInput(numProperties, inputFieldWidth);
 
-						if ( editproperty < numProperties )   // edit
+						if ( editproperty >= 0 && editproperty < numProperties )   // edit
 						{
 							if ( !SDL_IsTextInputActive() )
 							{
@@ -20635,6 +22861,10 @@ int main(int argc, char** argv)
 							propertyPageCursorFlash(spacing);
 						}
 					}
+				}
+				else if ( newwindow == 40 )
+				{
+					drawMonsterTemplateBrowser();
 				}
 				else if ( newwindow == 25 )
 				{
@@ -22500,308 +24730,181 @@ int main(int argc, char** argv)
 			handleButtons();
 		}
 
-		if ( spritepalette )
-		{
-			x = 0;
-			y = 0;
-			z = 0;
-			drawRect( NULL, makeColorRGB(0, 0, 0), 255 ); // wipe screen
-			for ( c = 0; c < xres * yres; c++ )
-			{
-				palette[c] = -1;
-			}
-			for ( c = 0; c < numsprites; c++ )
-			{
-				if ( sprites[c] != NULL )
-				{
-					pos.x = x;
-					pos.y = y;
-					pos.w = sprites[c]->w;
-					pos.h = sprites[c]->h;
-					int scale = 1;
-					if ( pos.w < 16 && pos.h < 16 )
-					{
-						scale = 4;
-						pos.w *= scale;
-						pos.h *= scale;
-					}
-					else if ( pos.w < 32 && pos.h < 32 )
-					{
-						scale = 2;
-						pos.w *= scale;
-						pos.h *= scale;
-					}
+        if ( spritepalette || tilepalette )
+        {
+            const int paletteType = spritepalette ? 1 : 2;
+            char* searchBuffer = paletteType == 1 ? editorSpritePaletteSearch : editorTilePaletteSearch;
+            editorPaletteBeginTextInput(searchBuffer);
+            editorPaletteRebuildMatches(paletteType);
 
-					drawImageScaled(sprites[c], NULL, &pos);
-					for ( x2 = x; x2 < x + sprites[c]->w * scale; x2++ )
-					{
-						for ( y2 = y; y2 < y + sprites[c]->h * scale; y2++ )
-						{
-							if ( x2 < xres && y2 < yres )
-							{
-								palette[y2 + x2 * yres] = c;
-							}
-						}
-					}
-					x += sprites[c]->w * scale;
-					z = std::max(z, sprites[c]->h * scale);
-					if ( c < numsprites - 1 )
-					{
-						if ( sprites[c + 1] != NULL )
-						{
-							if ( x + sprites[c + 1]->w * scale > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-						else
-						{
-							if ( x + sprites[0]->w * scale > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-					}
-				}
-				else
-				{
-					pos.x = x;
-					pos.y = y;
-					pos.w = TEXTURESIZE;
-					pos.h = TEXTURESIZE;
-					drawImageScaled(sprites[0], NULL, &pos);
-					x += sprites[0]->w;
-					z = std::max(z, sprites[0]->h);
-					if ( c < numsprites - 1 )
-					{
-						if ( sprites[c + 1] != NULL )
-						{
-							if ( x + sprites[c + 1]->w > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-						else
-						{
-							if ( x + sprites[0]->w > xres )
-							{
-								x = 0;
-								y += z;
-							}
-						}
-					}
-				}
-			}
-			if (mousestatus[SDL_BUTTON_LEFT])
-			{
-				mclick = 1;
-			}
-			if (!mousestatus[SDL_BUTTON_LEFT] && mclick)
-			{
-				// create a new object
-				if (palette[mousey + mousex * yres] >= 0)
-				{
-				entity = newEntity(
-					palette[mousey + mousex * yres],
-					0,
-					map.entities,
-					nullptr
-				);
+            const int headerHeight = 32;
+            const int footerHeight = 24;
+            const int cellSize = 64;
+            const int columns = std::max(1, xres / cellSize);
+            const int visibleRows = std::max(1, (yres - headerHeight - footerHeight) / cellSize);
+            const int pageSize = columns * visibleRows;
 
-				selectedEntity[0] = entity;
-				lastSelectedEntity[0] = selectedEntity[0];
+            editorPaletteHandleKeyboard(columns, visibleRows);
+            if ( scroll != 0 )
+            {
+                const int firstRow = editorPaletteFirstVisible / columns;
+                const int rowCount = editorPaletteMatches.empty()
+                    ? 0 : (static_cast<int>(editorPaletteMatches.size()) - 1) / columns + 1;
+                const int maxFirstRow = std::max(0, rowCount - visibleRows);
+                const int newFirstRow = std::max(0, std::min(firstRow - scroll, maxFirstRow));
+                editorPaletteFirstVisible = newFirstRow * columns;
+                editorPaletteSelectedMatch = std::max(editorPaletteFirstVisible,
+                    std::min(editorPaletteSelectedMatch, editorPaletteFirstVisible + pageSize - 1));
+                scroll = 0;
+            }
+            editorPaletteKeepSelectionVisible(columns, visibleRows);
 
-				setSpriteAttributes(selectedEntity[0], nullptr, nullptr);
+            drawRect(nullptr, makeColorRGB(0, 0, 0), 255);
+            drawWindowFancy(4, 4, xres - 4, 28);
+            printText(font8x8_bmp, 10, 12, "Search:");
+            drawDepressed(66, 8, xres - 154, 24);
+            printText(font8x8_bmp, 70, 12, searchBuffer);
+            if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+            {
+                const int cursorX = std::min(xres - 162, 70 + static_cast<int>(strlen(searchBuffer)) * 8);
+                printText(font8x8_bmp, cursorX, 12, "\26");
+            }
+            printTextFormatted(font8x8_bmp, xres - 146, 12, "%d match%s",
+                static_cast<int>(editorPaletteMatches.size()), editorPaletteMatches.size() == 1 ? "" : "es");
 
-				// Place new sprites at the currently selected editor layer.
-				selectedEntity[0]->z = spriteLayerToEntityZ(drawlayer);
-				}
+            if ( keystatus[SDLK_DELETE] && SDL_GetModState() & KMOD_CTRL )
+            {
+                keystatus[SDLK_DELETE] = 0;
+                searchBuffer[0] = '\0';
+                editorPaletteLastFilter.clear();
+                editorPaletteRebuildMatches(paletteType);
+            }
 
-				mclick = 0;
-				spritepalette = 0;
-			}
-			if (keystatus[SDLK_ESCAPE])
-			{
-				mclick = 0;
-				spritepalette = 0;
-			}
-			/*switch( palette[mousey+mousex*yres] ) {
-				case 1:	strcpy(action,"PLAYER"); break;
-				case 53:	strcpy(action,"PURPLEGEM"); break;
-				case 37:	strcpy(action,"REDGEM"); break;
-				case 74:
-				case 75:	strcpy(action,"TROLL"); break;
-				default:	strcpy(action,"STATIC"); break;
-			}*/
+            int hoveredMatch = -1;
+            const int visibleEnd = std::min(static_cast<int>(editorPaletteMatches.size()),
+                editorPaletteFirstVisible + pageSize);
+            for ( int matchIndex = editorPaletteFirstVisible; matchIndex < visibleEnd; ++matchIndex )
+            {
+                const int localIndex = matchIndex - editorPaletteFirstVisible;
+                const int column = localIndex % columns;
+                const int row = localIndex / columns;
+                const int cellX = column * cellSize;
+                const int cellY = headerHeight + row * cellSize;
+                const int objectIndex = editorPaletteMatches[matchIndex];
 
-			int numsprites = spriteEditorNameStrings.size();
+                SDL_Rect cellRect;
+                cellRect.x = cellX;
+                cellRect.y = cellY;
+                cellRect.w = cellSize;
+                cellRect.h = cellSize;
+                if ( matchIndex == editorPaletteSelectedMatch )
+                {
+                    drawRect(&cellRect, makeColorRGB(72, 72, 72), 255);
+                }
 
-			if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0 && palette[mousey + mousex * yres] < numsprites )
-			{
-				printTextFormatted(font8x8_bmp, 0, yres - 8, "Sprite index:%5d", palette[mousey + mousex * yres]);
-				printTextFormatted(font8x8_bmp, 0, yres - 16, "%s", spriteEditorNameStrings[palette[mousey + mousex * yres]]);
+                SDL_Surface* image = nullptr;
+                if ( paletteType == 1 )
+                {
+                    if ( objectIndex >= 0 && objectIndex < numsprites )
+                    {
+                        image = sprites[objectIndex] != nullptr ? sprites[objectIndex] : sprites[0];
+                    }
+                }
+                else if ( objectIndex >= 0 && objectIndex < numtiles )
+                {
+                    image = tiles[objectIndex] != nullptr ? tiles[objectIndex] : sprites[0];
+                }
 
-				char hoverTextString[1024] = "";
-				snprintf(hoverTextString, 5, "%d: ", palette[mousey + mousex * yres]);
-				strcat(hoverTextString, spriteEditorNameStrings[palette[mousey + mousex * yres]]);
-				int hoverTextWidth = strlen(hoverTextString);
+                if ( image != nullptr )
+                {
+                    const int maxImageSize = cellSize - 8;
+                    const real_t scaleX = static_cast<real_t>(maxImageSize) / std::max(1, image->w);
+                    const real_t scaleY = static_cast<real_t>(maxImageSize) / std::max(1, image->h);
+                    const real_t imageScale = std::min<real_t>(1.0, std::min(scaleX, scaleY));
+                    pos.w = std::max(1, static_cast<int>(image->w * imageScale));
+                    pos.h = std::max(1, static_cast<int>(image->h * imageScale));
+                    pos.x = cellX + (cellSize - pos.w) / 2;
+                    pos.y = cellY + (cellSize - pos.h) / 2;
+                    drawImageScaled(image, nullptr, &pos);
+                }
 
-				if ( mousey - 20 <= 0 )
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn above y = 0 and past window width (xres)
-						drawWindowFancy(mousex - 16 - (8 + 8 * hoverTextWidth), 0, mousex - 16, 16);
-						printTextFormatted(font8x8_bmp, mousex - 16 - (4 + 8 * hoverTextWidth), 4, "%s", hoverTextString);
-					}
-					else
-					{
-						// stop text being drawn above y = 0 
-						drawWindowFancy(mousex + 16, 0, 16 + 8 + mousex + 8 * hoverTextWidth, 16);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, 4, "%s", hoverTextString);
-					}
-				}
-				else
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn past window width (xres)
-						drawWindowFancy(xres - (8 + 8 * hoverTextWidth), mousey - 20, xres, mousey - 4);
-						printTextFormatted(font8x8_bmp, xres - (4 + 8 * hoverTextWidth), mousey - 16, "%s", hoverTextString);
-					}
-					else
-					{
-						drawWindowFancy(mousex + 16, mousey - 20, 16 + 8 + mousex + 8 * hoverTextWidth, mousey - 4);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, mousey - 16, "%s", hoverTextString);
-					}
-				}
-			}
-			else
-			{
-				printText(font8x8_bmp, 0, yres - 8, "Click to cancel");
-			}
-		}
-		if ( tilepalette )
-		{
-			x = 0;
-			y = 0;
-			drawRect( NULL, makeColorRGB(0, 0, 0), 255 ); // wipe screen
-			for ( c = 0; c < xres * yres; c++ )
-			{
-				palette[c] = -1;
-			}
-			for ( c = 0; c < numtiles; c++ )
-			{
-				pos.x = x;
-				pos.y = y;
-				pos.w = TEXTURESIZE;
-				pos.h = TEXTURESIZE;
-				if ( tiles[c] != NULL )
-				{
-					drawImageScaled(tiles[c], NULL, &pos);
-					for ( x2 = x; x2 < x + TEXTURESIZE; x2++ )
-						for ( y2 = y; y2 < y + TEXTURESIZE; y2++ )
-						{
-							if ( x2 < xres && y2 < yres )
-							{
-								palette[y2 + x2 * yres] = c;
-							}
-						}
-					x += TEXTURESIZE;
-					if ( c < numtiles - 1 )
-					{
-						if ( x + TEXTURESIZE > xres )
-						{
-							x = 0;
-							y += TEXTURESIZE;
-						}
-					}
-				}
-				else
-				{
-					drawImageScaled(sprites[0], NULL, &pos);
-					x += TEXTURESIZE;
-					if ( c < numtiles - 1 )
-					{
-						if ( x + TEXTURESIZE > xres )
-						{
-							x = 0;
-							y += TEXTURESIZE;
-						}
-					}
-				}
-			}
-			if (mousestatus[SDL_BUTTON_LEFT])
-			{
-				mclick = 1;
-			}
-			if (!mousestatus[SDL_BUTTON_LEFT] && mclick)
-			{
-				// select the tile under the mouse
-				if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0)
-				{
-					selectedTile = palette[mousey + mousex * yres];
-					updateRecentTileList(selectedTile);
-				}
-				mclick = 0;
-				tilepalette = 0;
-			}
-			if (keystatus[SDLK_ESCAPE])
-			{
-				mclick = 0;
-				tilepalette = 0;
-			}
+                if ( mousex >= cellX && mousex < cellX + cellSize
+                    && mousey >= cellY && mousey < cellY + cellSize )
+                {
+                    hoveredMatch = matchIndex;
+                    editorPaletteSelectedMatch = matchIndex;
+                }
+            }
 
-			int numtiles = static_cast<int>(sizeof(tileEditorNameStrings) / sizeof(tileEditorNameStrings[0]));
+            bool chooseCurrent = false;
+            if ( mousestatus[SDL_BUTTON_LEFT] )
+            {
+                mclick = 1;
+            }
+            if ( !mousestatus[SDL_BUTTON_LEFT] && mclick )
+            {
+                mclick = 0;
+                if ( hoveredMatch >= 0 )
+                {
+                    editorPaletteSelectedMatch = hoveredMatch;
+                    chooseCurrent = true;
+                }
+            }
+            if ( keystatus[SDLK_RETURN] || keystatus[SDLK_KP_ENTER] )
+            {
+                keystatus[SDLK_RETURN] = 0;
+                keystatus[SDLK_KP_ENTER] = 0;
+                chooseCurrent = !editorPaletteMatches.empty();
+            }
 
-			if ( (mousex <= xres && mousey <= yres) && palette[mousey + mousex * yres] >= 0 && palette[mousey + mousex * yres] <= numtiles)
-			{
-				printTextFormatted(font8x8_bmp, 0, yres - 8, "Tile index:%5d", palette[mousey + mousex * yres]);
-				printTextFormatted(font8x8_bmp, 0, yres - 16, "%s", tileEditorNameStrings[palette[mousey + mousex * yres]]);
+            if ( chooseCurrent && !editorPaletteMatches.empty() )
+            {
+                const int objectIndex = editorPaletteMatches[editorPaletteSelectedMatch];
+                if ( paletteType == 1 )
+                {
+                    entity = newEntity(objectIndex, 0, map.entities, nullptr);
+                    selectedEntity[0] = entity;
+                    lastSelectedEntity[0] = entity;
+                    setSpriteAttributes(entity, nullptr, nullptr);
+                    entity->z = spriteLayerToEntityZ(drawlayer);
+                    spritepalette = 0;
+                }
+                else
+                {
+                    selectedTile = objectIndex;
+                    updateRecentTileList(selectedTile);
+                    tilepalette = 0;
+                }
+                editorPaletteEndTextInput();
+            }
 
-				char hoverTextString[1024] = "";
-				snprintf(hoverTextString, 5, "%d: ", palette[mousey + mousex * yres]);
-				strcat(hoverTextString, tileEditorNameStrings[palette[mousey + mousex * yres]]);
-				int hoverTextWidth = strlen(hoverTextString);
+            if ( keystatus[SDLK_ESCAPE] )
+            {
+                keystatus[SDLK_ESCAPE] = 0;
+                mclick = 0;
+                spritepalette = 0;
+                tilepalette = 0;
+                editorPaletteEndTextInput();
+            }
 
-				if ( mousey - 20 <= 0 )
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn above y = 0 and past window width (xres)
-						drawWindowFancy(mousex - 16 - (8 + 8 * hoverTextWidth), 0, mousex - 16, 16);
-						printTextFormatted(font8x8_bmp, mousex - 16 - (4 + 8 * hoverTextWidth), 4, "%s", hoverTextString);
-					}
-					else
-					{
-						// stop text being drawn above y = 0 
-						drawWindowFancy(mousex + 16, 0, 16 + 8 + mousex + 8 * hoverTextWidth, 16);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, 4, "%s", hoverTextString);
-					}
-				}
-				else
-				{
-					if ( mousex + 16 + 8 * hoverTextWidth >= xres )
-					{
-						// stop text being drawn past window width (xres)
-						drawWindowFancy(xres - (8 + 8 * hoverTextWidth), mousey - 20, xres, mousey - 4);
-						printTextFormatted(font8x8_bmp, xres - (4 + 8 * hoverTextWidth), mousey - 16, "%s", hoverTextString);
-					}
-					else
-					{
-						drawWindowFancy(mousex + 16, mousey - 20, 16 + 8 + mousex + 8 * hoverTextWidth, mousey - 4);
-						printTextFormatted(font8x8_bmp, mousex + 16 + 4, mousey - 16, "%s", hoverTextString);
-					}
-				}
-			}
-			else
-			{
-				printText(font8x8_bmp, 0, yres - 8, "Click to cancel");
-			}
-		}
+            const int infoIndex = hoveredMatch >= 0 ? hoveredMatch : editorPaletteSelectedMatch;
+            if ( !editorPaletteMatches.empty() && infoIndex >= 0
+                && infoIndex < static_cast<int>(editorPaletteMatches.size()) )
+            {
+                const int objectIndex = editorPaletteMatches[infoIndex];
+                const char* displayName = paletteType == 1
+                    ? spriteEditorNameStrings[objectIndex] : tileEditorNameStrings[objectIndex];
+                printTextFormatted(font8x8_bmp, 4, yres - 20, "%s %d: %s",
+                    paletteType == 1 ? "Sprite" : "Tile", objectIndex, displayName);
+            }
+            else
+            {
+                printText(font8x8_bmp, 4, yres - 20, "No matching entries. Backspace to edit; Ctrl+Delete clears search.");
+            }
+            printText(font8x8_bmp, 4, yres - 10,
+                "Arrows navigate | Wheel/Page Up/Page Down scroll | Home/End jump | Enter selects | Esc closes");
+        }
+
 
 		// flip screen
 		GO_SwapBuffers(screen);
@@ -22835,6 +24938,16 @@ void propertyPageTextAndInput(int numProperties, int width)
 	int pad_x1 = subx1 + 8;
 	int spacing = 36;
 	int pad_x2 = width;
+
+	if ( numProperties <= 0 )
+	{
+		return;
+	}
+	if ( editproperty < 0 || editproperty >= numProperties )
+	{
+		editproperty = 0;
+		inputstr = spriteProperties[0];
+	}
 
 	// Cycle properties with TAB.
 	if ( keystatus[SDLK_TAB] )
@@ -22874,6 +24987,10 @@ void propertyPageError(int rowIndex, int resetValue)
 
 void propertyPageCursorFlash(int rowSpacing)
 {
+	if ( editproperty < 0 || editproperty >= 32 )
+	{
+		return;
+	}
 	if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 	{
 		printText(font8x8_bmp, subx1 + 8 + strlen(spriteProperties[editproperty]) * 8, suby1 + 44 + editproperty * rowSpacing, "\26");

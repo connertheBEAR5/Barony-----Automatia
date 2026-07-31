@@ -17853,6 +17853,16 @@ void Entity::awardXP(Entity* src, bool share, bool root)
 		return;
 	}
 
+	if ( root
+		&& src->behavior == &actMonster
+		&& srcStats->MISC_FLAGS[15] > 0 )
+	{
+		customDialogueCreditAuthoredDefeat(
+			srcStats->MISC_FLAGS[15],
+			src->getUID()
+		);
+	}
+
 	if ( src->behavior == &actPlayer && behavior == &actMonster && root )
 	{
 		Compendium_t::Events_t::eventUpdateMonster(src->skill[2], Compendium_t::CPDM_KILLED_BY, this, 1);
@@ -20185,7 +20195,7 @@ int countCustomItems(Stat* stats)
 	int x = 0;
 	int customItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] != 1 || (stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] != 0) )
 		{
@@ -20201,7 +20211,7 @@ int countDefaultItems(Stat* stats)
 	int x = 0;
 	int defaultItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] == 0 )
 		{
