@@ -900,6 +900,20 @@ bool applyPendingTunnelSpawn()
         }
     }
 
+    for ( node_t* node = map.entities->first; node != nullptr; node = node->next )
+    {
+        Entity* entity = static_cast<Entity*>(node->element);
+        if ( entity && entity->behavior == &actSpriteNametag )
+        {
+            if ( entity->parent == playerEntity->getUID() )
+            {
+                entity->bNeedsRenderPositionInit = true;
+            }
+        }
+    }
+
+    temporarilyDisableDithering();
+
     printlog(
         "[Custom Tunnel] Client applied server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
         playerEntity->x,

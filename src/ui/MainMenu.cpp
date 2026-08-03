@@ -19583,6 +19583,12 @@ failed:
         bool atLeastOnePlayer = false;
 	    bool allReady = true;
 		for (int c = 0; c < MAXPLAYERS; ++c) {
+			if (headless && multiplayer == SERVER && c == 0) {
+				// Slot zero is the dedicated server connection identity, not a
+				// playable lobby participant. Do not require it to press Ready.
+				playersInLobby[c] = false;
+				continue;
+			}
 			auto card = lobby->findFrame((std::string("card") + std::to_string(c)).c_str());
             if (card) {
                 auto backdrop = card->findImage("backdrop"); assert(backdrop);

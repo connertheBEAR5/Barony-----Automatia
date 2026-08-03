@@ -9465,13 +9465,7 @@ void doNewGame(bool makeHighscore) {
 			CalloutMenu[i].callouts.clear();
 		}
 
-		/*
-		 * Preserve the slot-zero connectedness advertised by the server. A
-		 * graphical host advertises slot zero as connected, while a dedicated
-		 * headless host advertises it as disconnected because it has no playable
-		 * body. Forcing this value to false caused clients to convert Player Start
-		 * zero into a visible phantom server character.
-		 */
+		client_disconnected[0] = false;
 
 		// initialize class
 		if ( !loadingsavegame )
