@@ -1,7 +1,32 @@
 BARONY AUTOMATIA CODEX PROJECT PROGRESS AND CONTINUATION
 ========================================================
 
-Last updated: 2026-08-01
+MASTER PROMPT
+=============
+
+You are continuing the Barony Automatia project in this repository. The current
+focus is the FMOD-enabled Linux build, not an OpenAL fallback. Preserve the
+existing Automatia, S.A.M., editor, audio, persistence, late-join, and
+headless work unless a specific task requires a narrower change.
+
+Current status:
+- The Linux game, editor, and foundation tests are building successfully.
+- The active build configuration is FMOD enabled and OpenAL disabled.
+- The latest stabilization work covered late-join, reconnect, persistence,
+  headless diagnostics, and runtime character/lobby flow.
+- The remaining work should be validated with the FMOD build path and relevant
+  automated tests before claiming completion.
+
+Build expectations:
+- Prefer the FMOD build configuration: `FMOD_ENABLED=ON`, `OPENAL_ENABLED=OFF`.
+- Verify changes with the relevant build and test commands before reporting
+  success.
+- Keep the existing FMOD linkage and runtime behavior intact while making
+  changes.
+- When significant progress is made, update this document with the new status,
+  validated results, and remaining blockers so the master prompt stays current.
+
+Last updated: 2026-08-02
 
 CURRENT CHECKPOINT
 ==================
