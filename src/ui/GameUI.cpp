@@ -4444,46 +4444,6 @@ std::vector<std::vector<std::string>> playerXPCapPaths = {
     }
 };
 
-static int getXPBarThemeIndex(const int player)
-{
-	static const int normalPrimary[] = {
-		0, 1, 2, 3, 4
-	};
-	static const int normalCycle[] = {
-		2, 3, 4
-	};
-	static const int colorblindPrimary[] = {
-		2, 3, 1, 4, 4
-	};
-	static const int colorblindCycle[] = {
-		2, 3, 4
-	};
-
-	static const PlayerSlotLookup<int, MAXPLAYERS>
-		normalThemeByPlayer =
-			buildPlayerSlotLookup<int, MAXPLAYERS>(
-				normalPrimary,
-				normalCycle,
-				0
-			);
-	static const PlayerSlotLookup<int, MAXPLAYERS>
-		colorblindThemeByPlayer =
-			buildPlayerSlotLookup<int, MAXPLAYERS>(
-				colorblindPrimary,
-				colorblindCycle,
-				0
-			);
-
-	if ( player < 0 || player >= MAXPLAYERS )
-	{
-		return 0;
-	}
-
-	return colorblind_lobby
-		? colorblindThemeByPlayer[player]
-		: normalThemeByPlayer[player];
-}
-
 void createXPBar(const int player)
 {
     auto& hud_t = players[player]->hud;
@@ -4510,31 +4470,51 @@ void createXPBar(const int player)
     auto progressClipFrame = hud_t.xpFrame->addFrame("xp progress clipping frame");
     progressClipFrame->setSize(SDL_Rect{ 0, 6, 1, progressBarHeight });
 
-    std::string bodyPath =
-        "*#images/ui/HUD/xpbar/HUD_Exp_SandBody2_";
-    int xpPathNum = getXPBarThemeIndex(player);
-
-    static const char* xpBodySuffixes[] = {
-        "00.png",
-        "01.png",
-        "02.png",
-        "03.png",
-        "04.png"
-    };
-
-    if ( xpPathNum < 0
-        || xpPathNum >= static_cast<int>(
-            sizeof(xpBodySuffixes)
-                / sizeof(xpBodySuffixes[0])
-        ) )
+    std::string bodyPath = "*#images/ui/HUD/xpbar/HUD_Exp_SandBody2_";
+    int xpPathNum = player;
+    if ( !colorblind_lobby )
     {
-        xpPathNum = 0;
+        switch ( player )
+        {
+            case 0:
+            default:
+                bodyPath += "00.png";
+                break;
+            case 1:
+                bodyPath += "01.png";
+                break;
+            case 2:
+                bodyPath += "02.png";
+                break;
+            case 3:
+                bodyPath += "03.png";
+                break;
+        }
     }
-
-    bodyPath += xpBodySuffixes[xpPathNum];
-
-    if ( xpPathNum
-        >= static_cast<int>(playerXPCapPaths.size()) )
+    else
+    {
+        switch ( player )
+        {
+            case 0:
+            default:
+                bodyPath += "02.png";
+                xpPathNum = 2;
+                break;
+            case 1:
+                bodyPath += "03.png";
+                xpPathNum = 3;
+                break;
+            case 2:
+                bodyPath += "01.png";
+                xpPathNum = 1;
+                break;
+            case 3:
+                bodyPath += "04.png";
+                xpPathNum = 4;
+                break;
+        }
+    }
+    if ( player >= playerXPCapPaths.size() )
     {
         xpPathNum = 0;
     }
