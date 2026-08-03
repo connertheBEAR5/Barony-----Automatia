@@ -1,0 +1,52 @@
+BARONY AUTOMATIA HEADLESS SERVER: REMAINING WORK AND SECURITY REQUIREMENTS
+=========================================================================
+
+This file documents the boundary between the functional LAN dedicated server
+and features that require deeper engine or protocol changes.
+
+1. SECURE PASSWORD AUTHENTICATION
+---------------------------------
+Do not transmit or log a plaintext password. Add a versioned connection
+handshake using a server nonce, a memory-hard password derivation function,
+an authenticated response, constant-time comparison, retry limits, and generic
+failure messages. Authentication must finish before allocating player state.
+
+2. PUBLIC SERVER LISTING
+------------------------
+Public mode needs explicit Steam/EOS/platform lobby registration, server
+identity, removal on shutdown, stale-listing recovery, and abuse controls.
+Opening a UDP socket is not public-listing support.
+
+3. LATE JOIN REMAINING ACCEPTANCE AND SECURITY
+----------------------------------------------
+The explicit direct-connect LAN path now has a versioned, bounded authoritative
+map-instance snapshot; per-chunk and whole-transfer checksums; reliable
+begin/data/complete records; S.A.M. fingerprint validation; and a
+ready/authorize/client-go barrier before live output. It is build- and
+foundation-tested, not yet live-verified. Required remaining work includes a
+real server/two-client run, loss/reordering and timeout stress, incremental delta
+catch-up, malformed-client testing, Windows coverage, P2P transport integration,
+and durable authenticated reconnect identity. Public or password-protected late
+join must remain unavailable until their authentication requirements are met.
+
+4. TRUE RENDERLESS STARTUP
+--------------------------
+Move simulation-required definitions out of texture/model/OpenGL loaders.
+Only then may the hidden OpenGL context be removed. CI should run startup and a
+short simulated session with no DISPLAY/Wayland server.
+
+5. SAVE AND RESTART RECOVERY
+----------------------------
+The numeric-slot Linux LAN path uses the versioned persistent-world companion,
+atomic temporary write plus rename, stable custom-item identity, graceful
+shutdown save, and fail-closed validation. A single-map FMOD
+start/save/restart/resave acceptance cycle passes. Remaining work is divergent-
+player recovery, unknown-item removal/rehydration acceptance, corrupted-save
+fixtures, clean-shutdown/crash markers, migration coverage, and Windows runtime
+verification.
+
+6. TESTING
+----------
+Test pre-game join, disconnect, autostart, terminal start/shutdown, invalid
+ports, occupied ports, malformed packets, catalog mismatch, long runtimes, and
+vanilla graphical startup. Unsupported options must fail closed.

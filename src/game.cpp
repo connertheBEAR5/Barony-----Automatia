@@ -10,6 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "main.hpp"
+#include "automatia_world_save.hpp"
 #include "draw.hpp"
 #include "game.hpp"
 #include "stat.hpp"
@@ -40,6 +41,11 @@
 #include "collision.hpp"
 #include "paths.hpp"
 #include "player.hpp"
+#include "world_state.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_sync.hpp"
+#endif
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "interface/ui.hpp"
@@ -57,11 +63,15 @@
 #include <string>
 #include <atomic>
 #include <future>
+#include <memory>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <ctime>
+#include <filesystem>
 /*
  * Implemented in mechanisms.cpp.
  * Reapplies the restored output of a signal timer or AND gate.
@@ -69,6 +79,90 @@
 void persistentSignalControllerBroadcastOutput(
     Entity* controller
 );
+static void capturePersistentMinimap();
+static void capturePersistentMechanismStates();
+static void capturePersistentMapRemovals();
+
+struct PendingAutomatiaTransition
+{
+	int playerIndex = -1;
+	std::string destinationMap;
+	Sint32 destinationTunnelID = 0;
+	int destinationLevel = 0;
+	bool destinationSecret = false;
+};
+
+static std::vector<PendingAutomatiaTransition> pendingAutomatiaTransitions;
+
+bool queueAutomatiaCustomTransition(
+	int playerIndex,
+	const std::string& destinationMap,
+	Sint32 destinationTunnelID,
+	int destinationLevel,
+	bool destinationSecret
+)
+{
+	if ( multiplayer != SERVER
+		|| playerIndex < 0
+		|| playerIndex >= MAXPLAYERS
+		|| !players[playerIndex]
+		|| !players[playerIndex]->entity
+		|| destinationMap.empty() )
+	{
+		return false;
+	}
+	for ( const PendingAutomatiaTransition& pending : pendingAutomatiaTransitions )
+	{
+		if ( pending.playerIndex == playerIndex )
+		{
+			return true;
+		}
+	}
+	pendingAutomatiaTransitions.push_back(PendingAutomatiaTransition{
+		playerIndex,
+		destinationMap,
+		destinationTunnelID,
+		destinationLevel,
+		destinationSecret
+	});
+	return true;
+}
+
+static std::string persistentStableItemId(const Sint32 runtimeId)
+{
+#ifdef SAM_FRAMEWORK_ENABLED
+    if (SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeId))
+    {
+        return SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeId);
+    }
+#endif
+    return "";
+}
+
+static Sint32 resolvePersistentItemType(
+    const std::string& stableId,
+    const Sint32 legacyType
+)
+{
+    if (stableId.empty())
+    {
+        return legacyType >= 0 && legacyType < NUMITEMS ? legacyType : -1;
+    }
+#ifdef SAM_FRAMEWORK_ENABLED
+    const Sint32 runtimeId =
+        SAMItemRegistryFoundation::runtimeIdForStableId(stableId);
+    if (runtimeId >= 0
+        && SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeId))
+    {
+        return runtimeId;
+    }
+#endif
+    printlog(
+        "[Persistent World] Custom item definition unavailable: [%s].",
+        stableId.c_str()
+    );
+    return -1;
+}
 /*
  * One item stored inside a normal persistent chest.
  *
@@ -77,6 +171,7 @@ void persistentSignalControllerBroadcastOutput(
  */
 struct PersistentChestItemState
 {
+    std::string stableId;
     Sint32 type = 0;
     Sint32 status = 0;
     Sint32 beatitude = 0;
@@ -112,6 +207,7 @@ struct PersistentChestItemState
  */
 struct PersistentWorldItemState
 {
+    std::string stableId;
     Sint32 type = 0;
     Sint32 status = 0;
     Sint32 beatitude = 0;
@@ -192,6 +288,7 @@ struct PersistentGoldBagState
  */
 struct PersistentMonsterItemState
 {
+    std::string stableId;
     Sint32 slot = 0;
 
     Sint32 type = 0;
@@ -873,6 +970,22 @@ static std::unordered_map<
  */
 static PersistentWorldStoryState
     persistentWorldStoryState;
+static AutomatiaSave::Json preservedAutomatiaWorldDocument;
+static AutomatiaSave::Json pendingAutomatiaWorldDocument;
+struct AutomatiaSavedPlayerPlacement
+{
+    WorldInstanceIdentity identity;
+    real_t x = 0.0;
+    real_t y = 0.0;
+    real_t z = 0.0;
+    real_t yaw = 0.0;
+    real_t pitch = 0.0;
+    real_t roll = 0.0;
+    bool hasPosition = false;
+    bool pending = false;
+};
+static AutomatiaSavedPlayerPlacement
+    automatiaSavedPlayerPlacements[MAXPLAYERS];
 /*
  * Explored minimap tiles retained for each visited map during the
  * current game session. This must be declared before the session reset
@@ -894,6 +1007,1745 @@ static Sint32 nextDynamicMonsterPersistentID = -1;
 static std::string clientPersistentSnapshotMapKey;
 static bool clientPersistentSnapshotReceiving = false;
 static bool clientPersistentSnapshotComplete = false;
+
+namespace
+{
+bool savedJsonInt(const AutomatiaSave::Json& object, const char* key, Sint32& value)
+{
+    if (!object.is_object() || !object.contains(key)
+        || !object[key].is_number_integer())
+    {
+        return false;
+    }
+    try
+    {
+        const std::int64_t parsed = object[key].get<std::int64_t>();
+        if (parsed < std::numeric_limits<Sint32>::min()
+            || parsed > std::numeric_limits<Sint32>::max())
+        {
+            return false;
+        }
+        value = static_cast<Sint32>(parsed);
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool savedJsonUint(const AutomatiaSave::Json& object, const char* key, Uint32& value)
+{
+    if (!object.is_object() || !object.contains(key))
+    {
+        return false;
+    }
+    try
+    {
+        if (object[key].is_number_unsigned())
+        {
+            const std::uint64_t parsed = object[key].get<std::uint64_t>();
+            if (parsed <= std::numeric_limits<Uint32>::max())
+            {
+                value = static_cast<Uint32>(parsed);
+                return true;
+            }
+            return false;
+        }
+        Sint32 parsed = 0;
+        if (savedJsonInt(object, key, parsed) && parsed >= 0)
+        {
+            value = static_cast<Uint32>(parsed);
+            return true;
+        }
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+    return false;
+}
+
+bool savedJsonBool(const AutomatiaSave::Json& object, const char* key, bool& value)
+{
+    if (!object.is_object() || !object.contains(key) || !object[key].is_boolean())
+    {
+        return false;
+    }
+    value = object[key].get<bool>();
+    return true;
+}
+
+bool savedJsonReal(const AutomatiaSave::Json& object, const char* key, real_t& value)
+{
+    if (!object.is_object() || !object.contains(key) || !object[key].is_number())
+    {
+        return false;
+    }
+    try
+    {
+        const real_t parsed = object[key].get<real_t>();
+        if (!std::isfinite(parsed))
+        {
+            return false;
+        }
+        value = parsed;
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool savedJsonTriplet(
+    const AutomatiaSave::Json& object,
+    const char* key,
+    real_t& first,
+    real_t& second,
+    real_t& third
+)
+{
+    if (!object.is_object() || !object.contains(key)
+        || !object[key].is_array() || object[key].size() != 3)
+    {
+        return false;
+    }
+    try
+    {
+        const real_t values[3] = {
+            object[key][0].get<real_t>(),
+            object[key][1].get<real_t>(),
+            object[key][2].get<real_t>()
+        };
+        if (!std::isfinite(values[0])
+            || !std::isfinite(values[1])
+            || !std::isfinite(values[2]))
+        {
+            return false;
+        }
+        first = values[0];
+        second = values[1];
+        third = values[2];
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool safeSavedStoryId(const std::string& value)
+{
+    if (value.empty() || value.size() > 255)
+    {
+        return false;
+    }
+    for (const unsigned char character : value)
+    {
+        if (character < 0x20 || character == 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+AutomatiaSave::Json saveChestItemState(const PersistentChestItemState& item)
+{
+    return AutomatiaSave::Json{
+        {"stable_id", item.stableId},
+        {"legacy_type", item.type},
+        {"status", item.status},
+        {"beatitude", item.beatitude},
+        {"count", item.count},
+        {"appearance", item.appearance},
+        {"identified", item.identified},
+        {"x", item.x},
+        {"y", item.y},
+        {"droppable", item.isDroppable},
+        {"sold_to_shop", item.playerSoldItemToShop},
+        {"special_shop_consumable", item.itemSpecialShopConsumable},
+        {"trading_skill_required", item.itemRequireTradingSkillInShop}
+    };
+}
+
+bool restoreChestItemState(
+    const AutomatiaSave::Json& saved,
+    PersistentChestItemState& item
+)
+{
+    Sint32 tradingSkill = 0;
+    if (!savedJsonInt(saved, "legacy_type", item.type)
+        || !savedJsonInt(saved, "status", item.status)
+        || !savedJsonInt(saved, "beatitude", item.beatitude)
+        || !savedJsonInt(saved, "count", item.count)
+        || !savedJsonUint(saved, "appearance", item.appearance)
+        || !savedJsonInt(saved, "x", item.x)
+        || !savedJsonInt(saved, "y", item.y)
+        || item.count <= 0)
+    {
+        return false;
+    }
+    if (saved.contains("stable_id") && saved["stable_id"].is_string()
+        && saved["stable_id"].get<std::string>().size() <= 255)
+    {
+        item.stableId = saved["stable_id"].get<std::string>();
+    }
+    savedJsonBool(saved, "identified", item.identified);
+    savedJsonBool(saved, "droppable", item.isDroppable);
+    savedJsonBool(saved, "sold_to_shop", item.playerSoldItemToShop);
+    savedJsonBool(
+        saved, "special_shop_consumable", item.itemSpecialShopConsumable
+    );
+    if (savedJsonInt(saved, "trading_skill_required", tradingSkill)
+        && tradingSkill >= 0
+        && tradingSkill <= std::numeric_limits<Uint8>::max())
+    {
+        item.itemRequireTradingSkillInShop = static_cast<Uint8>(tradingSkill);
+    }
+    return true;
+}
+
+AutomatiaSave::Json saveMonsterItemState(const PersistentMonsterItemState& item)
+{
+    return AutomatiaSave::Json{
+        {"stable_id", item.stableId},
+        {"slot", item.slot},
+        {"legacy_type", item.type},
+        {"status", item.status},
+        {"beatitude", item.beatitude},
+        {"count", item.count},
+        {"appearance", item.appearance},
+        {"identified", item.identified},
+        {"droppable", item.isDroppable},
+        {"x", item.x},
+        {"y", item.y}
+    };
+}
+
+bool restoreMonsterItemState(
+    const AutomatiaSave::Json& saved,
+    PersistentMonsterItemState& item
+)
+{
+    if (!savedJsonInt(saved, "slot", item.slot)
+        || item.slot < 0 || item.slot > 10
+        || !savedJsonInt(saved, "legacy_type", item.type)
+        || !savedJsonInt(saved, "status", item.status)
+        || !savedJsonInt(saved, "beatitude", item.beatitude)
+        || !savedJsonInt(saved, "count", item.count)
+        || !savedJsonUint(saved, "appearance", item.appearance)
+        || !savedJsonInt(saved, "x", item.x)
+        || !savedJsonInt(saved, "y", item.y)
+        || item.count <= 0)
+    {
+        return false;
+    }
+    if (saved.contains("stable_id") && saved["stable_id"].is_string()
+        && saved["stable_id"].get<std::string>().size() <= 255)
+    {
+        item.stableId = saved["stable_id"].get<std::string>();
+    }
+    savedJsonBool(saved, "identified", item.identified);
+    savedJsonBool(saved, "droppable", item.isDroppable);
+    return true;
+}
+
+AutomatiaSave::Json saveWorldItemState(const PersistentWorldItemState& item)
+{
+    return AutomatiaSave::Json{
+        {"stable_id", item.stableId},
+        {"legacy_type", item.type},
+        {"status", item.status},
+        {"beatitude", item.beatitude},
+        {"count", item.count},
+        {"appearance", item.appearance},
+        {"identified", item.identified},
+        {"position", {item.x, item.y, item.z}},
+        {"rotation", {item.yaw, item.pitch, item.roll}},
+        {"velocity", {item.velX, item.velY, item.velZ}},
+        {"not_moving", item.itemNotMoving},
+        {"sokoban_reward", item.itemSokobanReward},
+        {"stolen", item.itemStolen},
+        {"show_on_map", item.itemShowOnMap},
+        {"pickup_delay", item.itemDelayMonsterPickingUp},
+        {"passable", item.passable},
+        {"invisible", item.invisible},
+        {"burning", item.burning},
+        {"burnable", item.burnable}
+    };
+}
+
+bool restoreWorldItemState(
+    const AutomatiaSave::Json& saved,
+    PersistentWorldItemState& item
+)
+{
+    if (!savedJsonInt(saved, "legacy_type", item.type)
+        || !savedJsonInt(saved, "status", item.status)
+        || !savedJsonInt(saved, "beatitude", item.beatitude)
+        || !savedJsonInt(saved, "count", item.count)
+        || !savedJsonUint(saved, "appearance", item.appearance)
+        || item.count <= 0
+        || !savedJsonTriplet(saved, "position", item.x, item.y, item.z)
+        || !savedJsonTriplet(saved, "rotation", item.yaw, item.pitch, item.roll)
+        || !savedJsonTriplet(saved, "velocity", item.velX, item.velY, item.velZ))
+    {
+        return false;
+    }
+    if (saved.contains("stable_id") && saved["stable_id"].is_string()
+        && saved["stable_id"].get<std::string>().size() <= 255)
+    {
+        item.stableId = saved["stable_id"].get<std::string>();
+    }
+    savedJsonBool(saved, "identified", item.identified);
+    savedJsonInt(saved, "not_moving", item.itemNotMoving);
+    savedJsonInt(saved, "sokoban_reward", item.itemSokobanReward);
+    savedJsonInt(saved, "stolen", item.itemStolen);
+    savedJsonInt(saved, "show_on_map", item.itemShowOnMap);
+    savedJsonInt(saved, "pickup_delay", item.itemDelayMonsterPickingUp);
+    savedJsonBool(saved, "passable", item.passable);
+    savedJsonBool(saved, "invisible", item.invisible);
+    savedJsonBool(saved, "burning", item.burning);
+    savedJsonBool(saved, "burnable", item.burnable);
+    return true;
+}
+
+AutomatiaSave::Json saveGoldState(const PersistentGoldBagState& gold)
+{
+    return AutomatiaSave::Json{
+        {"amount", gold.amount},
+        {"bonus", gold.amountBonus},
+        {"sokoban", gold.sokoban},
+        {"bouncing", gold.bouncing},
+        {"dropped_by_player", gold.droppedByPlayer},
+        {"position", {gold.x, gold.y, gold.z}},
+        {"rotation", {gold.yaw, gold.pitch, gold.roll}},
+        {"velocity", {gold.velX, gold.velY, gold.velZ}},
+        {"passable", gold.passable},
+        {"invisible", gold.invisible}
+    };
+}
+
+bool restoreGoldState(
+    const AutomatiaSave::Json& saved,
+    PersistentGoldBagState& gold
+)
+{
+    if (!savedJsonInt(saved, "amount", gold.amount)
+        || !savedJsonInt(saved, "bonus", gold.amountBonus)
+        || gold.amount <= 0
+        || !savedJsonTriplet(saved, "position", gold.x, gold.y, gold.z)
+        || !savedJsonTriplet(saved, "rotation", gold.yaw, gold.pitch, gold.roll)
+        || !savedJsonTriplet(saved, "velocity", gold.velX, gold.velY, gold.velZ))
+    {
+        return false;
+    }
+    savedJsonInt(saved, "sokoban", gold.sokoban);
+    savedJsonInt(saved, "bouncing", gold.bouncing);
+    savedJsonInt(saved, "dropped_by_player", gold.droppedByPlayer);
+    savedJsonBool(saved, "passable", gold.passable);
+    savedJsonBool(saved, "invisible", gold.invisible);
+    return true;
+}
+
+AutomatiaSave::Json saveMechanismState(
+    const Sint32 persistentId,
+    const PersistentMechanismState& state
+)
+{
+    using AutomatiaSave::Json;
+    Json saved = {
+        {"persistent_id", persistentId},
+        {"payload_version", 1},
+        {"kind", static_cast<Uint8>(state.kind)},
+        {"switch_power", state.switchPower},
+        {"roll", state.roll},
+        {"lever_status", state.leverStatus},
+        {"lever_timer_ticks", state.leverTimerTicks},
+        {"gate_status", state.gateStatus},
+        {"gate_init", state.gateInit},
+        {"gate_rattle", state.gateRattle},
+        {"gate_inverted", state.gateInverted},
+        {"circuit_status", state.circuitStatus},
+        {"gate_start_height", state.gateStartHeight},
+        {"gate_z", state.gateZ},
+        {"gate_velocity_z", state.gateVelZ},
+        {"door_is_iron", state.doorIsIron},
+        {"door_dir", state.doorDir},
+        {"door_status", state.doorStatus},
+        {"door_health", state.doorHealth},
+        {"door_max_health", state.doorMaxHealth},
+        {"door_locked", state.doorLocked},
+        {"door_smacked", state.doorSmacked},
+        {"door_timer", state.doorTimer},
+        {"door_prevent_lockpick_exploit", state.doorPreventLockpickExploit},
+        {"door_force_locked_unlocked", state.doorForceLockedUnlocked},
+        {"door_disable_lockpicks", state.doorDisableLockpicks},
+        {"door_disable_opening", state.doorDisableOpening},
+        {"door_lockpick_health", state.doorLockpickHealth},
+        {"door_unlock_when_powered", state.doorUnlockWhenPowered},
+        {"door_circuit_status", state.doorCircuitStatus},
+        {"door_start_angle", state.doorStartAng},
+        {"door_yaw", state.doorYaw},
+        {"door_x", state.doorX},
+        {"door_y", state.doorY},
+        {"door_focal_y", state.doorFocalY},
+        {"door_burning", state.doorBurning},
+        {"door_burnable", state.doorBurnable},
+        {"furniture_type", state.furnitureType},
+        {"furniture_health", state.furnitureHealth},
+        {"furniture_max_health", state.furnitureMaxHealth},
+        {"furniture_burning", state.furnitureBurning},
+        {"furniture_burnable", state.furnitureBurnable},
+        {"collider_health", state.colliderCurrentHP},
+        {"collider_max_health", state.colliderMaxHP},
+        {"collider_damage_types", state.colliderDamageTypes},
+        {"collider_has_collision", state.colliderHasCollision},
+        {"collider_burning", state.colliderBurning},
+        {"collider_burnable", state.colliderBurnable},
+        {"crystal_initialized", state.crystalInitialised},
+        {"crystal_direction", state.crystalDirection},
+        {"crystal_electricity_nodes", state.crystalNumElectricityNodes},
+        {"crystal_turn_reverse", state.crystalTurnReverse},
+        {"crystal_spell", state.crystalSpellToActivate},
+        {"crystal_circuit_status", state.crystalCircuitStatus},
+        {"crystal_power_to_activate", state.crystalPowerToActivate},
+        {"boulder_trap_behavior", state.boulderTrapBehavior},
+        {"boulder_trap_fired", state.boulderTrapFired},
+        {"boulder_trap_refire_amount", state.boulderTrapRefireAmount},
+        {"boulder_trap_refire_counter", state.boulderTrapRefireCounter},
+        {"boulder_trap_pre_delay", state.boulderTrapPreDelay},
+        {"boulder_trap_circuit_status", state.boulderTrapCircuitStatus},
+        {"boulder_trap_sabotaged", state.boulderTrapSabotaged},
+        {"signal_is_and", state.signalControllerIsAND},
+        {"signal_switch_power", state.signalSwitchPower},
+        {"signal_delay_count", state.signalDelayCount},
+        {"signal_timer_count", state.signalTimerCount},
+        {"signal_repeat_count", state.signalRepeatCount},
+        {"signal_latch_input", state.signalLatchInput},
+        {"signal_and_power_mask", state.signalANDPowerMask},
+        {"signal_circuit_status", state.signalCircuitStatus},
+        {"signal_initialized", state.signalInitialized},
+        {"bell_active_timer", state.bellActiveTimer},
+        {"bell_has_item", state.bellHasItem},
+        {"bell_uses", state.bellUses},
+        {"bell_current_event", state.bellCurrentEvent},
+        {"bell_use_delay", state.bellUseDelay},
+        {"bell_clapper_broken", state.bellClapperBroken},
+        {"bell_bulb_broken", state.bellBulbBroken},
+        {"bell_buff_type", state.bellBuffType},
+        {"bell_burning_timer", state.bellBurningTimer},
+        {"bell_scrap_created", state.bellScrapCreated},
+        {"bell_burning", state.bellBurning},
+        {"bell_burnable", state.bellBurnable},
+        {"bell_invisible", state.bellInvisible},
+        {"water_is_fountain", state.waterSourceIsFountain},
+        {"water_uses", state.waterSourceUses},
+        {"water_main_effect", state.waterSourceMainEffect},
+        {"water_secondary_effect", state.waterSourceSecondaryEffect},
+        {"campfire_health", state.campfireHealth},
+        {"wall_lock_state", state.wallLockSavedState},
+        {"wall_lock_power", state.wallLockSavedPower},
+        {"wall_lock_pick_health", state.wallLockSavedPickHealth},
+        {"wall_lock_prevent_exploit", state.wallLockSavedPreventExploit},
+        {"wall_button_state", state.wallButtonState},
+        {"wall_button_power", state.wallButtonPower},
+        {"pressure_plate_permanent", state.pressurePlatePermanent},
+        {"pressure_plate_power", state.pressurePlatePower},
+        {"pressure_plate_interaction_lock", state.pressurePlateInteractionLock},
+        {"pedestal_has_orb", state.pedestalSavedHasOrb},
+        {"pedestal_power_status", state.pedestalSavedPowerStatus},
+        {"pedestal_init", state.pedestalSavedInit},
+        {"pedestal_in_ground", state.pedestalSavedInGround},
+        {"pedestal_z", state.pedestalSavedZ},
+        {"pedestal_velocity_z", state.pedestalSavedVelZ},
+        {"pedestal_passable", state.pedestalSavedPassable},
+        {"chest_health", state.chestSavedHealth},
+        {"chest_max_health", state.chestSavedMaxHealth},
+        {"chest_locked", state.chestSavedLocked},
+        {"chest_lockpick_health", state.chestSavedLockpickHealth},
+        {"chest_prevent_exploit", state.chestSavedPreventExploit},
+        {"chest_old_health", state.chestSavedOldHealth},
+        {"chest_void_state", state.chestSavedVoidState},
+        {"shop_store_type", state.shopkeeperSavedStoreType},
+        {"shop_gold", state.shopkeeperSavedGold},
+        {"shop_loads_since_restock", state.shopkeeperLoadsSinceRestock},
+        {"shop_name", state.shopkeeperSavedName},
+        {"monster_type", state.monsterSavedType},
+        {"monster_hp", state.monsterSavedHP},
+        {"monster_max_hp", state.monsterSavedMAXHP},
+        {"monster_mp", state.monsterSavedMP},
+        {"monster_max_mp", state.monsterSavedMAXMP},
+        {"monster_position", {
+            state.monsterSavedX, state.monsterSavedY, state.monsterSavedZ
+        }},
+        {"monster_rotation", {
+            state.monsterSavedYaw, state.monsterSavedPitch, state.monsterSavedRoll
+        }},
+        {"summon_monster", state.summonTrapMonster},
+        {"summon_count", state.summonTrapCount},
+        {"summon_interval", state.summonTrapInterval},
+        {"summon_spawn_cycles", state.summonTrapSpawnCycles},
+        {"summon_power_to_disable", state.summonTrapPowerToDisable},
+        {"summon_failure_rate", state.summonTrapFailureRate},
+        {"summon_fired", state.summonTrapFired},
+        {"summon_initialized", state.summonTrapInitialized},
+        {"summon_ticks_to_fire", state.summonTrapTicksToFire},
+        {"summon_player_proximity", state.summonTrapPlayerProximity},
+        {"passable", state.passable}
+    };
+
+    saved["chest_inventory"] = AutomatiaSave::Json::array();
+    for (const PersistentChestItemState& item : state.chestSavedInventory)
+    {
+        saved["chest_inventory"].push_back(saveChestItemState(item));
+    }
+    saved["shop_inventory"] = AutomatiaSave::Json::array();
+    for (const PersistentChestItemState& item : state.shopkeeperSavedInventory)
+    {
+        saved["shop_inventory"].push_back(saveChestItemState(item));
+    }
+    saved["world_item"] = saveWorldItemState(state.worldItemState);
+    saved["gold_bag"] = saveGoldState(state.goldBagState);
+    saved["monster_items"] = AutomatiaSave::Json::array();
+    for (const PersistentMonsterItemState& item : state.monsterSavedItems)
+    {
+        saved["monster_items"].push_back(saveMonsterItemState(item));
+    }
+    saved["monster_effects"] = AutomatiaSave::Json::array();
+    for (const PersistentMonsterEffectState& effect : state.monsterSavedEffects)
+    {
+        saved["monster_effects"].push_back(AutomatiaSave::Json{
+            {"effect_id", effect.effectID},
+            {"value", effect.effectValue},
+            {"timer", effect.timer}
+        });
+    }
+    return saved;
+}
+
+bool restoreMechanismState(
+    const AutomatiaSave::Json& saved,
+    Sint32& persistentId,
+    PersistentMechanismState& state
+)
+{
+    Sint32 kind = 0;
+    Sint32 payloadVersion = 0;
+    if (!savedJsonInt(saved, "persistent_id", persistentId)
+        || persistentId == 0
+        || !savedJsonInt(saved, "payload_version", payloadVersion)
+        || payloadVersion != 1
+        || !savedJsonInt(saved, "kind", kind)
+        || kind <= static_cast<Sint32>(PersistentMechanismState::Kind::None)
+        || kind > static_cast<Sint32>(PersistentMechanismState::Kind::SummonTrap))
+    {
+        return false;
+    }
+    state.kind = static_cast<PersistentMechanismState::Kind>(kind);
+
+    savedJsonInt(saved, "switch_power", state.switchPower);
+    savedJsonReal(saved, "roll", state.roll);
+    savedJsonInt(saved, "lever_status", state.leverStatus);
+    savedJsonInt(saved, "lever_timer_ticks", state.leverTimerTicks);
+    savedJsonInt(saved, "gate_status", state.gateStatus);
+    savedJsonInt(saved, "gate_init", state.gateInit);
+    savedJsonInt(saved, "gate_rattle", state.gateRattle);
+    savedJsonInt(saved, "gate_inverted", state.gateInverted);
+    savedJsonInt(saved, "circuit_status", state.circuitStatus);
+    savedJsonReal(saved, "gate_start_height", state.gateStartHeight);
+    savedJsonReal(saved, "gate_z", state.gateZ);
+    savedJsonReal(saved, "gate_velocity_z", state.gateVelZ);
+    savedJsonBool(saved, "door_is_iron", state.doorIsIron);
+    savedJsonInt(saved, "door_dir", state.doorDir);
+    savedJsonInt(saved, "door_status", state.doorStatus);
+    savedJsonInt(saved, "door_health", state.doorHealth);
+    savedJsonInt(saved, "door_max_health", state.doorMaxHealth);
+    savedJsonInt(saved, "door_locked", state.doorLocked);
+    savedJsonInt(saved, "door_smacked", state.doorSmacked);
+    savedJsonInt(saved, "door_timer", state.doorTimer);
+    savedJsonInt(
+        saved, "door_prevent_lockpick_exploit", state.doorPreventLockpickExploit
+    );
+    savedJsonInt(
+        saved, "door_force_locked_unlocked", state.doorForceLockedUnlocked
+    );
+    savedJsonInt(saved, "door_disable_lockpicks", state.doorDisableLockpicks);
+    savedJsonInt(saved, "door_disable_opening", state.doorDisableOpening);
+    savedJsonInt(saved, "door_lockpick_health", state.doorLockpickHealth);
+    savedJsonInt(saved, "door_unlock_when_powered", state.doorUnlockWhenPowered);
+    savedJsonInt(saved, "door_circuit_status", state.doorCircuitStatus);
+    savedJsonReal(saved, "door_start_angle", state.doorStartAng);
+    savedJsonReal(saved, "door_yaw", state.doorYaw);
+    savedJsonReal(saved, "door_x", state.doorX);
+    savedJsonReal(saved, "door_y", state.doorY);
+    savedJsonReal(saved, "door_focal_y", state.doorFocalY);
+    savedJsonBool(saved, "door_burning", state.doorBurning);
+    savedJsonBool(saved, "door_burnable", state.doorBurnable);
+    savedJsonInt(saved, "furniture_type", state.furnitureType);
+    savedJsonInt(saved, "furniture_health", state.furnitureHealth);
+    savedJsonInt(saved, "furniture_max_health", state.furnitureMaxHealth);
+    savedJsonBool(saved, "furniture_burning", state.furnitureBurning);
+    savedJsonBool(saved, "furniture_burnable", state.furnitureBurnable);
+    savedJsonInt(saved, "collider_health", state.colliderCurrentHP);
+    savedJsonInt(saved, "collider_max_health", state.colliderMaxHP);
+    savedJsonInt(saved, "collider_damage_types", state.colliderDamageTypes);
+    savedJsonInt(saved, "collider_has_collision", state.colliderHasCollision);
+    savedJsonBool(saved, "collider_burning", state.colliderBurning);
+    savedJsonBool(saved, "collider_burnable", state.colliderBurnable);
+    savedJsonInt(saved, "crystal_initialized", state.crystalInitialised);
+    savedJsonInt(saved, "crystal_direction", state.crystalDirection);
+    savedJsonInt(
+        saved, "crystal_electricity_nodes", state.crystalNumElectricityNodes
+    );
+    savedJsonInt(saved, "crystal_turn_reverse", state.crystalTurnReverse);
+    savedJsonInt(saved, "crystal_spell", state.crystalSpellToActivate);
+    savedJsonInt(saved, "crystal_circuit_status", state.crystalCircuitStatus);
+    savedJsonInt(saved, "crystal_power_to_activate", state.crystalPowerToActivate);
+    savedJsonInt(saved, "boulder_trap_behavior", state.boulderTrapBehavior);
+    savedJsonInt(saved, "boulder_trap_fired", state.boulderTrapFired);
+    savedJsonInt(
+        saved, "boulder_trap_refire_amount", state.boulderTrapRefireAmount
+    );
+    savedJsonInt(
+        saved, "boulder_trap_refire_counter", state.boulderTrapRefireCounter
+    );
+    savedJsonInt(saved, "boulder_trap_pre_delay", state.boulderTrapPreDelay);
+    savedJsonInt(
+        saved, "boulder_trap_circuit_status", state.boulderTrapCircuitStatus
+    );
+    savedJsonInt(saved, "boulder_trap_sabotaged", state.boulderTrapSabotaged);
+    savedJsonBool(saved, "signal_is_and", state.signalControllerIsAND);
+    savedJsonInt(saved, "signal_switch_power", state.signalSwitchPower);
+    savedJsonInt(saved, "signal_delay_count", state.signalDelayCount);
+    savedJsonInt(saved, "signal_timer_count", state.signalTimerCount);
+    savedJsonInt(saved, "signal_repeat_count", state.signalRepeatCount);
+    savedJsonInt(saved, "signal_latch_input", state.signalLatchInput);
+    savedJsonInt(saved, "signal_and_power_mask", state.signalANDPowerMask);
+    savedJsonInt(saved, "signal_circuit_status", state.signalCircuitStatus);
+    savedJsonInt(saved, "signal_initialized", state.signalInitialized);
+    savedJsonInt(saved, "bell_active_timer", state.bellActiveTimer);
+    savedJsonInt(saved, "bell_has_item", state.bellHasItem);
+    savedJsonInt(saved, "bell_uses", state.bellUses);
+    savedJsonInt(saved, "bell_current_event", state.bellCurrentEvent);
+    savedJsonInt(saved, "bell_use_delay", state.bellUseDelay);
+    savedJsonInt(saved, "bell_clapper_broken", state.bellClapperBroken);
+    savedJsonInt(saved, "bell_bulb_broken", state.bellBulbBroken);
+    savedJsonInt(saved, "bell_buff_type", state.bellBuffType);
+    savedJsonInt(saved, "bell_burning_timer", state.bellBurningTimer);
+    savedJsonInt(saved, "bell_scrap_created", state.bellScrapCreated);
+    savedJsonBool(saved, "bell_burning", state.bellBurning);
+    savedJsonBool(saved, "bell_burnable", state.bellBurnable);
+    savedJsonBool(saved, "bell_invisible", state.bellInvisible);
+    savedJsonBool(saved, "water_is_fountain", state.waterSourceIsFountain);
+    savedJsonInt(saved, "water_uses", state.waterSourceUses);
+    savedJsonInt(saved, "water_main_effect", state.waterSourceMainEffect);
+    savedJsonInt(saved, "water_secondary_effect", state.waterSourceSecondaryEffect);
+    savedJsonInt(saved, "campfire_health", state.campfireHealth);
+    savedJsonInt(saved, "wall_lock_state", state.wallLockSavedState);
+    savedJsonInt(saved, "wall_lock_power", state.wallLockSavedPower);
+    savedJsonInt(saved, "wall_lock_pick_health", state.wallLockSavedPickHealth);
+    savedJsonInt(
+        saved, "wall_lock_prevent_exploit", state.wallLockSavedPreventExploit
+    );
+    savedJsonInt(saved, "wall_button_state", state.wallButtonState);
+    savedJsonInt(saved, "wall_button_power", state.wallButtonPower);
+    savedJsonBool(saved, "pressure_plate_permanent", state.pressurePlatePermanent);
+    savedJsonInt(saved, "pressure_plate_power", state.pressurePlatePower);
+    savedJsonInt(
+        saved,
+        "pressure_plate_interaction_lock",
+        state.pressurePlateInteractionLock
+    );
+    savedJsonInt(saved, "pedestal_has_orb", state.pedestalSavedHasOrb);
+    savedJsonInt(saved, "pedestal_power_status", state.pedestalSavedPowerStatus);
+    savedJsonInt(saved, "pedestal_init", state.pedestalSavedInit);
+    savedJsonInt(saved, "pedestal_in_ground", state.pedestalSavedInGround);
+    savedJsonReal(saved, "pedestal_z", state.pedestalSavedZ);
+    savedJsonReal(saved, "pedestal_velocity_z", state.pedestalSavedVelZ);
+    savedJsonBool(saved, "pedestal_passable", state.pedestalSavedPassable);
+    savedJsonInt(saved, "chest_health", state.chestSavedHealth);
+    savedJsonInt(saved, "chest_max_health", state.chestSavedMaxHealth);
+    savedJsonInt(saved, "chest_locked", state.chestSavedLocked);
+    savedJsonInt(saved, "chest_lockpick_health", state.chestSavedLockpickHealth);
+    savedJsonInt(saved, "chest_prevent_exploit", state.chestSavedPreventExploit);
+    savedJsonInt(saved, "chest_old_health", state.chestSavedOldHealth);
+    savedJsonInt(saved, "chest_void_state", state.chestSavedVoidState);
+    savedJsonInt(saved, "shop_store_type", state.shopkeeperSavedStoreType);
+    savedJsonInt(saved, "shop_gold", state.shopkeeperSavedGold);
+    savedJsonInt(
+        saved, "shop_loads_since_restock", state.shopkeeperLoadsSinceRestock
+    );
+    if (saved.contains("shop_name") && saved["shop_name"].is_string()
+        && saved["shop_name"].get<std::string>().size() < 128)
+    {
+        state.shopkeeperSavedName = saved["shop_name"].get<std::string>();
+    }
+    savedJsonInt(saved, "monster_type", state.monsterSavedType);
+    savedJsonInt(saved, "monster_hp", state.monsterSavedHP);
+    savedJsonInt(saved, "monster_max_hp", state.monsterSavedMAXHP);
+    savedJsonInt(saved, "monster_mp", state.monsterSavedMP);
+    savedJsonInt(saved, "monster_max_mp", state.monsterSavedMAXMP);
+    savedJsonTriplet(
+        saved,
+        "monster_position",
+        state.monsterSavedX,
+        state.monsterSavedY,
+        state.monsterSavedZ
+    );
+    savedJsonTriplet(
+        saved,
+        "monster_rotation",
+        state.monsterSavedYaw,
+        state.monsterSavedPitch,
+        state.monsterSavedRoll
+    );
+    savedJsonInt(saved, "summon_monster", state.summonTrapMonster);
+    savedJsonInt(saved, "summon_count", state.summonTrapCount);
+    savedJsonInt(saved, "summon_interval", state.summonTrapInterval);
+    savedJsonInt(saved, "summon_spawn_cycles", state.summonTrapSpawnCycles);
+    savedJsonInt(
+        saved, "summon_power_to_disable", state.summonTrapPowerToDisable
+    );
+    savedJsonInt(saved, "summon_failure_rate", state.summonTrapFailureRate);
+    savedJsonInt(saved, "summon_fired", state.summonTrapFired);
+    savedJsonInt(saved, "summon_initialized", state.summonTrapInitialized);
+    savedJsonInt(saved, "summon_ticks_to_fire", state.summonTrapTicksToFire);
+    savedJsonInt(
+        saved, "summon_player_proximity", state.summonTrapPlayerProximity
+    );
+    savedJsonBool(saved, "passable", state.passable);
+
+    auto restoreChestItems = [&](const char* key, auto& destination)
+    {
+        if (!saved.contains(key) || !saved[key].is_array()
+            || saved[key].size() > 65536)
+        {
+            return;
+        }
+        for (const auto& savedItem : saved[key])
+        {
+            PersistentChestItemState item;
+            if (restoreChestItemState(savedItem, item))
+            {
+                destination.push_back(std::move(item));
+            }
+        }
+    };
+    restoreChestItems("chest_inventory", state.chestSavedInventory);
+    restoreChestItems("shop_inventory", state.shopkeeperSavedInventory);
+
+    if (state.kind == PersistentMechanismState::Kind::Chest
+        && (!saved.contains("chest_inventory")
+            || !saved["chest_inventory"].is_array()))
+    {
+        return false;
+    }
+    if (state.kind == PersistentMechanismState::Kind::ShopkeeperInventory
+        && (!saved.contains("shop_inventory")
+            || !saved["shop_inventory"].is_array()))
+    {
+        return false;
+    }
+
+    if (state.kind == PersistentMechanismState::Kind::WorldItem)
+    {
+        if (!saved.contains("world_item")
+            || !restoreWorldItemState(saved["world_item"], state.worldItemState))
+        {
+            return false;
+        }
+    }
+    if (state.kind == PersistentMechanismState::Kind::GoldBag)
+    {
+        if (!saved.contains("gold_bag")
+            || !restoreGoldState(saved["gold_bag"], state.goldBagState))
+        {
+            return false;
+        }
+    }
+    if (saved.contains("monster_items") && saved["monster_items"].is_array()
+        && saved["monster_items"].size() <= 65536)
+    {
+        for (const auto& savedItem : saved["monster_items"])
+        {
+            PersistentMonsterItemState item;
+            if (restoreMonsterItemState(savedItem, item))
+            {
+                state.monsterSavedItems.push_back(std::move(item));
+            }
+        }
+    }
+    if (saved.contains("monster_effects") && saved["monster_effects"].is_array()
+        && saved["monster_effects"].size() <= NUMEFFECTS)
+    {
+        for (const auto& savedEffect : saved["monster_effects"])
+        {
+            PersistentMonsterEffectState effect;
+            Sint32 effectValue = 0;
+            if (savedJsonInt(savedEffect, "effect_id", effect.effectID)
+                && effect.effectID >= 0 && effect.effectID < NUMEFFECTS
+                && savedJsonInt(savedEffect, "value", effectValue)
+                && effectValue >= 0
+                && effectValue <= std::numeric_limits<Uint8>::max()
+                && savedJsonInt(savedEffect, "timer", effect.timer)
+                && effect.timer > 0)
+            {
+                effect.effectValue = static_cast<Uint8>(effectValue);
+                state.monsterSavedEffects.push_back(effect);
+            }
+        }
+    }
+    if (state.kind == PersistentMechanismState::Kind::MonsterLivingState
+        && (!saved.contains("monster_items")
+            || !saved["monster_items"].is_array()
+            || !saved.contains("monster_effects")
+            || !saved["monster_effects"].is_array()))
+    {
+        return false;
+    }
+    return true;
+}
+
+void restoreSavedStringSet(
+    const AutomatiaSave::Json& object,
+    const char* key,
+    std::unordered_set<std::string>& destination
+)
+{
+    if (!object.is_object() || !object.contains(key) || !object[key].is_array()
+        || object[key].size() > 65536)
+    {
+        return;
+    }
+    for (const auto& member : object[key])
+    {
+        if (member.is_string())
+        {
+            const std::string value = member.get<std::string>();
+            if (safeSavedStoryId(value))
+            {
+                destination.insert(value);
+            }
+        }
+    }
+}
+
+void restoreSavedVariables(
+    const AutomatiaSave::Json& object,
+    const char* key,
+    std::unordered_map<std::string, Sint32>& destination
+)
+{
+    if (!object.is_object() || !object.contains(key) || !object[key].is_object()
+        || object[key].size() > 65536)
+    {
+        return;
+    }
+    for (auto member = object[key].begin(); member != object[key].end(); ++member)
+    {
+        Sint32 value = 0;
+        const AutomatiaSave::Json wrapper = {{"value", member.value()}};
+        if (safeSavedStoryId(member.key()) && savedJsonInt(wrapper, "value", value))
+        {
+            destination[member.key()] = value;
+        }
+    }
+}
+
+void hydratePreservedAutomatiaWorldDocument()
+{
+    using AutomatiaSave::Json;
+    if (!preservedAutomatiaWorldDocument.is_object())
+    {
+        return;
+    }
+
+    std::size_t restoredMaps = 0;
+    std::size_t restoredTiles = 0;
+    std::size_t restoredItems = 0;
+    if (preservedAutomatiaWorldDocument.contains("map_instances")
+        && preservedAutomatiaWorldDocument["map_instances"].is_array())
+    {
+        for (const Json& savedMap : preservedAutomatiaWorldDocument["map_instances"])
+        {
+            if (!savedMap.is_object() || !savedMap.contains("map_file")
+                || !savedMap["map_file"].is_string()
+                || !savedMap.contains("instance_id")
+                || !savedMap["instance_id"].is_string()
+                || !savedMap.contains("persistent_state")
+                || !savedMap["persistent_state"].is_object())
+            {
+                continue;
+            }
+            WorldInstanceIdentity identity;
+            if (!identity.set(
+                    savedMap["map_file"].get<std::string>(),
+                    savedMap["instance_id"].get<std::string>()
+                ))
+            {
+                continue;
+            }
+            MapInstanceSummary restoredSummary;
+            restoredSummary.identity = identity;
+            auto restoreUnsigned = [&savedMap](
+                const char* key,
+                std::uint64_t maximum,
+                std::uint64_t fallback
+            )
+            {
+                if (!savedMap.contains(key)
+                    || !savedMap[key].is_number_integer())
+                {
+                    return fallback;
+                }
+                const std::int64_t value = savedMap[key].get<std::int64_t>();
+                return value < 0 || static_cast<std::uint64_t>(value) > maximum
+                    ? fallback
+                    : static_cast<std::uint64_t>(value);
+            };
+            restoredSummary.identity.revision = restoreUnsigned(
+                "revision",
+                std::numeric_limits<std::uint64_t>::max(),
+                identity.revision
+            );
+            restoredSummary.dungeonLevel = static_cast<std::int32_t>(
+                restoreUnsigned("dungeon_level", INT32_MAX, 0)
+            );
+            restoredSummary.mapSeed = static_cast<std::uint32_t>(
+                restoreUnsigned("map_seed", UINT32_MAX, 0)
+            );
+            restoredSummary.nextEntityUid = static_cast<std::uint32_t>(
+                restoreUnsigned("next_entity_uid", UINT32_MAX, 1)
+            );
+            restoredSummary.nextPersistentId = restoreUnsigned(
+                "next_persistent_id",
+                std::numeric_limits<std::uint64_t>::max(),
+                1
+            );
+            restoredSummary.simulationTick = restoreUnsigned(
+                "simulation_tick",
+                std::numeric_limits<std::uint64_t>::max(),
+                0
+            );
+            restoredSummary.dirty =
+                savedMap.value("dirty", false);
+            restoredSummary.secretLevel =
+                savedMap.value("secret_level", false);
+            restoredSummary.darkMap =
+                savedMap.value("dark_map", false);
+            worldState.registerUnloadedInstance(restoredSummary);
+            const Json& persistent = savedMap["persistent_state"];
+            PersistentMapRemovalState& state =
+                persistentMapRemovalRegistry[identity.key()];
+
+            if (persistent.contains("removed_entity_ids")
+                && persistent["removed_entity_ids"].is_array()
+                && persistent["removed_entity_ids"].size() <= 1048576)
+            {
+                for (const Json& member : persistent["removed_entity_ids"])
+                {
+                    const Json wrapper = {{"value", member}};
+                    Sint32 id = 0;
+                    if (savedJsonInt(wrapper, "value", id) && id != 0)
+                    {
+                        state.removedEntityIDs.insert(id);
+                    }
+                }
+            }
+            if (persistent.contains("dynamic_monster_ids")
+                && persistent["dynamic_monster_ids"].is_array()
+                && persistent["dynamic_monster_ids"].size() <= 1048576)
+            {
+                for (const Json& member : persistent["dynamic_monster_ids"])
+                {
+                    const Json wrapper = {{"value", member}};
+                    Sint32 id = 0;
+                    if (savedJsonInt(wrapper, "value", id) && id < 0)
+                    {
+                        state.dynamicMonsterIDs.insert(id);
+                        if (id > std::numeric_limits<Sint32>::min())
+                        {
+                            nextDynamicMonsterPersistentID = std::min(
+                                nextDynamicMonsterPersistentID,
+                                static_cast<Sint32>(id - 1)
+                            );
+                        }
+                    }
+                }
+            }
+            if (persistent.contains("tile_states")
+                && persistent["tile_states"].is_array()
+                && persistent["tile_states"].size() <= 1048576)
+            {
+                for (const Json& savedTile : persistent["tile_states"])
+                {
+                    PersistentTileState tile;
+                    if (!savedJsonInt(savedTile, "x", tile.x)
+                        || !savedJsonInt(savedTile, "y", tile.y)
+                        || !savedJsonInt(savedTile, "layer", tile.layer)
+                        || !savedJsonInt(savedTile, "tile", tile.tile)
+                        || tile.x < 0 || tile.y < 0
+                        || tile.x > std::numeric_limits<Uint16>::max()
+                        || tile.y > std::numeric_limits<Uint16>::max()
+                        || tile.layer < 0 || tile.layer >= MAPLAYERS)
+                    {
+                        continue;
+                    }
+                    state.tileStates[makePersistentTileKey(
+                        tile.x, tile.y, tile.layer
+                    )] = tile;
+                    ++restoredTiles;
+                }
+            }
+            if (persistent.contains("dynamic_world_items")
+                && persistent["dynamic_world_items"].is_array()
+                && persistent["dynamic_world_items"].size() <= 65536)
+            {
+                for (const Json& savedItem : persistent["dynamic_world_items"])
+                {
+                    PersistentWorldItemState item;
+                    if (!savedJsonInt(savedItem, "legacy_type", item.type)
+                        || !savedJsonInt(savedItem, "status", item.status)
+                        || !savedJsonInt(savedItem, "beatitude", item.beatitude)
+                        || !savedJsonInt(savedItem, "count", item.count)
+                        || !savedJsonUint(savedItem, "appearance", item.appearance)
+                        || item.count <= 0
+                        || !savedJsonTriplet(savedItem, "position", item.x, item.y, item.z)
+                        || !savedJsonTriplet(
+                            savedItem, "rotation", item.yaw, item.pitch, item.roll
+                        )
+                        || !savedJsonTriplet(
+                            savedItem, "velocity", item.velX, item.velY, item.velZ
+                        ))
+                    {
+                        continue;
+                    }
+                    if (savedItem.contains("stable_id")
+                        && savedItem["stable_id"].is_string()
+                        && savedItem["stable_id"].get<std::string>().size() <= 255)
+                    {
+                        item.stableId = savedItem["stable_id"].get<std::string>();
+                    }
+                    savedJsonBool(savedItem, "identified", item.identified);
+                    savedJsonInt(savedItem, "not_moving", item.itemNotMoving);
+                    savedJsonInt(savedItem, "sokoban_reward", item.itemSokobanReward);
+                    savedJsonInt(savedItem, "stolen", item.itemStolen);
+                    savedJsonInt(savedItem, "show_on_map", item.itemShowOnMap);
+                    savedJsonInt(savedItem, "pickup_delay", item.itemDelayMonsterPickingUp);
+                    savedJsonBool(savedItem, "passable", item.passable);
+                    savedJsonBool(savedItem, "invisible", item.invisible);
+                    savedJsonBool(savedItem, "burning", item.burning);
+                    savedJsonBool(savedItem, "burnable", item.burnable);
+                    state.dynamicWorldItems.push_back(std::move(item));
+                    ++restoredItems;
+                }
+            }
+            if (persistent.contains("dynamic_gold_bags")
+                && persistent["dynamic_gold_bags"].is_array()
+                && persistent["dynamic_gold_bags"].size() <= 65536)
+            {
+                for (const Json& savedGold : persistent["dynamic_gold_bags"])
+                {
+                    PersistentGoldBagState gold;
+                    if (!savedJsonInt(savedGold, "amount", gold.amount)
+                        || !savedJsonInt(savedGold, "bonus", gold.amountBonus)
+                        || gold.amount <= 0
+                        || !savedJsonTriplet(savedGold, "position", gold.x, gold.y, gold.z)
+                        || !savedJsonTriplet(
+                            savedGold, "rotation", gold.yaw, gold.pitch, gold.roll
+                        )
+                        || !savedJsonTriplet(
+                            savedGold, "velocity", gold.velX, gold.velY, gold.velZ
+                        ))
+                    {
+                        continue;
+                    }
+                    savedJsonInt(savedGold, "sokoban", gold.sokoban);
+                    savedJsonInt(savedGold, "bouncing", gold.bouncing);
+                    savedJsonInt(savedGold, "dropped_by_player", gold.droppedByPlayer);
+                    savedJsonBool(savedGold, "passable", gold.passable);
+                    savedJsonBool(savedGold, "invisible", gold.invisible);
+                    state.dynamicGoldBags.push_back(std::move(gold));
+                }
+            }
+            if (persistent.contains("dynamic_boulders")
+                && persistent["dynamic_boulders"].is_array()
+                && persistent["dynamic_boulders"].size() <= 65536)
+            {
+                for (const Json& savedBoulder : persistent["dynamic_boulders"])
+                {
+                    PersistentBoulderState boulder;
+                    if (!savedJsonInt(
+                            savedBoulder,
+                            "source_trap_id",
+                            boulder.sourceTrapPersistentID
+                        )
+                        || !savedJsonInt(savedBoulder, "sprite", boulder.sprite)
+                        || !savedJsonTriplet(
+                            savedBoulder, "position", boulder.x, boulder.y, boulder.z
+                        )
+                        || !savedJsonTriplet(
+                            savedBoulder,
+                            "rotation",
+                            boulder.yaw,
+                            boulder.pitch,
+                            boulder.roll
+                        )
+                        || !savedJsonTriplet(
+                            savedBoulder,
+                            "velocity",
+                            boulder.velX,
+                            boulder.velY,
+                            boulder.velZ
+                        ))
+                    {
+                        continue;
+                    }
+                    savedJsonInt(savedBoulder, "stopped", boulder.stopped);
+                    savedJsonInt(savedBoulder, "no_ground", boulder.noGround);
+                    savedJsonInt(savedBoulder, "rolling", boulder.rolling);
+                    savedJsonInt(
+                        savedBoulder, "roll_direction", boulder.rollDirection
+                    );
+                    savedJsonInt(
+                        savedBoulder, "destination_x", boulder.destinationX
+                    );
+                    savedJsonInt(
+                        savedBoulder, "destination_y", boulder.destinationY
+                    );
+                    savedJsonInt(savedBoulder, "initialized", boulder.initialized);
+                    savedJsonInt(
+                        savedBoulder,
+                        "lava_explode_timer",
+                        boulder.lavaExplodeTimer
+                    );
+                    savedJsonBool(savedBoulder, "passable", boulder.passable);
+                    state.dynamicBoulders.push_back(std::move(boulder));
+                }
+            }
+            if (persistent.contains("mechanisms")
+                && persistent["mechanisms"].is_array()
+                && persistent["mechanisms"].size() <= 1048576)
+            {
+                for (const Json& savedMechanism : persistent["mechanisms"])
+                {
+                    Sint32 persistentId = 0;
+                    PersistentMechanismState mechanism;
+                    if (restoreMechanismState(
+                            savedMechanism,
+                            persistentId,
+                            mechanism
+                        ))
+                    {
+                        state.mechanismStates[persistentId] =
+                            std::move(mechanism);
+                    }
+                }
+            }
+            if (persistent.contains("minimap") && persistent["minimap"].is_array()
+                && persistent["minimap"].size()
+                    <= MINIMAP_MAX_DIMENSION * MINIMAP_MAX_DIMENSION)
+            {
+                std::vector<Sint8> minimapState;
+                minimapState.reserve(persistent["minimap"].size());
+                bool valid = true;
+                for (const Json& member : persistent["minimap"])
+                {
+                    const Json wrapper = {{"value", member}};
+                    Sint32 value = 0;
+                    if (!savedJsonInt(wrapper, "value", value)
+                        || value < std::numeric_limits<Sint8>::min()
+                        || value > std::numeric_limits<Sint8>::max())
+                    {
+                        valid = false;
+                        break;
+                    }
+                    minimapState.push_back(static_cast<Sint8>(value));
+                }
+                if (valid)
+                {
+                    persistentMinimapRegistry[identity.key()] = std::move(minimapState);
+                }
+            }
+            ++restoredMaps;
+        }
+    }
+
+    restoreSavedVariables(
+        preservedAutomatiaWorldDocument,
+        "world_variables",
+        persistentWorldStoryState.worldVariables
+    );
+    restoreSavedStringSet(
+        preservedAutomatiaWorldDocument,
+        "world_flags",
+        persistentWorldStoryState.worldFlags
+    );
+    if (preservedAutomatiaWorldDocument.contains("quests")
+        && preservedAutomatiaWorldDocument["quests"].is_object()
+        && preservedAutomatiaWorldDocument["quests"].size() <= 65536)
+    {
+        for (auto member = preservedAutomatiaWorldDocument["quests"].begin();
+            member != preservedAutomatiaWorldDocument["quests"].end(); ++member)
+        {
+            if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+            {
+                continue;
+            }
+            PersistentQuestState quest;
+            savedJsonBool(member.value(), "started", quest.started);
+            savedJsonBool(member.value(), "accepted", quest.accepted);
+            savedJsonBool(member.value(), "completed", quest.completed);
+            savedJsonBool(member.value(), "failed", quest.failed);
+            savedJsonInt(member.value(), "stage", quest.stage);
+            restoreSavedVariables(member.value(), "variables", quest.variables);
+            restoreSavedStringSet(member.value(), "flags", quest.flags);
+            restoreSavedStringSet(
+                member.value(), "completed_objectives", quest.completedObjectives
+            );
+            restoreSavedStringSet(member.value(), "used_choices", quest.usedChoices);
+            persistentWorldStoryState.quests[member.key()] = std::move(quest);
+        }
+    }
+    if (preservedAutomatiaWorldDocument.contains("dialogue")
+        && preservedAutomatiaWorldDocument["dialogue"].is_object()
+        && preservedAutomatiaWorldDocument["dialogue"].size() <= 65536)
+    {
+        for (auto member = preservedAutomatiaWorldDocument["dialogue"].begin();
+            member != preservedAutomatiaWorldDocument["dialogue"].end(); ++member)
+        {
+            if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+            {
+                continue;
+            }
+            PersistentNPCDialogueState dialogue;
+            if (member.value().contains("dialogue_id")
+                && member.value()["dialogue_id"].is_string()
+                && member.value()["dialogue_id"].get<std::string>().size() <= 255)
+            {
+                dialogue.dialogueID =
+                    member.value()["dialogue_id"].get<std::string>();
+            }
+            savedJsonInt(member.value(), "current_node", dialogue.currentNode);
+            savedJsonBool(
+                member.value(), "conversation_started", dialogue.conversationStarted
+            );
+            savedJsonBool(member.value(), "reward_given", dialogue.rewardGiven);
+            restoreSavedVariables(member.value(), "variables", dialogue.variables);
+            restoreSavedStringSet(member.value(), "flags", dialogue.flags);
+            restoreSavedStringSet(member.value(), "used_choices", dialogue.usedChoices);
+            restoreSavedStringSet(member.value(), "seen_nodes", dialogue.seenNodes);
+            persistentWorldStoryState.npcDialogueStates[member.key()] =
+                std::move(dialogue);
+        }
+    }
+    if (preservedAutomatiaWorldDocument.contains("players")
+        && preservedAutomatiaWorldDocument["players"].is_array()
+        && preservedAutomatiaWorldDocument["players"].size() <= MAXPLAYERS)
+    {
+        for (const Json& savedPlayer : preservedAutomatiaWorldDocument["players"])
+        {
+            Sint32 slot = -1;
+            if (!savedJsonInt(savedPlayer, "slot", slot)
+                || slot < 0 || slot >= MAXPLAYERS
+                || !savedPlayer.contains("map_file")
+                || !savedPlayer["map_file"].is_string()
+                || !savedPlayer.contains("instance_id")
+                || !savedPlayer["instance_id"].is_string())
+            {
+                continue;
+            }
+			if (headless && multiplayer == SERVER && slot == 0)
+			{
+				continue;
+			}
+            AutomatiaSavedPlayerPlacement placement;
+            if (!placement.identity.set(
+                    savedPlayer["map_file"].get<std::string>(),
+                    savedPlayer["instance_id"].get<std::string>()
+                ))
+            {
+                continue;
+            }
+            if (savedPlayer.contains("revision")
+                && savedPlayer["revision"].is_number_unsigned())
+            {
+                placement.identity.revision =
+                    savedPlayer["revision"].get<std::uint64_t>();
+            }
+            placement.hasPosition = savedJsonTriplet(
+                savedPlayer,
+                "position",
+                placement.x,
+                placement.y,
+                placement.z
+            );
+            savedJsonTriplet(
+                savedPlayer,
+                "rotation",
+                placement.yaw,
+                placement.pitch,
+                placement.roll
+            );
+            placement.pending = true;
+            automatiaSavedPlayerPlacements[slot] = std::move(placement);
+        }
+    }
+    printlog(
+        "[Automatia Save] Restored %zu map record(s), %zu tile override(s), %zu dynamic item(s), %zu quest(s), and %zu dialogue record(s).",
+        restoredMaps,
+        restoredTiles,
+        restoredItems,
+        persistentWorldStoryState.quests.size(),
+        persistentWorldStoryState.npcDialogueStates.size()
+    );
+}
+}
+
+void applyAutomatiaSavedPlayerPlacements()
+{
+    const WorldInstanceIdentity* activeIdentity = worldState.activeIdentity();
+    if (!activeIdentity)
+    {
+        return;
+    }
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+		if (headless && multiplayer == SERVER && playerIndex == 0)
+		{
+			continue;
+		}
+        AutomatiaSavedPlayerPlacement& placement =
+            automatiaSavedPlayerPlacements[playerIndex];
+        if (!placement.pending
+            || !placement.identity.matches(*activeIdentity)
+            || !players[playerIndex]
+            || !players[playerIndex]->entity)
+        {
+            continue;
+        }
+        Entity& entity = *players[playerIndex]->entity;
+        bool savedTilePassable = false;
+        if (placement.hasPosition
+            && placement.x >= 0.0
+            && placement.y >= 0.0
+            && placement.x < map.width * 16.0
+            && placement.y < map.height * 16.0)
+        {
+            const Sint32 tileX = static_cast<Sint32>(placement.x / 16.0);
+            const Sint32 tileY = static_cast<Sint32>(placement.y / 16.0);
+            const std::size_t obstacleIndex =
+                OBSTACLELAYER
+                + tileY * MAPLAYERS
+                + tileX * MAPLAYERS * map.height;
+            savedTilePassable = map.tiles && map.tiles[obstacleIndex] == 0;
+        }
+        if (placement.hasPosition
+            && savedTilePassable)
+        {
+            entity.x = placement.x;
+            entity.y = placement.y;
+            entity.z = placement.z;
+            entity.yaw = placement.yaw;
+            entity.pitch = placement.pitch;
+            entity.roll = placement.roll;
+            entity.new_x = entity.x;
+            entity.new_y = entity.y;
+            entity.new_z = entity.z;
+            entity.new_yaw = entity.yaw;
+            entity.vel_x = 0.0;
+            entity.vel_y = 0.0;
+            entity.vel_z = 0.0;
+            entity.bNeedsRenderPositionInit = true;
+            for (Entity* bodypart : entity.bodyparts)
+            {
+                if (bodypart)
+                {
+                    bodypart->bNeedsRenderPositionInit = true;
+                }
+            }
+        }
+        worldState.placePlayer(playerIndex, map);
+        placement.pending = false;
+    }
+}
+
+bool automatiaHasSavedPlayerPlacement(int playerIndex)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+    {
+        return false;
+    }
+    const AutomatiaSavedPlayerPlacement& placement =
+        automatiaSavedPlayerPlacements[playerIndex];
+    return placement.pending && placement.identity.isValid();
+}
+
+void consumeAutomatiaSavedPlayerPlacement(int playerIndex)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+    {
+        return;
+    }
+    automatiaSavedPlayerPlacements[playerIndex].pending = false;
+}
+
+bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS])
+{
+    if (!playerSpawnMask)
+    {
+        return false;
+    }
+    std::fill(playerSpawnMask, playerSpawnMask + MAXPLAYERS, true);
+    const WorldInstanceIdentity* activeIdentity = worldState.activeIdentity();
+    if (!activeIdentity || multiplayer == CLIENT)
+    {
+        return false;
+    }
+
+    bool hasSavedPlacements = false;
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+		if (headless && multiplayer == SERVER && playerIndex == 0)
+		{
+			playerSpawnMask[playerIndex] = false;
+			continue;
+		}
+        AutomatiaSavedPlayerPlacement& placement =
+            automatiaSavedPlayerPlacements[playerIndex];
+        if (!placement.pending || !placement.identity.isValid())
+        {
+            continue;
+        }
+        hasSavedPlacements = true;
+        const bool belongsToActiveMap =
+            placement.identity.matches(*activeIdentity);
+        playerSpawnMask[playerIndex] = belongsToActiveMap;
+        if (!belongsToActiveMap && players[playerIndex])
+        {
+            worldState.removePlayer(playerIndex);
+            players[playerIndex]->worldInstance = placement.identity;
+            players[playerIndex]->entity = nullptr;
+        }
+    }
+    return hasSavedPlacements;
+}
+
+bool restoreAutomatiaSavedPlayerInstances()
+{
+    if (multiplayer == CLIENT)
+    {
+        return false;
+    }
+    const WorldInstanceIdentity* initialIdentity = worldState.activeIdentity();
+    const std::string initialKey =
+        initialIdentity ? initialIdentity->key() : std::string{};
+    if (initialKey.empty())
+    {
+        return false;
+    }
+
+    std::vector<std::string> destinationKeys;
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+		if (headless && multiplayer == SERVER && playerIndex == 0)
+		{
+			continue;
+		}
+        const AutomatiaSavedPlayerPlacement& placement =
+            automatiaSavedPlayerPlacements[playerIndex];
+        if (!placement.pending
+            || !placement.identity.isValid()
+            || client_disconnected[playerIndex]
+            || !players[playerIndex]
+            || placement.identity.key() == initialKey)
+        {
+            continue;
+        }
+        if (std::find(destinationKeys.begin(), destinationKeys.end(),
+                placement.identity.key()) == destinationKeys.end())
+        {
+            destinationKeys.push_back(placement.identity.key());
+        }
+    }
+    std::sort(destinationKeys.begin(), destinationKeys.end());
+
+    bool restoredAny = false;
+    for (const std::string& destinationKey : destinationKeys)
+    {
+        AutomatiaSavedPlayerPlacement* representative = nullptr;
+        bool playerMask[MAXPLAYERS] = {};
+        for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+        {
+			if (headless && multiplayer == SERVER && playerIndex == 0)
+			{
+				continue;
+			}
+            AutomatiaSavedPlayerPlacement& placement =
+                automatiaSavedPlayerPlacements[playerIndex];
+            if (placement.pending
+                && placement.identity.key() == destinationKey
+                && !client_disconnected[playerIndex]
+                && players[playerIndex])
+            {
+                representative = &placement;
+                playerMask[playerIndex] = true;
+            }
+        }
+        if (!representative)
+        {
+            continue;
+        }
+
+        std::string error;
+        MapInstance* destination = worldState.find(destinationKey);
+        if (!destination || !destination->loadedMap)
+        {
+            const std::string fullMapPath = physfsFormatMapName(
+                representative->identity.mapFile.c_str()
+            );
+            if (fullMapPath.empty()
+                || !worldState.loadDetachedMap(
+                    fullMapPath,
+                    representative->identity.mapFile,
+                    representative->identity.instanceId,
+                    error))
+            {
+                printlog(
+                    "[Automatia Save] Could not load saved player instance '%s': %s.",
+                    destinationKey.c_str(),
+                    error.empty() ? "map file was not found" : error.c_str()
+                );
+                continue;
+            }
+            destination = worldState.find(destinationKey);
+        }
+        if (!destination || !worldState.activate(destinationKey))
+        {
+            printlog(
+                "[Automatia Save] Could not activate saved player instance '%s'.",
+                destinationKey.c_str()
+            );
+            continue;
+        }
+
+        numplayers = 0;
+        if (!destination->runtimeInitialized)
+        {
+            applyPersistentMapRemovals();
+            assignActions(&map, playerMask, true, false);
+            applyPersistentMechanismStates();
+            generatePathMaps();
+        }
+        else
+        {
+            assignActions(&map, playerMask, true, true);
+        }
+        applyAutomatiaSavedPlayerPlacements();
+
+        for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+        {
+            if (playerMask[playerIndex]
+                && players[playerIndex]
+                && players[playerIndex]->entity)
+            {
+                restoredAny = true;
+                printlog(
+                    "[Automatia Save] Restored player %d into '%s'.",
+                    playerIndex,
+                    destinationKey.c_str()
+                );
+            }
+        }
+    }
+
+    if (worldState.activeIdentity()
+        && worldState.activeIdentity()->key() != initialKey
+        && !worldState.activate(initialKey))
+    {
+        printlog(
+            "[Automatia Save] Warning: could not restore foreground instance '%s'.",
+            initialKey.c_str()
+        );
+    }
+    return restoredAny;
+}
+
+bool prepareAutomatiaLateJoinPlayer(
+    int playerIndex,
+    bool returningPlayer,
+    std::string& error
+)
+{
+    error.clear();
+    if (multiplayer != SERVER || playerIndex <= 0
+        || playerIndex >= MAXPLAYERS || !players[playerIndex])
+    {
+        error = "late-join player slot is invalid";
+        return false;
+    }
+    const WorldInstanceIdentity* initialIdentity = worldState.activeIdentity();
+    const std::string initialKey =
+        initialIdentity ? initialIdentity->key() : std::string{};
+    if (initialKey.empty())
+    {
+        error = "no foreground map instance is active";
+        return false;
+    }
+    auto restoreForeground = [&initialKey]()
+    {
+        if (!initialKey.empty() && worldState.activeIdentity()
+            && worldState.activeIdentity()->key() != initialKey)
+        {
+            worldState.activate(initialKey);
+        }
+    };
+
+    AutomatiaSavedPlayerPlacement& placement =
+        automatiaSavedPlayerPlacements[playerIndex];
+    if (returningPlayer
+        && (!placement.pending || !placement.identity.isValid()))
+    {
+        error = "returning player has no valid saved placement";
+        return false;
+    }
+    WorldInstanceIdentity destinationIdentity;
+    if (returningPlayer && placement.pending
+        && placement.identity.isValid())
+    {
+        destinationIdentity = placement.identity;
+    }
+    else
+    {
+        destinationIdentity = WorldInstanceIdentity{};
+        placement = AutomatiaSavedPlayerPlacement{};
+    }
+    const std::string destinationKey = destinationIdentity.key();
+    worldState.removePlayer(playerIndex);
+    players[playerIndex]->worldInstance = destinationIdentity;
+    players[playerIndex]->entity = nullptr;
+
+    MapInstance* destination = worldState.find(destinationKey);
+    if (!destination || !destination->loadedMap)
+    {
+        const std::string fullMapPath = physfsFormatMapName(
+            destinationIdentity.mapFile.c_str());
+        if (fullMapPath.empty()
+            || !worldState.loadDetachedMap(
+                fullMapPath,
+                destinationIdentity.mapFile,
+                destinationIdentity.instanceId,
+                error))
+        {
+            if (error.empty())
+            {
+                error = "late-join destination map could not be loaded";
+            }
+            restoreForeground();
+            return false;
+        }
+        destination = worldState.find(destinationKey);
+    }
+    if (!destination || !worldState.activate(destinationKey))
+    {
+        error = "late-join destination map could not be activated";
+        restoreForeground();
+        return false;
+    }
+
+    bool playerMask[MAXPLAYERS] = {};
+    playerMask[playerIndex] = true;
+    numplayers = 0;
+    if (!destination->runtimeInitialized)
+    {
+        applyPersistentMapRemovals();
+        assignActions(&map, playerMask, true, false);
+        applyPersistentMechanismStates();
+        generatePathMaps();
+    }
+    else
+    {
+        assignActions(&map, playerMask, true, true);
+    }
+    if (!players[playerIndex]->entity)
+    {
+        Entity* spawnAnchor = nullptr;
+		Entity* retainedPlayerStart = nullptr;
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* candidate = static_cast<Entity*>(node->element);
+			if (candidate && candidate->sprite == 1
+				&& candidate->behavior == nullptr)
+			{
+				retainedPlayerStart = candidate;
+				break;
+			}
+		}
+        for (int anchorPlayer = 0; anchorPlayer < MAXPLAYERS; ++anchorPlayer)
+        {
+            if (anchorPlayer == playerIndex || !players[anchorPlayer]
+                || !players[anchorPlayer]->entity
+                || players[anchorPlayer]->worldInstance.key() != destinationKey)
+            {
+                continue;
+            }
+            spawnAnchor = players[anchorPlayer]->entity;
+            break;
+        }
+		if (spawnAnchor || retainedPlayerStart)
+        {
+            Entity* fallbackStart = newEntity(1, 1, map.entities, nullptr);
+            if (fallbackStart)
+            {
+				fallbackStart->x = spawnAnchor
+					? spawnAnchor->x - 8.0
+					: retainedPlayerStart->x;
+				fallbackStart->y = spawnAnchor
+					? spawnAnchor->y - 8.0
+					: retainedPlayerStart->y;
+                fallbackStart->skill[2] = playerIndex;
+                fallbackStart->playerStartDir = -1;
+                numplayers = 0;
+                assignActions(&map, playerMask, true, true);
+                printlog(
+					"[Late Join] Player %d used the %s spawn fallback in '%s'.",
+                    playerIndex,
+					spawnAnchor ? "occupied-map" : "retained Player Start",
+                    destinationKey.c_str()
+                );
+            }
+        }
+    }
+    if (returningPlayer && placement.pending)
+    {
+        const AutomatiaSavedPlayerPlacement savedPlacement = placement;
+        applyAutomatiaSavedPlayerPlacements();
+        placement = savedPlacement;
+    }
+    else
+    {
+        worldState.placePlayer(playerIndex, map);
+    }
+    if (!players[playerIndex]->entity)
+    {
+        error = "late-join destination has no available Player Start";
+        worldState.removePlayer(playerIndex);
+        restoreForeground();
+        return false;
+    }
+
+    printlog(
+        "[Late Join] Prepared %s player %d in '%s'.",
+        returningPlayer ? "returning" : "new",
+        playerIndex,
+        destinationKey.c_str());
+    restoreForeground();
+    return true;
+}
+
 void resetPersistentWorldSession()
 {
     const size_t clearedMaps =
@@ -912,6 +2764,18 @@ void resetPersistentWorldSession()
         persistentWorldStoryState.worldFlags.size();
 
     persistentMapRemovalRegistry.clear();
+    worldState.clear();
+    for (AutomatiaSavedPlayerPlacement& placement : automatiaSavedPlayerPlacements)
+    {
+        placement = AutomatiaSavedPlayerPlacement{};
+    }
+    preservedAutomatiaWorldDocument = AutomatiaSave::Json{};
+    if (pendingAutomatiaWorldDocument.is_object())
+    {
+        preservedAutomatiaWorldDocument =
+            std::move(pendingAutomatiaWorldDocument);
+        pendingAutomatiaWorldDocument = AutomatiaSave::Json{};
+    }
 
 
     persistentMinimapRegistry.clear();
@@ -924,6 +2788,8 @@ void resetPersistentWorldSession()
     clientPersistentSnapshotReceiving = false;
     clientPersistentSnapshotComplete = false;
 
+    hydratePreservedAutomatiaWorldDocument();
+
     printlog(
         "[Persistent World] Reset session registry; cleared %zu map state record(s), %zu quest(s), %zu NPC dialogue memory record(s), %zu world variable(s), and %zu world flag(s).",
         clearedMaps,
@@ -934,74 +2800,8 @@ void resetPersistentWorldSession()
     );
 }
 /*
- * Produce a consistent key for the currently loaded map.
- *
- * map.filename is preferred because map.name can be blank or can be a
- * display name rather than the actual .lmp filename.
- */
-static std::string getPersistentMapKey()
-{
-    std::string key;
-
-    if ( map.filename[0] != '\0' )
-    {
-        key = map.filename;
-    }
-    else if ( map.name[0] != '\0' )
-    {
-        key = map.name;
-    }
-    else
-    {
-        printlog(
-            "[Persistent World] Warning: current map has no filename or map name."
-        );
-
-        return "";
-    }
-
-    // Normalize path separators.
-    std::replace(
-        key.begin(),
-        key.end(),
-        '\\',
-        '/'
-    );
-
-    // Keep only the filename, not an absolute or data-directory path.
-    const size_t lastSlash =
-        key.find_last_of('/');
-
-    if ( lastSlash != std::string::npos )
-    {
-        key = key.substr(lastSlash + 1);
-    }
-
-    // Make case differences irrelevant.
-    std::transform(
-        key.begin(),
-        key.end(),
-        key.begin(),
-        [](unsigned char character)
-        {
-            return static_cast<char>(
-                std::tolower(character)
-            );
-        }
-    );
-
-    // Ensure manually loaded names use the same extension form.
-    if ( key.length() < 4
-        || key.substr(key.length() - 4) != ".lmp" )
-    {
-        key += ".lmp";
-    }
-
-    return key;
-}
-/*
- * Normalize an explicit map name using the same format as
- * getPersistentMapKey().
+ * Normalize either a legacy map filename or a canonical map-instance key.
+ * Legacy callers intentionally resolve to the shared "world" instance.
  */
 static std::string normalizePersistentMapKey(
     std::string key
@@ -1012,40 +2812,643 @@ static std::string normalizePersistentMapKey(
         return "";
     }
 
-    std::replace(
-        key.begin(),
-        key.end(),
-        '\\',
-        '/'
-    );
-
-    const size_t lastSlash =
-        key.find_last_of('/');
-
-    if ( lastSlash != std::string::npos )
+    std::string instanceId = "world";
+    const size_t separator = key.find('#');
+    if ( separator != std::string::npos )
     {
-        key = key.substr(lastSlash + 1);
+        if ( key.find('#', separator + 1) != std::string::npos )
+        {
+            return "";
+        }
+        instanceId = key.substr(separator + 1);
+        key = key.substr(0, separator);
     }
 
-    std::transform(
-        key.begin(),
-        key.end(),
-        key.begin(),
-        [](unsigned char character)
+    WorldInstanceIdentity identity;
+    if ( !identity.set(
+            WorldInstanceIdentity::canonicalMapFile(key),
+            instanceId
+        ) )
+    {
+        return "";
+    }
+    return identity.key();
+}
+
+static bool captureAutomatiaPersistentWorldDocument(
+    const std::string& sessionId,
+    AutomatiaSave::Json& capturedDocument,
+    std::string& error
+)
+{
+    using AutomatiaSave::Json;
+
+    const WorldInstanceIdentity* foregroundIdentity =
+        worldState.activeIdentity();
+    const std::string foregroundKey =
+        foregroundIdentity ? foregroundIdentity->key() : std::string{};
+    if (map.tiles && map.entities && foregroundIdentity)
+    {
+        for (const MapInstanceSummary& summary : worldState.instanceSummaries())
         {
-            return static_cast<char>(
-                std::tolower(character)
+            if (!summary.loaded)
+            {
+                continue;
+            }
+            if (!worldState.activate(summary.identity.key()))
+            {
+                error = "unable to activate map instance for save capture: "
+                    + summary.identity.key();
+                if (!foregroundKey.empty())
+                {
+                    worldState.activate(foregroundKey);
+                }
+                return false;
+            }
+            capturePersistentMinimap();
+            capturePersistentMechanismStates();
+            capturePersistentMapRemovals();
+        }
+        if (!foregroundKey.empty()
+            && !worldState.activate(foregroundKey))
+        {
+            error = "unable to restore foreground map after save capture";
+            return false;
+        }
+    }
+
+    Json runtimeDocument = AutomatiaSave::captureWorldState(sessionId, worldState);
+    Json document = preservedAutomatiaWorldDocument.is_object()
+        ? preservedAutomatiaWorldDocument
+        : AutomatiaSave::makeEmptyWorldSave(sessionId);
+    for (auto member = runtimeDocument.begin(); member != runtimeDocument.end(); ++member)
+    {
+        if (member.key() != "map_instances")
+        {
+            document[member.key()] = member.value();
+        }
+    }
+
+    Json mergedMaps = Json::array();
+    auto mapKeyFor = [](const Json& mapEntry) -> std::string
+    {
+        if (!mapEntry.is_object()
+            || !mapEntry.contains("map_file")
+            || !mapEntry["map_file"].is_string()
+            || !mapEntry.contains("instance_id")
+            || !mapEntry["instance_id"].is_string())
+        {
+            return "";
+        }
+        return mapEntry["map_file"].get<std::string>()
+            + "#"
+            + mapEntry["instance_id"].get<std::string>();
+    };
+    for (const Json& runtimeMap : runtimeDocument["map_instances"])
+    {
+        Json mergedMap = Json::object();
+        if (preservedAutomatiaWorldDocument.contains("map_instances")
+            && preservedAutomatiaWorldDocument["map_instances"].is_array())
+        {
+            for (const Json& oldMap : preservedAutomatiaWorldDocument["map_instances"])
+            {
+                if (mapKeyFor(oldMap) == mapKeyFor(runtimeMap))
+                {
+                    mergedMap = oldMap;
+                    break;
+                }
+            }
+        }
+        mergedMap.update(runtimeMap);
+        mergedMaps.push_back(std::move(mergedMap));
+    }
+    if (preservedAutomatiaWorldDocument.contains("map_instances")
+        && preservedAutomatiaWorldDocument["map_instances"].is_array())
+    {
+        for (const Json& oldMap : preservedAutomatiaWorldDocument["map_instances"])
+        {
+            bool alreadyPresent = false;
+            for (const Json& mergedMap : mergedMaps)
+            {
+                if (mapKeyFor(mergedMap) == mapKeyFor(oldMap))
+                {
+                    alreadyPresent = true;
+                    break;
+                }
+            }
+            if (!alreadyPresent)
+            {
+                mergedMaps.push_back(oldMap);
+            }
+        }
+    }
+    document["map_instances"] = std::move(mergedMaps);
+    document["saved_at_unix_ms"] =
+        static_cast<std::uint64_t>(std::time(nullptr)) * 1000ULL;
+
+    auto sortedIntegerSet = [](const auto& values)
+    {
+        std::vector<Sint32> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    };
+    auto sortedStringSet = [](const auto& values)
+    {
+        std::vector<std::string> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    };
+
+    std::vector<std::string> mapKeys;
+    mapKeys.reserve(persistentMapRemovalRegistry.size());
+    for (const auto& entry : persistentMapRemovalRegistry)
+    {
+        mapKeys.push_back(entry.first);
+    }
+    std::sort(mapKeys.begin(), mapKeys.end());
+
+    for (const std::string& mapKey : mapKeys)
+    {
+        const PersistentMapRemovalState& state =
+            persistentMapRemovalRegistry.at(mapKey);
+        Json* mapDocument = nullptr;
+        for (Json& candidate : document["map_instances"])
+        {
+            if (candidate["map_file"].get<std::string>()
+                    + "#"
+                    + candidate["instance_id"].get<std::string>()
+                == mapKey)
+            {
+                mapDocument = &candidate;
+                break;
+            }
+        }
+        if (!mapDocument)
+        {
+            const std::size_t separator = mapKey.find('#');
+            if (separator == std::string::npos)
+            {
+                continue;
+            }
+            document["map_instances"].push_back(Json{
+                {"map_file", mapKey.substr(0, separator)},
+                {"instance_id", mapKey.substr(separator + 1)},
+                {"revision", 0},
+                {"loaded", false},
+                {"persistent_state", Json::object()}
+            });
+            mapDocument = &document["map_instances"].back();
+        }
+
+        Json persistent = mapDocument->contains("persistent_state")
+            && (*mapDocument)["persistent_state"].is_object()
+            ? (*mapDocument)["persistent_state"]
+            : Json::object();
+        persistent["removed_entity_ids"] =
+            sortedIntegerSet(state.removedEntityIDs);
+        persistent["dynamic_monster_ids"] =
+            sortedIntegerSet(state.dynamicMonsterIDs);
+
+        persistent["tile_states"] = Json::array();
+        std::vector<PersistentTileState> tiles;
+        tiles.reserve(state.tileStates.size());
+        for (const auto& tile : state.tileStates)
+        {
+            tiles.push_back(tile.second);
+        }
+        std::sort(
+            tiles.begin(),
+            tiles.end(),
+            [](const PersistentTileState& first, const PersistentTileState& second)
+            {
+                if (first.x != second.x) { return first.x < second.x; }
+                if (first.y != second.y) { return first.y < second.y; }
+                return first.layer < second.layer;
+            }
+        );
+        for (const PersistentTileState& tile : tiles)
+        {
+            persistent["tile_states"].push_back(Json{
+                {"x", tile.x},
+                {"y", tile.y},
+                {"layer", tile.layer},
+                {"tile", tile.tile}
+            });
+        }
+
+        persistent["dynamic_world_items"] = Json::array();
+        for (const PersistentWorldItemState& item : state.dynamicWorldItems)
+        {
+            persistent["dynamic_world_items"].push_back(Json{
+                {"stable_id", item.stableId},
+                {"legacy_type", item.type},
+                {"status", item.status},
+                {"beatitude", item.beatitude},
+                {"count", item.count},
+                {"appearance", item.appearance},
+                {"identified", item.identified},
+                {"position", {item.x, item.y, item.z}},
+                {"rotation", {item.yaw, item.pitch, item.roll}},
+                {"velocity", {item.velX, item.velY, item.velZ}},
+                {"not_moving", item.itemNotMoving},
+                {"sokoban_reward", item.itemSokobanReward},
+                {"stolen", item.itemStolen},
+                {"show_on_map", item.itemShowOnMap},
+                {"pickup_delay", item.itemDelayMonsterPickingUp},
+                {"passable", item.passable},
+                {"invisible", item.invisible},
+                {"burning", item.burning},
+                {"burnable", item.burnable}
+            });
+        }
+
+        persistent["dynamic_gold_bags"] = Json::array();
+        for (const PersistentGoldBagState& gold : state.dynamicGoldBags)
+        {
+            persistent["dynamic_gold_bags"].push_back(Json{
+                {"amount", gold.amount},
+                {"bonus", gold.amountBonus},
+                {"sokoban", gold.sokoban},
+                {"bouncing", gold.bouncing},
+                {"dropped_by_player", gold.droppedByPlayer},
+                {"position", {gold.x, gold.y, gold.z}},
+                {"rotation", {gold.yaw, gold.pitch, gold.roll}},
+                {"velocity", {gold.velX, gold.velY, gold.velZ}},
+                {"passable", gold.passable},
+                {"invisible", gold.invisible}
+            });
+        }
+
+        persistent["dynamic_boulders"] = Json::array();
+        for (const PersistentBoulderState& boulder : state.dynamicBoulders)
+        {
+            persistent["dynamic_boulders"].push_back(Json{
+                {"source_trap_id", boulder.sourceTrapPersistentID},
+                {"sprite", boulder.sprite},
+                {"position", {boulder.x, boulder.y, boulder.z}},
+                {"rotation", {boulder.yaw, boulder.pitch, boulder.roll}},
+                {"velocity", {boulder.velX, boulder.velY, boulder.velZ}},
+                {"stopped", boulder.stopped},
+                {"no_ground", boulder.noGround},
+                {"rolling", boulder.rolling},
+                {"roll_direction", boulder.rollDirection},
+                {"destination_x", boulder.destinationX},
+                {"destination_y", boulder.destinationY},
+                {"initialized", boulder.initialized},
+                {"lava_explode_timer", boulder.lavaExplodeTimer},
+                {"passable", boulder.passable}
+            });
+        }
+
+        persistent["mechanisms"] = Json::array();
+        std::vector<Sint32> mechanismIds;
+        mechanismIds.reserve(state.mechanismStates.size());
+        for (const auto& mechanism : state.mechanismStates)
+        {
+            mechanismIds.push_back(mechanism.first);
+        }
+        std::sort(mechanismIds.begin(), mechanismIds.end());
+        for (const Sint32 id : mechanismIds)
+        {
+            const PersistentMechanismState& mechanism = state.mechanismStates.at(id);
+            persistent["mechanisms"].push_back(
+                saveMechanismState(id, mechanism)
             );
         }
-    );
 
-    if ( key.length() < 4
-        || key.substr(key.length() - 4) != ".lmp" )
-    {
-        key += ".lmp";
+        const auto minimap = persistentMinimapRegistry.find(mapKey);
+        if (minimap != persistentMinimapRegistry.end())
+        {
+            persistent["minimap"] = minimap->second;
+        }
+        (*mapDocument)["persistent_state"] = std::move(persistent);
     }
 
-    return key;
+    document["quests"] = Json::object();
+    for (const auto& entry : persistentWorldStoryState.quests)
+    {
+        const PersistentQuestState& quest = entry.second;
+        document["quests"][entry.first] = Json{
+            {"started", quest.started},
+            {"accepted", quest.accepted},
+            {"completed", quest.completed},
+            {"failed", quest.failed},
+            {"stage", quest.stage},
+            {"variables", quest.variables},
+            {"flags", sortedStringSet(quest.flags)},
+            {"completed_objectives", sortedStringSet(quest.completedObjectives)},
+            {"used_choices", sortedStringSet(quest.usedChoices)}
+        };
+    }
+    document["world_variables"] = persistentWorldStoryState.worldVariables;
+    document["world_flags"] =
+        sortedStringSet(persistentWorldStoryState.worldFlags);
+    document["dialogue"] = Json::object();
+    for (const auto& entry : persistentWorldStoryState.npcDialogueStates)
+    {
+        const PersistentNPCDialogueState& dialogue = entry.second;
+        document["dialogue"][entry.first] = Json{
+            {"dialogue_id", dialogue.dialogueID},
+            {"current_node", dialogue.currentNode},
+            {"conversation_started", dialogue.conversationStarted},
+            {"reward_given", dialogue.rewardGiven},
+            {"variables", dialogue.variables},
+            {"flags", sortedStringSet(dialogue.flags)},
+            {"used_choices", sortedStringSet(dialogue.usedChoices)},
+            {"seen_nodes", sortedStringSet(dialogue.seenNodes)}
+        };
+    }
+
+    document["players"] = Json::array();
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+		if (headless && multiplayer == SERVER && playerIndex == 0)
+		{
+			continue;
+		}
+        const AutomatiaSavedPlayerPlacement& placement =
+            automatiaSavedPlayerPlacements[playerIndex];
+        if (placement.pending && placement.identity.isValid())
+        {
+            Json savedPlayer = {
+                {"player_id", "slot:" + std::to_string(playerIndex)},
+                {"identity_kind", "session_slot"},
+                {"slot", playerIndex},
+                {"map_file", placement.identity.mapFile},
+                {"instance_id", placement.identity.instanceId},
+                {"revision", placement.identity.revision}
+            };
+            if (placement.hasPosition)
+            {
+                savedPlayer["position"] = {
+                    placement.x, placement.y, placement.z
+                };
+                savedPlayer["rotation"] = {
+                    placement.yaw, placement.pitch, placement.roll
+                };
+            }
+            document["players"].push_back(std::move(savedPlayer));
+            continue;
+        }
+        if (!players[playerIndex]
+            || (client_disconnected[playerIndex]
+                && !players[playerIndex]->was_connected_to_game)
+            || !players[playerIndex]->worldInstance.isValid())
+        {
+            continue;
+        }
+        Json savedPlayer = {
+            {"player_id", "slot:" + std::to_string(playerIndex)},
+            {"identity_kind", "session_slot"},
+            {"slot", playerIndex},
+            {"map_file", players[playerIndex]->worldInstance.mapFile},
+            {"instance_id", players[playerIndex]->worldInstance.instanceId},
+            {"revision", players[playerIndex]->worldInstance.revision}
+        };
+        Entity* savedEntity = worldState.playerEntityFor(
+            players[playerIndex]->worldInstance.key(),
+            playerIndex
+        );
+        if (savedEntity)
+        {
+            const Entity& entity = *savedEntity;
+            savedPlayer["position"] = {entity.x, entity.y, entity.z};
+            savedPlayer["rotation"] = {entity.yaw, entity.pitch, entity.roll};
+        }
+        document["players"].push_back(std::move(savedPlayer));
+    }
+
+    const AutomatiaSave::Result validation =
+        AutomatiaSave::validate(document);
+    if (!validation.ok)
+    {
+        error = validation.error;
+        return false;
+    }
+    capturedDocument = std::move(document);
+    error.clear();
+    return true;
+}
+
+bool serializeAutomatiaPersistentWorldSnapshot(
+    const std::string& sessionId,
+    std::string& snapshot,
+    std::string& error
+)
+{
+    AutomatiaSave::Json document;
+    if (!captureAutomatiaPersistentWorldDocument(
+            sessionId, document, error))
+    {
+        snapshot.clear();
+        return false;
+    }
+
+    /*
+     * A late-joining client receives only its selected map instance. Global
+     * story state remains in the envelope, but persistent entities, map tiles,
+     * occupants, and player placements from unrelated instances must not leak
+     * into the snapshot or be hydrated accidentally.
+     */
+    if (!document.contains("active_instance")
+        || !document["active_instance"].is_string())
+    {
+        snapshot.clear();
+        error = "persistent-world snapshot has no active map instance";
+        return false;
+    }
+    const std::string activeInstance =
+        document["active_instance"].get<std::string>();
+    const std::size_t separator = activeInstance.find('#');
+    if (separator == std::string::npos)
+    {
+        snapshot.clear();
+        error = "persistent-world snapshot has an invalid active map instance";
+        return false;
+    }
+    const std::string activeMapFile = activeInstance.substr(0, separator);
+    const std::string activeInstanceId = activeInstance.substr(separator + 1);
+    AutomatiaSave::Json scopedMaps = AutomatiaSave::Json::array();
+    for (const AutomatiaSave::Json& savedMap : document["map_instances"])
+    {
+        if (savedMap.value("map_file", std::string{}) == activeMapFile
+            && savedMap.value("instance_id", std::string{}) == activeInstanceId)
+        {
+            scopedMaps.push_back(savedMap);
+        }
+    }
+    if (scopedMaps.size() != 1)
+    {
+        snapshot.clear();
+        error = "active map instance is missing or duplicated in snapshot";
+        return false;
+    }
+    document["map_instances"] = std::move(scopedMaps);
+    AutomatiaSave::Json scopedPlayers = AutomatiaSave::Json::array();
+    for (const AutomatiaSave::Json& savedPlayer : document["players"])
+    {
+        if (savedPlayer.value("map_file", std::string{}) == activeMapFile
+            && savedPlayer.value("instance_id", std::string{}) == activeInstanceId)
+        {
+            scopedPlayers.push_back(savedPlayer);
+        }
+    }
+    document["players"] = std::move(scopedPlayers);
+    document["snapshot_scope"] = "map_instance";
+#ifdef SAM_FRAMEWORK_ENABLED
+    document["sam_fingerprint"] = SAMSync::generateFingerprint();
+#endif
+    try
+    {
+        snapshot = document.dump();
+    }
+    catch (const std::exception& exception)
+    {
+        snapshot.clear();
+        error = "unable to serialize persistent-world snapshot: "
+            + std::string(exception.what());
+        return false;
+    }
+    constexpr std::size_t maxLateJoinSnapshotBytes =
+        16U * 1024U * 1024U;
+    if (snapshot.empty() || snapshot.size() > maxLateJoinSnapshotBytes)
+    {
+        snapshot.clear();
+        error = "persistent-world snapshot exceeds the 16 MiB late-join limit";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool writeAutomatiaPersistentWorldSave(
+    const char* path,
+    const std::string& sessionId,
+    std::string& error
+)
+{
+    AutomatiaSave::Json document;
+    if (!captureAutomatiaPersistentWorldDocument(
+            sessionId, document, error))
+    {
+        return false;
+    }
+    const AutomatiaSave::Result result =
+        AutomatiaSave::writeAtomic(path, document);
+    if (result.ok)
+    {
+        preservedAutomatiaWorldDocument = document;
+    }
+    error = result.error;
+    return result.ok;
+}
+
+static bool stageAutomatiaPersistentWorldDocument(
+    AutomatiaSave::Json document,
+    const std::string& sessionId,
+    std::string& error
+)
+{
+    const AutomatiaSave::Result validation = AutomatiaSave::validate(document);
+    if (!validation.ok)
+    {
+        error = validation.error;
+        return false;
+    }
+    if (document["session_id"].get<std::string>() != sessionId)
+    {
+        error = "world save session ID does not match the character save";
+        return false;
+    }
+    pendingAutomatiaWorldDocument = std::move(document);
+    error.clear();
+    return true;
+}
+
+bool stageAutomatiaPersistentWorldSnapshot(
+    const std::string& snapshot,
+    const std::string& sessionId,
+    std::string& error
+)
+{
+    constexpr std::size_t maxLateJoinSnapshotBytes =
+        16U * 1024U * 1024U;
+    if (snapshot.empty() || snapshot.size() > maxLateJoinSnapshotBytes)
+    {
+        error = "persistent-world snapshot is empty or exceeds 16 MiB";
+        return false;
+    }
+    AutomatiaSave::Json document;
+    try
+    {
+        document = AutomatiaSave::Json::parse(snapshot);
+    }
+    catch (const std::exception& exception)
+    {
+        error = "unable to parse persistent-world snapshot: "
+            + std::string(exception.what());
+        return false;
+    }
+#ifdef SAM_FRAMEWORK_ENABLED
+    if (!document.contains("sam_fingerprint")
+        || !document["sam_fingerprint"].is_string()
+        || document["sam_fingerprint"].get<std::string>()
+            != SAMSync::generateFingerprint())
+    {
+        error = "persistent-world snapshot S.A.M. fingerprint does not match";
+        return false;
+    }
+#endif
+    return stageAutomatiaPersistentWorldDocument(
+        std::move(document), sessionId, error);
+}
+
+void discardAutomatiaPersistentWorldSnapshot()
+{
+	pendingAutomatiaWorldDocument = AutomatiaSave::Json{};
+}
+
+bool loadAutomatiaPersistentWorldSave(
+    const char* path,
+    const std::string& sessionId,
+    std::string& error
+)
+{
+    AutomatiaSave::Json document;
+    const AutomatiaSave::Result result = AutomatiaSave::load(path, document);
+    if (!result.ok)
+    {
+        error = result.error;
+        return false;
+    }
+    return stageAutomatiaPersistentWorldDocument(
+        std::move(document), sessionId, error);
+}
+
+/*
+ * Produce the canonical identity of the currently active map. The WorldState
+ * registry is authoritative; the filename fallback keeps early menu/editor
+ * loading paths compatible until every load is registered.
+ */
+static std::string getPersistentMapKey()
+{
+    if ( const WorldInstanceIdentity* identity = worldState.activeIdentity() )
+    {
+        return identity->key();
+    }
+    if ( map.filename[0] != '\0' )
+    {
+        return normalizePersistentMapKey(map.filename);
+    }
+    if ( map.name[0] != '\0' )
+    {
+        return normalizePersistentMapKey(map.name);
+    }
+
+    printlog(
+        "[Persistent World] Warning: current map has no map-instance identity."
+    );
+    return "";
 }
 
 static void capturePersistentMinimap()
@@ -5487,6 +7890,14 @@ void applyPersistentMapRemovals()
         {
             continue;
         }
+		if ( entity->sprite == 1 )
+		{
+			// Player Starts are reusable spawn infrastructure, not world
+			// objects whose absence should persist across unloads or restarts.
+			state.originalEntityIDs.erase(entity->persistentID);
+			state.removedEntityIDs.erase(entity->persistentID);
+			continue;
+		}
 
         const auto result =
             state.originalEntityIDs.insert(
@@ -5709,6 +8120,7 @@ static bool capturePersistentMonsterItem(
         static_cast<Sint32>(
             item->type
         );
+    itemState.stableId = persistentStableItemId(itemState.type);
 
     itemState.status =
         static_cast<Sint32>(
@@ -6301,6 +8713,7 @@ static bool capturePersistentWorldItemState(
 
     savedState.type =
         entity->skill[10];
+    savedState.stableId = persistentStableItemId(savedState.type);
 
     savedState.status =
         entity->skill[11];
@@ -6384,11 +8797,14 @@ static bool applyPersistentWorldItemState(
     const PersistentWorldItemState& savedState
 )
 {
+    const Sint32 resolvedType = resolvePersistentItemType(
+        savedState.stableId,
+        savedState.type
+    );
     if ( !entity
-        || savedState.type < 0
-        || savedState.type >= NUMITEMS
+        || resolvedType < 0
         || savedState.count <= 0
-        || savedState.type == TOOL_DUCK )
+        || resolvedType == TOOL_DUCK )
     {
         return false;
     }
@@ -6400,7 +8816,7 @@ static bool applyPersistentWorldItemState(
     entity->sizey = 4;
 
     entity->skill[10] =
-        savedState.type;
+        resolvedType;
 
     entity->skill[11] =
         savedState.status;
@@ -7002,6 +9418,7 @@ static void capturePersistentMechanismStates()
                                 static_cast<Sint32>(
                                     item->type
                                 );
+                            itemState.stableId = persistentStableItemId(itemState.type);
 
                             itemState.status =
                                 static_cast<Sint32>(
@@ -7129,6 +9546,7 @@ static void capturePersistentMechanismStates()
                             static_cast<Sint32>(
                                 item->type
                             );
+                        itemState.stableId = persistentStableItemId(itemState.type);
 
                         itemState.status =
                             static_cast<Sint32>(
@@ -8254,14 +10672,17 @@ PersistentMapRemovalState& mapState =
                             itemState :
                             savedState.chestSavedInventory )
                         {
-                            if ( itemState.type < 0
-                                || itemState.type >= NUMITEMS
+                            const Sint32 resolvedType = resolvePersistentItemType(
+                                itemState.stableId,
+                                itemState.type
+                            );
+                            if ( resolvedType < 0
                                 || itemState.count <= 0 )
                             {
                                 printlog(
                                     "[Persistent World] Ignored invalid item in chest ID %d: type=%d count=%d.",
                                     entity->persistentID,
-                                    itemState.type,
+                                    resolvedType,
                                     itemState.count
                                 );
 
@@ -8271,7 +10692,7 @@ PersistentMapRemovalState& mapState =
                             Item* restoredItem =
                                 newItem(
                                     static_cast<ItemType>(
-                                        itemState.type
+                                        resolvedType
                                     ),
                                     static_cast<Status>(
                                         itemState.status
@@ -9689,8 +12110,11 @@ static Uint32 restorePersistentMonsterItems(
     for ( const PersistentMonsterItemState& itemState :
         savedState.monsterSavedItems )
     {
-        if ( itemState.type < 0
-            || itemState.type >= NUMITEMS
+        const Sint32 resolvedType = resolvePersistentItemType(
+            itemState.stableId,
+            itemState.type
+        );
+        if ( resolvedType < 0
             || itemState.status < BROKEN
             || itemState.status > EXCELLENT
             || itemState.count <= 0 )
@@ -9699,7 +12123,7 @@ static Uint32 restorePersistentMonsterItems(
                 "[Persistent World] Ignored invalid monster item for monster ID %d: slot=%d type=%d status=%d count=%d.",
                 monsterEntity->persistentID,
                 itemState.slot,
-                itemState.type,
+                resolvedType,
                 itemState.status,
                 itemState.count
             );
@@ -9710,7 +12134,7 @@ static Uint32 restorePersistentMonsterItems(
         Item* restoredItem =
             newItem(
                 static_cast<ItemType>(
-                    itemState.type
+                    resolvedType
                 ),
                 static_cast<Status>(
                     itemState.status
@@ -10281,6 +12705,7 @@ PersistentMechanismState& savedState =
 				static_cast<Sint32>(
 					item->type
 				);
+            itemState.stableId = persistentStableItemId(itemState.type);
 
 			itemState.status =
 				static_cast<Sint32>(
@@ -10363,14 +12788,17 @@ PersistentMechanismState& savedState =
     for ( const PersistentChestItemState& itemState :
         savedState.shopkeeperSavedInventory )
     {
-        if ( itemState.type < 0
-            || itemState.type >= NUMITEMS
+        const Sint32 resolvedType = resolvePersistentItemType(
+            itemState.stableId,
+            itemState.type
+        );
+        if ( resolvedType < 0
             || itemState.count <= 0 )
         {
             printlog(
                 "[Persistent World] Ignored invalid shop item for shopkeeper ID %d: type=%d count=%d.",
                 shopkeeperEntity->persistentID,
-                itemState.type,
+                resolvedType,
                 itemState.count
             );
 
@@ -10380,7 +12808,7 @@ PersistentMechanismState& savedState =
         Item* restoredItem =
             newItem(
                 static_cast<ItemType>(
-                    itemState.type
+                    resolvedType
                 ),
                 static_cast<Status>(
                     itemState.status
@@ -10468,7 +12896,7 @@ static void capturePersistentMapRemovals()
             Entity* entity =
                 static_cast<Entity*>(node->element);
 
-            if ( entity && entity->persistentID > 0 )
+            if ( entity && entity->persistentID > 0 && entity->sprite != 1 )
             {
                 state.originalEntityIDs.insert(
                     entity->persistentID
@@ -10503,6 +12931,10 @@ static void capturePersistentMapRemovals()
         {
             continue;
         }
+		if ( entity->sprite == 1 )
+		{
+			continue;
+		}
 
         currentlyPresentIDs.insert(
             entity->persistentID
@@ -10547,7 +12979,8 @@ static void capturePersistentMapRemovals()
 }
 
 static bool placePlayersAtCustomTunnel(
-    const Sint32 destinationTunnelID
+    const Sint32 destinationTunnelID,
+    const bool* playerMask = nullptr
 )
 {
     if ( destinationTunnelID <= 0 )
@@ -10627,7 +13060,8 @@ static bool placePlayersAtCustomTunnel(
         player < MAXPLAYERS;
         ++player )
     {
-        if ( client_disconnected[player]
+        if ( (playerMask && !playerMask[player])
+            || client_disconnected[player]
             || players[player] == nullptr
             || players[player]->entity == nullptr )
         {
@@ -10740,6 +13174,569 @@ static bool placePlayersAtCustomTunnel(
     );
 
     return placedPlayers > 0;
+}
+
+static bool processAutomatiaTransition(
+	const PendingAutomatiaTransition& transition,
+	std::string& error
+)
+{
+	error.clear();
+	const int player = transition.playerIndex;
+	if ( multiplayer != SERVER
+		|| player < 0
+		|| player >= MAXPLAYERS
+		|| client_disconnected[player]
+		|| !players[player] )
+	{
+		error = "player is no longer connected";
+		return false;
+	}
+	const WorldInstanceIdentity* initialActiveIdentity =
+		worldState.activeIdentity();
+	const std::string initialActiveKey =
+		initialActiveIdentity ? initialActiveIdentity->key() : std::string{};
+	auto restoreInitialInstance = [&initialActiveKey]()
+	{
+		if ( !initialActiveKey.empty() )
+		{
+			MapInstance* initial = worldState.find(initialActiveKey);
+			if ( initial && initial->loadedMap )
+			{
+				worldState.activate(initialActiveKey);
+			}
+		}
+	};
+	const std::string sourceKey = players[player]->worldInstance.key();
+	MapInstance* source = worldState.find(sourceKey);
+	Entity* sourceEntity = worldState.playerEntityFor(sourceKey, player);
+	if ( !source || !sourceEntity )
+	{
+		error = "source instance or player entity is unavailable";
+		return false;
+	}
+
+	const std::string fullMapPath =
+		physfsFormatMapName(transition.destinationMap.c_str());
+	if ( fullMapPath.empty() )
+	{
+		error = "destination map could not be resolved";
+		return false;
+	}
+	const std::string mapFile =
+		std::filesystem::path(fullMapPath).filename().string();
+	WorldInstanceIdentity destinationIdentity;
+	if ( !destinationIdentity.set(mapFile, "world") )
+	{
+		error = "destination identity is invalid";
+		return false;
+	}
+	constexpr std::size_t customTransitionFixedBytes = 14 + 1 + 4 + 6;
+	if ( transition.destinationMap.size()
+		> NET_PACKET_SIZE - 9 - customTransitionFixedBytes )
+	{
+		error = "destination map name is too long for the transition packet";
+		return false;
+	}
+	const std::string destinationKey = destinationIdentity.key();
+	if ( destinationKey == sourceKey )
+	{
+		if ( !worldState.activate(sourceKey) )
+		{
+			error = "source instance could not be activated";
+			return false;
+		}
+		bool playerMask[MAXPLAYERS] = {};
+		playerMask[player] = true;
+		placePlayersAtCustomTunnel(
+			transition.destinationTunnelID,
+			playerMask
+		);
+		if ( !initialActiveKey.empty() && initialActiveKey != sourceKey )
+		{
+			worldState.activate(initialActiveKey);
+		}
+		return true;
+	}
+
+	MapInstance* destination = worldState.find(destinationKey);
+	const bool destinationWasKnown = destination != nullptr;
+	if ( !destination || !destination->loadedMap )
+	{
+		if ( !worldState.loadDetachedMap(
+			fullMapPath,
+			mapFile,
+			"world",
+			error
+		) )
+		{
+			return false;
+		}
+		destination = worldState.find(destinationKey);
+	}
+	if ( !destination || !destination->loadedMap )
+	{
+		error = "destination instance is not loaded";
+		return false;
+	}
+	// Loading a previously unknown destination can insert into WorldState's
+	// unordered registry and invalidate pointers obtained before that insert.
+	// Reacquire the source instance (and its player entity) by stable key.
+	source = worldState.find(sourceKey);
+	sourceEntity = worldState.playerEntityFor(sourceKey, player);
+	if ( !source || !source->loadedMap || !sourceEntity )
+	{
+		error = "source instance changed while loading the destination";
+		restoreInitialInstance();
+		return false;
+	}
+	if ( !destination->runtimeInitialized && !destinationWasKnown )
+	{
+		destination->dungeonLevel = transition.destinationLevel;
+		destination->mapSeed = local_rng.rand();
+		destination->secretLevel = transition.destinationSecret;
+	}
+	if ( !worldState.activate(sourceKey) )
+	{
+		error = "source instance could not be activated for follower transfer";
+		restoreInitialInstance();
+		return false;
+	}
+	struct TransferredFollower
+	{
+		Entity* source = nullptr;
+		std::unique_ptr<Stat> stats;
+		real_t offsetX = 0.0;
+		real_t offsetY = 0.0;
+	};
+	std::vector<TransferredFollower> transferredFollowers;
+	if ( stats[player] )
+	{
+		for ( node_t* node = stats[player]->FOLLOWERS.first;
+			node;
+			node = node->next )
+		{
+			if ( !node->element )
+			{
+				continue;
+			}
+			Entity* follower = uidToEntity(*static_cast<Uint32*>(node->element));
+			Stat* followerStats = follower ? follower->getStats() : nullptr;
+			if ( !follower || !followerStats || follower->behavior != &actMonster )
+			{
+				continue;
+			}
+			transferredFollowers.push_back(TransferredFollower{
+				follower,
+				std::unique_ptr<Stat>(followerStats->copyStats()),
+				follower->x - sourceEntity->x,
+				follower->y - sourceEntity->y
+			});
+		}
+	}
+	if ( !worldState.activate(destinationKey) )
+	{
+		error = "destination instance could not be activated";
+		restoreInitialInstance();
+		return false;
+	}
+
+	const Uint32 mapLoadUidStart = destination->mapLoadEntityUidStart;
+	const Uint32 runtimeUidStart = destination->runtimeEntityUidStart;
+	bool playerMask[MAXPLAYERS] = {};
+	playerMask[player] = true;
+	if ( !destination->runtimeInitialized )
+	{
+		applyPersistentMapRemovals();
+		numplayers = 0;
+		assignActions(&map, playerMask, true, false);
+		applyPersistentMechanismStates();
+		generatePathMaps();
+	}
+	else
+	{
+		numplayers = 0;
+		assignActions(&map, playerMask, true, true);
+	}
+	Entity* destinationEntity = players[player]->entity;
+	if ( !destinationEntity )
+	{
+		Entity* spawnAnchor = nullptr;
+		Entity* retainedPlayerStart = nullptr;
+		for ( node_t* node = map.entities->first; node; node = node->next )
+		{
+			Entity* candidate = static_cast<Entity*>(node->element);
+			if ( candidate && candidate->sprite == 1
+				&& candidate->behavior == nullptr )
+			{
+				retainedPlayerStart = candidate;
+				break;
+			}
+		}
+		for ( int anchorPlayer = 0; anchorPlayer < MAXPLAYERS; ++anchorPlayer )
+		{
+			if ( anchorPlayer == player || !players[anchorPlayer]
+				|| !players[anchorPlayer]->entity
+				|| players[anchorPlayer]->worldInstance.key() != destinationKey )
+			{
+				continue;
+			}
+			spawnAnchor = players[anchorPlayer]->entity;
+			break;
+		}
+		if ( spawnAnchor || retainedPlayerStart )
+		{
+			Entity* fallbackStart = newEntity(1, 1, map.entities, nullptr);
+			if ( fallbackStart )
+			{
+				fallbackStart->x = spawnAnchor
+					? spawnAnchor->x - 8.0
+					: retainedPlayerStart->x;
+				fallbackStart->y = spawnAnchor
+					? spawnAnchor->y - 8.0
+					: retainedPlayerStart->y;
+				fallbackStart->z = spawnAnchor
+					? spawnAnchor->z
+					: retainedPlayerStart->z;
+				fallbackStart->skill[2] = player;
+				fallbackStart->playerStartDir = -1;
+				numplayers = 0;
+				assignActions(&map, playerMask, true, true);
+				destinationEntity = players[player]->entity;
+				printlog(
+					"[World State] Custom transition player %d used the %s spawn fallback in '%s'.",
+					player,
+					spawnAnchor ? "occupied-map" : "retained Player Start",
+					destinationKey.c_str()
+				);
+			}
+		}
+	}
+	if ( !destinationEntity )
+	{
+		worldState.activate(sourceKey);
+		restoreInitialInstance();
+		error = "destination has no deferred Player Start for this player";
+		return false;
+	}
+	if ( !worldState.placePlayer(player, map) )
+	{
+		worldState.activate(sourceKey);
+		restoreInitialInstance();
+		error = "destination player ownership could not be recorded";
+		return false;
+	}
+
+	if ( player > 0
+		&& !players[player]->isLocalPlayer()
+		&& net_packet
+		&& net_packet->data )
+	{
+		sendPersistentWorldSnapshotToClient(
+			player,
+			transition.destinationMap
+		);
+		std::memcpy(net_packet->data, "LVLC", 4);
+		net_packet->data[4] = transition.destinationSecret;
+		SDLNet_Write32(destination->mapSeed, &net_packet->data[5]);
+		SDLNet_Write32(mapLoadUidStart, &net_packet->data[9]);
+		net_packet->data[13] = transition.destinationLevel;
+		const std::size_t mapNameLength = transition.destinationMap.size();
+		std::memcpy(
+			&net_packet->data[14],
+			transition.destinationMap.c_str(),
+			mapNameLength
+		);
+		net_packet->data[14 + mapNameLength] = 0;
+		const std::size_t tunnelOffset = 14 + mapNameLength + 1;
+		SDLNet_Write32(
+			static_cast<Uint32>(transition.destinationTunnelID),
+			&net_packet->data[tunnelOffset]
+		);
+		const std::size_t extensionOffset = tunnelOffset + sizeof(Uint32);
+		net_packet->data[extensionOffset] = 0xA1;
+		net_packet->data[extensionOffset + 1] = player;
+		SDLNet_Write32(runtimeUidStart, &net_packet->data[extensionOffset + 2]);
+		net_packet->len = extensionOffset + 6;
+		net_packet->address.host = net_clients[player - 1].host;
+		net_packet->address.port = net_clients[player - 1].port;
+		sendPacketSafe(net_sock, -1, net_packet, player - 1);
+	}
+
+	// LVLC must enter the reliable queue before TNSP, otherwise the old
+	// source-map entity could consume the destination position.
+	placePlayersAtCustomTunnel(
+		transition.destinationTunnelID,
+		playerMask
+	);
+	destinationEntity = players[player]->entity;
+	if (destinationEntity
+		&& destinationEntity->behavior == &actPlayer
+		&& destinationEntity->skill[0] == 0)
+	{
+		// Independent arrivals are announced before the next simulation tick.
+		// Initialize their server-side voxel children now so the following
+		// bodypart baseline has real limb IDs and sprites to serialize.
+		actPlayer(destinationEntity);
+	}
+	if ( player > 0
+		&& !players[player]->isLocalPlayer() )
+	{
+		int baselineEntities = 0;
+		for ( node_t* node = map.entities->first; node; node = node->next )
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if ( !entity
+				|| !entity->flags[UPDATENEEDED]
+				|| entity->flags[NOUPDATE] )
+			{
+				continue;
+			}
+			sendEntityUDP(entity, player, true);
+			++baselineEntities;
+		}
+		printlog(
+			"[World State] Sent %d existing destination entity baseline(s) to player %d in '%s' (map UID start %u, runtime UID start %u).",
+			baselineEntities,
+			player,
+			destinationKey.c_str(),
+			mapLoadUidStart,
+			runtimeUidStart
+		);
+		int notifiedPlayers = 0;
+		for ( const int recipient : destination->playersPresent )
+		{
+			if ( recipient <= 0
+				|| recipient >= MAXPLAYERS
+				|| recipient == player
+				|| client_disconnected[recipient]
+				|| !players[recipient]
+				|| players[recipient]->isLocalPlayer() )
+			{
+				continue;
+			}
+			sendEntityUDP(destinationEntity, recipient, true);
+			++notifiedPlayers;
+		}
+		printlog(
+			"[World State] Announced arriving player %d UID %u sprite %d to %d existing player(s) in '%s'.",
+			player,
+			destinationEntity ? destinationEntity->getUID() : 0,
+			destinationEntity ? destinationEntity->sprite : -1,
+			notifiedPlayers,
+			destinationKey.c_str()
+		);
+		if (destinationEntity)
+		{
+			// The head ENTU lets an existing client construct the remote
+			// actPlayer immediately. Follow it with the authoritative limb IDs
+			// and visible equipment/body sprites; the original initialization
+			// broadcast occurred before that client knew the new head UID.
+			serverUpdateBodypartIDs(destinationEntity);
+			for (int bodypart = 1; bodypart < 11; ++bodypart)
+			{
+				serverUpdateEntityBodypart(destinationEntity, bodypart);
+			}
+			serverUpdateEntityBodypart(destinationEntity, 13);
+			printlog(
+				"[World State] Queued arriving player %d voxel bodypart baseline in '%s'.",
+				player,
+				destinationKey.c_str());
+		}
+	}
+	if ( stats[player] )
+	{
+		list_FreeAll(&stats[player]->FOLLOWERS);
+	}
+	for ( TransferredFollower& transfer : transferredFollowers )
+	{
+		if ( !transfer.stats )
+		{
+			continue;
+		}
+		Entity* follower = summonMonster(
+			transfer.stats->type,
+			destinationEntity->x + transfer.offsetX,
+			destinationEntity->y + transfer.offsetY
+		);
+		if ( !follower || !follower->children.last )
+		{
+			printlog("[World State] Warning: unable to transfer one follower for player %d.", player);
+			continue;
+		}
+		list_RemoveNode(follower->children.last);
+		node_t* statNode = list_AddNodeLast(&follower->children);
+		statNode->element = transfer.stats.release();
+		statNode->deconstructor = &statDeconstructor;
+		statNode->size = sizeof(Stat);
+		Stat* followerStats = static_cast<Stat*>(statNode->element);
+		followerStats->leader_uid = destinationEntity->getUID();
+		follower->monsterAllyIndex = player;
+		follower->monsterAllyClass = followerStats->allyClass;
+		follower->monsterAllyPickupItems = followerStats->allyItemPickup;
+		follower->flags[USERFLAG2] = true;
+		serverUpdateEntityFlag(follower, USERFLAG2);
+		serverUpdateEntitySkill(follower, 42);
+		serverUpdateEntitySkill(follower, 46);
+		serverUpdateEntitySkill(follower, 44);
+		node_t* followerNode = list_AddNodeLast(&stats[player]->FOLLOWERS);
+		followerNode->deconstructor = &defaultDeconstructor;
+		followerNode->size = sizeof(Uint32);
+		followerNode->element = std::malloc(sizeof(Uint32));
+		if ( followerNode->element )
+		{
+			*static_cast<Uint32*>(followerNode->element) = follower->getUID();
+		}
+		else
+		{
+			list_RemoveNode(followerNode);
+		}
+		if ( player > 0
+			&& !players[player]->isLocalPlayer()
+			&& net_packet
+			&& net_packet->data )
+		{
+			std::memcpy(net_packet->data, "LEAD", 4);
+			SDLNet_Write32(follower->getUID(), &net_packet->data[4]);
+			SDLNet_Write32(followerStats->type, &net_packet->data[8]);
+			const std::size_t nameLength = std::min<std::size_t>(
+				std::strlen(followerStats->name),
+				sizeof(followerStats->name) - 1
+			);
+			std::memcpy(&net_packet->data[12], followerStats->name, nameLength);
+			net_packet->data[12 + nameLength] = 0;
+			net_packet->len = 13 + nameLength;
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
+		serverUpdateAllyStat(
+			player,
+			follower->getUID(),
+			followerStats->LVL,
+			followerStats->HP,
+			followerStats->MAXHP,
+			followerStats->type
+		);
+	}
+
+	if ( !worldState.activate(sourceKey) )
+	{
+		restoreInitialInstance();
+		error = "source instance could not be reactivated for cleanup";
+		return false;
+	}
+	Entity* deferredStart = newEntity(1, 1, map.entities, nullptr);
+	deferredStart->x = sourceEntity->x - 8.0;
+	deferredStart->y = sourceEntity->y - 8.0;
+	deferredStart->z = sourceEntity->z;
+	deferredStart->skill[2] = player;
+	deferredStart->flags[INVISIBLE] = true;
+	deferredStart->flags[NOUPDATE] = true;
+	deferredStart->playerStartDir = static_cast<int>(
+		std::round(sourceEntity->yaw / (PI / 4.0))
+	) & 7;
+	auto removeEntityTree = [](Entity* entity)
+	{
+		if ( !entity )
+		{
+			return;
+		}
+		const std::vector<Entity*> bodyparts = entity->bodyparts;
+		for ( Entity* bodypart : bodyparts )
+		{
+			if ( bodypart && bodypart->mynode
+				&& bodypart->mynode->list == map.entities )
+			{
+				list_RemoveNode(bodypart->mynode);
+			}
+		}
+		if ( entity->mynode && entity->mynode->list == map.entities )
+		{
+			list_RemoveNode(entity->mynode);
+		}
+	};
+	for ( const TransferredFollower& transfer : transferredFollowers )
+	{
+		removeEntityTree(transfer.source);
+	}
+	removeEntityTree(sourceEntity);
+	capturePersistentMinimap();
+	capturePersistentMechanismStates();
+	capturePersistentMapRemovals();
+	source->dirty = true;
+	if ( entitiesdeleted.first )
+	{
+		const int deletedEntityCount = list_Size(&entitiesdeleted);
+		list_FreeAll(&entitiesdeleted);
+		printlog(
+			"[World State] Completed %d deferred source entity deletion(s) before leaving '%s'.",
+			deletedEntityCount,
+			sourceKey.c_str()
+		);
+	}
+	const bool sourceBecameEmpty = source->playersPresent.empty();
+	if ( sourceBecameEmpty || players[player]->isLocalPlayer() )
+	{
+		if ( !worldState.activate(destinationKey) )
+		{
+			error = "destination instance could not be reactivated after source cleanup";
+			restoreInitialInstance();
+			return false;
+		}
+	}
+	if ( sourceBecameEmpty )
+	{
+		if ( !worldState.unloadEmptyInstance(sourceKey) )
+		{
+			printlog(
+				"[World State] Warning: empty source instance '%s' remained loaded.",
+				sourceKey.c_str()
+			);
+		}
+	}
+	if ( !players[player]->isLocalPlayer()
+		&& !initialActiveKey.empty()
+		&& worldState.find(initialActiveKey)
+		&& worldState.find(initialActiveKey)->loadedMap )
+	{
+		worldState.activate(initialActiveKey);
+	}
+	printlog(
+		"[World State] Player %d transitioned independently from '%s' to '%s'.",
+		player,
+		sourceKey.c_str(),
+		destinationKey.c_str()
+	);
+	return destinationEntity != nullptr;
+}
+
+static void processPendingAutomatiaTransitions()
+{
+	if ( pendingAutomatiaTransitions.empty() )
+	{
+		return;
+	}
+	std::vector<PendingAutomatiaTransition> pending =
+		std::move(pendingAutomatiaTransitions);
+	pendingAutomatiaTransitions.clear();
+	for ( const PendingAutomatiaTransition& transition : pending )
+	{
+		std::string error;
+		if ( !processAutomatiaTransition(transition, error) )
+		{
+			printlog(
+				"[World State] Independent transition for player %d failed: %s.",
+				transition.playerIndex,
+				error.c_str()
+			);
+			messagePlayer(
+				transition.playerIndex,
+				MESSAGE_MISC,
+				"The destination could not be loaded."
+			);
+		}
+	}
 }
 #ifdef LINUX
 //Sigsegv catching stuff.
@@ -11600,6 +14597,176 @@ static ConsoleCommand ccmd_demo_play("/demo_play", "play a recorded demo(default
     }
     });
 
+static bool automatiaEntityWasDeleted(Entity* entity)
+{
+	for ( node_t* node = entitiesdeleted.first; node; node = node->next )
+	{
+		if ( node->element == entity )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static void simulateActiveAutomatiaInstanceEntities()
+{
+	auto runList = [](list_t* entities, bool updateTileIndex)
+	{
+		if ( !entities )
+		{
+			return;
+		}
+		for ( node_t* node = entities->first, *nextnode = nullptr;
+			node != nullptr;
+			node = nextnode )
+		{
+			nextnode = node->next;
+			Entity* entity = static_cast<Entity*>(node->element);
+			if ( !entity || entity->ranbehavior )
+			{
+				continue;
+			}
+			if ( !gamePaused )
+			{
+				++entity->ticks;
+			}
+			if ( !entity->behavior || gamePaused )
+			{
+				continue;
+			}
+			if ( gameloopFreezeEntities
+				&& entity->behavior != &actPlayer
+				&& entity->behavior != &actPlayerLimb
+				&& entity->behavior != &actDeathGhost
+				&& entity->behavior != &actFlame )
+			{
+				continue;
+			}
+
+			const int oldTileX = static_cast<int>(entity->x) >> 4;
+			const int oldTileY = static_cast<int>(entity->y) >> 4;
+			if ( updateTileIndex && !entity->myTileListNode )
+			{
+				TileEntityList.addEntity(*entity);
+			}
+			(*entity->behavior)(entity);
+			const bool deleted = automatiaEntityWasDeleted(entity);
+			if ( !deleted )
+			{
+				if ( updateTileIndex
+					&& (oldTileX != static_cast<int>(entity->x) >> 4
+						|| oldTileY != static_cast<int>(entity->y) >> 4) )
+				{
+					TileEntityList.updateEntity(*entity);
+				}
+				TimerExperiments::updateEntityInterpolationPosition(entity);
+				entity->ranbehavior = true;
+			}
+			if ( entitiesdeleted.first )
+			{
+				nextnode = entities->first;
+				list_FreeAll(&entitiesdeleted);
+			}
+		}
+		for ( node_t* node = entities->first; node; node = node->next )
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if ( entity )
+			{
+				entity->ranbehavior = false;
+			}
+		}
+	};
+
+	runList(map.worldUI, false);
+	runList(map.entities, true);
+	if ( MapInstance* instance = worldState.activeInstance() )
+	{
+		++instance->simulationTick;
+	}
+}
+
+static void serverBroadcastActiveAutomatiaEntityUpdates()
+{
+	if ( multiplayer != SERVER
+		|| ticks % (TICKS_PER_SECOND / 8) != 0
+		|| !map.entities )
+	{
+		return;
+	}
+	for ( node_t* node = map.entities->first; node; node = node->next )
+	{
+		Entity* entity = static_cast<Entity*>(node->element);
+		if ( !entity
+			|| !entity->flags[UPDATENEEDED]
+			|| entity->flags[NOUPDATE] )
+		{
+			continue;
+		}
+		const bool guarantee = entity->getUID() % (TICKS_PER_SECOND * 4)
+			== ticks % (TICKS_PER_SECOND * 4);
+		for ( int player = 1; player < MAXPLAYERS; ++player )
+		{
+			if ( !client_disconnected[player] )
+			{
+				sendEntityUDP(entity, player, guarantee);
+			}
+		}
+	}
+}
+
+static void simulateOccupiedAutomatiaInstances()
+{
+	if ( multiplayer != SERVER || gamePaused || entitiesdeleted.first )
+	{
+		return;
+	}
+	const WorldInstanceIdentity* activeIdentity =
+		worldState.activeIdentity();
+	if ( !activeIdentity )
+	{
+		return;
+	}
+	const std::string foregroundKey = activeIdentity->key();
+	const std::vector<std::string> occupiedKeys =
+		worldState.occupiedLoadedInstanceKeys();
+	for ( const std::string& key : occupiedKeys )
+	{
+		if ( key == foregroundKey )
+		{
+			continue;
+		}
+		MapInstance* instance = worldState.find(key);
+		if ( !instance || !instance->runtimeInitialized )
+		{
+			continue;
+		}
+		if ( !worldState.activate(key) )
+		{
+			printlog("[World State] Unable to schedule occupied instance '%s'.", key.c_str());
+			continue;
+		}
+		loadnextlevel = false;
+		simulateActiveAutomatiaInstanceEntities();
+		serverBroadcastActiveAutomatiaEntityUpdates();
+		if ( loadnextlevel )
+		{
+			printlog(
+				"[World State] Deferred a legacy whole-party exit requested in background instance '%s'.",
+				key.c_str()
+			);
+			loadnextlevel = false;
+		}
+	}
+	if ( worldState.activeIdentity()
+		&& worldState.activeIdentity()->key() != foregroundKey
+		&& !worldState.activate(foregroundKey) )
+	{
+		printlog("[World State] Unable to restore foreground instance '%s'.", foregroundKey.c_str());
+	}
+}
+
 /*-------------------------------------------------------------------------------
 
 	gameLogic
@@ -11865,7 +15032,7 @@ void gameLogic(void)
 
 			packetsend_t* packet = (packetsend_t*)node->element;
 			//printlog("Packet resend: %d", packet->hostnum);
-			sendPacket(packet->sock, packet->channel, packet->packet, packet->hostnum, true);
+			resendPacketSafe(packet);
 			packet->tries++;
 			if ( packet->tries >= MAXTRIES )
 			{
@@ -13489,6 +16656,12 @@ void gameLogic(void)
 				entity = (Entity*)node->element;
 				entity->ranbehavior = false;
 			}
+			processPendingAutomatiaTransitions();
+			if ( MapInstance* activeInstance = worldState.activeInstance() )
+			{
+				++activeInstance->simulationTick;
+			}
+			simulateOccupiedAutomatiaInstances();
 			DebugStats.eventsT4 = std::chrono::high_resolution_clock::now();
 			if ( multiplayer == SERVER )
 			{
@@ -13497,7 +16670,7 @@ void gameLogic(void)
 				{
 					for ( c = 1; c < MAXPLAYERS; c++ )
 					{
-						if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+                        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 						{
 							continue;
 						}
@@ -14095,7 +17268,10 @@ void gameLogic(void)
 					Entity* entity = (Entity*)nodeToCheck->element;
 					if ( entity )
 					{
-						if ( !entity->flags[NOUPDATE] && entity->getUID() > 0 && entity->getUID() != -2 && entity->getUID() != -3 && entity->getUID() != -4 )
+						if ( !entity->flags[NOUPDATE]
+							&& entity->behavior != &actCustomPortal
+							&& entity->behavior != &actLightSource
+							&& entity->getUID() > 0 && entity->getUID() != -2 && entity->getUID() != -3 && entity->getUID() != -4 )
 						{
 							if (net_packet && net_packet->data) {
 								strcpy((char*)net_packet->data, "ENTE");
@@ -14843,7 +18019,7 @@ static void bindControllerToPlayer(int id, int player) {
     inputs.getVirtualMouse(player)->draw_cursor = false;
     inputs.getVirtualMouse(player)->lastMovementFromController = true;
     printlog("(Device %d bound to player %d)", id, player);
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < MAX_SPLITSCREEN; ++c) {
         auto& input = Input::inputs[c];
 	    input.refresh();
     }
@@ -15797,7 +18973,7 @@ bool handleEvents(void)
 					printlog("Device %d successfully initialized as game controller in slot %d.\n", sdl_device_index, id);
 					controller.initBindings();
 					Input::gameControllers[id] = controller.getControllerDevice();
-					for (int c = 0; c < 4; ++c) {
+					for (int c = 0; c < MAX_SPLITSCREEN; ++c) {
 						Input::inputs[c].refresh();
 					}
 					break;
@@ -15840,7 +19016,7 @@ bool handleEvents(void)
 						printlog("Device %d removed as game controller (it was in slot %d).\n", instanceID, id);
 						controller.close();
 						Input::gameControllers.erase(id);
-						for ( int c = 0; c < 4; ++c ) {
+						for ( int c = 0; c < MAX_SPLITSCREEN; ++c ) {
 							Input::inputs[c].refresh();
 						}
 					}
@@ -15872,7 +19048,7 @@ bool handleEvents(void)
 					printlog(" NumAxes: %d", SDL_JoystickNumAxes(joystick));
 					printlog(" NumButtons: %d", SDL_JoystickNumButtons(joystick));
 					printlog(" NumHats: %d", SDL_JoystickNumHats(joystick));
-					for (int c = 0; c < 4; ++c) {
+					for (int c = 0; c < MAX_SPLITSCREEN; ++c) {
 						Input::inputs[c].refresh();
 					}
 				}
@@ -15960,7 +19136,7 @@ bool handleEvents(void)
 							index = pair.first;
 							printlog("Removed joystick with device index (%d), instance id (%d)", index, event.jdevice.which);
 							Input::joysticks.erase(index);
-							for ( int c = 0; c < 4; ++c ) {
+							for ( int c = 0; c < MAX_SPLITSCREEN; ++c ) {
 								Input::inputs[c].refresh();
 							}
 							break;
@@ -16158,7 +19334,7 @@ void pauseGame(int mode /* 0 == toggle, 1 == force unpause, 2 == force pause */,
 	    playSound(500, 96);
 		gamePaused = true;
 		bool noOneUsingKeyboard = true;
-		for (int c = 0; c < 4; ++c)
+		for (int c = 0; c < MAX_SPLITSCREEN; ++c)
 		{
 		    if (inputs.bPlayerUsingKeyboardControl(c) && MainMenu::isPlayerSignedIn(c) && players[c]->isLocalPlayer()) {
 		        noOneUsingKeyboard = false;
@@ -17997,7 +21173,104 @@ int main(int argc, char** argv)
 #endif
 				if ( argv[c] != NULL )
 				{
-					if ( !strcmp(argv[c], "-windowed") )
+                    if ( !strcmp(argv[c], "--headless") || !strcmp(argv[c], "-headless") )
+                    {
+                        headless = true;
+                        no_sound = true;
+                        fullscreen = 0;
+                        borderless = false;
+                        xres = 320;
+                        yres = 200;
+                    }
+                    else if ( !strcmp(argv[c], "--LAN") || !strcmp(argv[c], "--lan") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_LAN;
+                        strncpy(headlessBindAddress, "0.0.0.0", sizeof(headlessBindAddress) - 1);
+                        headlessBindAddress[sizeof(headlessBindAddress) - 1] = '\0';
+                    }
+                    else if ( !strcmp(argv[c], "--private") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_PRIVATE;
+                    }
+                    else if ( !strcmp(argv[c], "--public") )
+                    {
+                        headlessServerVisibility = HEADLESS_VISIBILITY_PUBLIC;
+                    }
+                    else if ( !strcmp(argv[c], "--late-join") )
+                    {
+                        headlessLateJoinRequested = true;
+                    }
+                    else if ( !strcmp(argv[c], "--autostart") )
+                    {
+                        headlessAutoStart = true;
+                        headlessAutoStartDelaySeconds = 0;
+                    }
+                    else if ( !strncmp(argv[c], "--autostart=", 12) )
+                    {
+                        const int delay = atoi(argv[c] + 12);
+                        if ( delay >= 0 )
+                        {
+                            headlessAutoStart = true;
+                            headlessAutoStartDelaySeconds = static_cast<Uint32>(delay);
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--autosave=", 11) )
+                    {
+                        char* end = nullptr;
+                        const unsigned long interval = strtoul(argv[c] + 11, &end, 10);
+                        const unsigned long maximum = 7UL * 24UL * 60UL * 60UL;
+                        if ( end != argv[c] + 11 && *end == '\0' && interval <= maximum )
+                        {
+                            headlessAutosaveIntervalSeconds = static_cast<Uint32>(interval);
+                        }
+                        else
+                        {
+                            printlog("Headless option error: --autosave requires seconds from 0 through %lu.", maximum);
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--save=", 7) )
+                    {
+                        char* end = nullptr;
+                        const long slot = strtol(argv[c] + 7, &end, 10);
+                        if ( end != argv[c] + 7 && *end == '\0' && slot >= 0 && slot <= 99 )
+                        {
+                            headlessSaveSlot = static_cast<int>(slot);
+                            savegameCurrentFileIndex = headlessSaveSlot;
+                        }
+                        else
+                        {
+                            printlog("Headless option error: this build accepts --save=<slot> from 0 through 99; path targets are not enabled.");
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--port=", 7) )
+                    {
+                        const int requestedPort = atoi(argv[c] + 7);
+                        if ( requestedPort > 0 && requestedPort <= 65535 )
+                        {
+                            headlessServerPort = static_cast<Uint16>(requestedPort);
+                        }
+                        else
+                        {
+                            printlog("Headless option error: invalid --port value '%s'. Using %u.", argv[c] + 7, headlessServerPort);
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--bind=", 7) )
+                    {
+                        strncpy(headlessBindAddress, argv[c] + 7, sizeof(headlessBindAddress) - 1);
+                        headlessBindAddress[sizeof(headlessBindAddress) - 1] = '\0';
+                    }
+                    else if ( !strncmp(argv[c], "--server-name=", 14) )
+                    {
+                        strncpy(headlessServerName, argv[c] + 14, sizeof(headlessServerName) - 1);
+                        headlessServerName[sizeof(headlessServerName) - 1] = '\0';
+                    }
+                    else if ( !strncmp(argv[c], "--password=", 11) )
+                    {
+                        strncpy(headlessServerPassword, argv[c] + 11, sizeof(headlessServerPassword) - 1);
+                        headlessServerPassword[sizeof(headlessServerPassword) - 1] = '\0';
+                        headlessPasswordRequested = headlessServerPassword[0] != '\0';
+                    }
+					else if ( !strcmp(argv[c], "-windowed") )
 					{
 						fullscreen = 0;
 					}
@@ -18046,12 +21319,66 @@ int main(int argc, char** argv)
 				}
 			}
 		}
-		printlog("Data path is %s", datadir);
-		printlog("Output path is %s", outputdir);
+        printlog("Data path is %s", datadir);
+        printlog("Output path is %s", outputdir);
+        if ( headless )
+        {
+            const char* visibilityName = "loopback-only";
+            if ( headlessServerVisibility == HEADLESS_VISIBILITY_LAN )
+            {
+                visibilityName = "LAN";
+            }
+            else if ( headlessServerVisibility == HEADLESS_VISIBILITY_PRIVATE )
+            {
+                visibilityName = "private/unlisted";
+            }
+            else if ( headlessServerVisibility == HEADLESS_VISIBILITY_PUBLIC )
+            {
+                visibilityName = "public/listed";
+            }
+
+            printlog("HEADLESS-1B enabled: dedicated-server configuration and visibility reporting.");
+            printlog("Headless server name: %s", headlessServerName);
+            printlog("Requested visibility: %s", visibilityName);
+            printlog("Requested bind endpoint: %s:%u", headlessBindAddress, headlessServerPort);
+            printlog("Password requested: %s", headlessPasswordRequested ? "yes" : "no");
+            printlog("Late joining requested: %s", headlessLateJoinRequested ? "yes" : "no");
+            printlog("Autosave interval: %u seconds", headlessAutosaveIntervalSeconds);
+            printlog("Save slot: %d", headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex);
+            printlog("SECURITY STATUS: plain --headless opens no socket; explicit hosting mode is required.");
+            printlog("SECURITY STATUS: --LAN opens the existing direct-connect UDP lobby. Public/password modes fail closed until implemented safely.");
+            printlog("HEADLESS-1B note: rendering resources are still initialized through a hidden OpenGL context for compatibility.");
+
+            char statusPath[PATH_MAX];
+            snprintf(statusPath, sizeof(statusPath), "%s/headless_server_status.txt", outputdir);
+            FILE* statusFile = fopen(statusPath, "w");
+            if ( statusFile )
+            {
+                fprintf(statusFile, "Barony Automatia Headless Server Status\n");
+                fprintf(statusFile, "State: startup configuration loaded; listener opens only for supported explicit hosting modes\n");
+                fprintf(statusFile, "Server name: %s\n", headlessServerName);
+                fprintf(statusFile, "Visibility: %s\n", visibilityName);
+                fprintf(statusFile, "Bind endpoint: %s:%u\n", headlessBindAddress, headlessServerPort);
+                fprintf(statusFile, "Password requested: %s\n", headlessPasswordRequested ? "yes" : "no");
+                fprintf(statusFile, "Late joining requested: %s\n", headlessLateJoinRequested ? "yes" : "no");
+                fprintf(statusFile, "Autosave interval: %u seconds\n", headlessAutosaveIntervalSeconds);
+                fprintf(statusFile, "Save slot: %d\n", headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex);
+                fprintf(statusFile, "Important: --LAN opens the direct-connect UDP listener; plain --headless stays idle.\n");
+                fclose(statusFile);
+                printlog("Headless status file: %s", statusPath);
+            }
+            else
+            {
+                printlog("Warning: could not write headless status file '%s'.", statusPath);
+            }
+        }
         
         // init sdl
         Uint32 init_flags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
-        init_flags |= SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC;
+        if ( !headless )
+        {
+            init_flags |= SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC;
+        }
         if (SDL_Init(init_flags) == -1)
         {
             printlog("failed to initialize SDL: %s\n", SDL_GetError());
@@ -18147,7 +21474,7 @@ int main(int argc, char** argv)
 		if (!nxIsHandheldMode()) {
 			nxAssignControllers(1, 1, true, false, true, false, nullptr);
 		}
-		for (int c = 0; c < 4; ++c) {
+		for (int c = 0; c < MAX_SPLITSCREEN; ++c) {
 			game_controllers[c].open(0, c); // first parameter is not used by Nintendo.
 			bindControllerToPlayer(c, c);
 		}
@@ -18156,7 +21483,10 @@ int main(int argc, char** argv)
 
 		// play splash sound
 #ifdef MUSIC
-		playMusic(splashmusic, false, false, false);
+        if ( !headless )
+        {
+            playMusic(splashmusic, false, false, false);
+        }
 #endif
 
 		int indev_timer = 0;
@@ -18268,6 +21598,11 @@ int main(int argc, char** argv)
 					}
 				}
 			}
+
+            if ( headless )
+            {
+                MainMenu::headlessDedicatedServerTick();
+            }
 
 			if ( intro )
 			{

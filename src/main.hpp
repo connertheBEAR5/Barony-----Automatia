@@ -678,7 +678,7 @@ typedef struct door_t
 #define TEXTURESIZE 32
 #define TEXTUREPOWER 5 // power of 2 that texture size is, ie pow(2,TEXTUREPOWER) = TEXTURESIZE
 #ifdef BARONY_SUPER_MULTIPLAYER
-#define MAXPLAYERS 8
+#define MAXPLAYERS 15
 #else
 #define MAXPLAYERS 4
 #endif
@@ -900,7 +900,12 @@ SDL_Cursor* newCursor(char const * const image[]);
 
 // function prototypes for maps.c:
 int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> mapParameters = std::make_tuple(-1, -1, -1, 0)); // secretLevelChance of -1 is default Barony generation.
-void assignActions(map_t* map);
+void assignActions(
+	map_t* map,
+	const bool* playerSpawnMask = nullptr,
+	bool deferUnselectedPlayerStarts = false,
+	bool playerStartsOnly = false
+);
 
 // Cursor bitmap definitions
 extern char const *cursor_pencil[];
@@ -911,6 +916,26 @@ extern char const *cursor_fill[];
 GLuint create_shader(const char* filename, GLenum type);
 
 extern bool no_sound; //False means sound initialized properly. True means sound failed to initialize.
+enum HeadlessServerVisibility
+{
+    HEADLESS_VISIBILITY_LOOPBACK = 0,
+    HEADLESS_VISIBILITY_LAN,
+    HEADLESS_VISIBILITY_PRIVATE,
+    HEADLESS_VISIBILITY_PUBLIC
+};
+
+extern bool headless; // Dedicated-server startup mode. HEADLESS-1A still uses a hidden GL context for compatibility.
+extern HeadlessServerVisibility headlessServerVisibility;
+extern bool headlessLateJoinRequested;
+extern bool headlessPasswordRequested;
+extern Uint16 headlessServerPort;
+extern char headlessBindAddress[64];
+extern char headlessServerName[64];
+extern char headlessServerPassword[128];
+extern bool headlessAutoStart;
+extern Uint32 headlessAutoStartDelaySeconds;
+extern Uint32 headlessAutosaveIntervalSeconds;
+extern int headlessSaveSlot;
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

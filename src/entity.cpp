@@ -14,6 +14,9 @@ See LICENSE for details.
 #include "stat.hpp"
 #include "entity.hpp"
 #include "items.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #include "monster.hpp"
 #include "engine/audio/sound.hpp"
 #include "magic/magic.hpp"
@@ -37,6 +40,8 @@ See LICENSE for details.
 #include "ui/MainMenu.hpp"
 #include "ui/GameUI.hpp"
 #include "light.hpp"
+#include "status_effect_owner_encoding.hpp"
+#include "world_state.hpp"
 /*-------------------------------------------------------------------------------
 
 Entity::Entity)
@@ -47,13 +52,21 @@ Construct an Entity
 ConsoleVariable<int> cvar_entity_bodypart_sync_tick("/entity_bodypart_sync_tick", TICKS_PER_SECOND / 4);
 void Entity::setUID(Uint32 new_uid)
 {
-	if ( !mynode ) { return; }
-	if ( mynode->list == map.entities )
-	{
-		map.entities_map.erase(uid);
-		map.entities_map.insert({ new_uid, mynode });
-	}
-	uid = new_uid;
+    if (!mynode)
+    {
+        return;
+    }
+    map_t* owner = worldState.mapForEntities(mynode->list);
+    if (!owner && mynode->list == map.entities)
+    {
+        owner = &map;
+    }
+    if (owner)
+    {
+        owner->entities_map.erase(uid);
+        owner->entities_map.insert({new_uid, mynode});
+    }
+    uid = new_uid;
 }
 
 /*-------------------------------------------------------------------------------
@@ -2625,7 +2638,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 					|| skill == PRO_RANGED
 					|| skill == PRO_STEALTH) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_NIMBLENESS) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_NIMBLENESS));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2639,7 +2652,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 					|| skill == PRO_AXE
 					|| skill == PRO_MACE) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_GREATER_MIGHT) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_GREATER_MIGHT));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2652,7 +2665,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 				&& (skill == PRO_SORCERY
 					|| skill == PRO_MYSTICISM) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_COUNSEL) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_COUNSEL));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -2664,7 +2677,7 @@ bool Entity::increaseSkill(int skill, bool notify)
 			if ( myStats->getEffectActive(EFF_STURDINESS)
 				&& (skill == PRO_SHIELD) )
 			{
-				int caster = ((myStats->getEffectActive(EFF_STURDINESS) >> 4) & 0xF) - 1;
+				int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_STURDINESS));
 				if ( caster >= 0 && caster < MAXPLAYERS )
 				{
 					if ( players[caster]->entity )
@@ -14473,7 +14486,35 @@ void Entity::attack(int pose, int charge, Entity* target)
 									net_packet->address.host = net_clients[playerhit - 1].host;
 									net_packet->address.port = net_clients[playerhit - 1].port;
 									net_packet->len = 26;
-									sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
+#ifdef SAM_FRAMEWORK_ENABLED
+                                    if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(armor->type) )
+                                    {
+                                        const std::string& stableId =
+                                            SAMItemRegistryFoundation::stableIdForRuntimeId(armor->type);
+                                        const int available = NET_PACKET_SIZE - 27;
+                                        if ( !stableId.empty()
+                                            && static_cast<int>(stableId.size()) <= available )
+                                        {
+                                            memcpy(
+                                                &net_packet->data[26],
+                                                stableId.c_str(),
+                                                stableId.size()
+                                            );
+                                            net_packet->data[26 + stableId.size()] = '\0';
+                                            net_packet->len =
+                                                27 + static_cast<int>(stableId.size());
+                                        }
+                                        else
+                                        {
+                                            printlog(
+                                                "[S.A.M] STLA could not serialize custom item runtime %d. "
+                                                "The remote removal update will be rejected safely.\n",
+                                                static_cast<int>(armor->type)
+                                            );
+                                        }
+                                    }
+#endif
+                                    sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
 								}
 
 								if ( armor->count <= 0 )
@@ -14628,7 +14669,35 @@ void Entity::attack(int pose, int charge, Entity* target)
 									net_packet->address.host = net_clients[playerhit - 1].host;
 									net_packet->address.port = net_clients[playerhit - 1].port;
 									net_packet->len = 26;
-									sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
+#ifdef SAM_FRAMEWORK_ENABLED
+                                    if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(armor->type) )
+                                    {
+                                        const std::string& stableId =
+                                            SAMItemRegistryFoundation::stableIdForRuntimeId(armor->type);
+                                        const int available = NET_PACKET_SIZE - 27;
+                                        if ( !stableId.empty()
+                                            && static_cast<int>(stableId.size()) <= available )
+                                        {
+                                            memcpy(
+                                                &net_packet->data[26],
+                                                stableId.c_str(),
+                                                stableId.size()
+                                            );
+                                            net_packet->data[26 + stableId.size()] = '\0';
+                                            net_packet->len =
+                                                27 + static_cast<int>(stableId.size());
+                                        }
+                                        else
+                                        {
+                                            printlog(
+                                                "[S.A.M] STLA could not serialize custom item runtime %d. "
+                                                "The remote removal update will be rejected safely.\n",
+                                                static_cast<int>(armor->type)
+                                            );
+                                        }
+                                    }
+#endif
+                                    sendPacketSafe(net_sock, -1, net_packet, playerhit - 1);
 								}
 
 								if ( armor->count <= 0 )
@@ -17793,6 +17862,16 @@ void Entity::awardXP(Entity* src, bool share, bool root)
 		return;
 	}
 
+	if ( root
+		&& src->behavior == &actMonster
+		&& srcStats->MISC_FLAGS[15] > 0 )
+	{
+		customDialogueCreditAuthoredDefeat(
+			srcStats->MISC_FLAGS[15],
+			src->getUID()
+		);
+	}
+
 	if ( src->behavior == &actPlayer && behavior == &actMonster && root )
 	{
 		Compendium_t::Events_t::eventUpdateMonster(src->skill[2], Compendium_t::CPDM_KILLED_BY, this, 1);
@@ -18185,10 +18264,10 @@ void Entity::awardXP(Entity* src, bool share, bool root)
 				bool bonus = false;
 				if ( srcStats->getEffectActive(EFF_DIVINE_FIRE) )
 				{
-					int effectInflictedBy = (srcStats->getEffectActive(EFF_DIVINE_FIRE) & 0xF0) >> 4;
+					int effectInflictedBy = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(srcStats->getEffectActive(EFF_DIVINE_FIRE));
 					if ( behavior == &actPlayer && !checkFriend(src) )
 					{
-						if ( effectInflictedBy == (1 + skill[2]) )
+						if ( effectInflictedBy == skill[2] )
 						{
 							minRoll += srcStats->getEffectActive(EFF_DIVINE_FIRE) & 0xF;
 							bonus = true;
@@ -20125,7 +20204,7 @@ int countCustomItems(Stat* stats)
 	int x = 0;
 	int customItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] != 1 || (stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] != 0) )
 		{
@@ -20141,7 +20220,7 @@ int countDefaultItems(Stat* stats)
 	int x = 0;
 	int defaultItemSlotCount = 0;
 
-	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_6; x = x + ITEM_SLOT_NUMPROPERTIES )
+	for ( x = ITEM_SLOT_INV_1; x <= ITEM_SLOT_INV_LAST; x = x + ITEM_SLOT_NUMPROPERTIES )
 	{
 		if ( stats->EDITOR_ITEMS[x] == 1 && stats->EDITOR_ITEMS[x + ITEM_SLOT_CATEGORY] == 0 )
 		{
@@ -32576,7 +32655,7 @@ bool Entity::modifyDamageMultipliersFromEffects(Entity* hitentity, Entity* attac
 	}
 	if ( hitstats->getEffectActive(EFF_SIGIL) )
 	{
-		int caster = ((hitstats->getEffectActive(EFF_SIGIL) >> 4) & 0xF) - 1;
+		int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(hitstats->getEffectActive(EFF_SIGIL));
 		if ( caster >= 0 && caster < MAXPLAYERS )
 		{
 			if ( hitentity->behavior == &actMonster 
@@ -32596,7 +32675,7 @@ bool Entity::modifyDamageMultipliersFromEffects(Entity* hitentity, Entity* attac
 		real_t reduction = std::min(0.8, std::max(0.0, 0.1 + (0.15 * (int)(hitstats->getEffectActive(EFF_SANCTUARY) & 0xF))));
 		damageMultiplier = std::max(0.1, damageMultiplier * (1.0 - reduction));
 
-		int caster = ((hitstats->getEffectActive(EFF_SANCTUARY) >> 4) & 0xF) - 1;
+		int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(hitstats->getEffectActive(EFF_SANCTUARY));
 		if ( caster >= 0 && caster < MAXPLAYERS )
 		{
 			if ( players[caster]->entity )
@@ -32618,7 +32697,7 @@ real_t Entity::getHealingSpellPotionModifierFromEffects(bool processLevelup)
 	{
 		if ( myStats->getEffectActive(EFF_SIGIL) )
 		{
-			int caster = ((myStats->getEffectActive(EFF_SIGIL) >> 4) & 0xF) - 1;
+			int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(myStats->getEffectActive(EFF_SIGIL));
 			if ( caster >= 0 && caster < MAXPLAYERS )
 			{
 				if ( (behavior == &actMonster

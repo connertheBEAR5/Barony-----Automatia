@@ -11,7 +11,9 @@
 
 #pragma once
 
-#define FMOD_AUDIO_GUID_FMT "%.8x%.16llx"
+#include <inttypes.h>
+
+#define FMOD_AUDIO_GUID_FMT "%.8" PRIx32 "%.16" PRIx64
 
 #include <stdio.h>
 #ifdef USE_FMOD
@@ -555,14 +557,17 @@ int closeOPENAL();
 void sound_update(int player, int index, int numplayers);
 
 OPENAL_SOUND* playSoundPlayer(int player, Uint16 snd, Uint8 vol);
+OPENAL_SOUND* playSoundNotificationPlayer(int player, Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSoundPosLocal(real_t x, real_t y, Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSoundEntity(Entity* entity, Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSoundEntityLocal(Entity* entity, Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSound(Uint16 snd, Uint8 vol);
+OPENAL_SOUND* playSoundNotification(Uint16 snd, Uint8 vol);
 OPENAL_SOUND* playSoundVelocity(); //TODO: Write.
 
-void playmusic(OPENAL_BUFFER* sound, bool loop, bool crossfade, bool resume); //Automatically crossfades. NOTE: Resets fadein and fadeout increments to the defaults every time it is called. You'll have to change the fadein and fadeout increments AFTER calling this function.
+void playMusic(OPENAL_BUFFER* sound, bool loop, bool crossfade, bool resume); //Automatically crossfades. NOTE: Resets fadein and fadeout increments to the defaults every time it is called. You'll have to change the fadein and fadeout increments AFTER calling this function.
+void stopMusic();
 
 void handleLevelMusic(); //Manages and updates the level music.
 

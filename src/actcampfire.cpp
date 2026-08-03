@@ -104,10 +104,16 @@ void actCampfire(Entity* my)
 		}
 
 		// light environment
-		if ( !CAMPFIRE_LIGHTING )
+		if ( !my->light )
 		{
-			my->light = addLight(my->x / 16, my->y / 16, "campfire");
-			CAMPFIRE_LIGHTING = 1;
+			my->light = addLight(
+				my->x / 16,
+				my->y / 16,
+				CAMPFIRE_LIGHTING == 2 ? "campfire_flicker" : "campfire");
+			if ( !CAMPFIRE_LIGHTING )
+			{
+				CAMPFIRE_LIGHTING = 1;
+			}
 		}
 		if ( flickerLights )
 		{
@@ -239,10 +245,16 @@ void actCauldron(Entity* my)
 		}
 
 		// light environment
-		if ( !CAMPFIRE_LIGHTING )
+		if ( !my->light )
 		{
-			my->light = addLight(my->x / 16, my->y / 16, "campfire");
-			CAMPFIRE_LIGHTING = 1;
+			my->light = addLight(
+				my->x / 16,
+				my->y / 16,
+				CAMPFIRE_LIGHTING == 2 ? "campfire_flicker" : "campfire");
+			if ( !CAMPFIRE_LIGHTING )
+			{
+				CAMPFIRE_LIGHTING = 1;
+			}
 		}
 		if ( flickerLights )
 		{

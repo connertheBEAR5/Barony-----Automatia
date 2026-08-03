@@ -625,7 +625,7 @@ public:
 			}
 			if ( !useDefaultInventoryItems )
 			{
-				for ( int invSlots = ITEM_SLOT_INV_1; invSlots <= ITEM_SLOT_INV_6; invSlots = invSlots + ITEM_SLOT_NUMPROPERTIES )
+				for ( int invSlots = ITEM_SLOT_INV_1; invSlots <= ITEM_SLOT_INV_LAST; invSlots = invSlots + ITEM_SLOT_NUMPROPERTIES )
 				{
 					myStats->EDITOR_ITEMS[invSlots] = 0;
 				}

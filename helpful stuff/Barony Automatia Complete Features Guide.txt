@@ -727,3 +727,365 @@ Planned:
 - Cross-session quest state
 - Mass sprite copy/paste
 - Flame-specific culling improvements
+
+
+======================================================================
+34. HEADLESS SERVER LAUNCH OPTIONS
+======================================================================
+
+Current implementation level: HEADLESS-1B configuration and visibility reporting.
+
+Basic launch:
+
+./barony --headless
+
+Current behavior:
+
+- Starts with a hidden compatibility OpenGL context.
+- Disables audio and controller initialization.
+- Does not display a normal game window.
+- Defaults to loopback-only configuration at 127.0.0.1:57165.
+- Prints an explicit security/status summary to the terminal and log.
+- Writes ~/.barony/headless_server_status.txt on normal Linux builds.
+- Does not open a listening server socket yet.
+
+LAN configuration:
+
+./barony --headless --LAN
+
+This requests LAN mode and changes the requested bind endpoint to:
+
+0.0.0.0:57165
+
+Optional arguments:
+
+--port=57165
+    Select the requested UDP/TCP game port. Valid range: 1 through 65535.
+
+--bind=127.0.0.1
+    Select the requested local bind address.
+
+--server-name=MyServer
+    Set the displayed/logged dedicated-server name.
+
+--private
+    Request a private or unlisted online server mode.
+
+--public
+    Request a public or listed online server mode.
+
+--password=ExamplePassword
+    Record that password protection is requested. The password is never printed
+    into the log or status file.
+
+--late-join
+    Enable the experimental direct-connect LAN in-progress JOIN path.
+
+Examples:
+
+./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+./barony --headless --private --password=ExamplePassword --server-name=PrivateWorld
+
+./barony --headless --public --port=57165 --server-name=PublicAutomatia
+
+Important limitations in HEADLESS-1B:
+
+- Plain `--headless` opens no listener. Explicit `--LAN` opens the existing
+  direct-connect UDP listener.
+- Password enforcement is not implemented; password/private requests fail closed.
+- Public lobby publication is not implemented; public requests fail closed.
+- The direct-LAN new-player snapshot probe has passed, but normal two-client,
+  returning-player, divergent-map, and Windows runtime acceptance remain.
+- The hidden OpenGL context is still required by existing resource startup code.
+
+The terminal log and headless_server_status.txt deliberately state these
+limitations so an administrator can tell that the process is not silently
+listening or exposed.
+
+HEADLESS SERVER LAUNCH OPTIONS
+==============================
+
+Safe non-listening startup:
+  ./barony --headless
+
+LAN direct-connect lobby:
+  ./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+Immediate game start:
+  ./barony --headless --LAN --autostart
+
+Delayed game start:
+  ./barony --headless --LAN --autostart=30
+
+Five-minute autosave to slot 0:
+  ./barony --headless --LAN --autostart --save=0 --autosave=300
+
+Autosave is disabled by default. Save targets are currently numeric slots 0
+through 99; arbitrary path targets are rejected. An existing valid LAN-server
+slot is restored before start. Existing malformed, unreadable, or incompatible
+slots stop startup and close the listener rather than being overwritten. Public listing, password
+authentication, true renderless startup, and durable authenticated reconnect
+identity are not complete. Explicit --late-join enables a direct-LAN runtime
+JOIN path whose deterministic new-player snapshot probe passes, but which still
+requires normal two-client and returning-player acceptance.
+Unsupported
+security modes fail closed rather than pretending to protect the server.
+
+HEADLESS ADMIN CONSOLE
+======================
+On Linux/POSIX builds, type these commands into the launch terminal:
+
+  help      Show commands.
+  status    Print listener and feature status.
+  start     Start the game from the waiting LAN lobby.
+  save      Save the active authoritative server session.
+  shutdown  Save an active savable session, then terminate gracefully.
+
+Public listing, password authentication, true renderless startup, and durable
+authenticated reconnect remain intentionally unavailable. In-progress joining
+is limited to the explicit, experimental direct-LAN --late-join path and remains
+unverified in a real two-client session.
+
+HEADLESS SERVER ON WINDOWS
+==========================
+
+Launch a LAN server from Command Prompt or PowerShell:
+
+  barony.exe --headless --LAN --port=57165 --server-name=AutomatiaLAN
+
+Start automatically after 30 seconds:
+
+  barony.exe --headless --LAN --autostart=30
+
+The administrator terminal accepts the same commands on Windows and Linux:
+
+  help
+  status
+  start
+  save
+  shutdown
+
+On first launch, Windows may ask whether Barony may communicate through Microsoft Defender Firewall. Select Private networks for LAN hosting. Public network permission is not required for normal LAN use.
+
+DIVERGENT PATHS / LATE JOIN FOUNDATION
+--------------------------------------
+DIVERGENT-1A adds validated per-player map-instance identity. Every player now
+has a map filename, instance ID, and revision counter. New players default to
+start.lmp#world. The server now has compile-tested independent custom-tunnel
+transitions and occupied-map simulation, but these paths still require real
+two-client runtime verification. A bounded, revision-keyed late-join snapshot
+transaction now suppresses live map simulation until explicit authorization,
+rejects malformed chunk accounting, and resets safely when a network slot is
+reused or disconnected. An explicit direct-LAN runtime JOIN now drives the
+versioned handshake and scoped snapshot transfer, including a S.A.M. fingerprint
+check and ready/authorize/go barrier. This path is build- and foundation-tested,
+not yet verified with a real server and two clients; see "Divergent Paths and
+Late Join Developer Guide.txt" for the remaining acceptance work.
+
+
+======================================================================
+35. PROJECT COMPLETION STATUS
+======================================================================
+
+Audit date: 2026-07-31
+Audited revision: f231f0d8 (maindev)
+
+This matrix records verified implementation state rather than the intended
+roadmap. A feature described elsewhere as implemented can remain unverified
+here until its required build or runtime test has passed.
+
+Phase 0 - Baseline verification
+    Status: Complete for the Linux compile baseline.
+    The project owner confirmed FMOD is the primary supported audio backend.
+    A GCC 13.3.0, FMOD-on, OpenAL-off, 15-player build now compiles and links
+    both the graphical game and editor against the installed FMOD library.
+    An optional OpenAL build also exposed and received isolated compatibility
+    repairs, but OpenAL feature parity is not a project priority. Runtime
+    graphical, headless, multiplayer, and Windows tests remain Phase 8 work.
+
+Phase 1 - Divergent paths
+    Status: Partially implemented.
+    Canonical WorldInstanceIdentity and per-player identity fields exist. A
+    WorldState registry now owns runtime MapInstance metadata without embedding
+    non-trivial state into legacy C-allocated map_t objects. Legacy main-map
+    loads bind start.lmp#world-style keys and revisions, and core entity,
+    bodypart, sprite, skill, flag, particle, and tile packets filter recipients
+    against the active instance. The central reliable/unreliable send paths
+    also enforce this scope, including SAFE retries. Session persistence,
+    minimap state, story NPC keys, and authoritative persistent snapshots now
+    use canonical map-instance keys rather than filename-only keys. New lobby
+    occupants are placed into the active instance before gameplay packets can
+    be sent. MapInstance now references its loaded tiles, entity, creature, and
+    world-UI collections plus dimensions, occupants, simulation time, dirty
+    state, and persistent-ID sequence, and WorldState can bind or release more
+    than one loaded map without placing C++ ownership inside legacy map_t.
+    Activating a detached instance now explicitly swaps every owned map_t field
+    into the legacy global-map compatibility view and updates both registry
+    bindings before changing the authoritative active key. Dungeon level, map
+    seed, entity-UID sequence, secret-level state, and darkness state travel
+    with that instance. Per-instance pathfinding arrays now travel through the
+    same boundary, and the collision tile index is cleared and rebuilt so it
+    cannot retain entities from the previous map. Detached map files can be
+    loaded into manager-owned storage after their source filename is matched to
+    the canonical identity. Their entity lists are registered before parsing,
+    so entities receive per-instance UIDs instead of the legacy detached-list
+    sentinel. Failed loads clean up without publishing a partial instance.
+    Runtime actions can retain hidden per-player starts, and a narrow server
+    scheduler rotates through loaded occupied instances to run entity/world-UI
+    behaviors, deletion handling, collision-index movement, packet output, and
+    per-instance simulation ticks. Player entity pointers, lighting, shop masks,
+    monster counters, pathfinding state, and positional/entity sounds follow the
+    active map boundary. Named custom tunnels queue a player-specific end-of-tick
+    transition; the destination client receives selective-spawn and runtime-UID
+    data while players left behind keep their source instance. Classified inbound
+    movement, interaction, dialogue, spell, item, world, minimap, shop, and
+    workstation-close packets activate the claimed player's loaded instance;
+    direct-IP packets also validate the joined UDP endpoint. Entity-existence and
+    item-detail requests, suicide, and GUI-close packets now use the same sender
+    authentication boundary. Truncated dispatch, SAFE, GOTP, movement, ghost
+    movement, and click packets fail closed. Entity effects, projectiles,
+    teleports, NPC/container UI, walls, signs, follower, death, and mechanism
+    updates are filtered to active-instance occupants; discovery, latency probes,
+    and preference traffic remains session-global. These new
+    scheduler/transition paths compile but
+    have not passed the required live two-client regression. Empty instances now
+    capture persistence before releasing their owned runtime storage and reload
+    under preserved validated metadata; saves rotate through every loaded map
+    and retain inactive player positions. Steam/EOS queued packets also retain
+    the transport peer index and reject mismatched claimed players. Followers
+    owned by the moving player are copied to the destination instance with
+    relative placement and server ownership updates, then removed from the
+    source instance. This transfer path compiles but still needs the live
+    two-client regression. Live P2P verification and complete packet coverage
+    also remain incomplete.
+
+Phase 2 - Persistent save files
+    Status: Partially implemented.
+    Extensive session-only map/entity/story persistence and stable custom-item
+    save metadata exist. A production-linked schema-v1 world-save envelope now
+    validates canonical map identities and players, rejects malformed or future
+    incompatible saves, caps input size, writes and flushes a same-directory
+    temporary file, validates it again, and atomically replaces the destination.
+    Unknown JSON fields and unresolved custom-item payloads survive round trips.
+    Foundation tests exercise those guarantees. Normal host save operations now
+    write the companion document beside the established character save and fail
+    visibly if the world write fails; clients cannot author it. Save discovery
+    rejects malformed or mismatched companion documents, and deleting a save
+    removes its world document and stale temporary file. The document currently
+    exports per-instance tile/removal/dynamic-monster state, dynamic items and
+    gold, minimaps, mechanism identities, quests, world facts, and NPC dialogue
+    memory. Valid companion documents are paired to the character save by
+    session ID during load. Validated map removals, tile overrides, dynamic
+    monster identifiers, items, gold, spawned boulders, minimaps, quests, world
+    facts, NPC dialogue memory, and versioned mechanism payloads are hydrated
+    when the session is restored. Mechanism payloads cover chest and shop
+    inventories, monster equipment and effects, item/gold metadata, power and
+    trap state, timers, and the other persistent scalar mechanism fields. The
+    unknown root fields, unknown per-map fields, unresolved custom-item payloads,
+    and unloaded map sections are retained for the next atomic save instead of
+    being discarded by a partial migration. Saved placements for the currently
+    active map are bounds- and obstacle-checked before they are applied.
+    Persistent chest, shop, monster-equipment, and floor-item records
+    now retain S.A.M. stable IDs and resolve those before legacy numeric IDs.
+    Player records currently use explicit session-slot identity. On restart,
+    connected players are selectively spawned only in their saved instance;
+    other saved instances are loaded and initialized once, validated positions
+    use the normal Player Start as a fallback, and character-save followers are
+    restored while their owner's instance is active. Durable account or
+    authenticated reconnect identity and unknown-item placeholder rehydration
+    are not complete. Timed
+    headless autosave and graceful-shutdown save hooks now use the same atomic
+    companion writer. Explicit numeric LAN-server slots are restored before
+    start and fail closed on existing invalid data. A Linux FMOD direct-LAN
+    acceptance run passes new-session startup, administrator shutdown save,
+    same-slot restart, schema-v1 companion restore, live map entry, resave, and
+    clean shutdown. That run exposed and fixed a timing-dependent headless title-
+    fade crash caused by indexing an uninitialized intro-music array while sound
+    was suppressed. Divergent-player and Windows recovery testing remains open.
+
+Phase 3 - Late join and reconnect
+    Status: Direct-LAN protocol implemented and build-tested; live acceptance pending.
+    Pre-game lobby joining exists. A bounded snapshot transaction validates
+    transfer ID, instance revision, sequence coverage, chunk count, and byte
+    total; duplicate chunks are harmless, malformed totals fail closed, and
+    live active-map updates remain gated until explicit authorization. Slot
+    reuse, disconnect, and network teardown clear stale transactions. Foundation
+    tests cover the versioned begin/chunk/completion/ready/authorization wire
+    records plus the final client-go barrier, strict lengths, 900-byte chunk
+    bounds, per-chunk and whole-snapshot
+    CRC-32, out-of-order reassembly, duplicate-content suppression, incorrect
+    transfer identity, authorization ordering, and byte-total mismatch. The
+    existing validated schema-v1 capture path can serialize a compact 16 MiB-
+    bounded snapshot containing only the selected active instance; client
+    staging validates its schema and session ID before accepting it. The reliable
+    direct-LAN runtime JOIN path queues begin/chunk/completion records, suppresses live map
+    updates during transfer, reassembles and stages them client-side, authenticates
+    the client-ready response, emits explicit spawn authorization, and waits for
+    client-go before enabling live output. The initial HELO/capability exchange,
+    post-HELO LJHI request, S.A.M. catalog fingerprint validation, and extended
+    gameplay start metadata are connected to gameplay JOIN when a direct LAN
+    server explicitly enables --late-join. A server placement
+    helper now prepares one joining slot before snapshot capture: returning slots
+    use their saved instance and validated position, while new slots use
+    start.lmp#world; unloaded maps are loaded, persistent state and pathing are
+    initialized once, and a Player Start supplies the safe fallback. The connected
+    path has passed a deterministic direct-LAN new-player UDP probe with a
+    seven-chunk scoped snapshot. It has not yet passed a normal two-client
+    runtime, the corrected returning-player branch, loss/reordering stress, or
+    Windows acceptance. P2P late join, durable authenticated reconnect
+    identity, and a post-snapshot incremental delta/catch-up protocol remain
+    unavailable.
+
+Phase 4 - Headless server
+    Status: Linux single-map LAN/restart acceptance passes; broader coverage pending.
+    Hidden-window headless startup, explicit LAN lobby hosting, autostart,
+    bounded numeric save-slot selection, timed autosave, signal/admin
+    save-on-shutdown, fail-closed selected-slot recovery, and Linux/Windows
+    terminal command paths exist. Public hosting, password authentication, and
+    true renderless startup correctly remain fail-closed or unavailable.
+    Explicit --late-join enables only the experimental direct-LAN path. Its
+    deterministic new-player snapshot probe passes. Linux
+    start/save/restart/resave succeeds with an atomic companion restore. Recovery
+    still needs divergent-player and Windows verification; late join still needs
+    normal two-client and returning-player acceptance while gameplay is active.
+
+Phase 5 - Remaining persistent world features
+    Status: Partially implemented.
+    Many mechanisms persist within a session. Dynamic dropped-item persistence,
+    full container/shop state, shop visit-based refresh, and several roadmap
+    mechanisms still require implementation or verification.
+
+Phase 6 - Dialogue and quests
+    Status: Partially implemented.
+    JSON dialogue, guided editor tools, per-player session quest state, journal,
+    objectives, actions, and host-authoritative choice handling exist. Stable
+    saved-player identity, cross-session serialization, party/world scope,
+    compound conditions, cross-instance evaluation, and complete multiplayer
+    regression tests remain.
+
+Phase 7 - Editor roadmap
+    Status: Implemented in parts but not fully verified.
+    Searchable palettes, expanded monster inventory work, 3D previews, and mass
+    copy/paste code are present in recent history. Cuboid tools, complete
+    selection semantics, UID/persistent-ID collision behavior, and full editor
+    regression coverage still require source-level verification.
+
+Phase 8 - Release readiness
+    Status: Not started.
+    The primary Linux FMOD compile gate passes. Windows, graphical runtime,
+    editor runtime, headless LAN, divergent-map, late-join, reconnect, restart,
+    save migration, and S.A.M. mismatch acceptance tests remain required.
+
+Foundation regression target
+    Configure with BUILD_TESTING=ON and run:
+
+        cmake --build build --target automatia_foundation_tests
+        ctest --test-dir build --output-on-failure
+
+    The current test covers canonical map-instance identity validation,
+    revision behavior, map-local packet classification, global chat exclusion,
+    and reliable SAFE packet unwrapping. The shared PC file buffer was also
+    hardened against byte-count overflow, invalid seeks, partial I/O offset
+    corruption, and release-build retry hangs before persistent disk saves are
+    layered on top of it.

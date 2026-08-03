@@ -1,0 +1,1265 @@
+BARONY AUTOMATIA CODEX PROJECT PROGRESS AND CONTINUATION
+========================================================
+
+Last updated: 2026-08-01
+
+CURRENT CHECKPOINT
+==================
+
+The current divergent-map, persistence, late-join, and headless architecture has
+been statically audited and strengthened. The Linux FMOD game, editor, and
+foundation tests build successfully. This checkpoint is ready for the manual
+two-client acceptance test below, but divergent paths, restart persistence,
+late joining, and reconnect are not declared complete without that runtime
+evidence.
+
+WORK COMPLETED
+==============
+
+* Read the complete Automatia feature guide, divergent-path/late-join guide,
+  headless guide, master completion prompt, current tests, and current Git
+  changes relevant to this checkpoint.
+* Audited WorldState/MapInstance ownership, map activation, player membership,
+  independent exits, follower transfer, background simulation, unload/reload,
+  persistence capture/restore, late-join transactions, packet scoping, and
+  headless recovery.
+* Verified that map activation swaps the legacy map, creature/UI lists, path
+  maps, shop mask, light state, entity UID cursor, map metadata, player entity
+  view, and tile-entity index as a single compatibility context.
+* Expanded and audited the map-packet classification used by the central send
+  and receive boundaries. Every network handler that performs `uidToEntity()`
+  lookup is now classified as map-local; entity, visual effect, shop,
+  equipment, summon, mechanism, item, and interaction packets are filtered by
+  recipient map membership and authenticated sender instance.
+* Added bounded incremental catch-up for updates produced after a late-join
+  snapshot is captured. The server buffers ordered map-local payloads per
+  joining player, sends a CRC-protected LJCB/LJCC/LJCE transfer before STRT,
+  and opens live simulation only afterward. The client defers reordered live
+  packets until its destination map is loaded, then replays snapshot catch-up
+  before the deferred live tail.
+* Added 30-second late-join progress timeouts, explicit LJAB abort records,
+  endpoint validation, staged-snapshot cleanup, transaction/buffer cleanup,
+  and concise failure diagnostics without per-tick logging.
+* Added per-slot 128-bit reconnect bearer identities to LAN character saves.
+  Returning runtime JOIN now requires the matching saved token and compares it
+  without early exit. Tokens are issued directly to the assigned client and
+  are never logged. Old saves without tokens fail closed for returning-player
+  reconnect; password and public hosting remain separately fail-closed.
+* Kept public hosting and password hosting fail-closed. Only explicit LAN
+  direct-connect hosting opens the implemented listener.
+* Added command-triggered headless instance diagnostics. The `status` command
+  prints the active instance and one concise line per registered instance,
+  including revision, load/init/active/dirty state, simulation tick, and player
+  membership. It does not log every tick.
+* Converted headless slot 0 into a network authority only. The server no longer
+  spawns or persists a playable host entity, clients receive slot 0 as absent,
+  and WorldState membership contains only real players. Numbered remote Player
+  Starts remain hidden and reusable for authenticated runtime joins.
+* Extended backward-compatible LAN discovery metadata for dedicated/late-join
+  state and game port. Empty dedicated servers remain visible, running
+  late-join servers are advertised as joinable instead of locked, and malformed
+  discovery replies are rejected safely. This is LAN-browser discovery only;
+  public matchmaking remains fail-closed.
+* Rebuilt client-local torch, crystal, campfire, and cauldron light objects when
+  synchronized runtime skills say the light was already initialized. This
+  closes the late-join state/pointer mismatch without per-tick diagnostics.
+* Expanded foundation coverage for unsafe/oversized identities, failed-set
+  immutability, identity matching and revision behavior, transaction ordering,
+  duplicates, revision mismatches, malformed wire records, per-chunk and whole
+  snapshot CRC failures, impossible chunk capacity, chunk/snapshot limits,
+  player/map membership references, save schema validation, exact save
+  round-trip, opaque unknown S.A.M. item preservation, catch-up ordering and
+  malformed lengths, abort records, reconnect-token validation, and explicit
+  divergent player/follower/item/chest/shop/mechanism/quest/dialogue payloads.
+
+FAILURES FOUND AND FIXED
+========================
+
+* Returning late-join placement was consumed during preparation, before the
+  client completed snapshot authorization. It now remains pending until a
+  successful LJGO authorization/start sequence.
+* Runtime returning JOIN validation compared against transient load flags that
+  are cleared after startup. It now compares against the running game and lobby
+  keys.
+* The live probe assumed only the short HELO roster layout. It now accepts both
+  valid lobby and saved-equipment layouts and acknowledges the chunk bootstrap.
+* Headless recovery could lose a disconnected saved slot or give it to a new
+  joiner. Pending saved placements are retained and reserved.
+* Save restoration could continue applying effects or followers through the
+  wrong global map if a requested instance activation failed. Those operations
+  now fail locally with a focused diagnostic and skip that player.
+* A retired legacy map identity retained aliases to global path/shop buffers
+  after ownership moved to a newly bound identity. Those aliases are cleared at
+  the rebind boundary, preventing a later stale-pointer/double-free hazard.
+* Custom-transition packet construction did not explicitly bound the map name
+  against the reliable packet payload. Oversized names are now rejected before
+  transition mutation.
+* A headless/FMOD title-music fade could dereference an unavailable sound during
+  no-sound startup. The title transition now validates the music state first.
+* Map-local updates produced between snapshot capture and spawn authorization
+  were discarded. They are now retained in a bounded catch-up transaction and
+  replayed before live traffic.
+* Incomplete or corrupt snapshot transfers had no explicit timeout/abort
+  lifecycle and could retain staged documents or chunk memory. Both peers now
+  abort, validate the abort source, clean staged state, and release buffers.
+* Returning identity depended only on slot and ordinary save metadata. LAN
+  reconnect now also requires a server-issued per-slot bearer token saved by
+  both peers; missing or mismatched identities fail closed.
+* Headless slot 0 appeared as a rendered player and occupied map membership.
+  Dedicated startup now retains no slot-0 entity and advertises no host player.
+* Headless startup deleted or persisted-away unused Player Starts, preventing
+  new late joiners from spawning. Player Starts are now retained invisibly and
+  excluded/healed from persistent entity-removal records.
+* Running late-join servers were marked locked in LAN discovery, and empty
+  dedicated servers were filtered from the browser. Dedicated discovery now
+  identifies those servers explicitly and leaves late-join sessions joinable.
+* Static light entities could receive synchronized initialization flags before
+  owning their client-local light object. Their behaviors now reconstruct the
+  missing local light using the synchronized steady/flicker state.
+
+FILES MODIFIED IN THIS STABILIZATION PASS
+=========================================
+
+* src/game.cpp
+* src/game.hpp
+* src/menu.cpp
+* src/net.cpp
+* src/net.hpp
+* src/scores.cpp
+* src/scores.hpp
+* src/ui/MainMenu.cpp
+* src/world_state.cpp
+* src/maps.cpp
+* src/acttorch.cpp
+* src/actcampfire.cpp
+* src/lan_discovery.hpp
+* src/late_join_protocol.hpp
+* src/late_join_state.hpp
+* src/world_packet_scope.hpp
+* tests/automatia_foundation_tests.cpp
+* tests/late_join_live_probe.cpp
+* tests/run_late_join_live_acceptance.sh
+* helpful stuff/Codex Project Progress and Continuation.txt
+
+The repository already contained broader uncommitted Automatia, S.A.M., editor,
+audio, persistence, and headless work. Those existing changes were preserved.
+
+Complete current worktree review inventory:
+
+* Build/config: .gitignore, CMakeLists.txt, src/CMakeLists.txt.
+* Documentation: the four existing Automatia/headless guides listed in Git
+  status and this continuation file.
+* Runtime integration: src/actladder.cpp, src/entity.cpp,
+  src/entity_shared.cpp, src/files.cpp, src/game.cpp, src/game.hpp,
+  src/init_game.cpp, src/main.cpp, src/main.hpp, src/maps.cpp, src/menu.cpp,
+  src/net.cpp, src/net.hpp, src/scores.cpp, src/shops.cpp,
+  src/ui/MainMenu.cpp, and src/world_instance.hpp.
+* Audio/file/S.A.M. compatibility: src/engine/audio/music.cpp,
+  src/engine/audio/sound.cpp, src/engine/audio/sound.hpp,
+  src/engine/audio/sound_game.cpp, src/engine/filepc.hpp, and
+  src/sam/framework/sam_sync.cpp.
+* New foundations: src/automatia_save.cpp/.hpp,
+  src/automatia_world_save.cpp/.hpp, src/late_join_protocol.hpp,
+  src/late_join_state.hpp, src/world_packet_scope.hpp, and
+  src/world_state.cpp/.hpp.
+* Tests: tests/automatia_foundation_tests.cpp and
+  tests/late_join_live_probe.cpp.
+
+BUILDS AND AUTOMATED TESTS
+==========================
+
+Baseline before this stabilization pass:
+
+* `cmake --build build -j8` - PASS (game, editor, and test executables)
+* `ctest --test-dir build --output-on-failure` - PASS
+* `git diff --check` - PASS
+* FMOD linkage check - PASS; the Linux game resolves libfmod.so.14 and does not
+  require OpenAL.
+
+Final stabilization verification after incremental catch-up, abort cleanup, and
+reconnect identity changes:
+
+* `automatia_foundation` - PASS
+* `cmake --build build -j2` - PASS (game, editor, foundation tests, and live
+  probe targets)
+* `cmake --build build --target editor -j2` - PASS
+* `ctest --test-dir build --output-on-failure` - PASS (1/1)
+* `bash -n tests/run_late_join_live_acceptance.sh` - PASS
+* `git diff --check` - PASS
+* CMake cache - PASS: `FMOD_ENABLED=ON`, `OPENAL_ENABLED=OFF`
+* Linux linkage - PASS: game resolves `libfmod.so.14`; no OpenAL dependency
+* Dedicated/LAN stabilization live probe - PASS: dedicated discovery reported
+  zero host players and a joinable late-join session; a new player completed an
+  11-chunk snapshot/catch-up/start sequence into `start.lmp#world`; headless
+  status reported only the real remote player in `players=[...]`.
+
+Character-selection, slot-5, and lighting checkpoint (2026-08-01):
+
+* Fixed the runtime join ordering regression. `JOIN` now reserves only the
+  network slot and opens character selection. `LJHI` confirms the late-join
+  lobby protocol but does not place the player or begin a snapshot. The server
+  accepts source-validated `PLYR` customization packets and starts placement
+  plus snapshot transfer only after that same client sends `REDY=1`.
+* Runtime `PLYR` and `REDY` are no longer mystery packets. Malformed lengths,
+  wrong endpoints, wrong player indices, and packets outside the waiting phase
+  are rejected. `LJRD` and `LJGO` acknowledgements now also require the
+  assigned player's endpoint.
+* Character selection may remain open for five minutes. The bounded 30-second
+  timeout remains in force after snapshot transfer begins. Waiting clients do
+  not occupy a map instance or receive live simulation.
+* Fixed maps with fewer authored Player Starts than network slots. After Ready,
+  a new player may clone a retained inert Player Start when neither its numbered
+  start nor an existing same-map player is available. This preserves the
+  dedicated slot-0 marker as spawn infrastructure without rendering slot 0 as
+  a player.
+* Fixed client reconstruction for editor light-source entity sprite 131.
+  Runtime entity updates now restore `actLightSource`, and each late-join
+  catch-up includes the authoritative current enabled state (`skill[10]`) for
+  every editor light source in the destination map. The existing torch,
+  crystal, campfire, and light-field reconstruction remains intact.
+* Updated `tests/late_join_live_probe.cpp` to exercise the real client order:
+  `LJHI`, `PLYR`, then `REDY=1`, followed by snapshot authorization, catch-up,
+  and start.
+* Files modified in this checkpoint: `src/net.cpp`, `src/game.cpp`,
+  `tests/late_join_live_probe.cpp`, and this continuation document.
+* Failures found and fixed: placement before Ready; unhandled runtime character
+  and Ready packets; immediate snapshot start on `LJHI`; unavailable slot-5
+  Player Start; missing late-join editor-light behavior/state; and unvalidated
+  snapshot acknowledgement endpoints.
+* `cmake --build build -j8` - PASS.
+* `cmake --build build --target editor -j8` - PASS.
+* `ctest --test-dir build --output-on-failure` - PASS (1/1).
+* `bash -n tests/run_late_join_live_acceptance.sh` - PASS.
+* Contained FMOD headless live probes - PASS for successively reserved new
+  player slots 1, 2, 3, 4, and 5. The slot-5 run used the retained Player Start
+  fallback, completed a 12-chunk/10354-byte snapshot, replayed one editor light
+  source state packet, opened live simulation, emitted no mystery `PLYR` or
+  `REDY`, and shut down successfully.
+* CMake cache remains `FMOD_ENABLED=ON`, `OPENAL_ENABLED=OFF`; Linux linkage
+  resolves `libfmod.so.14` and has no OpenAL dependency.
+
+Runtime character-card UI follow-up (2026-08-01):
+
+* User graphical evidence showed a runtime client assigned beyond the first
+  four slots while the joined lobby remained scrolled to slots 0-3. All four
+  visible cards said `OPEN`, so the assigned character and Ready control were
+  present off-screen.
+* Runtime late join also incorrectly reused the ordinary pre-game
+  `createStartButton()` flow. That asked an already authenticated network client
+  to locally claim/import its player slot a second time instead of immediately
+  presenting the imported/default character editor.
+* Fixed `src/ui/MainMenu.cpp`: the client now queues `LJHI` before opening the
+  runtime lobby, immediately creates the assigned slot's default or saved
+  character card (including its Ready button), and initializes horizontal lobby
+  scrolling to the four-slot page containing `clientnum`. Ordinary pre-game
+  lobby joins retain the original press-to-claim behavior.
+* Full Linux FMOD build after the UI fix - PASS. Editor target, registered tests
+  (1/1), and `git diff --check` - PASS. A contained slot-6 headless protocol
+  probe also completed its 12-chunk snapshot/catch-up/start sequence, confirming
+  the reordered handshake remains server-compatible. The remaining compiler
+  output consists of pre-existing format/truncation warnings.
+* This fixes the code path demonstrated by the screenshot, but still requires
+  the user to confirm the graphical card, customization controls, and Ready
+  button appear in the rebuilt client.
+
+Late-join light-field reinitialization follow-up (2026-08-01):
+
+* User graphical evidence confirmed that authored editor light sources still
+  produced no illumination after late join even when configured `Always On`.
+* `src/net.cpp` now performs an explicit client-local light rebuild only after
+  the late-join destination map is loaded and snapshot catch-up plus deferred
+  live packets have been replayed. It removes stale torch/crystal/campfire light
+  handles so their normal behaviors recreate them on the next tick.
+* Editor `actLightSource` entities are rebuilt immediately at that boundary.
+  Their transient light/flicker state is reset, authored `Always On` is
+  reasserted as enabled even if the source's one-time network state update
+  predated the connection or its editor UID failed to match, and
+  `actLightSource()` creates the local light field immediately.
+* Added one focused completion diagnostic reporting reset fixture lights,
+  successfully rebuilt editor sources, and rebuild failures. This is emitted
+  once per late-join replay and adds no per-tick logging.
+* Full Linux FMOD build, editor target, registered tests (1/1), acceptance-script
+  syntax, and `git diff --check` after the light rebuild change - PASS.
+  Graphical confirmation remains required because the headless live probe cannot
+  inspect rendered lightmaps.
+
+Divergent-path implementation status clarification:
+
+* The implementation for separate players occupying separate `.lmp` map
+  instances is present: `WorldState`/`MapInstance` identity and membership,
+  independent custom-exit transition packets, destination-only client loading,
+  map-scoped packet routing, background instance simulation, follower migration,
+  and empty-instance persistence/unload/reload paths are implemented.
+* Independent divergence currently applies to configured custom exits. Legacy
+  ordinary ladder behavior still checks that the party is assembled unless that
+  route is converted to the custom independent-exit path.
+* This remains implementation status, not a completion claim. A real two-client
+  run with one client remaining active in the source `.lmp` while the other
+  enters a different `.lmp` is still required, followed by isolation,
+  follower, unload/return, and save/restart checks.
+
+Custom-exit, persistent-light, and roster follow-up (2026-08-01):
+
+* User runtime evidence showed a custom exit becoming noninteractive and a
+  transition to `test.lmp` producing no useful response. The client `ENTU`
+  handler was clearing behaviors and rebuilding them from runtime sprite number.
+  Custom exits use an arbitrary editor-selected runtime sprite, so they could
+  not be identified by that switch and lost `actCustomPortal`. Existing
+  map-authored custom exits now preserve `actCustomPortal` across entity refreshes.
+* Independent custom-transition destination spawning had the same four-authored-
+  Player-Start assumption previously fixed for late join. Players in slots 5-15
+  now receive an occupied-map or retained-Player-Start fallback when entering a
+  destination `.lmp`; the transition logs which fallback was used.
+* Authored `Always On` is now healed every client tick inside
+  `Entity::actLightSource()`. A late/stale disabled skill packet can no longer
+  extinguish an Always On editor source after the one-time light rebuild.
+* Server `DISC` packets now require the endpoint assigned to that player.
+  Join/disconnect events emit one roster diagnostic with separate connected,
+  reconnect-reserved, and available counts. Headless `status` emits the same
+  count and filters disconnected slots from each instance's visible occupant
+  list.
+* Logical player slots are deliberately not renumbered while connected. Moving
+  live slot 2 to slot 1 would invalidate entity ownership, follower ownership,
+  reliable packet routing, saves, and reconnect tokens. New joins already select
+  the lowest disconnected slot that is not reconnect-reserved; saved reconnect
+  reservations remain protected. The compact connected count is separate from
+  these stable identity slots.
+* Full Linux FMOD build, editor target, registered tests (1/1), and
+  `git diff --check` - PASS. A contained new-player probe passed through slot 7
+  with a 12-chunk snapshot and showed `connected=1 reconnect-reserved=6
+  available=7`; headless instance output listed only connected player 7.
+* Graphical testing is still required for sustained editor illumination and an
+  actual custom-exit transition to `test.lmp` while a second client remains in
+  the source map.
+
+RUNTIME EVIDENCE AND LIMITS
+===========================
+
+* An isolated Linux headless start/save/restart/resave cycle passed previously.
+* The earlier deterministic direct-LAN new-player live probe passed with a
+  seven-chunk, 6225-byte snapshot into start.lmp#world. That evidence predates
+  the new incremental catch-up records and therefore does not count as runtime
+  acceptance of the current wire sequence.
+* On 2026-08-01 the current contained FMOD headless live probes passed after the
+  dedicated-host/discovery changes. It validated the SCAN response as an empty,
+  unlocked dedicated late-join server, required character data and Ready before
+  placement, completed the current snapshot and catch-up handshake through slot
+  5, and showed no slot-0 occupant in headless status. The slot-5 run is runtime
+  evidence for the fallback and light-source state packet; it is not graphical
+  evidence that lighting renders correctly.
+* An earlier returning-player probe reached saved placement preparation and
+  exposed the early-consumption failure listed above. The corrected branch
+  builds and unit tests pass, but no current token-matched returning-player run
+  has completed. The new-player probe now provides current incremental catch-up
+  evidence; it does not provide reconnect evidence.
+* No test in this checkpoint substitutes for two real graphical clients on
+  separate maps. Rendering, entity/effect isolation, follower behavior, and
+  reconnect UX still require the acceptance test below.
+
+EXACT MANUAL TWO-CLIENT ACCEPTANCE TEST
+=======================================
+
+Preparation
+-----------
+
+1. Preserve a copy of any personal save slot you intend to use. Choose an empty
+   test slot and two compatible clients built from this exact worktree. Create
+   the multiplayer test save with this build so each remote character save
+   receives its reconnect token; legacy saves without a token intentionally
+   cannot perform returning-player reconnect.
+2. Start the host with LAN late join, a fixed port, a fixed save slot, and no
+   public/password option. Example:
+
+     ./barony --headless --LAN --port=57165 --server-name=AutomatiaAcceptance --late-join --autostart --save=95 --autosave=0
+
+   A graphical direct-LAN host may be used instead if that is how the custom
+   exit will be exercised. For the headless late-join test, wait until the log
+   reports autostart and `start.lmp` loading, then locate the server in the LAN
+   browser or direct-connect to it. It is not a public matchmaking listing.
+3. Connect client A after autostart. Confirm the lobby automatically scrolls to
+   the page containing the assigned slot and immediately displays a populated
+   default/saved character card with customization controls and a Ready button;
+   it must not show only `OPEN / Waiting for player to join` cards. Confirm it
+   remains in character selection while editing and is not placed merely because
+   it connected. Finish the character and click that client's Ready button;
+   only then should snapshot transfer begin and the client enter
+   `start.lmp#world`. Repeat with client B.
+   Confirm neither client can ready the other, there is no host character/entity,
+   and slot 0 is not listed as a map occupant.
+4. Confirm both clients render the authored torch/campfire flame sprites and
+   their illumination, plus any powered editor light sources visible in the
+   start map. On a headless host, enter `status` and retain the log. It should
+   show one loaded/initialized active instance with both real player slots in
+   `players=[...]`.
+
+Divergence and isolation
+------------------------
+
+5. Give the travelling player one follower and note a persistent detail in the
+   start map (for example an opened chest, moved mechanism, collected original
+   item, or defeated original monster).
+6. Have only that player activate a configured custom exit to a different
+   `.lmp`. Do not let the other player touch the exit.
+7. Confirm the traveller arrives and remains controllable in the destination.
+   Confirm the other player remains controllable in `start.lmp#world`; neither
+   client may freeze, load the other map, or be forced through the exit.
+8. Move, fight, cast visible effects, alter mechanisms, and drop/pick up items on
+   both clients for at least one minute. Each client must see only entities,
+   movement, combat effects, positional sounds, map edits, pings, shops, and
+   interactions from its own instance. Record any wrong-map UID/entity update.
+9. Confirm the traveller's follower appears in the destination with the same
+   name, type, health/loadout, ownership, and usable follow commands. Confirm no
+   duplicate or ghost follower remains visible in the source map.
+10. On a headless host, enter `status`. Confirm two loaded, initialized,
+    simulation-active instances, each listing only its actual occupant. Confirm
+    both simulation ticks advance between two status commands without per-tick
+    log spam.
+
+Unload, reload, and save
+------------------------
+
+11. Move the remaining source-map player through a custom exit so the source
+    becomes empty. Confirm the server logs one safe empty-instance unload and
+    does not crash. `status` should retain an unloaded source summary with no
+    occupants and no active simulation.
+12. Return one player to the unloaded map. Confirm it reloads safely and restores
+    the persistent detail from step 5 without duplicating removed entities,
+    rerolling persisted mechanisms, or resetting map-specific state.
+13. Separate the two players again onto two different maps. Enter `status` and
+    record the exact player-to-instance membership and instance revisions.
+14. Trigger `save` on the headless console (or the normal host save action).
+    Require both the primary save and adjacent `.automatia-world.json` companion
+    to be written successfully. Then issue `shutdown` and require a successful
+    graceful-shutdown save with no crash.
+
+Restart, new join, and reconnect
+-------------------------------
+
+15. Restart with the same `--save=95`, port, LAN, and late-join options. Require
+    recovery validation to succeed and the game to resume without replacing the
+    save. Enter `status` and confirm both saved map identities and revisions are
+    registered and both saved player locations are restored/reserved correctly.
+16. Reconnect the existing remote player using that player's matching character
+    save, slot, game key, lobby key, map seed, and issued reconnect identity.
+    Confirm the snapshot and incremental catch-up transfers complete before
+    live entity packets begin, STRT names the saved `.lmp`, and
+    the player appears at the saved position in the saved instance—not at the
+    host, not at a fallback start, and not in `start.lmp#world` unless that was
+    the saved location.
+17. Disconnect that player cleanly. Join client B as a genuinely new player with
+    no running-session save and automatic slot selection. Confirm client B is
+    assigned an unreserved slot and joins `start.lmp#world` through the bounded
+    snapshot/authorization sequence.
+18. While the restored player and client B are on different maps, repeat the
+    movement/combat/effect isolation checks from step 8 and the `status`
+    membership check from step 10.
+19. Save and shut down once more. Preserve both client logs, the host log, the
+    final status output, primary save, and companion save when reporting the
+    result.
+
+Acceptance requires every step above. A successful connection alone does not
+prove divergent simulation, persistence, late join, or reconnect.
+
+RUNTIME TESTS STILL REQUIRING THE USER
+======================================
+
+* The complete two-client test above.
+* A graphical client custom-exit transition and follower transfer.
+* Visual/audio/entity isolation on two independently simulated maps.
+* Empty-map unload and loaded-state restoration with actual gameplay changes.
+* Save/restart with players separated across maps.
+* A real new-player late join and token-matched returning-player reconnect using
+  normal clients.
+* Graphical confirmation that torch/campfire flame sprites, editor light-source
+  illumination, and ordinary map lighting render after late join.
+* Windows build and headless runtime acceptance.
+
+EXACT NEXT TASK
+===============
+
+Run the revised manual two-client acceptance test above, beginning with the
+character-selection/individual-Ready and graphical lighting checks, and return
+the host/client logs plus both save files. Fix only failures demonstrated by
+that evidence before starting another broad feature phase.
+
+FINAL VERIFICATION
+==================
+
+Final post-documentation verification on 2026-08-01:
+
+* Full Linux FMOD build: PASS
+* Editor target: PASS
+* All registered automated tests: PASS (1/1)
+* Git whitespace/error check: PASS
+* Contained dedicated LAN discovery/new-player late-join probes: PASS through
+  saved slots 1-5 with character selection, explicit Ready, light-source
+  catch-up, and the slot-5 retained-Player-Start fallback.
+* Reviewed every tracked and untracked changed file in the worktree. No source
+  backup files were created, writes stayed inside `~/maindev`, and unrelated
+  S.A.M., quest, dialogue, editor, FMOD, persistence, and headless changes were
+  retained.
+
+EDITOR FIXTURE NETWORK-LIFECYCLE FOLLOW-UP (2026-08-01)
+========================================================
+
+Runtime failure reported
+------------------------
+
+* A late client still lost illumination from editor Light Source sprite 131.
+* A custom exit's visual sprite still disappeared and the client could no
+  longer interact with it.
+
+Failures found and fixed
+------------------------
+
+* Ordinary ENTU processing cleared and rebuilt the Light Source behavior on
+  every update. The sprite-131 client action then removed the client-local
+  light field repeatedly. ENTU now preserves `actLightSource` and its existing
+  light field; initialization cleanup runs only when the behavior is first
+  assigned.
+* `receiveEntity()` only applied true entity flags. Once an update marked a
+  portal INVISIBLE, a later authoritative false flag could not reveal it. All
+  24 transmitted flags are now assigned both true and false. This is also
+  required for a powered custom portal's delayed spawn animation to reveal the
+  portal on clients.
+* A custom portal cannot be identified from its runtime sprite because that
+  sprite is editor-selected. ENTU now includes an explicit network archetype
+  byte for custom portals and editor light sources.
+* If a late client's provisional static-fixture UID differs from the server,
+  ENTU now matches the archetyped fixture at the same authored position before
+  creating a duplicate. The authoritative UID is bound to that existing entity,
+  retaining the portal destination/requirements and light color/radius skills.
+* New archetyped entities receive the correct behavior even when sprite-based
+  `clientActions()` cannot identify them. The entity packet grew from 47 to 48
+  bytes; client and server must therefore be rebuilt together.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS after the documentation update.
+* The contained live probe could not be rerun in this execution environment:
+  headless startup failed closed while opening UDP ports 57173 and 57391. The
+  earlier live probe remains valid for the prior revision, but this packet
+  revision still needs a real client/server runtime test.
+
+Runtime tests still required
+----------------------------
+
+* Rebuild both server and client from the same revision. Mixing an older
+  47-byte client/server binary with this 48-byte protocol is unsupported.
+* Late join, remain beside an Always On editor light for at least one minute,
+  and confirm illumination does not blink out.
+* Observe a powered custom exit through its reveal sequence, then interact with
+  it. Confirm its sprite remains present, the server logs the custom transition,
+  and only the activating player reaches the configured `.lmp`.
+
+HEADLESS SIMULATION AND INTERACTION DIAGNOSTICS (2026-08-01)
+===========================================================
+
+Clarified architecture
+----------------------
+
+* Headless mode already runs authoritative entity behaviors, mechanisms,
+  sprites-as-entities, tile collision, custom exits, and every occupied map
+  instance. It omits visible drawing; it does not omit gameplay simulation.
+* Light color accumulation is intentionally client-local. The server simulates
+  the authoritative Always On/circuit/enabled state and synchronizes it, while
+  each client builds the graphical lightmap. Rendering a server lightmap would
+  not repair a client whose local additive light record became stale.
+
+Work completed
+--------------
+
+* Every accepted in-range client selection now produces a focused host log with
+  player, authoritative UID, instance, sprite, custom-exit classification,
+  distance, visibility, and circuit state. Unknown UIDs are logged explicitly.
+* `actCustomPortal()` logs each interaction that reaches the server, including
+  eligibility, distance, visibility, circuit state, and destination tunnel.
+  Existing destination-resolution, queue, failure, and successful-transition
+  logs remain in place. These are interaction events, not per-tick logs.
+* Headless `status` now reports entity, assigned-behavior, custom-exit, and
+  editor-light counts for every registered instance. Its simulation tick still
+  proves that an occupied instance continues to execute.
+* Light removal now clamps additive lightmap channels at zero. Removing a stale
+  or overlapping light can no longer create negative illumination that cancels
+  another live source.
+* An Always On client light validates that its own center contribution remains
+  in the active lightmap. If a late map/lightmap rebuild retained only the
+  pointer, it repairs the stale field locally and emits one repair diagnostic
+  when detected.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS.
+
+Exact runtime evidence requested next
+-------------------------------------
+
+* Enter `status` on the host and retain every `HEADLESS INSTANCE` and
+  `HEADLESS SIMULATION` line.
+* Interact with the custom exit once and retain the adjacent `[Client Activity]`,
+  `[Custom Exit]`, `[Custom Tunnel]`, and `[World State]` lines. If only an
+  unknown-UID line appears, the remaining defect is UID binding. If the resolved
+  type is `other`, it is behavior binding. If `[Custom Exit]` appears but no
+  transition follows, its eligibility/destination log identifies the next
+  server-side failure.
+* Walk between two overlapping lights and retain any client-side `[Lighting]
+  Repairing stale Always On light field` line plus the host status output.
+
+LATE-JOIN STATIC UID INTERACTION FIX (2026-08-01)
+=================================================
+
+Runtime evidence
+----------------
+
+The host received two decisive interaction results from player 10:
+
+* Local UID 8 resolved to server sprite 188 with type `other`.
+* Local UID 10 did not exist on the server and was rejected repeatedly.
+
+This proves the client was not trying to be authoritative and the failure was
+not party assembly. The client reported the UID assigned to its local static map
+fixture, while the server had assigned a different UID to the corresponding
+custom exit after runtime late join.
+
+Failures found and fixed
+------------------------
+
+* CKIR now optionally carries a custom-exit archetype and encoded fixture
+  position. These values are only lookup hints; the client does not provide a
+  destination or authorize movement.
+* When the reported UID is absent or identifies another behavior, the server
+  searches only the reporting player's active map for an `actCustomPortal` at
+  that exact authored position. It then independently verifies that the actual
+  server player is within `TOUCHRANGE`. Only that authoritative entity can be
+  selected and execute its server-authored requirements/destination.
+* A successful fallback logs the local and authoritative UIDs. A missing
+  fixture or failed server range check is rejected and logged.
+* The periodic ENTE existence probe was the reason the portal disappeared:
+  an unmatched local static UID caused the server to return ENTD, deleting the
+  client's still-valid map fixture. Clients no longer issue UID-only ENTE probes
+  for custom portals or editor light sources. Their lifecycle comes from map
+  loading and the dedicated authoritative state updates.
+
+Security/authority result
+-------------------------
+
+The server remains authoritative over map instance, portal identity, player
+range, visibility/circuit state, race/class requirements, destination map,
+destination tunnel, and transition. A client hint cannot select a remote portal
+because the server-side `TOUCHRANGE` check is mandatory.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS after this documentation update.
+
+Exact next runtime check
+------------------------
+
+Rebuild both binaries, late join, wait longer than the previous disappearance
+interval, and use the custom exit. The expected host sequence is:
+
+1. `[Client Activity] Safely resolved ... local UID ... authoritative custom
+   exit UID ...`
+2. `[Client Activity] ... type=custom-exit ...`
+3. `[Custom Exit] ... eligible=yes ...`
+4. `[Custom Tunnel] Resolved destination map ...`
+5. `[World State] Player ... transitioned independently ...`
+
+PORTAL POSITION, SLOT RESERVATION, AND LOBBY PACKET FOLLOW-UP (2026-08-01)
+==========================================================================
+
+Runtime evidence
+----------------
+
+* Player 11's custom-exit hint reached the server, but the server reported
+  `fixture match=no, server range=no` for local UID 10.
+* The roster showed 10 reconnect-reserved slots and assigned the next test
+  client slot 11.
+* Runtime lobby requests `SVFL` and `CSCN` reached the gameplay packet dispatcher
+  without registered handlers and were reported as mystery packets.
+* A new-player runtime join unnecessarily attempted to read
+  `savegame95_mp.baronysave`, producing ENOENT even though a genuinely new late
+  joiner is intentionally not required to own the running save.
+
+Work completed
+--------------
+
+* Custom-exit fixture matching now uses the authored X/Y position and ignores
+  transient client Z interpolation. Rejections now report the hinted X/Y and
+  the total authoritative custom portals present in that server map. The server
+  still requires an actual `actCustomPortal` plus authoritative `TOUCHRANGE`;
+  no client-provided entity is promoted or trusted.
+* When the configured headless primary save is absent, startup now discards any
+  staged companion snapshot and resets persistent runtime state. Stale companion
+  player placements can no longer reserve progressively higher slots in what is
+  explicitly a new session.
+* `SVFL` and `CSCN` are now authenticated runtime server handlers. They return
+  the authoritative server flags and the active/empty custom scenario using the
+  legacy lobby wire format instead of producing mystery-packet logs.
+* New runtime players no longer call `getSaveGameInfo()` merely because the
+  running server has a game key. Returning players still undergo the existing
+  save, game-key, lobby-key, map-seed, and reconnect-token validation.
+
+Expected behavior
+-----------------
+
+* After a full server restart with no primary save, the first genuinely new
+  client should take the lowest available remote slot rather than continuing at
+  slot 11. During one running saved session, real reconnect reservations remain
+  intentional and are not silently discarded.
+* `SVFL` and `CSCN` should log normal responses, not `Got a mystery packet`.
+* ENOENT for the absent primary save should not appear for a genuinely new late
+  joiner. It remains meaningful if a returning-player flow explicitly requests
+  a save that is missing.
+* A rejected portal hint now distinguishes `server portals=0` (the server map
+  did not instantiate the custom exit) from a nonzero count with no X/Y match.
+
+BACKGROUND ENTITY SYNC AND TRANSITION CLEANUP (2026-08-01)
+==========================================================
+
+Runtime evidence
+----------------
+
+* Two remote players successfully used the custom exit and entered
+  `test.lmp#world`, but could not see one another there.
+* A fireball's impact effect reached the other client, while the moving
+  projectile did not appear for either client, including its caster.
+* The second transition logged `Refusing to activate 'test.lmp#world' while
+  entity deletion is pending`, left the now-empty source loaded, and then
+  rejected a map-local packet because the destination instance was unavailable.
+
+Failures found and fixed
+------------------------
+
+* Occupied background instances ran entity behavior but did not run the normal
+  eight-updates-per-second server entity broadcast. They could therefore
+  simulate collision and emit specialized impact/effect packets while omitting
+  the continuous ENTU stream for players, limbs, monsters, followers, magic
+  missiles, thrown entities, boulders, and other entities marked
+  `UPDATENEEDED`.
+* Each simulated background instance now broadcasts all of its ordinary
+  updateable entities while that instance is active. `sendEntityUDP()` retains
+  the authoritative map-membership and late-join-phase checks, so clients in
+  unrelated instances do not receive the updates. Entities intentionally
+  marked `NOUPDATE` remain excluded, and specialized effects retain their
+  existing packet paths.
+* Removing the source player and follower trees during a custom transition
+  queued their destruction in `entitiesdeleted`, then immediately attempted to
+  activate the destination. `WorldState::activate()` correctly refused to swap
+  global map views across that deletion barrier.
+* The transition now completes deferred source deletions while the source map
+  is still active, before activating the destination or unloading an empty
+  source. Destination reactivation is checked and reported as a transition
+  failure instead of being ignored.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS after final changed-file review.
+
+Exact next runtime check
+------------------------
+
+Rebuild the server and both clients from the same revision. Move both clients
+to `test.lmp#world`, then verify that they see one another moving, see enemies
+and followers moving, and both see a fireball throughout its flight and impact.
+Then move the final player out of `start.lmp#world`; the host must no longer log
+an activation refusal or `empty source ... remained loaded`. This remains a
+user-run acceptance test and is not yet claimed complete.
+
+DESTINATION ARRIVAL UID AND BASELINE SYNC (2026-08-01)
+======================================================
+
+Runtime evidence
+----------------
+
+* Player A entered `test.lmp#world`, followed later by player B.
+* Player A could see player B, but player B could not see player A.
+* Player B did receive player A's newly cast projectile, proving map-local live
+  packet routing was working after the preceding background broadcast fix.
+* Neither client could interact with the destination doors. Player B could use
+  a lever handle but could not see its base.
+
+Failure found and fixed
+-----------------------
+
+* The independent LVLC packet used the destination's runtime UID value as both
+  the raw `.lmp` load starting UID and the post-load runtime generation UID.
+  These are distinct phases. A later-arriving client could consequently assign
+  server player UIDs to its own player or a mechanism component. ENTU then
+  updated or protected the wrong local entity, producing asymmetric player
+  visibility, failed door selection, and the overwritten/missing lever base.
+* Each loaded map instance now records both its raw-map UID starting value and
+  its runtime-entity UID starting value. LVLC byte 9 supplies the raw load value
+  as in the normal Barony level-change path; the independent transition
+  extension supplies the runtime generation value after raw entities load.
+* After LVLC and the authoritative tunnel placement are queued, the server now
+  queues a reliable baseline of every existing ordinary `UPDATENEEDED` entity
+  in that destination for the arriving player. This includes players already
+  present, monsters, followers, projectiles, dropped/updateable entities, and
+  other live actors. Map membership and late-join phase checks remain enforced
+  by `sendEntityUDP()`.
+* A focused host diagnostic reports the baseline count, player, instance, raw
+  map UID start, and runtime UID start once per transition; there is no per-tick
+  logging.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS after final changed-file review.
+
+Exact next runtime check
+------------------------
+
+Rebuild the server and both clients together. Have player A enter `test.lmp`,
+then player B follow. Confirm bidirectional player visibility, door interaction
+for both players, a visible lever base and handle for both players, and full
+projectile flight. Retain the new `Sent ... existing destination entity
+baseline(s)` host line if any symptom remains. This fix still requires that
+user-run two-client evidence before the transition path is claimed complete.
+
+UNLOADED RETURN MAP, OCCUPANT ANNOUNCEMENT, AND HOST SAVES (2026-08-01)
+=====================================================================
+
+Runtime evidence
+----------------
+
+* A player could travel from `start.lmp#world` to `test.lmp#world`, but the
+  return exit failed with `destination instance is not loaded`.
+* When player A occupied `test.lmp` before player B joined and followed, player
+  A still did not see player B.
+
+Failures found and fixed
+------------------------
+
+* A known map instance whose last player left was intentionally registered as
+  unloaded. Independent transition loading only handled completely unknown
+  destinations. It now calls `loadDetachedMap()` for both unknown and
+  known-but-unloaded instances, which restores the registered instance and then
+  reapplies persistent removals, tiles, mechanisms, and runtime initialization.
+* The original legacy foreground map now records its raw-map and runtime UID
+  starting values when `loadMap()` binds it. This covers returning to an
+  occupied `start.lmp`, not only detached maps first opened by a custom exit.
+* After placing an arriving player, the server reliably announces that
+  authoritative player entity to every existing remote occupant of the same
+  map instance. A focused host line reports how many existing players received
+  the announcement. Unrelated instances remain excluded by
+  `sendEntityUDP()`'s recipient check.
+* Dedicated headless multiplayer saves now use `savegames/host/`, while normal
+  single-player and graphical multiplayer saves retain `savegames/`. Startup
+  creates the host directory, all save filename types use it consistently, and
+  the contained late-join acceptance script expects the new location.
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS after final changed-file review.
+
+Exact next runtime check
+------------------------
+
+Rebuild all three binaries. Test A: player A travels start -> test -> start and
+the returning start state is intact. Test B: A enters test, B late joins start,
+B follows to test, and both players see each other. Expected host diagnostics
+include `Sent ... existing destination entity baseline(s)` and `Announced
+arriving player ...`. Test C: save the headless server and confirm the primary
+save and `.automatia-world.json` companion appear under `savegames/host/`.
+These remain user-run acceptance tests.
+
+PRE-MAP LATE-JOIN HANDSHAKE AND LOBBY PACKET GATING (2026-08-01)
+================================================================
+
+Runtime evidence
+----------------
+
+* A newly connected client remained in character selection while repeatedly
+  logging mystery `STAT` and `ENSM` packets.
+* The server logged an unavailable `start.lmp#world` map-local packet, rejected
+  the character-selection handshake as player `-1`, and then rejected Ready.
+
+Failures found and fixed
+------------------------
+
+* `LJHI`, the pre-map late-join character-selection handshake, was incorrectly
+  classified as an active-map packet. The server consequently tried to
+  activate a map for a player who had not yet been placed and rejected the
+  otherwise valid handshake. `LJHI` is now connection-scoped; `LJRD` and
+  `LJGO`, which occur after placement, remain map-scoped.
+* Global player-stat (`STAT`) and ensemble-music (`ENSM`) broadcasts were sent
+  to connected clients while their late-join transaction was still awaiting
+  character selection. A shared recipient predicate now permits these live
+  gameplay updates only after the transaction may receive live simulation.
+  This prevents lobby mystery-packet spam without weakening map-local packet
+  filtering.
+* The packet-scope foundation test now explicitly verifies that `LJHI` is not
+  active-map scoped.
+
+Files modified for this fix
+---------------------------
+
+* `src/world_packet_scope.hpp`
+* `src/net.hpp`
+* `src/net.cpp`
+* `src/player.cpp`
+* `tests/automatia_foundation_tests.cpp`
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS.
+* Focused review of all five files changed for this fix: PASS.
+
+Exact next runtime check
+------------------------
+
+Rebuild the headless server and client from this same tree. Join the running
+server, customize the default character, and press Ready. Confirm the server
+accepts the character-selection handshake (with a real player index), starts
+the snapshot after Ready, and the client enters the game. The client should no
+longer report repeated mystery `STAT` or `ENSM` packets while in character
+selection. After that, resume the start -> test -> start and two-player
+visibility checks above. Runtime late join is not claimed complete until this
+user-run check passes.
+
+ASYMMETRIC DESTINATION PLAYER VISIBILITY (2026-08-02)
+====================================================
+
+Runtime evidence
+----------------
+
+* Player 2 entered `test.lmp#world` first. Player 1 entered later.
+* The host sent two existing-entity baselines to player 1 and announced player
+  1 to the one existing destination occupant. Player 1 could therefore see
+  player 2, but player 2 could not see player 1.
+* Player 2 still received damage from player 1's bolt, proving authoritative
+  combat and map-local simulation continued despite the missing visual entity.
+* The first client also logged a mystery `JOIN`; the later client logged one
+  early mystery `ENSM` during its load boundary.
+
+Failures found and fixed
+------------------------
+
+* A client loading its own player creates client-only HUD and `NOUPDATE`
+  entities. Their provisional runtime UID sequence differs from the headless
+  server's remote-player sequence. A player created later on the server could
+  therefore arrive with a UID already held by one of those client-only
+  entities.
+* `ENTU` previously treated that collision as an update to the client-only
+  object and sent `NOUP`. The server then disabled `UPDATENEEDED` on the real
+  authoritative player entity, permanently suppressing its visual updates for
+  that client while combat remained active.
+* An incoming authoritative player head now detects a mismatched existing
+  identity. The client moves only the conflicting provisional object into a
+  reserved client UID range, then creates and binds the authoritative player
+  under the server UID. A focused client diagnostic records both UIDs.
+* The server now authenticates `NOUP` by sender/map and refuses to disable
+  player or death-ghost entities through this legacy optimization.
+* Runtime `JOIN` roster data is no longer broadcast before character creation
+  is final. After `PLYR`, the server sends the finalized class, race,
+  appearance, sex, and name to existing live clients, and the in-game client
+  dispatcher now consumes it. This supplies the model data needed when the
+  later player entity appears.
+* `ENSM` is now map-scoped, so a late-join client defers it with other map
+  traffic until its map is loaded instead of reporting it as a lobby mystery.
+* The host arrival diagnostic now includes the authoritative player UID and
+  head sprite.
+
+Files modified for this fix
+---------------------------
+
+* `src/net.cpp`
+* `src/game.cpp`
+* `src/world_packet_scope.hpp`
+* `tests/automatia_foundation_tests.cpp`
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target build: PASS.
+* Registered automated tests: PASS (1/1).
+* Added collision-predicate and `ENSM` packet-scope regression assertions.
+* `git diff --check`: PASS.
+* Focused review of every file changed for this fix: PASS.
+
+Exact next runtime check
+------------------------
+
+Rebuild the headless server and both clients from this same tree. Have player A
+enter `test.lmp`, then player B follow. Both players must see one another and
+each other's moving projectiles, and player B must use the finalized character
+appearance. The host should log `Announced arriving player ... UID ... sprite
+...`; the first client may log one `moved provisional entity ... before
+accepting player ...` line. It must not repeat continuously, and the host must
+not disable the arriving player through `NOUP`. Retain all three logs if either
+direction remains invisible. This still requires user-run two-client evidence.
+
+CLIENT MAP MEMBERSHIP AND STALE REMOTE POINTER FOLLOW-UP (2026-08-02)
+====================================================================
+
+Runtime evidence
+----------------
+
+* The preceding UID reconciliation and finalized roster update produced no
+  visible change: the first destination occupant still could not see the
+  player who arrived later.
+* Earlier client logs showed `test.lmp#world` being bound with two or three
+  players even when only that client's local player had entered it. This
+  disproved UID collision as the complete explanation and exposed incorrect
+  client-side map membership.
+
+Failures found and fixed
+------------------------
+
+* `bindLegacyMap()` assigned every connected player to each map loaded by a
+  client. That is the old whole-party assumption and is invalid for an
+  independent transition. Clients now bind only their local player(s) during
+  map loading; the server remains authoritative for full instance membership.
+* After an independent client map change, remote `Player::entity` pointers
+  still referenced entity storage from the replaced source map. Those pointers
+  are now cleared. The client's saved knowledge of the remote player's source
+  identity remains, but it no longer keeps a stale entity pointer.
+* When a map-local authoritative `ENTU` identifies a remote player in the
+  client's active map, the client now explicitly calls `WorldState::placePlayer`
+  after binding the entity. This updates both `playersPresent` and the player's
+  map-instance identity instead of relying only on the legacy global entity
+  pointer.
+* Focused diagnostics report when the client creates or places an authoritative
+  player and include its player slot, UID, and canonical instance key. They log
+  only on creation or an instance change, not each update tick.
+
+Files modified for this follow-up
+---------------------------------
+
+* `src/world_state.cpp`
+* `src/net.cpp`
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor target build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS.
+* Focused changed-file review: PASS.
+
+Exact next runtime check
+------------------------
+
+Rebuild the headless server and both clients from the same tree. Repeat player
+A entering `test.lmp`, followed by player B. A destination client should bind
+the map with only its local occupant, then log either `Client created
+authoritative player ...` or `Client placed authoritative player ...` when the
+other player arrives. Confirm bidirectional visibility and projectile flight.
+If it still fails, provide the new host log and both client logs; these focused
+lines will distinguish delivery failure from entity creation/render failure.
+The result remains unconfirmed until that two-client run passes.
+
+VOXEL MODEL ASSEMBLY AND MAP-SCOPED RELIABLE RETRIES (2026-08-02)
+================================================================
+
+Runtime evidence
+----------------
+
+* Both players remained authoritative and could affect each other through
+  combat/interaction. The failure was specifically that the later arrival's
+  voxel model disappeared for the first destination occupant.
+* The later-arriving client created the existing player from its destination
+  baseline (`player 2 UID 5`). The first occupant never logged creation of the
+  later player, although the host reported announcing `player 1 UID 6`.
+* Client map-bind diagnostics still reported three occupants. `bindMap()` was
+  carrying the previous legacy map object's occupants across a different map
+  identity before `bindLegacyMap()` applied its client-local filter.
+
+Failures found and fixed
+------------------------
+
+* Independent transition announcement happened before the new server player
+  had run its first `actPlayer` tick, so the head existed but its voxel limb
+  children did not. The server now initializes that player immediately before
+  its arrival baseline.
+* A client receiving a new authoritative player head now initializes
+  `actPlayer` immediately when its model is not initialized. This constructs
+  the local voxel child hierarchy before bodypart packets are handled. A
+  one-time diagnostic records the resulting child count.
+* After the head announcement, the server now queues a fresh authoritative
+  `BDYI` limb-ID baseline plus the normal visible player `ENTB` body/equipment
+  slots. The original initialization broadcasts could occur before the
+  existing client knew the new head UID and were therefore ineffective.
+* Reliable map-local packets previously remembered only their recipient, not
+  their map instance. Once the headless host restored another legacy global
+  map view, retries were filtered against that unrelated active map and
+  silently suppressed. Reliable queue entries now capture the canonical map
+  key and revision. A retry bypasses the current global-view filter only when
+  the recipient still belongs to that exact key and revision; otherwise the
+  stale retry is discarded.
+* `bindMap()` now preserves occupants only when rebinding the same canonical
+  instance. A different `.lmp` using the legacy global map object begins with
+  an empty occupant set and is populated by the appropriate server or
+  client-local binding policy.
+* Reinitializing a live `.lmp` on every arrival was intentionally not used: it
+  would reset or recreate transient actors, projectiles, mechanisms, and combat
+  state and would turn an incremental visual-sync defect into a full restore
+  operation.
+
+Files modified for this fix
+---------------------------
+
+* `src/game.hpp`
+* `src/net.hpp`
+* `src/net.cpp`
+* `src/game.cpp`
+* `src/world_state.cpp`
+* `src/world_packet_scope.hpp`
+* `tests/automatia_foundation_tests.cpp`
+
+Verification
+------------
+
+* Full Linux FMOD game build: PASS.
+* Editor build: PASS.
+* Registered automated tests: PASS (1/1).
+* Added key/revision matching assertions for scoped reliable retries.
+* `git diff --check`: PASS.
+* Focused review of every changed file: PASS.
+
+Exact next runtime check
+------------------------
+
+Rebuild the headless server and both clients together. Repeat A entering
+`test.lmp`, followed by B. The host should log `Queued arriving player ...
+voxel bodypart baseline`. The first occupant should log `Client initialized
+player ... voxel model with ... child node(s)` if it constructed the model from
+the arrival announcement. Both complete voxel models must remain visible while
+moving, attacking, and casting. If this still fails, retain those two focused
+lines and both client logs; do not reload the live map as a workaround. Runtime
+success remains unconfirmed until this test passes.
+
+CROSS-INSTANCE ENTITY TOMBSTONES AND PLAYER VISIBILITY (2026-08-02)
+==================================================================
+
+Runtime evidence and root cause
+-------------------------------
+
+* The supplied host log announced arriving player 2 UID 5 to the existing
+  occupant of `test.lmp#world`, then queued the voxel bodypart baseline.
+* The later-arriving client created player 1 UID 6 and initialized both local
+  voxel trees. The first occupant never logged creating, placing, or
+  initializing player 2 UID 5, although server-authoritative combat between
+  them continued to work.
+* `changeLevel()` copied every entity UID from the source map into the global
+  client `removedEntities` tombstone list. When player 1 left `start.lmp`, that
+  list included player 2 UID 5. `test.lmp` legitimately reused UID 5 for that
+  same player, and the `ENTU` handler silently rejected the destination entity
+  because the tombstone had no map-instance context. The following `BDYI` and
+  `ENTB` packets then had no parent entity to update. This explains the exact
+  order-dependent, one-way visibility failure.
+
+Failures fixed
+--------------
+
+* Removed-entity tombstones now retain their source map-instance key and
+  revision. They apply only while that exact instance revision is active.
+  On the first authoritative entity update after a map-instance change, stale
+  source tombstones are cleared and a focused diagnostic reports the old and
+  new instance identities. Ordinary `ENTD` processing re-scopes tombstones to
+  the active instance before recording a removal.
+* Reliable map-local retry scoping from the preceding fix remains in place, so
+  an old reliable entity update is discarded when its recipient has changed
+  map key or revision. Retries now also require the recipient's late-join
+  transaction to permit live simulation, preventing a same-instance retry
+  from bypassing snapshot/catch-up gating.
+* Loading a first-time destination can insert into the `WorldState` instance
+  registry and rehash its storage. The transition path no longer retains a
+  potentially invalid `MapInstance*`; it reacquires the source instance and
+  player entity by stable key after destination loading.
+* Player `BDYI` packets were four bytes too short. A 29-child player model
+  writes 28 child UIDs and requires 120 bytes; the old shared monster formula
+  advertised only 116 bytes. Player and monster packet lengths are now
+  calculated from their different skipped-child counts.
+* Client `BDYI` and `ENTB` handlers now reject truncated packets before reading
+  or mutating state. Invalid/null bodypart nodes are guarded on both send and
+  receive paths.
+* Reinitializing a live destination map on each arrival was not used. Such a
+  reload could recreate fixtures, reset transient combat/projectile state, and
+  conflict with persistence; the defect was an entity-identity tombstone leak.
+
+Files modified in this follow-up
+--------------------------------
+
+* `src/net.cpp`
+* `src/world_packet_scope.hpp`
+* `tests/automatia_foundation_tests.cpp`
+* `helpful stuff/Codex Project Progress and Continuation.txt`
+
+Automated coverage
+------------------
+
+* Added source/destination key and revision cases for map-scoped entity
+  tombstones, including safe handling when an unscoped legacy tombstone meets
+  a newly bound instance.
+* Added live-simulation gating coverage for map-scoped reliable retries.
+* Added exact player/monster `BDYI` length cases and rejection of a one-byte
+  truncated player bodypart-ID packet.
+
+Verification
+------------
+
+* Linux build configuration remains `FMOD_ENABLED=ON` and
+  `OPENAL_ENABLED=OFF`.
+* Full Linux game build: PASS.
+* Editor build: PASS.
+* Registered automated tests: PASS (1/1).
+* `git diff --check`: PASS.
+* Focused review of the runtime logs and changed networking paths: PASS.
+
+Known limitation and exact next task
+------------------------------------
+
+Map-local packets still do not carry an on-wire map epoch. Server recipient
+routing and scoped reliable retries stop new and retried source-map traffic,
+but a plain unreliable source `ENTU` already in flight at the instant of an
+`LVLC` cannot be cryptographically distinguished from destination traffic.
+No supplied log shows that rare race, and it is not the deterministic UID 5
+failure fixed here. The custom `SAFE` transport also retries and deduplicates
+without ordering packets: an immediate `BDYI` or `ENTB` may precede its player
+head and be ignored, although the newly accepted head builds a default voxel
+tree immediately and the server's periodic bodypart baseline repairs it. If
+runtime evidence shows a persistent or long-lived equipment/body mismatch,
+the next networking task is a bounded orphan-bodypart queue or an atomic
+player-visual baseline. Do not claim the architecture fully proven until
+runtime.
+
+Rebuild the server and both clients from this tree. Have player A enter
+`test.lmp`, then player B follow. On A, expect one
+`Cleared ... source-instance entity tombstone(s)` line, followed by
+`Client created authoritative player 2 UID 5` and (when needed)
+`Client initialized player 2 UID 5 voxel model with 29 child node(s)`.
+Confirm both players see one another continuously while moving, attacking,
+and casting in both arrival orders. Also confirm projectiles and ordinary
+destination entities remain visible. Divergent paths remain enabled for this
+focused retest; runtime success is still unconfirmed.

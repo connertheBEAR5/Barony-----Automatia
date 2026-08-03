@@ -1,65 +1,35 @@
-# Barony Automatia
+HEADLESS CROSS-PLATFORM COMPLETION PACKAGE
+==========================================
 
-Barony Automatia is a custom Barony source-code project focused on expanding the map editor, persistent-world support, custom map travel, dialogue and quest tools, controller usability, and additional gameplay systems.
+Install from the maindev worktree:
 
-## Main Features
+Linux:
+  cd ~/maindev
+  unzip -o ~/Downloads/HEADLESS_CROSS_PLATFORM_completion.zip -d ~/maindev
 
-- Up to 32 map layers
-- New layered-map format with compatibility for older maps
-- Two-way custom exits with persistent destination IDs
-- Persistent entity IDs generated on map save
-- Session-based persistent world changes across map travel
-- Persistent destructible decorations and mechanisms
-- Custom NPC dialogue and quest systems
-- Branching choices, requirements, and NPC actions
-- Enemy squads and named elite enemies
-- Configurable map fog
-- Improved editor 3D camera controls and decoration previews
-- Progressive nine-slot magic hotbar
-- Controller and keyboard/mouse magic-hotbar support
-- Pit warning, voluntary falling, blind falling, and knockback falling
-- Held-orb lighting
-- Custom multiplayer travel behavior
+Windows PowerShell example:
+  Set-Location C:\path\to\maindev
+  Expand-Archive -Force "$HOME\Downloads\HEADLESS_CROSS_PLATFORM_completion.zip" .
 
-## Current Development Status
+Launch a LAN server:
 
-Most major editor, travel, persistence, dialogue, and gameplay foundations are implemented.
+Linux:
+  ./barony --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-Still experimental or incomplete:
+Windows Command Prompt or PowerShell:
+  .\barony.exe --headless --LAN --port=57165 --server-name=AutomatiaLAN
 
-- Flame-specific editor culling remains unfinished
-- Temporary diagnostic logging still needs cleanup
-- Cross-session and cross-map global quest checks require a dedicated save system
-- Wider regression testing is still required
+Optional delayed startup:
+  --autostart=30
 
-## Building
+Terminal commands on Linux and Windows:
+  help
+  status
+  start
+  shutdown
 
-Typical Linux build commands:
+Windows may display a Microsoft Defender Firewall prompt the first time the UDP listener opens. Permit Private networks for LAN use. Do not permit Public networks unless you intentionally understand and accept the exposure.
 
-```bash
-cmake --build build --target barony -j1
-cmake --build build --target editor -j1
-```
-
-## Documentation
-
-A detailed player and map-maker guide is included at:
-
-```text
-helpful stuff/Barony Automatia Complete Features Guide.txt
-```
-
-It explains how the custom features work, how they are used, current limitations, multiplayer notes, and development status without describing the C++ implementation.
-
-## Compatibility Notes
-
-- New maps default to the expanded layered format.
-- Older Barony maps remain loadable and default to three layers.
-- Some custom properties require newer Automatia map versions.
-- Automatia-specific maps may not work correctly in an unmodified Barony build.
-- Persistent-world state is primarily session-based unless a feature explicitly saves into a normal game save.
-- Custom multiplayer features should be tested with both host and client.
-
-## License
-
-Barony Automatia is based on the Barony source project. And is open sourced. 
+CURRENT SECURITY BOUNDARY
+-------------------------
+Plain --headless opens no listener. --LAN explicitly opens the existing direct-connect UDP lobby. Public listing, password authentication, and in-progress late joining remain fail-closed because the required authentication and full-state snapshot protocols are not yet implemented.

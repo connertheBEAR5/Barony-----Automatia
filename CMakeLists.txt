@@ -1,9 +1,58 @@
 cmake_minimum_required(VERSION 3.0)
 project(barony)
 
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(
+        automatia_foundation_tests
+        tests/automatia_foundation_tests.cpp
+        src/automatia_save.cpp
+    )
+    target_include_directories(
+        automatia_foundation_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_features(automatia_foundation_tests PRIVATE cxx_std_17)
+    add_test(NAME automatia_foundation COMMAND automatia_foundation_tests)
+
+    if(UNIX)
+        add_executable(
+            late_join_live_probe
+            tests/late_join_live_probe.cpp
+        )
+        target_include_directories(
+            late_join_live_probe
+            PRIVATE
+            "${PROJECT_SOURCE_DIR}/src"
+        )
+        target_compile_features(late_join_live_probe PRIVATE cxx_std_17)
+    endif()
+endif()
+
 if (NOT CMAKE_BUILD_TYPE)
 	set (CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
+
+option(
+	BARONY_SUPER_MULTIPLAYER
+	"Build Barony with support for up to 15 players"
+	OFF
+)
+
+option(
+	SAM_FRAMEWORK_ENABLED
+	"Build the Automatia S.A.M framework integration"
+	ON
+)
+
+if (BARONY_SUPER_MULTIPLAYER)
+	add_definitions(-DBARONY_SUPER_MULTIPLAYER)
+	message(STATUS "Building with 15-player multiplayer support")
+else()
+	message(STATUS "Building with standard 4-player multiplayer support")
+endif()
 
 if (DEFINED ENV{STEAMWORKS_ENABLED})
 	set (STEAMWORKS_ENABLED $ENV{STEAMWORKS_ENABLED})
@@ -540,6 +589,38 @@ else()
 endif(APPLE)
 
 if (GAME_ENABLED)
+  if (SAM_FRAMEWORK_ENABLED)
+	target_sources(
+		barony
+		PRIVATE
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_class_registry_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_registry_foundation.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_content_catalog.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_catalog_exporter.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_definition_bridge.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_logger.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_errors.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_sync.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_workshop.cpp"
+	)
+	target_include_directories(
+		barony
+		PRIVATE
+			"${PROJECT_SOURCE_DIR}/src/sam"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework"
+	)
+	target_compile_definitions(
+		barony
+		PRIVATE
+			SAM_FRAMEWORK_ENABLED=1
+	)
+	message(
+		STATUS
+		"Building Automatia with S.A.M 1.10.0 foundation support"
+	)
+  endif()
+
   if(WIN32)
     # Only for MinGW...
 	# target_link_libraries(barony -lmingw32)

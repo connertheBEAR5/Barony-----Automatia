@@ -28,6 +28,9 @@
 #include "mod_tools.hpp"
 #include "menu.hpp"
 #include "ui/MainMenu.hpp"
+#ifndef EDITOR
+#include "world_state.hpp"
+#endif
 // ==================== SECRET DOORWAY GLOBALS ====================
 bool secretDoorwayHasSpawned = false;   // Only one per entire run
 bool secretDoorwayOnThisFloor = false;
@@ -7092,7 +7095,12 @@ void debugMap(map_t* map)
 
 -------------------------------------------------------------------------------*/
 std::map<int, int> generatedSpellbooks;
-void assignActions(map_t* map)
+void assignActions(
+	map_t* map,
+	const bool* playerSpawnMask,
+	bool deferUnselectedPlayerStarts,
+	bool playerStartsOnly
+)
 {
 	bool itemsdonebefore = false;
 	Entity* vampireQuestChest = nullptr;
@@ -7126,7 +7134,8 @@ void assignActions(map_t* map)
 	int balance = 0;
 	for ( int i = 0; i < MAXPLAYERS; i++ )
 	{
-		if ( !client_disconnected[i] )
+		if ( !client_disconnected[i]
+			&& (playerSpawnMask == nullptr || playerSpawnMask[i]) )
 		{
 			balance++;
 		}
@@ -7163,6 +7172,11 @@ void assignActions(map_t* map)
 		{
 			continue;
 		}
+		if ( playerStartsOnly
+			&& (entity->sprite != 1 || entity->behavior != nullptr) )
+		{
+			continue;
+		}
 		switch ( entity->sprite )
 		{
 			// null:
@@ -7175,16 +7189,64 @@ void assignActions(map_t* map)
 			}
 			case 1:
 			{
+				if ( playerStartsOnly )
+				{
+					numplayers = entity->skill[2];
+				}
 				if ( numplayers >= 0 && numplayers < MAXPLAYERS )
 				{
-					if ( client_disconnected[numplayers] && !intro )
+					if ( headless && multiplayer == SERVER && numplayers == 0 )
 					{
-						// don't spawn missing players
+						// Networking slot zero identifies the dedicated server, but
+						// it is not a playable character. Retain a hidden marker so
+						// legacy Player Start numbering stays stable for real clients.
+						players[0]->entity = nullptr;
+						entity->skill[2] = 0;
+						entity->flags[INVISIBLE] = true;
+						entity->flags[NOUPDATE] = true;
+						++numplayers;
+						break;
+					}
+					if ( playerSpawnMask != nullptr && !playerSpawnMask[numplayers] )
+					{
+						// This player remains in another world instance. Retain a
+						// hidden marker when this map may accept them later.
+						if ( deferUnselectedPlayerStarts )
+						{
+							entity->skill[2] = numplayers;
+							entity->flags[INVISIBLE] = true;
+							entity->flags[NOUPDATE] = true;
+							++numplayers;
+							break;
+						}
 						++numplayers;
 						list_RemoveNode(entity->mynode);
 						entity = nullptr;
 						break;
 					}
+					if ( client_disconnected[numplayers] )
+					{
+						if ( headless && multiplayer == SERVER )
+						{
+							// A runtime late join still needs its numbered Player Start.
+							// Keep the marker inert until that slot is authenticated.
+							entity->skill[2] = numplayers;
+							entity->flags[INVISIBLE] = true;
+							entity->flags[NOUPDATE] = true;
+							++numplayers;
+							break;
+						}
+						if ( !intro )
+						{
+							// Graphical hosts do not need starts for missing players.
+							++numplayers;
+							list_RemoveNode(entity->mynode);
+							entity = nullptr;
+							break;
+						}
+					}
+					entity->flags[INVISIBLE] = false;
+					entity->flags[NOUPDATE] = false;
 
 					bool revived = false;
                     if ( stats[numplayers]->HP <= 0 )
@@ -10851,6 +10913,13 @@ void assignActions(map_t* map)
 			TileEntityList.addEntity(*entity);
 		}
 	}
+	if ( playerStartsOnly )
+	{
+#ifndef EDITOR
+		worldState.markRuntimeInitialized(*map);
+#endif
+		return;
+	}
 
 	for ( auto node = map->entities->first; node != nullptr; )
 	{
@@ -11232,6 +11301,9 @@ if (secretDoorwayOnThisFloor)
 // Reset flag for next floor
 secretDoorwayOnThisFloor = false;
 // ==================== END SECRET DOORWAY MESSAGE ====================
+#ifndef EDITOR
+	worldState.markRuntimeInitialized(*map);
+#endif
 }
 
 int mapLevel(int player, int radius, int _x, int _y, bool usingSpell)

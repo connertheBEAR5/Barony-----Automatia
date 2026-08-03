@@ -1474,22 +1474,12 @@ int powerActivator = -1;
 
 if ( my->portalCustomActivateOnPower )
 {
-	printlog(
-		"[CUSTOM EXIT TICK] activateOnPower=%d circuit=%d previous=%d",
-		my->portalCustomActivateOnPower,
-		my->skill[28],
-		CUSTOM_PORTAL_PREVIOUS_POWER
-	);
 	const bool currentlyPowered =
 		my->skill[28] == 2; // CIRCUIT_ON
 
 	activatedByPower =
 		currentlyPowered
 		&& CUSTOM_PORTAL_PREVIOUS_POWER == 0;
-	if ( activatedByPower )
-{
-	printlog("[CUSTOM EXIT] rising power detected");
-}
 	CUSTOM_PORTAL_PREVIOUS_POWER =
 		currentlyPowered ? 1 : 0;
 
@@ -1520,10 +1510,6 @@ if ( my->portalCustomActivateOnPower )
 }
 
 		}
-		printlog(
-	"[CUSTOM EXIT] nearest activator=%d",
-	powerActivator
-);
 		// Power cannot use the exit unless a player is beside it.
 		if ( powerActivator < 0 )
 		{
@@ -1546,6 +1532,19 @@ const bool playerTriedInteraction =
 const bool playerMeetsRequirements =
 	customExitPlayerMeetsRequirements(my, i);
 
+if ( multiplayer == SERVER && playerTriedInteraction )
+{
+	const double interactionDistance = players[i] && players[i]->entity
+		? entityDist(my, players[i]->entity)
+		: -1.0;
+	printlog(
+		"[Custom Exit] Player %d interaction reached UID %u on map '%s' (distance %.2f, eligible=%s, invisible=%s, circuit=%d, destination tunnel=%d).",
+		i, my->getUID(), map.name, interactionDistance,
+		playerMeetsRequirements ? "yes" : "no",
+		my->flags[INVISIBLE] ? "yes" : "no",
+		my->skill[28], my->portalCustomDestinationTunnelID);
+}
+
 if ( playerTriedInteraction && !playerMeetsRequirements )
 {
 	messagePlayer(
@@ -1565,7 +1564,13 @@ const bool activatedByInteraction =
 
 			if ( activatedByInteraction || activatedForThisPlayer )
 			{
-				for ( c = 0; c < MAXPLAYERS; c++ )
+				if ( multiplayer == SERVER )
+				{
+					// Automatia transitions are player-specific. Other occupants
+					// remain in this instance and must not gate this exit.
+					playercount = 1;
+				}
+				for ( c = 0; multiplayer != SERVER && c < MAXPLAYERS; c++ )
 				{
 					if ( client_disconnected[c] || players[c] == nullptr || players[c]->entity == nullptr )
 					{
@@ -1743,6 +1748,28 @@ const bool activatedByInteraction =
 						loadCustomNextMap.c_str(),
 						levelToJumpTo
 					);
+
+					if ( multiplayer == SERVER )
+					{
+						const int destinationLevel =
+							levelToJumpTo == -999
+							? my->portalCustomLevelsToJump
+							: levelToJumpTo;
+						if ( queueAutomatiaCustomTransition(
+							i,
+							mapName,
+							my->portalCustomDestinationTunnelID,
+							destinationLevel,
+							!my->portalNotSecret
+						) )
+						{
+							loadnextlevel = false;
+							loadCustomNextMap.clear();
+							loadCustomNextTunnelID = 0;
+							skipLevelsOnLoad = 0;
+							return;
+						}
+					}
 
 					if ( levelToJumpTo == -999 )
 					{

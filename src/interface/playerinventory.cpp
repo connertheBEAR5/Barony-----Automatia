@@ -2284,78 +2284,152 @@ void select_inventory_slot(int player, int currentx, int currenty, int diffx, in
 
 std::string getItemSpritePath(const int player, Item& item)
 {
-	if ( item.type == SPELL_ITEM )
-	{
-		return ItemTooltips.getSpellIconPath(player, item, -1);
-	}
-	else
-	{
-		node_t* imagePathsNode = nullptr;
-		if ( item.type == TOOL_PLAYER_LOOT_BAG )
-		{
-			if ( colorblind_lobby )
-			{
-				int playerOwner = item.getLootBagPlayer();
-				Uint32 index = 4;
-				switch ( playerOwner )
-				{
-					case 0:
-						index = 2;
-						break;
-					case 1:
-						index = 3;
-						break;
-					case 2:
-						index = 1;
-						break;
-					case 3:
-						index = 4;
-						break;
-					default:
-						break;
-				}
+    const int runtimeType =
+        static_cast<int>(item.type);
 
-				imagePathsNode = list_Node(&items[item.type].images, index);
-			}
-			else
-			{
-				imagePathsNode = list_Node(&items[item.type].images, item.getLootBagPlayer());
-			}
-		}
-		else if ( item.type == MAGICSTAFF_SCEPTER )
-		{
-			if ( item.appearance % MAGICSTAFF_SCEPTER_CHARGE_MAX == 0 )
-			{
-				imagePathsNode = list_Node(&items[item.type].images, 1);
-			}
-			else
-			{
-				imagePathsNode = list_Node(&items[item.type].images, 0);
-			}
-		}
-		else if ( itemCategory(&item) == SPELLBOOK || itemCategory(&item) == TOME_SPELL )
-		{
-			int variation = getItemVariationFromSpellbookOrTome(item);
-			if ( variation >= 0 && variation < items[item.type].variations )
-			{
-				imagePathsNode = list_Node(&items[item.type].images, variation);
-			}
-			else
-			{
-				imagePathsNode = list_Node(&items[item.type].images, item.appearance % items[item.type].variations);
-			}
-		}
-		else
-		{
-			imagePathsNode = list_Node(&items[item.type].images, item.appearance % items[item.type].variations);
-		}
-		if ( imagePathsNode )
-		{
-			string_t* imagePath = static_cast<string_t*>(imagePathsNode->element);
-			return imagePath->data;
-		}
-	}
-	return "";
+    // Preserve Barony's original vanilla behavior exactly. Several vanilla
+    // item families, especially spellbooks and tomes, derive their inventory
+    // image variation from gameplay metadata rather than appearance alone.
+    if ( runtimeType >= 0
+        && runtimeType < NUMITEMS )
+    {
+        if ( item.type == SPELL_ITEM )
+        {
+            return ItemTooltips.getSpellIconPath(
+                player,
+                item,
+                -1
+            );
+        }
+
+        node_t* imagePathsNode = nullptr;
+
+        if ( item.type == TOOL_PLAYER_LOOT_BAG )
+        {
+            const int playerOwner =
+                item.getLootBagPlayer();
+            imagePathsNode = list_Node(
+                &items[item.type].images,
+                getLootBagVariationForPlayer(
+                    playerOwner,
+                    colorblind_lobby
+                )
+            );
+        }
+        else if ( item.type == MAGICSTAFF_SCEPTER )
+        {
+            if ( item.appearance
+                % MAGICSTAFF_SCEPTER_CHARGE_MAX
+                == 0 )
+            {
+                imagePathsNode = list_Node(
+                    &items[item.type].images,
+                    1
+                );
+            }
+            else
+            {
+                imagePathsNode = list_Node(
+                    &items[item.type].images,
+                    0
+                );
+            }
+        }
+        else if ( itemCategory(&item) == SPELLBOOK
+            || itemCategory(&item) == TOME_SPELL )
+        {
+            const int variation =
+                getItemVariationFromSpellbookOrTome(
+                    item
+                );
+
+            if ( variation >= 0
+                && variation
+                    < items[item.type].variations )
+            {
+                imagePathsNode = list_Node(
+                    &items[item.type].images,
+                    variation
+                );
+            }
+            else if ( items[item.type].variations > 0 )
+            {
+                imagePathsNode = list_Node(
+                    &items[item.type].images,
+                    item.appearance
+                        % items[item.type].variations
+                );
+            }
+        }
+        else if ( items[item.type].variations > 0 )
+        {
+            imagePathsNode = list_Node(
+                &items[item.type].images,
+                item.appearance
+                    % items[item.type].variations
+            );
+        }
+
+        if ( imagePathsNode
+            && imagePathsNode->element )
+        {
+            const string_t* imagePath =
+                static_cast<const string_t*>(
+                    imagePathsNode->element
+                );
+            if ( imagePath && imagePath->data )
+            {
+                return imagePath->data;
+            }
+        }
+
+        return "";
+    }
+
+    // Custom S.A.M items borrow only the selected vanilla visual template.
+    // Their real runtime identity remains unchanged.
+    const int visualType =
+        itemVisualTemplateType(runtimeType);
+
+    if ( visualType < 0
+        || visualType >= NUMITEMS )
+    {
+        return "";
+    }
+
+    const ItemGeneric& visualDefinition =
+        items[visualType];
+
+    if ( visualDefinition.variations <= 0 )
+    {
+        return "";
+    }
+
+    const int variation =
+        item.appearance
+            % visualDefinition.variations;
+
+    node_t* imagePathsNode = list_Node(
+        const_cast<list_t*>(
+            &visualDefinition.images
+        ),
+        variation
+    );
+
+    if ( !imagePathsNode
+        || !imagePathsNode->element )
+    {
+        return "";
+    }
+
+    const string_t* imagePath =
+        static_cast<const string_t*>(
+            imagePathsNode->element
+        );
+
+    return imagePath && imagePath->data
+        ? imagePath->data
+        : "";
 }
 
 Item* takeItemFromChest(int player, Item* item, int amount, Item* addToSpecificInventoryItem, bool forceNewStack, bool bDoPickupMessage)
@@ -4785,7 +4859,7 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
     {
         tooltipDisplayedSettings.updateItem(player, item);
         
-        std::string tooltipType = ItemTooltips.tmpItems[item->type].tooltip;
+        std::string tooltipType = ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].tooltip;
         
         if ( ItemTooltips.tooltips.find(tooltipType) == ItemTooltips.tooltips.end() )
         {
@@ -5055,17 +5129,17 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
         }
         else
         {
-            if ( itemTooltip.minWidths.find(ItemTooltips.tmpItems[item->type].internalName) != itemTooltip.minWidths.end() )
+            if ( itemTooltip.minWidths.find(ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName) != itemTooltip.minWidths.end() )
             {
-                minWidthKey = ItemTooltips.tmpItems[item->type].internalName;
+                minWidthKey = ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName;
             }
-            if ( itemTooltip.maxWidths.find(ItemTooltips.tmpItems[item->type].internalName) != itemTooltip.maxWidths.end() )
+            if ( itemTooltip.maxWidths.find(ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName) != itemTooltip.maxWidths.end() )
             {
-                maxWidthKey = ItemTooltips.tmpItems[item->type].internalName;
+                maxWidthKey = ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName;
             }
-            if ( itemTooltip.headerMaxWidths.find(ItemTooltips.tmpItems[item->type].internalName) != itemTooltip.headerMaxWidths.end() )
+            if ( itemTooltip.headerMaxWidths.find(ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName) != itemTooltip.headerMaxWidths.end() )
             {
-                headerMaxWidthKey = ItemTooltips.tmpItems[item->type].internalName;
+                headerMaxWidthKey = ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName;
             }
         }
         
@@ -5296,7 +5370,7 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
                     {
                         if ( icon.conditionalAttribute.find("magicstaff_") != std::string::npos )
                         {
-                            if ( ItemTooltips.tmpItems[item->type].internalName != icon.conditionalAttribute )
+                            if ( ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName != icon.conditionalAttribute )
                             {
                                 continue;
                             }
@@ -5307,7 +5381,7 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
                     {
                         if ( icon.conditionalAttribute.find("scroll_") != std::string::npos )
                         {
-                            if ( ItemTooltips.tmpItems[item->type].internalName != icon.conditionalAttribute )
+                            if ( ItemTooltips.tmpItems[itemVisualTemplateType(static_cast<int>(item->type))].internalName != icon.conditionalAttribute )
                             {
                                 continue;
                             }

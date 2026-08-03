@@ -22,6 +22,9 @@
 #include "magic/magic.hpp"
 #include "engine/audio/sound.hpp"
 #include "items.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #include "shops.hpp"
 #include "menu.hpp"
 #include "scores.hpp"
@@ -32,6 +35,10 @@
 #include "steam.hpp"
 #endif
 #include "player.hpp"
+#include "world_state.hpp"
+#include "world_packet_scope.hpp"
+#include "late_join_protocol.hpp"
+#include "lan_discovery.hpp"
 #include "scores.hpp"
 #include "colors.hpp"
 #include "mod_tools.hpp"
@@ -46,7 +53,766 @@
 
 #include <atomic>
 #include <future>
+#include <random>
 #include <thread>
+
+namespace
+{
+	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr Uint8 kJoinCapabilityLateJoinV1 = 0x02;
+	constexpr Uint8 kJoinCapabilityReconnectTokenV1 = 0x04;
+	constexpr Uint8 kEntityArchetypeNone = 0;
+	constexpr Uint8 kEntityArchetypeCustomPortal = 1;
+	constexpr Uint8 kEntityArchetypeEditorLight = 2;
+	constexpr std::size_t kEntityArchetypeOffset = 47;
+	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
+	constexpr int kHeloChunkHeaderSize = 12;
+	constexpr int kHeloChunkPayloadMax = 900;
+	constexpr int kHeloSinglePacketMax = 1100;
+	constexpr int kHeloChunkMaxCount = 32;
+	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+	static int g_currentPacketSenderHostIndex = -1;
+	static LateJoinSnapshotTransaction g_lateJoinTransactions[MAXPLAYERS];
+	static LateJoinPacketCatchupBuffer g_lateJoinCatchupBuffers[MAXPLAYERS];
+	static LateJoinProtocol::SnapshotAssembler g_clientLateJoinAssembler;
+	static LateJoinProtocol::SnapshotAssembler g_clientLateJoinCatchupAssembler;
+	static LateJoinProtocol::Begin g_clientLateJoinBegin;
+	static bool g_clientLateJoinSpawnAuthorized = false;
+	static bool g_clientLateJoinPacketDeferral = false;
+	static bool g_clientLateJoinCatchupComplete = false;
+	static bool g_clientLateJoinMapIsLoaded = false;
+	static bool g_clientLateJoinReplayingPackets = false;
+	static LateJoinPacketCatchupBuffer g_clientLateJoinLivePackets;
+	static std::vector<std::vector<std::uint8_t>>
+		g_clientLateJoinCatchupPackets;
+	static Uint32 g_lateJoinWireTransferId[MAXPLAYERS] = { 0 };
+	static Uint32 g_lateJoinLastProgressTick[MAXPLAYERS] = { 0 };
+	static bool g_lateJoinReturningPlayer[MAXPLAYERS] = { false };
+	static bool g_lateJoinClientHandshake[MAXPLAYERS] = { false };
+	static bool g_processingRuntimeJoin = false;
+	static Uint32 g_clientLateJoinLastProgressTick = 0;
+	static Uint32 g_clientProvisionalEntityUid = 0x70000000U;
+	static bool g_resendingScopedSafePacket = false;
+	static bool g_removedEntityTombstonesHaveInstanceScope = false;
+	static std::string g_removedEntityTombstoneInstanceKey;
+	static Uint64 g_removedEntityTombstoneRevision = 0;
+	constexpr Uint32 kLateJoinTimeoutTicks = 30 * TICKS_PER_SECOND;
+	constexpr Uint32 kLateJoinCharacterSelectionTimeoutTicks =
+		5 * 60 * TICKS_PER_SECOND;
+
+	static std::string generateReconnectToken()
+	{
+		try
+		{
+			static constexpr char hex[] = "0123456789abcdef";
+			std::random_device source;
+			std::string token(kReconnectTokenLength, '0');
+			for (std::size_t index = 0; index < token.size(); index += 2)
+			{
+				const unsigned value = source();
+				token[index] = hex[(value >> 4U) & 0x0fU];
+				token[index + 1] = hex[value & 0x0fU];
+			}
+			return token;
+		}
+		catch (const std::exception&)
+		{
+			return {};
+		}
+	}
+
+	static void setRemovedEntityTombstoneScope(
+		const WorldInstanceIdentity* identity)
+	{
+		g_removedEntityTombstonesHaveInstanceScope = identity != nullptr;
+		g_removedEntityTombstoneInstanceKey = identity
+			? identity->key()
+			: std::string{};
+		g_removedEntityTombstoneRevision = identity
+			? identity->revision
+			: 0;
+	}
+
+	static bool removedEntityTombstonesApplyToActiveInstance()
+	{
+		const WorldInstanceIdentity* active = worldState.activeIdentity();
+		return removedEntityTombstoneAppliesToInstance(
+			g_removedEntityTombstonesHaveInstanceScope,
+			g_removedEntityTombstoneInstanceKey.c_str(),
+			g_removedEntityTombstoneRevision,
+			active ? active->key().c_str() : "",
+			active ? active->revision : 0);
+	}
+
+	static void prepareRemovedEntityTombstonesForActiveInstance()
+	{
+		if (removedEntityTombstonesApplyToActiveInstance())
+		{
+			return;
+		}
+		list_FreeAll(&removedEntities);
+		setRemovedEntityTombstoneScope(worldState.activeIdentity());
+	}
+
+	static bool serverPlayerSharesActiveMap(int playerIndex)
+	{
+		return playerIndex > 0
+			&& playerIndex < MAXPLAYERS
+			&& !client_disconnected[playerIndex]
+			&& players[playerIndex]
+			&& !players[playerIndex]->isLocalPlayer()
+			&& worldState.playerSharesActiveInstance(playerIndex);
+	}
+
+	static Uint8 networkEntityArchetype(const Entity* entity)
+	{
+		if (!entity)
+		{
+			return kEntityArchetypeNone;
+		}
+		if (entity->behavior == &actCustomPortal)
+		{
+			return kEntityArchetypeCustomPortal;
+		}
+		if (entity->behavior == &actLightSource)
+		{
+			return kEntityArchetypeEditorLight;
+		}
+		return kEntityArchetypeNone;
+	}
+
+	static Uint8 receivedEntityArchetype()
+	{
+		if (!net_packet
+			|| net_packet->len <= static_cast<int>(kEntityArchetypeOffset))
+		{
+			return kEntityArchetypeNone;
+		}
+		return net_packet->data[kEntityArchetypeOffset];
+	}
+
+	static Entity* findUnboundMapFixtureForEntityUpdate(Uint8 archetype)
+	{
+		if (!net_packet || !map.entities
+			|| (archetype != kEntityArchetypeCustomPortal
+				&& archetype != kEntityArchetypeEditorLight))
+		{
+			return nullptr;
+		}
+		const real_t packetX =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[10])) / 32.0;
+		const real_t packetY =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[12])) / 32.0;
+		const real_t packetZ =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[14])) / 32.0;
+		Entity* best = nullptr;
+		real_t bestDistance = 0.25;
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* candidate = static_cast<Entity*>(node->element);
+			if (!candidate || candidate->lastupdateserver != 0)
+			{
+				continue;
+			}
+			const bool matchingBehavior =
+				(archetype == kEntityArchetypeCustomPortal
+					&& candidate->behavior == &actCustomPortal)
+				|| (archetype == kEntityArchetypeEditorLight
+					&& candidate->behavior == &actLightSource);
+			if (!matchingBehavior)
+			{
+				continue;
+			}
+			const real_t distance = std::abs(candidate->x - packetX)
+				+ std::abs(candidate->y - packetY)
+				+ std::abs(candidate->z - packetZ);
+			if (distance <= bestDistance)
+			{
+				best = candidate;
+				bestDistance = distance;
+			}
+		}
+		return best;
+	}
+
+	static bool currentPacketSenderMatchesPlayer(int playerIndex)
+	{
+		if (playerIndex <= 0 || playerIndex >= MAXPLAYERS || !net_packet)
+		{
+			return false;
+		}
+		if (directConnect)
+		{
+			return net_packet->address.host == net_clients[playerIndex - 1].host
+				&& net_packet->address.port == net_clients[playerIndex - 1].port;
+		}
+		return g_currentPacketSenderHostIndex == playerIndex - 1;
+	}
+
+	static void logServerRosterState(const char* reason)
+	{
+		if (multiplayer != SERVER)
+		{
+			return;
+		}
+		int connected = 0;
+		int reconnectReserved = 0;
+		int available = 0;
+		for (int player = 1; player < MAXPLAYERS; ++player)
+		{
+			if (!client_disconnected[player])
+			{
+				++connected;
+			}
+			else if (automatiaHasSavedPlayerPlacement(player))
+			{
+				++reconnectReserved;
+			}
+			else
+			{
+				++available;
+			}
+		}
+		printlog(
+			"[Roster] %s: connected=%d reconnect-reserved=%d available=%d.",
+			reason ? reason : "updated", connected, reconnectReserved, available);
+	}
+
+	static bool serverRouteActiveMapPacket(
+		int playerIndex, const Uint8* data, std::size_t size)
+	{
+		if (!serverPlayerSharesActiveMap(playerIndex))
+		{
+			return false;
+		}
+		LateJoinSnapshotTransaction& transaction =
+			g_lateJoinTransactions[playerIndex];
+		if (transaction.mayReceiveLiveSimulation())
+		{
+			return true;
+		}
+		const bool capture =
+			transaction.phase() == LateJoinSnapshotTransaction::Phase::Receiving
+			|| transaction.phase() == LateJoinSnapshotTransaction::Phase::Complete;
+		if (!capture || !data || size < 4)
+		{
+			return false;
+		}
+		// Reliable retries already in flight before snapshot capture are stale.
+		// Initial reliable sends reach this function before SAFE wrapping.
+		if (std::memcmp(data, "SAFE", 4) == 0)
+		{
+			return false;
+		}
+		if (!g_lateJoinCatchupBuffers[playerIndex].append(data, size))
+		{
+			transaction.fail();
+			printlog(
+				"[Late Join] Packet catch-up limit exceeded for player %d; transfer will abort.",
+				playerIndex);
+		}
+		return false;
+	}
+
+	static Uint32 moveClientEntityOutOfAuthoritativeUid(Entity* entity)
+	{
+		if (!entity)
+		{
+			return 0;
+		}
+		while (g_clientProvisionalEntityUid > 0x60000000U
+			&& uidToEntity(static_cast<Sint32>(g_clientProvisionalEntityUid)))
+		{
+			--g_clientProvisionalEntityUid;
+		}
+		if (g_clientProvisionalEntityUid <= 0x60000000U)
+		{
+			return 0;
+		}
+		const Uint32 provisionalUid = g_clientProvisionalEntityUid--;
+		const Uint32 oldUid = entity->getUID();
+		entity->setUID(provisionalUid);
+		if (map.entities && oldUid != provisionalUid)
+		{
+			for (node_t* node = map.entities->first; node; node = node->next)
+			{
+				Entity* child = static_cast<Entity*>(node->element);
+				if (child && child != entity && child->parent == oldUid)
+				{
+					child->parent = provisionalUid;
+				}
+			}
+		}
+		return provisionalUid;
+	}
+
+	static void adoptAuthoritativeUidForClientPlayerHead(
+		Entity* entity, Uint32 authoritativeUid)
+	{
+		if (!entity || authoritativeUid == 0)
+		{
+			return;
+		}
+		const Uint32 previousUid = entity->getUID();
+		if (previousUid == authoritativeUid)
+		{
+			return;
+		}
+		entity->setUID(authoritativeUid);
+		if (!map.entities)
+		{
+			return;
+		}
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* attached = static_cast<Entity*>(node->element);
+			if (attached && attached != entity && attached->parent == previousUid)
+			{
+				attached->parent = authoritativeUid;
+			}
+		}
+	}
+
+	static void ensureClientPlayerVisualInitialized(Entity* entity)
+	{
+		if (multiplayer != CLIENT
+			|| !entity
+			|| entity->behavior != &actPlayer
+			|| entity->skill[2] < 0
+			|| entity->skill[2] >= MAXPLAYERS
+			|| entity->skill[0] != 0)
+		{
+			return;
+		}
+		const int player = entity->skill[2];
+		actPlayer(entity);
+		printlog(
+			"[World State] Client initialized player %d UID %u voxel model with %u child node(s).",
+			player,
+			entity->getUID(),
+			static_cast<unsigned>(list_Size(&entity->children)));
+	}
+
+	static int decodeGameplayPacketPlayerIndex(
+		const Uint8 encodedPlayer
+	)
+	{
+		const int player =
+			static_cast<int>(encodedPlayer);
+
+		if ( player >= MAXPLAYERS )
+		{
+			printlog(
+				"[NET]: ignoring gameplay packet with invalid player index %d",
+				player
+			);
+			return -1;
+		}
+        if ( multiplayer == SERVER
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && directConnect
+            && player > 0
+            && (
+                net_packet->address.host != net_clients[player - 1].host
+                || net_packet->address.port != net_clients[player - 1].port
+            ) )
+        {
+            printlog(
+                "[NET]: ignoring map-local packet with invalid sender for player %d",
+                player
+            );
+            return -1;
+        }
+        if ( multiplayer == SERVER
+            && !directConnect
+            && player > 0
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && g_currentPacketSenderHostIndex != player - 1 )
+        {
+            printlog(
+                "[NET]: ignoring map-local P2P packet whose sender does not match player %d",
+                player
+            );
+            return -1;
+        }
+        if ( multiplayer == SERVER
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && !worldState.playerSharesActiveInstance(player) )
+        {
+            const std::string playerInstanceKey =
+                players[player]
+                ? players[player]->worldInstance.key()
+                : std::string{};
+            if ( playerInstanceKey.empty()
+                || !worldState.activate(playerInstanceKey)
+                || !worldState.playerSharesActiveInstance(player) )
+            {
+                printlog(
+                    "[NET]: ignoring map-local packet for unavailable instance '%s' from player %d",
+                    playerInstanceKey.c_str(),
+                    player
+                );
+                return -1;
+            }
+        }
+
+		return player;
+	}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+    static bool resolveSAMItemTypeFromPacket(
+        const int transmittedType,
+        const int stableIdOffset,
+        const char* packetName,
+        int& resolvedType
+    )
+    {
+        resolvedType = transmittedType;
+
+        if ( net_packet->len > stableIdOffset )
+        {
+            const int payloadLength = net_packet->len - stableIdOffset;
+            int stableIdLength = 0;
+            while ( stableIdLength < payloadLength
+                && net_packet->data[stableIdOffset + stableIdLength] != '\0' )
+            {
+                ++stableIdLength;
+            }
+
+            if ( stableIdLength <= 0
+                || stableIdLength >= payloadLength )
+            {
+                printlog(
+                    "[S.A.M] Refusing malformed %s stable-id payload.\n",
+                    packetName
+                );
+                return false;
+            }
+
+            const std::string stableId(
+                reinterpret_cast<const char*>(
+                    &net_packet->data[stableIdOffset]
+                ),
+                stableIdLength
+            );
+            resolvedType =
+                SAMItemRegistryFoundation::
+                    runtimeIdForStableId(stableId);
+            if ( resolvedType < 0
+                || !SAMItemRegistryFoundation::
+                    isRegisteredRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] %s custom item unavailable locally: [%s]. Item rejected.\n",
+                    packetName,
+                    stableId.c_str()
+                );
+                return false;
+            }
+
+            return true;
+        }
+
+        if ( SAMItemRegistryFoundation::
+            isSAMRuntimeItemId(transmittedType) )
+        {
+            printlog(
+                "[S.A.M] Refusing numeric-only %s custom runtime %d.\n",
+                packetName,
+                transmittedType
+            );
+            return false;
+        }
+
+        return true;
+    }
+#endif
+
+	static Uint16 nextHeloTransferIdForPlayer(const int player)
+	{
+		if ( player <= 0 || player >= MAXPLAYERS )
+		{
+			return 0;
+		}
+
+		++g_heloTransferId[player];
+		if ( g_heloTransferId[player] == 0 )
+		{
+			++g_heloTransferId[player];
+		}
+		return g_heloTransferId[player];
+	}
+
+	static bool sendChunkedHeloDirect(
+		const Uint8* heloData,
+		const int heloLen,
+		const Uint16 transferId,
+		const int playerNumForLog
+	)
+	{
+		if ( !heloData
+			|| heloLen <= 0
+			|| heloLen > NET_PACKET_SIZE )
+		{
+			printlog(
+				"[NET]: refusing chunked HELO with invalid payload length %d",
+				heloLen
+			);
+			return false;
+		}
+
+		const int chunkPayloadMax =
+			std::min(
+				kHeloChunkPayloadMax,
+				NET_PACKET_SIZE - kHeloChunkHeaderSize
+			);
+		const int chunkCount =
+			(heloLen + chunkPayloadMax - 1)
+				/ chunkPayloadMax;
+
+		if ( chunkPayloadMax <= 0
+			|| chunkCount <= 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkCount > 0xFF )
+		{
+			printlog(
+				"[NET]: refusing chunked HELO with invalid chunk count %d",
+				chunkCount
+			);
+			return false;
+		}
+
+		printlog(
+			"sending chunked HELO: player=%d transfer=%u chunks=%d total=%d",
+			playerNumForLog,
+			static_cast<unsigned>(transferId),
+			chunkCount,
+			heloLen
+		);
+
+		for ( int chunkIndex = 0;
+			chunkIndex < chunkCount;
+			++chunkIndex )
+		{
+			const int offset =
+				chunkIndex * chunkPayloadMax;
+			const int chunkLen =
+				std::min(
+					chunkPayloadMax,
+					heloLen - offset
+				);
+
+			if ( chunkLen <= 0
+				|| chunkLen > chunkPayloadMax )
+			{
+				return false;
+			}
+
+			memcpy(net_packet->data, "HLCN", 4);
+			SDLNet_Write16(
+				transferId,
+				&net_packet->data[4]
+			);
+			net_packet->data[6] =
+				static_cast<Uint8>(chunkIndex);
+			net_packet->data[7] =
+				static_cast<Uint8>(chunkCount);
+			SDLNet_Write16(
+				static_cast<Uint16>(heloLen),
+				&net_packet->data[8]
+			);
+			SDLNet_Write16(
+				static_cast<Uint16>(chunkLen),
+				&net_packet->data[10]
+			);
+			memcpy(
+				&net_packet->data[kHeloChunkHeaderSize],
+				heloData + offset,
+				chunkLen
+			);
+			net_packet->len =
+				kHeloChunkHeaderSize + chunkLen;
+
+			if ( !sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					0
+				) )
+			{
+				printlog(
+					"[NET]: failed sending HELO chunk %d/%d",
+					chunkIndex + 1,
+					chunkCount
+				);
+				return false;
+			}
+		}
+
+		return true;
+	}
+}
+
+static void tryReplayClientLateJoinPackets();
+
+void clientResetLateJoinPacketDeferral()
+{
+	g_clientLateJoinPacketDeferral = false;
+	g_clientLateJoinCatchupComplete = false;
+	g_clientLateJoinMapIsLoaded = false;
+	g_clientLateJoinReplayingPackets = false;
+	g_clientLateJoinCatchupAssembler.reset();
+	g_clientLateJoinLivePackets.reset();
+	g_clientLateJoinCatchupPackets.clear();
+	g_clientLateJoinLastProgressTick = 0;
+}
+
+void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
+{
+	clientResetLateJoinPacketDeferral();
+	if (transferId == 0)
+	{
+		return;
+	}
+	g_clientLateJoinBegin.transferId = transferId;
+	g_clientLateJoinBegin.instanceRevision = revision;
+	g_clientLateJoinPacketDeferral = true;
+	g_clientLateJoinLastProgressTick = ticks;
+}
+
+bool clientAcceptLateJoinCatchupBegin(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Complete metadata;
+	if (!g_clientLateJoinPacketDeferral
+		|| !LateJoinProtocol::decodeCatchupBegin(data, size, metadata)
+		|| metadata.transferId != g_clientLateJoinBegin.transferId
+		|| metadata.instanceRevision != g_clientLateJoinBegin.instanceRevision
+		|| metadata.totalBytes > LateJoinPacketCatchupBuffer::maxSerializedBytes)
+	{
+		return false;
+	}
+	LateJoinProtocol::Begin begin;
+	begin.transferId = metadata.transferId;
+	begin.instanceRevision = metadata.instanceRevision;
+	begin.chunkCount = metadata.chunkCount;
+	begin.totalBytes = metadata.totalBytes;
+	begin.snapshotChecksum = metadata.snapshotChecksum;
+	const bool accepted = g_clientLateJoinCatchupAssembler.begin(begin);
+	if (accepted)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+	return accepted;
+}
+
+bool clientAcceptLateJoinCatchupChunk(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Chunk chunk;
+	const bool accepted = g_clientLateJoinPacketDeferral
+		&& LateJoinProtocol::decodeCatchupChunk(data, size, chunk)
+		&& g_clientLateJoinCatchupAssembler.accept(chunk)
+			!= LateJoinProtocol::ReceiveResult::Rejected;
+	if (accepted)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+	return accepted;
+}
+
+bool clientAcceptLateJoinCatchupComplete(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Complete complete;
+	if (!g_clientLateJoinPacketDeferral
+		|| !LateJoinProtocol::decodeCatchupComplete(data, size, complete)
+		|| g_clientLateJoinCatchupAssembler.finish(complete)
+			!= LateJoinProtocol::ReceiveResult::Complete
+		|| !LateJoinPacketCatchupBuffer::deserialize(
+			g_clientLateJoinCatchupAssembler.snapshot(),
+			g_clientLateJoinCatchupPackets))
+	{
+		return false;
+	}
+	g_clientLateJoinCatchupComplete = true;
+	g_clientLateJoinLastProgressTick = ticks;
+	tryReplayClientLateJoinPackets();
+	return true;
+}
+
+void clientCheckLateJoinTimeout()
+{
+	if (!g_clientLateJoinPacketDeferral
+		|| g_clientLateJoinLastProgressTick == 0
+		|| ticks - g_clientLateJoinLastProgressTick <= kLateJoinTimeoutTicks)
+	{
+		return;
+	}
+	LateJoinProtocol::Abort abort;
+	abort.playerIndex = static_cast<std::uint8_t>(clientnum);
+	abort.transferId = g_clientLateJoinBegin.transferId;
+	abort.instanceRevision = g_clientLateJoinBegin.instanceRevision;
+	abort.reason = 1;
+	const std::vector<std::uint8_t> record =
+		LateJoinProtocol::encodeAbort(abort);
+	if (net_packet && net_sock && !record.empty())
+	{
+		memcpy(net_packet->data, record.data(), record.size());
+		net_packet->len = static_cast<int>(record.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+	}
+	printlog("[Late Join] Client aborted an incomplete transfer after 30 seconds.");
+	discardAutomatiaPersistentWorldSnapshot();
+	g_clientLateJoinAssembler.reset();
+	g_clientLateJoinSpawnAuthorized = false;
+	clientResetLateJoinPacketDeferral();
+}
+
+bool clientLateJoinPacketDeferralActive()
+{
+	return g_clientLateJoinPacketDeferral;
+}
+
+void clientNoteLateJoinProgress()
+{
+	if (g_clientLateJoinPacketDeferral)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+}
+
+bool clientDeferLateJoinMapPacket(const Uint8* data, std::size_t size)
+{
+	if (!g_clientLateJoinPacketDeferral || g_clientLateJoinReplayingPackets
+		|| !packetUsesActiveMapScope(data, size))
+	{
+		return false;
+	}
+	if (!g_clientLateJoinLivePackets.append(data, size))
+	{
+		printlog("[Late Join] Client live-packet deferral limit exceeded.");
+	}
+	return true;
+}
+
+void clientLateJoinMapLoaded()
+{
+	if (!g_clientLateJoinPacketDeferral)
+	{
+		return;
+	}
+	g_clientLateJoinMapIsLoaded = true;
+	tryReplayClientLateJoinPackets();
+}
 
 NetHandler* net_handler = nullptr;
 struct PendingTunnelSpawn
@@ -59,6 +825,9 @@ struct PendingTunnelSpawn
 };
 
 static PendingTunnelSpawn pendingTunnelSpawn;
+static bool pendingIndependentLevelChange = false;
+static int pendingIndependentPlayer = -1;
+static Uint32 pendingIndependentRuntimeUid = 0;
 char last_ip[64] = "";
 char last_port[64] = "";
 char lobbyChatbox[LOBBY_CHATBOX_LENGTH];
@@ -131,6 +900,20 @@ bool applyPendingTunnelSpawn()
         }
     }
 
+    for ( node_t* node = map.entities->first; node != nullptr; node = node->next )
+    {
+        Entity* entity = static_cast<Entity*>(node->element);
+        if ( entity && entity->behavior == &actSpriteNametag )
+        {
+            if ( entity->parent == playerEntity->getUID() )
+            {
+                entity->bNeedsRenderPositionInit = true;
+            }
+        }
+    }
+
+    temporarilyDisableDithering();
+
     printlog(
         "[Custom Tunnel] Client applied server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
         playerEntity->x,
@@ -153,7 +936,7 @@ void pollNetworkForShutdown() {
 			nextnode = node->next;
 
 			packetsend_t* packet = (packetsend_t*)node->element;
-			sendPacket(packet->sock, packet->channel, packet->packet, packet->hostnum);
+			resendPacketSafe(packet);
 			packet->tries++;
 			if ( packet->tries >= MAXTRIES )
 			{
@@ -193,6 +976,15 @@ void pollNetworkForShutdown() {
 
 int sendPacket(UDPsocket sock, int channel, UDPpacket* packet, int hostnum, bool tryReliable)
 {
+    if ( multiplayer == SERVER
+		&& !g_resendingScopedSafePacket
+        && packetUsesActiveMapScope(packet ? packet->data : nullptr, packet ? packet->len : 0)
+        && !serverRouteActiveMapPacket(
+			hostnum + 1, packet ? packet->data : nullptr,
+			packet ? static_cast<std::size_t>(packet->len) : 0) )
+    {
+        return 0;
+    }
 	if ( directConnect )
 	{
 		return SDLNet_UDP_Send(sock, channel, packet);
@@ -246,6 +1038,14 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		printlog("[NET]: Error - attempt to send to non-valid hostnum: %d", hostnum);
 		return 0;
 	}
+    if ( multiplayer == SERVER
+        && packetUsesActiveMapScope(packet ? packet->data : nullptr, packet ? packet->len : 0)
+        && !serverRouteActiveMapPacket(
+			hostnum + 1, packet ? packet->data : nullptr,
+			packet ? static_cast<std::size_t>(packet->len) : 0) )
+    {
+        return 0;
+    }
 
 	if ( !directConnect )
 	{
@@ -270,6 +1070,11 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 	}
 
 	packetsend_t* packetsend = (packetsend_t*) malloc(sizeof(packetsend_t));
+	if (!packetsend)
+	{
+		return 0;
+	}
+	memset(packetsend, 0, sizeof(*packetsend));
 	if (!(packetsend->packet = SDLNet_AllocPacket(NET_PACKET_SIZE)))
 	{
 		printlog("warning: packet allocation failed: %s\n", SDLNet_GetError());
@@ -297,6 +1102,24 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 	SDLNet_Write32(packetnum, &packetsend->packet->data[5]);
 	packetsend->num = packetnum;
 	packetsend->tries = 0;
+	if (multiplayer == SERVER
+		&& packetUsesActiveMapScope(packet->data, packet->len))
+	{
+		const WorldInstanceIdentity* identity = worldState.activeIdentity();
+		if (!identity)
+		{
+			SDLNet_FreePacket(packetsend->packet);
+			free(packetsend);
+			return 0;
+		}
+		packetsend->mapScoped = true;
+		packetsend->mapInstanceRevision = identity->revision;
+		stringCopy(
+			packetsend->mapInstanceKey,
+			identity->key().c_str(),
+			sizeof(packetsend->mapInstanceKey),
+			identity->key().size() + 1);
+	}
 	packetnum++;
 
 	node_t* node = list_AddNodeFirst(&safePacketsSent);
@@ -331,6 +1154,47 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		}
 		return 0;
 	}
+}
+
+int resendPacketSafe(packetsend_t* packet)
+{
+	if (!packet || !packet->packet)
+	{
+		return 0;
+	}
+	if (multiplayer == SERVER && packet->mapScoped)
+	{
+		const int recipient = packet->hostnum + 1;
+		if (recipient <= 0 || recipient >= MAXPLAYERS
+			|| client_disconnected[recipient]
+			|| !players[recipient]
+			|| !scopedReliablePacketCanRetry(
+				packet->mapInstanceKey,
+				packet->mapInstanceRevision,
+				players[recipient]->worldInstance.key().c_str(),
+				players[recipient]->worldInstance.revision,
+				g_lateJoinTransactions[recipient]
+					.mayReceiveLiveSimulation()))
+		{
+			packet->tries = MAXTRIES;
+			return 0;
+		}
+		g_resendingScopedSafePacket = true;
+		const int result = sendPacket(
+			packet->sock,
+			packet->channel,
+			packet->packet,
+			packet->hostnum,
+			true);
+		g_resendingScopedSafePacket = false;
+		return result;
+	}
+	return sendPacket(
+		packet->sock,
+		packet->channel,
+		packet->packet,
+		packet->hostnum,
+		true);
 }
 
 /*-------------------------------------------------------------------------------
@@ -548,6 +1412,388 @@ void sendEntityTCP(Entity* entity, int c)
 	// deprecated
 }
 
+bool serverPlayerCanReceiveActiveMapUpdates(int playerIndex)
+{
+	if (!serverPlayerSharesActiveMap(playerIndex))
+	{
+		return false;
+	}
+	const LateJoinSnapshotTransaction::Phase phase =
+		g_lateJoinTransactions[playerIndex].phase();
+	return g_lateJoinTransactions[playerIndex].mayReceiveLiveSimulation()
+		|| phase == LateJoinSnapshotTransaction::Phase::Receiving
+		|| phase == LateJoinSnapshotTransaction::Phase::Complete;
+}
+
+bool serverPlayerCanReceiveGameplayUpdates(int playerIndex)
+{
+	return playerIndex > 0
+		&& playerIndex < MAXPLAYERS
+		&& !client_disconnected[playerIndex]
+		&& players[playerIndex]
+		&& !players[playerIndex]->isLocalPlayer()
+		&& g_lateJoinTransactions[playerIndex].mayReceiveLiveSimulation();
+}
+
+bool beginServerLateJoinSnapshot(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 chunkCount,
+    Uint32 totalBytes
+)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+	{
+		return false;
+	}
+	g_lateJoinCatchupBuffers[playerIndex].reset();
+	return g_lateJoinTransactions[playerIndex].begin(
+		transferId, instanceRevision, chunkCount, totalBytes);
+}
+
+LateJoinChunkResult acceptServerLateJoinSnapshotChunk(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 sequence,
+    Uint32 payloadBytes,
+    Uint32 payloadChecksum
+)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+    {
+        return LateJoinChunkResult::Rejected;
+    }
+    return g_lateJoinTransactions[playerIndex].acceptChunk(
+        transferId,
+        instanceRevision,
+        sequence,
+        payloadBytes,
+        payloadChecksum
+    );
+}
+
+bool authorizeServerLateJoinPlayer(int playerIndex)
+{
+    return playerIndex > 0
+        && playerIndex < MAXPLAYERS
+        && g_lateJoinTransactions[playerIndex].authorize();
+}
+
+void resetServerLateJoinPlayer(int playerIndex)
+{
+    if (playerIndex > 0 && playerIndex < MAXPLAYERS)
+    {
+        g_lateJoinTransactions[playerIndex].reset();
+		g_lateJoinCatchupBuffers[playerIndex].reset();
+		g_lateJoinLastProgressTick[playerIndex] = 0;
+		g_lateJoinReturningPlayer[playerIndex] = false;
+		g_lateJoinClientHandshake[playerIndex] = false;
+    }
+}
+
+static bool queueLateJoinRecordForPlayer(
+    int playerIndex,
+    const std::vector<std::uint8_t>& record
+)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+        || client_disconnected[playerIndex] || !net_packet || !net_sock
+        || record.empty() || record.size() > NET_PACKET_SIZE - 9)
+    {
+        return false;
+    }
+    memcpy(net_packet->data, record.data(), record.size());
+    net_packet->len = static_cast<int>(record.size());
+    net_packet->address.host = net_clients[playerIndex - 1].host;
+    net_packet->address.port = net_clients[playerIndex - 1].port;
+    sendPacketSafe(net_sock, -1, net_packet, playerIndex - 1);
+    return true;
+}
+
+static void abortServerLateJoinPlayer(int playerIndex, Uint8 reason)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+	{
+		return;
+	}
+	LateJoinProtocol::Abort abort;
+	abort.playerIndex = static_cast<std::uint8_t>(playerIndex);
+	abort.transferId = g_lateJoinTransactions[playerIndex].transferId();
+	abort.instanceRevision =
+		g_lateJoinTransactions[playerIndex].instanceRevision();
+	abort.reason = reason ? reason : 1;
+	queueLateJoinRecordForPlayer(
+		playerIndex, LateJoinProtocol::encodeAbort(abort));
+	worldState.removePlayer(playerIndex);
+	client_disconnected[playerIndex] = true;
+	resetServerLateJoinPlayer(playerIndex);
+}
+
+static bool startServerLateJoinSnapshotTransfer(int playerIndex)
+{
+    if (multiplayer != SERVER || playerIndex <= 0
+        || playerIndex >= MAXPLAYERS || client_disconnected[playerIndex]
+        || !players[playerIndex]
+        || !players[playerIndex]->worldInstance.isValid())
+    {
+        return false;
+    }
+
+    const WorldInstanceIdentity* foreground = worldState.activeIdentity();
+    const std::string foregroundKey =
+        foreground ? foreground->key() : std::string{};
+    const std::string destinationKey =
+        players[playerIndex]->worldInstance.key();
+    if (!worldState.activate(destinationKey))
+    {
+        printlog(
+            "[Late Join] Cannot activate destination '%s' for player %d.",
+            destinationKey.c_str(), playerIndex);
+        return false;
+    }
+
+    std::string snapshot;
+    std::string snapshotError;
+    const bool captured = serializeAutomatiaPersistentWorldSnapshot(
+        std::to_string(uniqueGameKey), snapshot, snapshotError);
+    if (!foregroundKey.empty() && foregroundKey != destinationKey
+        && !worldState.activate(foregroundKey))
+    {
+        printlog(
+            "[Late Join] Failed to restore foreground '%s' after snapshot capture.",
+            foregroundKey.c_str());
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    if (!captured)
+    {
+        printlog(
+            "[Late Join] Snapshot capture failed for player %d: %s",
+            playerIndex, snapshotError.c_str());
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+
+    Uint32 transferId = ++g_lateJoinWireTransferId[playerIndex];
+    if (transferId == 0)
+    {
+        transferId = ++g_lateJoinWireTransferId[playerIndex];
+    }
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (snapshot.size() + LateJoinProtocol::maxChunkPayload - 1)
+        / LateJoinProtocol::maxChunkPayload);
+    const Uint64 revision = players[playerIndex]->worldInstance.revision;
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(snapshot.data()),
+        snapshot.size());
+    if (!beginServerLateJoinSnapshot(
+            playerIndex, transferId, revision, chunkCount,
+            static_cast<Uint32>(snapshot.size())))
+    {
+        return false;
+    }
+
+	// Light sources normally synchronize skill[10] only when their powered
+	// state changes. A client that joins after that event would otherwise load
+	// the authored default and never learn the current enabled state.
+	std::size_t synchronizedLightSources = 0;
+	MapInstance* destinationInstance = worldState.find(destinationKey);
+	if (destinationInstance && destinationInstance->entities)
+	{
+		for (node_t* node = destinationInstance->entities->first;
+			node; node = node->next)
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (!entity || entity->behavior != &actLightSource)
+			{
+				continue;
+			}
+			std::vector<std::uint8_t> state(13, 0);
+			memcpy(state.data(), "ENTS", 4);
+			LateJoinProtocol::write32(
+				state, 4, static_cast<Uint32>(entity->getUID()));
+			state[8] = 10;
+			LateJoinProtocol::write32(
+				state, 9, static_cast<Uint32>(entity->skill[10]));
+			if (!g_lateJoinCatchupBuffers[playerIndex].append(
+					state.data(), state.size()))
+			{
+				printlog(
+					"[Late Join] Could not queue light-source state for player %d.",
+					playerIndex);
+				resetServerLateJoinPlayer(playerIndex);
+				return false;
+			}
+			++synchronizedLightSources;
+		}
+	}
+
+    LateJoinProtocol::Begin begin;
+    begin.transferId = transferId;
+    begin.instanceRevision = revision;
+    begin.chunkCount = chunkCount;
+    begin.totalBytes = static_cast<Uint32>(snapshot.size());
+    begin.snapshotChecksum = checksum;
+    begin.sessionKey = uniqueGameKey;
+    if (!queueLateJoinRecordForPlayer(
+            playerIndex, LateJoinProtocol::encodeBegin(begin)))
+    {
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+
+    for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence)
+            * LateJoinProtocol::maxChunkPayload;
+        const std::size_t payloadSize = std::min(
+            LateJoinProtocol::maxChunkPayload,
+            snapshot.size() - offset);
+        LateJoinProtocol::Chunk chunk;
+        chunk.transferId = transferId;
+        chunk.instanceRevision = revision;
+        chunk.sequence = sequence;
+        const std::uint8_t* payloadBegin =
+            reinterpret_cast<const std::uint8_t*>(snapshot.data() + offset);
+        chunk.payload.assign(payloadBegin, payloadBegin + payloadSize);
+        const Uint32 chunkChecksum = LateJoinProtocol::crc32(
+            chunk.payload.data(), chunk.payload.size());
+        if (!queueLateJoinRecordForPlayer(
+                playerIndex, LateJoinProtocol::encodeChunk(chunk)))
+        {
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
+        const LateJoinChunkResult chunkResult =
+            acceptServerLateJoinSnapshotChunk(
+                playerIndex, transferId, revision, sequence,
+                static_cast<Uint32>(payloadSize), chunkChecksum);
+        if (chunkResult == LateJoinChunkResult::Rejected)
+        {
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
+    }
+
+    LateJoinProtocol::Complete complete;
+    complete.transferId = transferId;
+    complete.instanceRevision = revision;
+    complete.chunkCount = chunkCount;
+    complete.totalBytes = static_cast<Uint32>(snapshot.size());
+    complete.snapshotChecksum = checksum;
+    if (!queueLateJoinRecordForPlayer(
+            playerIndex, LateJoinProtocol::encodeComplete(complete)))
+    {
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    printlog(
+        "[Late Join] Queued transfer %u for player %d: %u chunk(s), %zu bytes, %zu editor light source state(s), instance '%s' revision %llu.",
+        transferId, playerIndex, chunkCount, snapshot.size(),
+		synchronizedLightSources,
+        destinationKey.c_str(),
+        static_cast<unsigned long long>(revision));
+    return true;
+}
+
+static bool sendServerLateJoinStart(int playerIndex)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+        || !players[playerIndex]
+        || !players[playerIndex]->worldInstance.isValid())
+    {
+        return false;
+    }
+    const WorldInstanceIdentity& identity =
+        players[playerIndex]->worldInstance;
+    const MapInstance* instance = worldState.find(identity.key());
+    if (!instance || !instance->loadedMap
+        || identity.mapFile.empty() || identity.mapFile.size() > 255)
+    {
+        return false;
+    }
+    const std::size_t metadataOffset = 19 + identity.mapFile.size();
+    std::vector<std::uint8_t> record(metadataOffset + 9, 0);
+    memcpy(record.data(), "STRT", 4);
+    LateJoinProtocol::write32(record, 4, svFlags);
+    LateJoinProtocol::write32(record, 8, uniqueGameKey);
+    record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
+    LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
+    record[17] = 1;
+    record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
+    memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
+    LateJoinProtocol::write32(
+        record, metadataOffset, static_cast<Uint32>(instance->dungeonLevel));
+    LateJoinProtocol::write32(record, metadataOffset + 4, instance->mapSeed);
+    record[metadataOffset + 8] = instance->secretLevel ? 1 : 0;
+    return queueLateJoinRecordForPlayer(playerIndex, record);
+}
+
+static bool sendServerLateJoinCatchup(int playerIndex)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+		|| g_lateJoinCatchupBuffers[playerIndex].failed())
+	{
+		return false;
+	}
+	const std::vector<std::uint8_t> bytes =
+		g_lateJoinCatchupBuffers[playerIndex].serialize();
+	if (bytes.empty())
+	{
+		return false;
+	}
+	const Uint32 transferId = g_lateJoinTransactions[playerIndex].transferId();
+	const Uint64 revision =
+		g_lateJoinTransactions[playerIndex].instanceRevision();
+	const Uint32 chunkCount = static_cast<Uint32>(
+		(bytes.size() + LateJoinProtocol::maxChunkPayload - 1)
+		/ LateJoinProtocol::maxChunkPayload);
+	LateJoinProtocol::Complete metadata;
+	metadata.transferId = transferId;
+	metadata.instanceRevision = revision;
+	metadata.chunkCount = chunkCount;
+	metadata.totalBytes = static_cast<Uint32>(bytes.size());
+	metadata.snapshotChecksum = LateJoinProtocol::crc32(
+		bytes.data(), bytes.size());
+	if (!queueLateJoinRecordForPlayer(
+			playerIndex, LateJoinProtocol::encodeCatchupBegin(metadata)))
+	{
+		return false;
+	}
+	for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+	{
+		const std::size_t offset =
+			static_cast<std::size_t>(sequence)
+			* LateJoinProtocol::maxChunkPayload;
+		const std::size_t payloadSize = std::min(
+			LateJoinProtocol::maxChunkPayload, bytes.size() - offset);
+		LateJoinProtocol::Chunk chunk;
+		chunk.transferId = transferId;
+		chunk.instanceRevision = revision;
+		chunk.sequence = sequence;
+		chunk.payload.assign(
+			bytes.begin() + offset, bytes.begin() + offset + payloadSize);
+		if (!queueLateJoinRecordForPlayer(
+				playerIndex, LateJoinProtocol::encodeCatchupChunk(chunk)))
+		{
+			return false;
+		}
+	}
+	if (!queueLateJoinRecordForPlayer(
+			playerIndex, LateJoinProtocol::encodeCatchupComplete(metadata)))
+	{
+		return false;
+	}
+	printlog(
+		"[Late Join] Queued %zu catch-up packet(s), %zu serialized bytes for player %d transfer %u.",
+		g_lateJoinCatchupBuffers[playerIndex].packetCount(),
+		bytes.size(), playerIndex, transferId);
+	return true;
+}
+
 void sendEntityUDP(Entity* entity, int c, bool guarantee)
 {
 	int j;
@@ -556,11 +1802,11 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		return;
 	}
-	if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+	if ( c <= 0 || c >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( c <= 0 )
+    if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 	{
 		return;
 	}
@@ -615,6 +1861,8 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 			net_packet->data[46 + j / 8] |= power(2, j - (j / 8) * 8);
 		}
 	}
+	net_packet->data[kEntityArchetypeOffset] =
+		networkEntityArchetype(entity);
 	net_packet->address.host = net_clients[c - 1].host;
 	net_packet->address.port = net_clients[c - 1].port;
 	net_packet->len = ENTITY_PACKET_LENGTH;
@@ -671,13 +1919,41 @@ void sendMapTCP(int c)
 void serverUpdateBodypartIDs(Entity* entity)
 {
 	int c;
-	if ( multiplayer != SERVER )
+	if ( multiplayer != SERVER || !entity )
 	{
 		return;
 	}
+	const bool monsterBodyparts = entity->behavior == &actMonster;
+	const std::size_t packetLength = bodypartIdPacketLength(
+		list_Size(&entity->children), monsterBodyparts);
+	if (packetLength > NET_PACKET_SIZE)
+	{
+		printlog(
+			"[NET]: refusing oversized BDYI packet for UID %u (%zu bytes).",
+			entity->getUID(),
+			packetLength);
+		return;
+	}
+	int childIndex = 0;
+	for (node_t* node = entity->children.first;
+		node;
+		node = node->next, ++childIndex)
+	{
+		if (childIndex < (monsterBodyparts ? 2 : 1))
+		{
+			continue;
+		}
+		if (!node->element)
+		{
+			printlog(
+				"[NET]: refusing BDYI packet for UID %u with a null transmitted child.",
+				entity->getUID());
+			return;
+		}
+	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -703,7 +1979,7 @@ void serverUpdateBodypartIDs(Entity* entity)
 		}
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 8 + (list_Size(&entity->children) - 2) * 4;
+		net_packet->len = static_cast<int>(packetLength);
 		sendPacketSafe(net_sock, -1, net_packet, c - 1);
 	}
 }
@@ -723,13 +1999,13 @@ void serverUpdateBodypartIDs(Entity* entity)
 void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 {
 	int c;
-	if ( multiplayer != SERVER )
+	if ( multiplayer != SERVER || !entity )
 	{
 		return;
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -737,7 +2013,7 @@ void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 		SDLNet_Write32(entity->getUID(), &net_packet->data[4]);
 		net_packet->data[8] = bodypart;
 		node_t* node = list_Node(&entity->children, bodypart);
-		if ( !node )
+		if ( !node || !node->element )
 		{
 			continue;
 		}
@@ -788,7 +2064,7 @@ void serverUpdateEntitySprite(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -819,7 +2095,7 @@ void serverUpdateEntitySkill(Entity* entity, int skill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -855,7 +2131,7 @@ void serverUpdateEntityStatFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -887,7 +2163,7 @@ void serverUpdateEntityFSkill(Entity* entity, int fskill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -919,7 +2195,7 @@ void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSpri
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -955,7 +2231,7 @@ void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int partic
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -992,7 +2268,7 @@ void serverUpdateEntityFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1016,7 +2292,7 @@ void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1054,7 +2330,7 @@ void serverUpdateEffects(int player)
 	{
 		return;
 	}
-	if ( client_disconnected[player] == true || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] == true || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1124,7 +2400,7 @@ void serverUpdateHunger(int player)
 	{
 		return;
 	}
-	if ( client_disconnected[player] == true || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] == true || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1154,7 +2430,7 @@ void serverUpdateSexChange(int player)
 
 	for ( int c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
@@ -1178,38 +2454,111 @@ Updates all player current HP/MP for clients
 
 void serverUpdatePlayerStats()
 {
-	int c;
 	if ( multiplayer != SERVER )
 	{
 		return;
 	}
-	for ( c = 1; c < MAXPLAYERS; c++ )
+
+	constexpr int packetLength =
+		4 + 8 * MAXPLAYERS;
+	static_assert(
+		packetLength <= NET_PACKET_SIZE,
+		"NET_PACKET_SIZE is too small for STAT"
+	);
+
+	strcpy((char*)net_packet->data, "STAT");
+
+	for ( int i = 0; i < MAXPLAYERS; ++i )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		Uint32 packedHP = 0;
+		Uint32 packedMP = 0;
+
+		if ( stats[i] )
+		{
+			const Uint16 maxHP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MAXHP,
+							65535
+						)
+					)
+				);
+			const Uint16 currentHP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->HP,
+							65535
+						)
+					)
+				);
+			const Uint16 maxMP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MAXMP,
+							65535
+						)
+					)
+				);
+			const Uint16 currentMP =
+				static_cast<Uint16>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->MP,
+							65535
+						)
+					)
+				);
+
+			packedHP =
+				static_cast<Uint32>(maxHP)
+				| (
+					static_cast<Uint32>(currentHP)
+					<< 16
+				);
+			packedMP =
+				static_cast<Uint32>(maxMP)
+				| (
+					static_cast<Uint32>(currentMP)
+					<< 16
+				);
+		}
+
+		SDLNet_Write32(
+			packedHP,
+			&net_packet->data[4 + i * 8]
+		);
+		SDLNet_Write32(
+			packedMP,
+			&net_packet->data[8 + i * 8]
+		);
+	}
+
+	net_packet->len = packetLength;
+
+	for ( int c = 1; c < MAXPLAYERS; ++c )
+	{
+		if ( !serverPlayerCanReceiveGameplayUpdates(c) )
 		{
 			continue;
 		}
-		strcpy((char*)net_packet->data, "STAT");
-		Sint32 playerHP = 0;
-		Sint32 playerMP = 0;
-		for ( int i = 0; i < MAXPLAYERS; ++i )
-		{
-			if ( stats[i] )
-			{
-				playerHP = static_cast<Sint16>(stats[i]->MAXHP);
-				playerHP |= static_cast<Sint16>(stats[i]->HP) << 16;
-				playerMP = static_cast<Sint16>(stats[i]->MAXMP);
-				playerMP |= static_cast<Sint16>(stats[i]->MP) << 16;
-			}
-			SDLNet_Write32(playerHP, &net_packet->data[4 + i * 8]); // 4/12/20/28 data
-			SDLNet_Write32(playerMP, &net_packet->data[8 + i * 8]); // 8/16/24/32 data
-			playerHP = 0;
-			playerMP = 0;
-		}
-		net_packet->address.host = net_clients[c - 1].host;
-		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 4 + 8 * MAXPLAYERS;
-		sendPacketSafe(net_sock, -1, net_packet, c - 1);
+
+		net_packet->address.host =
+			net_clients[c - 1].host;
+		net_packet->address.port =
+			net_clients[c - 1].port;
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			c - 1
+		);
 	}
 }
 
@@ -1342,7 +2691,7 @@ void serverUpdatePlayerConduct(int player, int conduct, int value)
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1365,41 +2714,63 @@ Updates all player current LVL for clients
 
 void serverUpdatePlayerLVL()
 {
-	int c;
 	if ( multiplayer != SERVER )
 	{
 		return;
 	}
-	for ( c = 1; c < MAXPLAYERS; c++ )
+
+	static_assert(
+		4 + MAXPLAYERS <= NET_PACKET_SIZE,
+		"NET_PACKET_SIZE is too small for UPLV"
+	);
+
+	strcpy((char*)net_packet->data, "UPLV");
+	for ( int i = 0; i < MAXPLAYERS; ++i )
 	{
-		if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+		net_packet->data[4 + i] =
+			stats[i]
+				? static_cast<Uint8>(
+					std::max(
+						0,
+						std::min(
+							stats[i]->LVL,
+							255
+						)
+					)
+				)
+				: 0;
+	}
+	net_packet->len = 4 + MAXPLAYERS;
+
+	for ( int c = 1; c < MAXPLAYERS; ++c )
+	{
+		if ( client_disconnected[c]
+			|| !players[c]
+			|| players[c]->isLocalPlayer() )
 		{
 			continue;
 		}
-		strcpy((char*)net_packet->data, "UPLV");
-		Sint32 playerLevels = 0;
-		for ( int i = 0; i < MAXPLAYERS; ++i )
-		{
-			if ( stats[i] )
-			{
-				playerLevels |= static_cast<Uint8>(stats[i]->LVL) << (8 * i); // store uint8 in data, highest bits for player 4.
-			}
-		}
-		SDLNet_Write32(playerLevels, &net_packet->data[4]);
-		net_packet->address.host = net_clients[c - 1].host;
-		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 8;
-		sendPacketSafe(net_sock, -1, net_packet, c - 1);
+
+		net_packet->address.host =
+			net_clients[c - 1].host;
+		net_packet->address.port =
+			net_clients[c - 1].port;
+		sendPacketSafe(
+			net_sock,
+			-1,
+			net_packet,
+			c - 1
+		);
 	}
 }
 
 void serverRemoveClientFollower(int player, Uint32 uidToRemove)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1414,16 +2785,21 @@ void serverRemoveClientFollower(int player, Uint32 uidToRemove)
 
 void serverSendItemToPickupAndEquip(int player, Item* item)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
+	{
+		return;
+	}
+	if ( !item )
 	{
 		return;
 	}
 
-	// send the client info on the item it just picked up
+	// Send the ordinary item fields first. Vanilla packets remain exactly
+	// 29 bytes for compatibility with older Barony clients.
 	strcpy((char*)net_packet->data, "ITEQ");
 	SDLNet_Write32((Uint32)item->type, &net_packet->data[4]);
 	SDLNet_Write32((Uint32)item->status, &net_packet->data[8]);
@@ -1432,19 +2808,69 @@ void serverSendItemToPickupAndEquip(int player, Item* item)
 	SDLNet_Write32((Uint32)item->appearance, &net_packet->data[20]);
 	SDLNet_Write32((Uint32)item->ownerUid, &net_packet->data[24]);
 	net_packet->data[28] = item->identified;
+	net_packet->len = 29;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	const int runtimeType =
+		static_cast<int>(item->type);
+	if ( SAMItemRegistryFoundation::
+		isRegisteredRuntimeItemId(runtimeType) )
+	{
+		const std::string& stableId =
+			SAMItemRegistryFoundation::
+				stableIdForRuntimeId(runtimeType);
+
+		if ( stableId.empty() )
+		{
+			printlog(
+				"[S.A.M] Refusing ITEQ custom item runtime %d: no stable id.\n",
+				runtimeType
+			);
+			return;
+		}
+
+		const int available =
+			NET_PACKET_SIZE - 30;
+		if ( available <= 0
+			|| static_cast<int>(stableId.size()) > available )
+		{
+			printlog(
+				"[S.A.M] Refusing ITEQ custom item [%s]: stable id is too long.\n",
+				stableId.c_str()
+			);
+			return;
+		}
+
+		memcpy(
+			&net_packet->data[29],
+			stableId.c_str(),
+			stableId.size()
+		);
+		net_packet->data[29 + stableId.size()] = '\0';
+		net_packet->len =
+			30 + static_cast<int>(stableId.size());
+
+		printlog(
+			"[S.A.M] Sending ITEQ custom item [%s] runtime %d to player %d.\n",
+			stableId.c_str(),
+			runtimeType,
+			player
+		);
+	}
+#endif
+
 	net_packet->address.host = net_clients[player - 1].host;
 	net_packet->address.port = net_clients[player - 1].port;
-	net_packet->len = 29;
 	sendPacketSafe(net_sock, -1, net_packet, player - 1);
 }
 
 void serverUpdateAllyStat(int player, Uint32 uidToUpdate, int LVL, int HP, int MAXHP, int type)
 {
-	if ( multiplayer != SERVER || player <= 0 )
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1467,11 +2893,14 @@ void serverUpdatePlayerSummonStrength(int player)
 	{
 		return;
 	}
-	if ( player <= 0 || player > MAXPLAYERS )
+	if ( player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || !stats[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player]
+		|| !stats[player]
+		|| !players[player]
+		|| players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1495,11 +2924,11 @@ void serverUpdateAllyHP(int player, Uint32 uidToUpdate, int HP, int MAXHP, bool 
 	{
 		return;
 	}
-	if ( player <= 0 )
+	if ( player <= 0 || player >= MAXPLAYERS )
 	{
 		return;
 	}
-	if ( client_disconnected[player] || players[player]->isLocalPlayer() )
+	if ( client_disconnected[player] || !players[player] || players[player]->isLocalPlayer() )
 	{
 		return;
 	}
@@ -1597,26 +3026,93 @@ void sendAllyCommandClient(int player, Uint32 uid, int command, Uint8 x, Uint8 y
 	sendPacket(net_sock, -1, net_packet, 0);
 }
 
-NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool lockedSlots[4])
+NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
+	int& outResult,
+	bool lockedSlots[MAXPLAYERS],
+	bool& outUseChunkedHelo
+)
 {
     printlog("processing lobby join request\n");
 
+	outUseChunkedHelo = false;
+
+	/*
+	 * The legacy JOIN layout is 69 bytes. New clients append one
+	 * capability byte at offset 69, making the packet 70 bytes.
+	 * Reject shorter packets before reading any fixed fields.
+	 */
+	constexpr int legacyJoinPacketLength = 69;
+	constexpr int versionFieldOffset = 48;
+	constexpr int versionFieldLength = 8;
+
+	if ( !net_packet
+		|| net_packet->len < legacyJoinPacketLength )
+	{
+		printlog(
+			"[NET]: rejecting truncated JOIN packet (len=%d expected>=%d)",
+			net_packet ? net_packet->len : 0,
+			legacyJoinPacketLength
+		);
+		outResult = MAXPLAYERS + 1;
+		return directConnect
+			? NET_LOBBY_JOIN_DIRECTIP_FAILURE
+			: NET_LOBBY_JOIN_P2P_FAILURE;
+	}
+
+	const bool clientSupportsHeloChunk =
+		net_packet->len >= 70
+		&& (
+			net_packet->data[69]
+				& kJoinCapabilityHeloChunkV1
+		);
+	const bool clientSupportsLateJoin =
+		net_packet->len >= 70
+		&& (net_packet->data[69] & kJoinCapabilityLateJoinV1);
+	const bool clientSupportsReconnectToken =
+		net_packet->len >= 70 + static_cast<int>(kReconnectTokenLength)
+		&& (net_packet->data[69] & kJoinCapabilityReconnectTokenV1);
+	const Uint32 clientms = SDLNet_Read32(&net_packet->data[57]);
+	const Uint32 clientlsg = SDLNet_Read32(&net_packet->data[61]);
+	const Uint32 clientlobbyKey = SDLNet_Read32(&net_packet->data[65]);
+	const Uint32 expectedGameKey =
+		g_processingRuntimeJoin ? uniqueGameKey : loadingsavegame;
+	const bool runtimeNewPlayer =
+		g_processingRuntimeJoin && clientlsg == 0;
+	const bool sendSavedEquipment =
+		expectedGameKey != 0 && !runtimeNewPlayer;
+	SaveGameInfo savegameinfo;
+
+	char clientVersion[versionFieldLength + 1] = { 0 };
+	memcpy(
+		clientVersion,
+		&net_packet->data[versionFieldOffset],
+		versionFieldLength
+	);
+
 	Uint32 result = MAXPLAYERS;
-	if ( strcmp(VERSION, (char*)net_packet->data + 48) ) // TODO this should be safer.
+	if (g_processingRuntimeJoin && !clientSupportsLateJoin)
+	{
+		result = MAXPLAYERS + 7;
+	}
+	else if ( strncmp(
+			VERSION,
+			clientVersion,
+			versionFieldLength
+		) != 0 )
 	{
 		result = MAXPLAYERS + 1; // wrong version number
 	}
 	else
 	{
-		Uint32 clientms = SDLNet_Read32(&net_packet->data[57]);
-		Uint32 clientlsg = SDLNet_Read32(&net_packet->data[61]);
-		Uint32 clientlobbyKey = (net_packet->len > 65) ? SDLNet_Read32(&net_packet->data[65]) : 0;
 		if ( net_packet->data[56] == 0 )
 		{
 			// client will enter any player spot
 			for ( result = 1; result < MAXPLAYERS; result++ )
 			{
-				if ( client_disconnected[result] == true && !lockedSlots[result] )
+				if ( client_disconnected[result] == true
+					&& !lockedSlots[result]
+					&& (!runtimeNewPlayer
+						|| !automatiaHasSavedPlayerPlacement(result)) )
 				{
 					break;    // no more player slots
 				}
@@ -1631,40 +3127,62 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 				result = MAXPLAYERS;  // client wants to fill a space that is already filled
 			}
 		}
-		SaveGameInfo savegameinfo;
-		if (loadingsavegame) {
+		if (expectedGameKey != 0 && !runtimeNewPlayer) {
 			savegameinfo = getSaveGameInfo(false);
 		}
-		if ( clientlsg != loadingsavegame && loadingsavegame == 0 )
+		if (runtimeNewPlayer && net_packet->data[56] != 0)
+		{
+			result = MAXPLAYERS + 8;
+		}
+		else if (runtimeNewPlayer)
+		{
+			// A new late joiner intentionally has no copy of the running save.
+		}
+		else if ( clientlsg != expectedGameKey && expectedGameKey == 0 )
 		{
 			result = MAXPLAYERS + 2;  // client shouldn't load save game
 		}
-		else if ( clientlsg == 0 && loadingsavegame != 0 )
+		else if ( clientlsg == 0 && expectedGameKey != 0 )
 		{
 			result = MAXPLAYERS + 3;  // client is trying to join a save game without a save of their own
 		}
-		else if ( clientlsg != loadingsavegame )
+		else if ( clientlsg != expectedGameKey )
 		{
 			result = MAXPLAYERS + 4;  // client is trying to join the game with an incompatible save
 		}
-		else if ( loadingsavegame && savegameinfo.mapseed != clientms )
+		else if ( expectedGameKey != 0 && savegameinfo.mapseed != clientms )
 		{
 			result = MAXPLAYERS + 5;  // client is trying to join the game with a slightly incompatible save (wrong level)
 		}
-		else if ( (loadingsavegame && clientlobbyKey != savegameinfo.lobbykey) )
+		else if ( expectedGameKey != 0
+			&& clientlobbyKey
+				!= (g_processingRuntimeJoin
+					? uniqueLobbyKey
+					: savegameinfo.lobbykey) )
 		{
 			result = MAXPLAYERS + 6; // lobby key not matching
+		}
+		else if (g_processingRuntimeJoin && clientlsg != 0
+			&& result < MAXPLAYERS
+			&& (net_packet->data[56] == 0
+				|| !clientSupportsReconnectToken
+				|| savegameinfo.players.size() <= result
+				|| !ReconnectToken::equals(
+					savegameinfo.players[result].reconnect_token,
+					&net_packet->data[70])))
+		{
+			result = MAXPLAYERS + 9;
 		}
 	}
 	outResult = result;
 	if ( result >= MAXPLAYERS )
 	{
 
-		// on error, client gets a player number that is invalid (to be interpreted as an error code)
-		net_clients[MAXPLAYERS - 1].host = net_packet->address.host;
-		net_clients[MAXPLAYERS - 1].port = net_packet->address.port;
-		net_packet->address.host = net_clients[MAXPLAYERS - 1].host;
-		net_packet->address.port = net_clients[MAXPLAYERS - 1].port;
+		/*
+		 * On error, reply directly to the packet's existing source
+		 * address. Do not use the final valid client slot as scratch
+		 * storage, because player 15 may already occupy it.
+		 */
 		net_packet->len = 8;
 		memcpy(net_packet->data, "HELO", 4);
 		SDLNet_Write32(result, &net_packet->data[4]); // error code for client to interpret
@@ -1682,9 +3200,38 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 	else
 	{
 	    const int c = result;
+		if (g_processingRuntimeJoin && clientlsg != 0
+			&& savegameinfo.players.size() > static_cast<std::size_t>(c))
+		{
+			automatiaReconnectTokens[c] =
+				savegameinfo.players[c].reconnect_token;
+		}
+		if (!ReconnectToken::isValid(automatiaReconnectTokens[c]))
+		{
+			automatiaReconnectTokens[c] = generateReconnectToken();
+		}
+		if (!ReconnectToken::isValid(automatiaReconnectTokens[c]))
+		{
+			outResult = MAXPLAYERS + 9;
+			memcpy(net_packet->data, "HELO", 4);
+			SDLNet_Write32(outResult, &net_packet->data[4]);
+			net_packet->len = 8;
+			printlog("[Late Join] Reconnect identity generation failed closed.");
+			if (directConnect)
+			{
+				sendPacketSafe(net_sock, -1, net_packet, 0);
+				return NET_LOBBY_JOIN_DIRECTIP_FAILURE;
+			}
+			return NET_LOBBY_JOIN_P2P_FAILURE;
+		}
 
 		// on success, client gets legit player number
+		resetServerLateJoinPlayer(c);
 		client_disconnected[c] = false;
+		if (!g_processingRuntimeJoin)
+		{
+			worldState.placePlayer(c, map);
+		}
         stringCopy(stats[c]->name, (const char*)net_packet->data + 4, sizeof(Stat::name), 32);
 		client_classes[c] = (int)SDLNet_Read32(&net_packet->data[36]);
 		stats[c]->sex = static_cast<sex_t>((int)SDLNet_Read32(&net_packet->data[40]));
@@ -1697,8 +3244,10 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 
 		printlog("client %d connected.\n", c);
 
-		// send existing clients info on new client
-		for ( int x = 1; x < MAXPLAYERS; x++ )
+		// Normal lobby clients need the provisional roster immediately. Runtime
+		// clients may still change this character; their finalized JOIN is sent
+		// after PLYR instead, when in-game recipients can consume it.
+		for ( int x = 1; !g_processingRuntimeJoin && x < MAXPLAYERS; x++ )
 		{
 			if ( client_disconnected[x] || c == x )
 			{
@@ -1724,11 +3273,17 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 		// send new client their id number + info on other clients
 		memcpy(net_packet->data, "HELO", 4);
 		SDLNet_Write32(c, &net_packet->data[4]);
-		if (loadingsavegame) {
+		if (sendSavedEquipment) {
 			constexpr int chunk_size = 6 + 32 + 6 * 10; // 6 bytes for player stats, 32 for name, 60 for equipment
+			static_assert(
+				8 + MAXPLAYERS * chunk_size <= NET_PACKET_SIZE,
+				"NET_PACKET_SIZE is too small for the 15-player savegame HELO payload"
+			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
-				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
+				net_packet->data[8 + x * chunk_size + 0] =
+					LanDiscovery::advertisedDisconnected(
+						headless, x, client_disconnected[x]); // connectedness
 				net_packet->data[8 + x * chunk_size + 1] = lockedSlots[x]; // locked state
 				net_packet->data[8 + x * chunk_size + 2] = client_classes[x]; // class
 				net_packet->data[8 + x * chunk_size + 3] = stats[x]->sex; // sex
@@ -1736,7 +3291,7 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 				net_packet->data[8 + x * chunk_size + 5] = (Uint8)stats[x]->playerRace; // player race
 
 				char shortname[32];
-				snprintf(shortname, sizeof(shortname), "%s", stats[x]->name);
+                stringCopy(shortname, stats[x]->name, sizeof(shortname), sizeof(Stat::name));
 				memcpy(net_packet->data + 8 + x * chunk_size + 6, shortname, sizeof(shortname)); // name
 
 				const Item* player_slots[] = {
@@ -1767,9 +3322,15 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 			net_packet->len = 8 + MAXPLAYERS * chunk_size;
 		} else {
 			constexpr int chunk_size = 6 + 32; // 6 bytes for player stats, 32 for name
+			static_assert(
+				8 + MAXPLAYERS * chunk_size <= NET_PACKET_SIZE,
+				"NET_PACKET_SIZE is too small for the 15-player HELO payload"
+			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
-				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
+				net_packet->data[8 + x * chunk_size + 0] =
+					LanDiscovery::advertisedDisconnected(
+						headless, x, client_disconnected[x]); // connectedness
 				net_packet->data[8 + x * chunk_size + 1] = lockedSlots[x]; // locked state
 				net_packet->data[8 + x * chunk_size + 2] = client_classes[x]; // class
 				net_packet->data[8 + x * chunk_size + 3] = stats[x]->sex; // sex
@@ -1777,16 +3338,91 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool loc
 				net_packet->data[8 + x * chunk_size + 5] = (Uint8)stats[x]->playerRace; // player race
 
 				char shortname[32];
-				snprintf(shortname, sizeof(shortname), "%s", stats[x]->name);
+                stringCopy(shortname, stats[x]->name, sizeof(shortname), sizeof(Stat::name));
 				memcpy(net_packet->data + 8 + x * chunk_size + 6, shortname, sizeof(shortname)); // name
 			}
 			net_packet->len = 8 + MAXPLAYERS * chunk_size;
 		}
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
+
+		if (g_processingRuntimeJoin && net_packet->len < NET_PACKET_SIZE)
+		{
+			net_packet->data[net_packet->len++] = 1;
+		}
+
+		const bool shouldChunkHelo =
+			sendSavedEquipment
+			&& net_packet->len > kHeloSinglePacketMax;
+		outUseChunkedHelo =
+			clientSupportsHeloChunk
+			&& shouldChunkHelo;
+
 		if ( directConnect )
 		{
-		    sendPacketSafe(net_sock, -1, net_packet, 0);
+			if ( outUseChunkedHelo )
+			{
+				std::vector<Uint8> heloSnapshot(
+					net_packet->len
+				);
+				memcpy(
+					heloSnapshot.data(),
+					net_packet->data,
+					heloSnapshot.size()
+				);
+
+				const Uint16 transferId =
+					nextHeloTransferIdForPlayer(c);
+
+				if ( !sendChunkedHeloDirect(
+						heloSnapshot.data(),
+						static_cast<int>(
+							heloSnapshot.size()
+						),
+						transferId,
+						c
+					) )
+				{
+					printlog(
+						"[NET]: chunked HELO failed; using legacy HELO for player %d",
+						c
+					);
+					memcpy(
+						net_packet->data,
+						heloSnapshot.data(),
+						heloSnapshot.size()
+					);
+					net_packet->len =
+						static_cast<int>(
+							heloSnapshot.size()
+						);
+					outUseChunkedHelo = false;
+					sendPacketSafe(
+						net_sock,
+						-1,
+						net_packet,
+						0
+					);
+				}
+			}
+			else
+			{
+				sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					0
+				);
+			}
+			memcpy(net_packet->data, "RJTK", 4);
+			net_packet->data[4] = static_cast<Uint8>(c);
+			memcpy(&net_packet->data[5],
+				automatiaReconnectTokens[c].data(), kReconnectTokenLength);
+			net_packet->len = 5 + static_cast<int>(kReconnectTokenLength);
+			net_packet->address.host = net_clients[c - 1].host;
+			net_packet->address.port = net_clients[c - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, c - 1);
+
 			return NET_LOBBY_JOIN_DIRECTIP_SUCCESS;
 		}
 		else
@@ -1944,17 +3580,15 @@ Entity* receiveEntity(Entity* entity)
 	}
 	for (c = 0; c < 16; ++c)
 	{
-		if ( net_packet->data[34 + c / 8]&power(2, c - (c / 8) * 8) )
-		{
-			entity->flags[c] = true;
-		}
+		entity->flags[c] =
+			(net_packet->data[34 + c / 8]
+				& power(2, c - (c / 8) * 8)) != 0;
 	}
 	for ( c = 0; c < 8; ++c ) // new flags 16-23
 	{
-		if ( net_packet->data[46 + c / 8] & power(2, c - (c / 8) * 8) )
-		{
-			entity->flags[c + 16] = true;
-		}
+		entity->flags[c + 16] =
+			(net_packet->data[46 + c / 8]
+				& power(2, c - (c / 8) * 8)) != 0;
 	}
 	entity->vel_x = ((Sint16)SDLNet_Read16(&net_packet->data[40])) / 32.0;
 	entity->vel_y = ((Sint16)SDLNet_Read16(&net_packet->data[42])) / 32.0;
@@ -2015,6 +3649,25 @@ void clientActions(Entity* entity)
 			entity->behavior = &actCampfire;
 			entity->flags[NOUPDATE] = true;
 			break;
+		case 131:
+		{
+			// Runtime catch-up clears behaviors before rebuilding them here.
+			// Editor light sources are invisible by design, but must keep their
+			// behavior on clients so they reconstruct their local light field.
+			const bool initializeLightSource =
+				entity->behavior != &actLightSource;
+			entity->behavior = &actLightSource;
+			entity->flags[SPRITE] = true;
+			entity->flags[INVISIBLE] = true;
+			entity->flags[PASSABLE] = true;
+			if (initializeLightSource)
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				entity->skill[8] = 0;
+			}
+			break;
+		}
 		case 163:
 			entity->skill[2] = (int)SDLNet_Read32(&net_packet->data[30]);
 			entity->behavior = &actFountain;
@@ -2184,7 +3837,7 @@ void clientActions(Entity* entity)
 				playernum = SDLNet_Read32(&net_packet->data[30]);
 				if ( playernum >= 0 && playernum < MAXPLAYERS )
 				{
-					if ( players[playernum] && players[playernum]->entity )
+					if ( players[playernum] )
 					{
 						players[playernum]->entity = entity;
 					}
@@ -2332,11 +3985,23 @@ void clientActions(Entity* entity)
 
 static void changeLevel()
 {
+    WorldInstanceIdentity previousPlayerInstances[MAXPLAYERS];
+    for ( int player = 0; player < MAXPLAYERS; ++player )
+    {
+        if ( players[player] )
+        {
+            previousPlayerInstances[player] =
+                players[player]->worldInstance;
+        }
+    }
     // A normal or older level-change packet has no tunnel request.
     // Reset first so an unrelated later transition cannot reuse a
     // previous custom tunnel ID.
     loadCustomNextMap = "";
     loadCustomNextTunnelID = 0;
+    pendingIndependentLevelChange = false;
+    pendingIndependentPlayer = -1;
+    pendingIndependentRuntimeUid = 0;
 
     constexpr size_t customMapOffset = 14;
 
@@ -2389,6 +4054,19 @@ static void changeLevel()
                             ]
                         )
                     );
+
+                const size_t extensionOffset =
+                    tunnelIDOffset + sizeof(Uint32);
+                if ( net_packet->len >= extensionOffset + 6
+                    && net_packet->data[extensionOffset] == 0xA1 )
+                {
+                    pendingIndependentPlayer =
+                        net_packet->data[extensionOffset + 1];
+                    pendingIndependentRuntimeUid =
+                        SDLNet_Read32(&net_packet->data[extensionOffset + 2]);
+                    pendingIndependentLevelChange =
+                        pendingIndependentPlayer == clientnum;
+                }
             }
         }
         else
@@ -2519,6 +4197,7 @@ static void changeLevel()
 	}
 
 	list_FreeAll(&removedEntities);
+	setRemovedEntityTombstoneScope(worldState.activeIdentity());
 	for ( auto node = map.entities->first; node != nullptr; node = node->next )
 	{
 		auto entity = (Entity*)node->element;
@@ -2581,6 +4260,12 @@ static void changeLevel()
 			false,
 			&checkMapHash
 		);
+		if ( pendingIndependentLevelChange )
+		{
+			// Raw editor entities consume their ordinary load-time UIDs first.
+			// The server-provided value is the shared start of runtime creation.
+			entity_uids = pendingIndependentRuntimeUid;
+		}
 
 		/*
 		* Multiplayer sync is a pain :( but cool!
@@ -2604,7 +4289,16 @@ static void changeLevel()
 		updateLoadingScreen(50);
 
 		numplayers = 0;
-		assignActions(&map);
+		if ( pendingIndependentLevelChange )
+		{
+			bool playerMask[MAXPLAYERS] = {};
+			playerMask[clientnum] = true;
+			assignActions(&map, playerMask);
+		}
+		else
+		{
+			assignActions(&map);
+		}
 
 		/*
 		* Lever handles and runtime gate entities now exist. Restore their
@@ -2640,6 +4334,30 @@ static void changeLevel()
     destroyLoadingScreen();
 	loading = false;
     int result = loading_task.get();
+    if ( pendingIndependentLevelChange )
+    {
+        for ( int player = 0; player < MAXPLAYERS; ++player )
+        {
+            if ( player != clientnum )
+            {
+                worldState.removePlayer(player);
+                if ( players[player] )
+                {
+                    players[player]->worldInstance =
+                        previousPlayerInstances[player];
+					// This client no longer owns or simulates the remote player's
+					// source map. Do not retain a pointer into the map storage that
+					// was just replaced; a later map-local ENTU will bind the new
+					// authoritative entity if that player follows us.
+					players[player]->entity = nullptr;
+                }
+            }
+        }
+        worldState.placePlayer(clientnum, map);
+        pendingIndependentLevelChange = false;
+        pendingIndependentPlayer = -1;
+        pendingIndependentRuntimeUid = 0;
+    }
     
     clearChunks();
     createChunks();
@@ -2809,6 +4527,197 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+	{'JOIN', [](){
+		if (!net_packet || net_packet->len != 41)
+		{
+			printlog("[Roster] Client rejected malformed in-game JOIN packet.");
+			return;
+		}
+		const int player = net_packet->data[4];
+		if (player <= 0 || player >= MAXPLAYERS || !stats[player])
+		{
+			printlog("[Roster] Client rejected invalid in-game JOIN slot %d.", player);
+			return;
+		}
+		client_disconnected[player] = false;
+		client_classes[player] = net_packet->data[5];
+		stats[player]->sex = static_cast<sex_t>(net_packet->data[6]);
+		stats[player]->stat_appearance = net_packet->data[7];
+		stats[player]->playerRace = net_packet->data[8];
+		stringCopy(
+			stats[player]->name,
+			reinterpret_cast<char*>(&net_packet->data[9]),
+			sizeof(Stat::name),
+			32);
+		printlog("[Roster] Client accepted finalized character for player %d.", player);
+	}},
+	{'LJBG', [](){
+		LateJoinProtocol::Begin begin;
+		if (!LateJoinProtocol::decodeBegin(
+				net_packet->data, net_packet->len, begin)
+			|| !g_clientLateJoinAssembler.begin(begin))
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected malformed snapshot begin.");
+			return;
+		}
+		g_clientLateJoinBegin = begin;
+		g_clientLateJoinSpawnAuthorized = false;
+		clientBeginLateJoinPacketDeferral(
+			begin.transferId, begin.instanceRevision);
+	}},
+	{'LJCH', [](){
+		LateJoinProtocol::Chunk chunk;
+		if (!LateJoinProtocol::decodeChunk(
+				net_packet->data, net_packet->len, chunk)
+			|| g_clientLateJoinAssembler.accept(chunk)
+				== LateJoinProtocol::ReceiveResult::Rejected)
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected corrupt snapshot chunk.");
+		}
+		else
+		{
+			clientNoteLateJoinProgress();
+		}
+	}},
+	{'LJDN', [](){
+		LateJoinProtocol::Complete complete;
+		if (!LateJoinProtocol::decodeComplete(
+				net_packet->data, net_packet->len, complete)
+			|| g_clientLateJoinAssembler.finish(complete)
+				!= LateJoinProtocol::ReceiveResult::Complete)
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected incomplete snapshot transfer.");
+			return;
+		}
+		const std::vector<std::uint8_t>& bytes =
+			g_clientLateJoinAssembler.snapshot();
+		const std::string snapshot(
+			reinterpret_cast<const char*>(bytes.data()), bytes.size());
+		std::string snapshotError;
+		const bool accepted = stageAutomatiaPersistentWorldSnapshot(
+			snapshot, std::to_string(g_clientLateJoinBegin.sessionKey), snapshotError);
+		LateJoinProtocol::Ready ready;
+		ready.playerIndex = static_cast<std::uint8_t>(clientnum);
+		ready.transferId = complete.transferId;
+		ready.instanceRevision = complete.instanceRevision;
+		ready.snapshotAccepted = accepted;
+		const std::vector<std::uint8_t> readyPacket =
+			LateJoinProtocol::encodeReady(ready);
+		if (readyPacket.empty())
+		{
+			printlog("[Late Join] Client could not encode snapshot-ready response.");
+			return;
+		}
+		memcpy(net_packet->data, readyPacket.data(), readyPacket.size());
+		net_packet->len = static_cast<int>(readyPacket.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+		if (!accepted)
+		{
+			printlog(
+				"[Late Join] Client rejected snapshot document: %s",
+				snapshotError.c_str());
+		}
+		else
+		{
+			clientNoteLateJoinProgress();
+		}
+	}},
+	{'LJOK', [](){
+		LateJoinProtocol::Authorization authorization;
+		if (!LateJoinProtocol::decodeAuthorization(
+				net_packet->data, net_packet->len, authorization)
+			|| authorization.transferId != g_clientLateJoinBegin.transferId
+			|| authorization.instanceRevision
+				!= g_clientLateJoinBegin.instanceRevision
+			|| !authorization.spawnAuthorized
+			|| !g_clientLateJoinAssembler.complete())
+		{
+			printlog("[Late Join] Client rejected invalid spawn authorization.");
+			return;
+		}
+		g_clientLateJoinSpawnAuthorized = true;
+		clientNoteLateJoinProgress();
+		LateJoinProtocol::Ready go;
+		go.playerIndex = static_cast<std::uint8_t>(clientnum);
+		go.transferId = authorization.transferId;
+		go.instanceRevision = authorization.instanceRevision;
+		go.snapshotAccepted = true;
+		const std::vector<std::uint8_t> goPacket =
+			LateJoinProtocol::encodeGo(go);
+		memcpy(net_packet->data, goPacket.data(), goPacket.size());
+		net_packet->len = static_cast<int>(goPacket.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+		printlog(
+			"[Late Join] Client accepted spawn authorization for transfer %u.",
+			authorization.transferId);
+	}},
+	{'LJCB', [](){
+		if (!clientAcceptLateJoinCatchupBegin(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up begin.");
+		}
+	}},
+	{'LJCC', [](){
+		if (!clientAcceptLateJoinCatchupChunk(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up chunk.");
+		}
+	}},
+	{'LJCE', [](){
+		if (!clientAcceptLateJoinCatchupComplete(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up completion.");
+		}
+	}},
+	{'LJAB', [](){
+		LateJoinProtocol::Abort abort;
+		if (!LateJoinProtocol::decodeAbort(
+				net_packet->data, net_packet->len, abort)
+			|| abort.playerIndex != clientnum
+			|| (abort.transferId != 0
+				&& (abort.transferId != g_clientLateJoinBegin.transferId
+					|| abort.instanceRevision
+						!= g_clientLateJoinBegin.instanceRevision)))
+		{
+			printlog("[Late Join] Client ignored invalid abort record.");
+			return;
+		}
+		discardAutomatiaPersistentWorldSnapshot();
+		clientResetLateJoinPacketDeferral();
+		g_clientLateJoinAssembler.reset();
+		g_clientLateJoinSpawnAuthorized = false;
+		printlog("[Late Join] Server aborted transfer (reason %u).",
+			static_cast<unsigned>(abort.reason));
+	}},
+	{'RJTK', [](){
+		if (net_packet->len != 5 + static_cast<int>(kReconnectTokenLength)
+			|| net_packet->data[4] != clientnum)
+		{
+			printlog("[Late Join] Client rejected malformed reconnect token.");
+			return;
+		}
+		const std::string token(
+			reinterpret_cast<const char*>(&net_packet->data[5]),
+			kReconnectTokenLength);
+		if (!ReconnectToken::isValid(token))
+		{
+			printlog("[Late Join] Client rejected invalid reconnect token.");
+			return;
+		}
+		automatiaReconnectTokens[clientnum] = token;
+		printlog("[Late Join] Client stored reconnect identity for slot %d.",
+			clientnum);
+	}},
 	// keep alive
 	{'KPAL', [](){
 		client_keepalive[0] = ticks;
@@ -2817,9 +4726,87 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// entity update
 	{'ENTU', [](){
 		client_keepalive[0] = ticks; // don't timeout
-		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
+		const Uint8 archetype = receivedEntityArchetype();
+		const Uint32 authoritativeUid = SDLNet_Read32(&net_packet->data[4]);
+		const int incomingSprite = static_cast<int>(
+			SDLNet_Read16(&net_packet->data[8]));
+		const int incomingPlayer = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[30]));
+		Entity *entity = uidToEntity(static_cast<Sint32>(authoritativeUid));
+		if (entity && authoritativePlayerUpdateConflicts(
+				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingPlayer,
+				MAXPLAYERS,
+				entity->behavior == &actPlayer,
+				entity->skill[2]))
+		{
+			const int oldSprite = entity->sprite;
+			const Uint32 provisionalUid =
+				moveClientEntityOutOfAuthoritativeUid(entity);
+			if (provisionalUid != 0)
+			{
+				printlog(
+					"[World State] Client moved provisional entity sprite %d from UID %u to UID %u before accepting player %d.",
+					oldSprite,
+					authoritativeUid,
+					provisionalUid,
+					incomingPlayer);
+				entity = nullptr;
+			}
+			else
+			{
+				printlog(
+					"[World State] Client could not resolve authoritative player %d UID %u collision.",
+					incomingPlayer,
+					authoritativeUid);
+				return;
+			}
+		}
+		if (!entity
+			&& incomingPlayer >= 0
+			&& incomingPlayer < MAXPLAYERS
+			&& players[incomingPlayer])
+		{
+			Entity* slotHead = players[incomingPlayer]->entity;
+			if (authoritativePlayerCanAdoptSlotHead(
+				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingPlayer,
+				MAXPLAYERS,
+				slotHead != nullptr,
+				slotHead && slotHead->mynode
+					&& slotHead->mynode->list == map.entities,
+				slotHead && slotHead->behavior == &actPlayer,
+				slotHead ? slotHead->skill[2] : -1))
+			{
+				const Uint32 provisionalUid = slotHead->getUID();
+				adoptAuthoritativeUidForClientPlayerHead(
+					slotHead, authoritativeUid);
+				entity = slotHead;
+				printlog(
+					"[World State] Client adopted provisional player %d head UID %u as authoritative UID %u in '%s'.",
+					incomingPlayer,
+					provisionalUid,
+					authoritativeUid,
+					worldState.activeIdentity()
+						? worldState.activeIdentity()->key().c_str()
+						: "unbound");
+			}
+		}
+		if (!entity)
+		{
+			// Static editor fixtures can have a different provisional UID on a
+			// late client. Bind the authoritative update to the fixture at the
+			// same location so its authored skills are retained.
+			entity = findUnboundMapFixtureForEntityUpdate(archetype);
+		}
 		if ( entity )
 		{
+			const bool preserveCustomPortalBehavior =
+				entity->behavior == &actCustomPortal
+				|| archetype == kEntityArchetypeCustomPortal;
+			const bool preserveEditorLightBehavior =
+				entity->behavior == &actLightSource
+				|| archetype == kEntityArchetypeEditorLight;
 			if ( (Uint32)SDLNet_Read32(&net_packet->data[36]) < (Uint32)entity->lastupdateserver )
 			{
 				// old packet, not used
@@ -2847,12 +4834,67 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			{
 				// receive the entity
 				receiveEntity(entity);
-				entity->behavior = NULL;
-				clientActions(entity);
+				if (preserveCustomPortalBehavior)
+				{
+					// Custom exits deliberately use an editor-selected runtime
+					// sprite, so their behavior cannot be recovered from the
+					// sprite switch below. Keep the map-authored behavior across
+					// ordinary ENTU refreshes or the portal becomes noninteractive.
+					entity->behavior = &actCustomPortal;
+				}
+				else if (preserveEditorLightBehavior)
+				{
+					// The light field is client-local. Do not tear it down on every
+					// ordinary position update.
+					entity->behavior = &actLightSource;
+				}
+				else
+				{
+					entity->behavior = NULL;
+					clientActions(entity);
+				}
+			}
+			if (entity->behavior == &actPlayer
+				&& entity->skill[2] >= 0
+				&& entity->skill[2] < MAXPLAYERS
+				&& players[entity->skill[2]])
+			{
+				const int remotePlayer = entity->skill[2];
+				const bool changedInstance = !worldState.activeIdentity()
+					|| !players[remotePlayer]->worldInstance.matches(
+						*worldState.activeIdentity());
+				players[remotePlayer]->entity = entity;
+				if (worldState.placePlayer(remotePlayer, map) && changedInstance)
+				{
+					printlog(
+						"[World State] Client placed authoritative player %d UID %u into '%s'.",
+						remotePlayer,
+						entity->getUID(),
+						players[remotePlayer]->worldInstance.key().c_str());
+				}
+				ensureClientPlayerVisualInitialized(entity);
 			}
 			return;
 		}
 
+		if (!removedEntityTombstonesApplyToActiveInstance()
+			&& removedEntities.first)
+		{
+			const std::size_t staleCount = list_Size(&removedEntities);
+			const WorldInstanceIdentity* active = worldState.activeIdentity();
+			printlog(
+				"[World State] Cleared %zu source-instance entity tombstone(s) from '%s' revision %llu before accepting UID %u in '%s' revision %llu.",
+				staleCount,
+				g_removedEntityTombstoneInstanceKey.c_str(),
+				static_cast<unsigned long long>(
+					g_removedEntityTombstoneRevision),
+				authoritativeUid,
+				active ? active->key().c_str() : "unbound",
+				static_cast<unsigned long long>(
+					active ? active->revision : 0));
+			list_FreeAll(&removedEntities);
+			setRemovedEntityTombstoneScope(active);
+		}
 		for ( auto node = removedEntities.first; node != NULL; node = node->next )
 		{
 			auto entity2 = (Entity*)node->element;
@@ -2864,7 +4906,39 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 		entity = receiveEntity(NULL);
 		// IMPORTANT! Assign actions to the objects the client has control over
-		clientActions(entity);
+		if (archetype == kEntityArchetypeCustomPortal)
+		{
+			entity->behavior = &actCustomPortal;
+			if (entity->portalCustomSprite == 0)
+			{
+				entity->portalCustomSprite = entity->sprite;
+			}
+		}
+		else if (archetype == kEntityArchetypeEditorLight)
+		{
+			entity->behavior = &actLightSource;
+		}
+		else
+		{
+			clientActions(entity);
+		}
+		if (entity->behavior == &actPlayer
+			&& entity->skill[2] >= 0
+			&& entity->skill[2] < MAXPLAYERS
+			&& players[entity->skill[2]])
+		{
+			const int remotePlayer = entity->skill[2];
+			players[remotePlayer]->entity = entity;
+			if (worldState.placePlayer(remotePlayer, map))
+			{
+				printlog(
+					"[World State] Client created authoritative player %d UID %u in '%s'.",
+					remotePlayer,
+					entity->getUID(),
+					players[remotePlayer]->worldInstance.key().c_str());
+			}
+			ensureClientPlayerVisualInitialized(entity);
+		}
 
 		//if ( entity->behavior == &actPlayer && entity->skill[2] >= 0 && entity->skill[2] < MAXPLAYERS ) // respawned
 		//{
@@ -2894,20 +4968,41 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
     
     // raise/lower shield
     {'SHLD', [](){
-        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        const int player =
+        	decodeGameplayPacketPlayerIndex(
+        		net_packet->data[4]
+        	);
+        if ( player < 0 )
+        {
+        	return;
+        }
         stats[player]->defending = net_packet->data[5];
     }},
 
     // sneaking
     {'SNEK', [](){
-        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        const int player =
+        	decodeGameplayPacketPlayerIndex(
+        		net_packet->data[4]
+        	);
+        if ( player < 0 )
+        {
+        	return;
+        }
         stats[player]->sneaking = net_packet->data[5];
         return;
     }},
 
 	// ghost sneaking
 	{ 'GHOD', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
 		if ( players[player]->ghost.my )
 		{
 			players[player]->ghost.my->skill[3] = net_packet->data[5] & (1 << 0);
@@ -3009,11 +5104,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update entity bodypart
 	{'ENTB', [](){
+		if (net_packet->len < 14)
+		{
+			printlog("[NET]: ignored truncated ENTB packet.");
+			return;
+		}
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
-			node_t* childNode = list_Node(&entity->children, net_packet->data[8]);
-			if ( childNode )
+			const int bodypart = net_packet->data[8];
+			if ((entity->behavior == &actPlayer && bodypart < 1)
+				|| (entity->behavior == &actMonster && bodypart < 2))
+			{
+				return;
+			}
+			node_t* childNode = list_Node(&entity->children, bodypart);
+			if ( childNode && childNode->element )
 			{
 				Entity* tempEntity = (Entity*)childNode->element;
 				tempEntity->sprite = SDLNet_Read32(&net_packet->data[9]);
@@ -3037,9 +5143,29 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// bodypart ids
 	{'BDYI', [](){
+		if (net_packet->len < 8)
+		{
+			printlog("[NET]: ignored truncated BDYI packet.");
+			return;
+		}
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
+			const std::size_t expectedLength = bodypartIdPacketLength(
+				list_Size(&entity->children),
+				entity->behavior == &actMonster);
+			if (!bodypartIdPacketIsComplete(
+				static_cast<std::size_t>(net_packet->len),
+				list_Size(&entity->children),
+				entity->behavior == &actMonster))
+			{
+				printlog(
+					"[NET]: ignored truncated BDYI packet for UID %u (%d of %zu bytes).",
+					entity->getUID(),
+					net_packet->len,
+					expectedLength);
+				return;
+			}
 			node_t* childNode;
 			int c;
 			for ( c = 0, childNode = entity->children.first; childNode != nullptr; childNode = childNode->next, c++ )
@@ -3132,24 +5258,106 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		return;
 	}},
 
-	// server sent item details.
-	{'ITMU', [](){
-		Uint32 uid = SDLNet_Read32(&net_packet->data[4]);
-		Entity* entity = uidToEntity(uid);
-		if ( entity )
-		{
-			Uint32 itemTypeAndIdentified = SDLNet_Read32(&net_packet->data[8]);
-			Uint32 statusBeatitudeQuantityAppearance = SDLNet_Read32(&net_packet->data[12]);
+    // server sent item details.
+    {'ITMU', [](){
+        if ( net_packet->len < 16 )
+        {
+            printlog(
+                "[NET]: ignoring malformed ITMU packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-			entity->skill[10] = static_cast<ItemType>((itemTypeAndIdentified >> 16) & 0xFFFF); //type
-			entity->skill[15] = (itemTypeAndIdentified) & 0xFFFF;
+        Uint32 uid = SDLNet_Read32(&net_packet->data[4]);
+        Entity* entity = uidToEntity(uid);
+        if ( entity )
+        {
+            Uint32 itemTypeAndIdentified = SDLNet_Read32(&net_packet->data[8]);
+            Uint32 statusBeatitudeQuantityAppearance = SDLNet_Read32(&net_packet->data[12]);
+            int resolvedType =
+                static_cast<int>((itemTypeAndIdentified >> 16) & 0xFFFF);
+            bool hasSAMStableIdPayload = false;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+            constexpr int samWorldItemTypeSentinel = 0xFFFF;
+            if ( resolvedType == samWorldItemTypeSentinel )
+            {
+                hasSAMStableIdPayload = true;
+                const int stableIdOffset = 16;
+                const int payloadLength =
+                    net_packet->len - stableIdOffset;
+                int stableIdLength = 0;
+                while ( stableIdLength < payloadLength
+                    && net_packet->data[stableIdOffset + stableIdLength] != '\0' )
+                {
+                    ++stableIdLength;
+                }
+
+                if ( stableIdLength <= 0
+                    || stableIdLength >= payloadLength )
+                {
+                    printlog(
+                        "[S.A.M] Refusing malformed ITMU stable-id payload for entity %u.\n",
+                        uid
+                    );
+                    return;
+                }
+
+                const std::string stableId(
+                    reinterpret_cast<const char*>(
+                        &net_packet->data[stableIdOffset]
+                    ),
+                    stableIdLength
+                );
+
+                resolvedType =
+                    SAMItemRegistryFoundation::
+                        runtimeIdForStableId(stableId);
+                if ( resolvedType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(resolvedType) )
+                {
+                    printlog(
+                        "[S.A.M] ITMU world item unavailable locally: [%s]. Entity %u rejected.\n",
+                        stableId.c_str(),
+                        uid
+                    );
+                    entity->flags[INVISIBLE] = true;
+                    entity->itemReceivedDetailsFromServer = 0;
+                    return;
+                }
+
+                printlog(
+                    "[S.A.M] Resolved ITMU world item [%s] to local runtime %d for entity %u.\n",
+                    stableId.c_str(),
+                    resolvedType,
+                    uid
+                );
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only ITMU custom runtime %d for entity %u.\n",
+                    resolvedType,
+                    uid
+                );
+                entity->flags[INVISIBLE] = true;
+                entity->itemReceivedDetailsFromServer = 0;
+                return;
+            }
+#endif
+
+            entity->skill[10] = resolvedType;
+            entity->skill[15] = (itemTypeAndIdentified) & 0xFFFF;
 			entity->skill[11] = static_cast<Uint8>((statusBeatitudeQuantityAppearance >> 24) & 0xFF); // status
 			entity->skill[12] = static_cast<Sint8>((statusBeatitudeQuantityAppearance >> 16) & 0xFF); // beatitude
 			entity->skill[13] = static_cast<Uint8>((statusBeatitudeQuantityAppearance >> 8) & 0xFF); // quantity
 			entity->skill[14] = static_cast<Uint8>((statusBeatitudeQuantityAppearance) & 0xFF); // appearance
-			if ( net_packet->len >= 16 )
-			{
-				if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
+            if ( !hasSAMStableIdPayload && net_packet->len >= 18 )
+            {
+                if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
 				{
 					if ( items[entity->skill[10]].category == TOME_SPELL )
 					{
@@ -4106,21 +6314,42 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// pause game
 	{'PAUS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1118), stats[player]->name);
 		pauseGame(2, 0);
 	}},
 
 	// unpause game
 	{'UNPS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1119), stats[player]->name);
 		pauseGame(1, 0);
 	}},
 
 	// server or player shut down
 	{'DISC', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_disconnected[player] = true;
 		if (player == 0)
 		{
@@ -4251,6 +6480,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
+			prepareRemovedEntityTombstonesForActiveInstance();
 			auto entity2 = newEntity(entity->sprite, 1, &removedEntities, nullptr);
 			if ( entity2 )
 			{
@@ -4524,10 +6754,19 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 	}},
 
-	// steal armor (destroy it)
-	{'STLA', [](){
-	    Item* item = nullptr;
-		int armornum = net_packet->data[4];
+    // steal armor or weapon (destroy it)
+    {'STLA', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog(
+                "[NET]: ignoring malformed STLA packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        Item* item = nullptr;
+        int armornum = net_packet->data[4];
 		switch ( armornum )
 		{
 			case 0:
@@ -4566,8 +6805,26 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 
 		
-		ItemType checkType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
-		Status checkStatus = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            26,
+            "STLA",
+            resolvedType
+        ) )
+        {
+            messagePlayer(
+                clientnum,
+                MESSAGE_MISC,
+                "A custom equipment update was rejected because its stable ID was unavailable."
+            );
+            return;
+        }
+#endif
+        ItemType checkType = static_cast<ItemType>(resolvedType);
+        Status checkStatus = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		Sint16 checkBeatitude = static_cast<Sint16>(SDLNet_Read32(&net_packet->data[13]));
 		Sint16 checkCount = static_cast<Sint16>(SDLNet_Read32(&net_packet->data[17]));
 		Uint32 checkAppearance = static_cast<Uint32>(SDLNet_Read32(&net_packet->data[21]));
@@ -4817,16 +7074,37 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		combat = assailant;
 	}},
 
-	// get item
-	{'ITEM', [](){
-		Item* item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[28],
-		    NULL);
+    // get item
+    {'ITEM', [](){
+        if ( net_packet->len < 29 )
+        {
+            printlog("[NET]: refusing malformed ITEM packet.\n");
+            return;
+        }
+
+        int resolvedType = static_cast<int>(
+            SDLNet_Read32(&net_packet->data[4])
+        );
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            29,
+            "ITEM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        Item* item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[28],
+            NULL);
 		item->ownerUid = SDLNet_Read32(&net_packet->data[24]);
 		Item* pickedUp = itemPickup(clientnum, item);
 		free(item);
@@ -4974,13 +7252,33 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// shop item
 	{'SHPI', [](){
+        if ( net_packet->len < 18 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		if ( !shopInv[clientnum] )
 		{
 			return;
 		}
 
-		ItemType type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4]));
-		Status status = static_cast<Status>((Sint8)net_packet->data[8]);
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            18,
+            "SHPI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        ItemType type = static_cast<ItemType>(resolvedType);
+        Status status = static_cast<Status>((Sint8)net_packet->data[8]);
 		Sint16 beatitude = (Sint8)net_packet->data[9];
 		Sint16 count = (unsigned char)net_packet->data[10];
 		Uint32 appearance = SDLNet_Read32(&net_packet->data[11]);
@@ -5096,11 +7394,42 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 				net_packet->data[24] = item->identified;
 				net_packet->data[25] = clientnum;
 				net_packet->data[26] = (Uint8)cameras[clientnum].x;
-				net_packet->data[27] = (Uint8)cameras[clientnum].y;
-				net_packet->address.host = net_server.host;
-				net_packet->address.port = net_server.port;
-				net_packet->len = 28;
-				sendPacketSafe(net_sock, -1, net_packet, 0);
+                net_packet->data[27] = (Uint8)cameras[clientnum].y;
+                net_packet->len = 28;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+                const int runtimeType = static_cast<int>(item->type);
+                if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeType) )
+                {
+                    const std::string& stableId =
+                        SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeType);
+                    const int available = NET_PACKET_SIZE - 29;
+                    if ( stableId.empty() )
+                    {
+                        printlog(
+                            "[S.A.M] Refusing DIEI custom item runtime %d: no stable id.\n",
+                            runtimeType
+                        );
+                        continue;
+                    }
+                    if ( available <= 0
+                        || static_cast<int>(stableId.size()) > available )
+                    {
+                        printlog(
+                            "[S.A.M] Refusing DIEI custom item [%s]: stable id is too long.\n",
+                            stableId.c_str()
+                        );
+                        continue;
+                    }
+                    memcpy(&net_packet->data[28], stableId.c_str(), stableId.size());
+                    net_packet->data[28 + stableId.size()] = '\0';
+                    net_packet->len = 29 + static_cast<int>(stableId.size());
+                }
+#endif
+
+                net_packet->address.host = net_server.host;
+                net_packet->address.port = net_server.port;
+                sendPacketSafe(net_sock, -1, net_packet, 0);
 			}
 		}
 		else
@@ -5134,12 +7463,45 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 					net_packet->data[24] = item->identified;
 					net_packet->data[25] = clientnum;
 					net_packet->data[26] = (Uint8)cameras[clientnum].x;
-					net_packet->data[27] = (Uint8)cameras[clientnum].y;
-					net_packet->address.host = net_server.host;
-					net_packet->address.port = net_server.port;
-					net_packet->len = 28;
-					sendPacketSafe(net_sock, -1, net_packet, 0);
-					list_RemoveNode(node);
+                    net_packet->data[27] = (Uint8)cameras[clientnum].y;
+                    net_packet->len = 28;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+                    const int runtimeType = static_cast<int>(item->type);
+                    if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeType) )
+                    {
+                        const std::string& stableId =
+                            SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeType);
+                        const int available = NET_PACKET_SIZE - 29;
+                        if ( stableId.empty() )
+                        {
+                            printlog(
+                                "[S.A.M] Refusing DIEI custom item runtime %d: no stable id.\n",
+                                runtimeType
+                            );
+                            list_RemoveNode(node);
+                            continue;
+                        }
+                        if ( available <= 0
+                            || static_cast<int>(stableId.size()) > available )
+                        {
+                            printlog(
+                                "[S.A.M] Refusing DIEI custom item [%s]: stable id is too long.\n",
+                                stableId.c_str()
+                            );
+                            list_RemoveNode(node);
+                            continue;
+                        }
+                        memcpy(&net_packet->data[28], stableId.c_str(), stableId.size());
+                        net_packet->data[28 + stableId.size()] = '\0';
+                        net_packet->len = 29 + static_cast<int>(stableId.size());
+                    }
+#endif
+
+                    net_packet->address.host = net_server.host;
+                    net_packet->address.port = net_server.port;
+                    sendPacketSafe(net_sock, -1, net_packet, 0);
+                    list_RemoveNode(node);
 				}
 			}
 		}
@@ -5159,7 +7521,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server forwarded a player callout
 	{ 'CALL', []() {
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		if ( pnum != clientnum )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
@@ -5434,15 +7803,50 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update player stat values
 	{'STAT', [](){
-		Sint32 buffer = 0;
+		constexpr int expectedLength =
+			4 + 8 * MAXPLAYERS;
+		if ( net_packet->len < expectedLength )
+		{
+			printlog(
+				"[NET]: ignoring truncated STAT packet (len=%d expected>=%d)",
+				net_packet->len,
+				expectedLength
+			);
+			return;
+		}
+
 		for ( int i = 0; i < MAXPLAYERS; ++i )
 		{
-			buffer = (Sint32)SDLNet_Read32(&net_packet->data[4 + i * 8]);
-			stats[i]->MAXHP = buffer & 0xFFFF;
-			stats[i]->HP = (buffer >> 16) & 0xFFFF;
-			buffer = (Sint32)SDLNet_Read32(&net_packet->data[8 + i * 8]);
-			stats[i]->MAXMP = buffer & 0xFFFF;
-			stats[i]->MP = (buffer >> 16) & 0xFFFF;
+			if ( !stats[i] )
+			{
+				continue;
+			}
+
+			const Uint32 packedHP =
+				SDLNet_Read32(
+					&net_packet->data[4 + i * 8]
+				);
+			const Uint32 packedMP =
+				SDLNet_Read32(
+					&net_packet->data[8 + i * 8]
+				);
+
+			stats[i]->MAXHP =
+				static_cast<Sint32>(
+					packedHP & 0xFFFF
+				);
+			stats[i]->HP =
+				static_cast<Sint32>(
+					(packedHP >> 16) & 0xFFFF
+				);
+			stats[i]->MAXMP =
+				static_cast<Sint32>(
+					packedMP & 0xFFFF
+				);
+			stats[i]->MP =
+				static_cast<Sint32>(
+					(packedMP >> 16) & 0xFFFF
+				);
 		}
 	}},
 
@@ -5564,10 +7968,27 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update player levels
 	{'UPLV', [](){
-		Sint32 buffer = SDLNet_Read32(&net_packet->data[4]);
+		const int expectedLength =
+			4 + MAXPLAYERS;
+		if ( net_packet->len < expectedLength )
+		{
+			printlog(
+				"[NET]: ignoring truncated UPLV packet (len=%d expected>=%d)",
+				net_packet->len,
+				expectedLength
+			);
+			return;
+		}
+
 		for ( int i = 0; i < MAXPLAYERS; ++i )
 		{
-			stats[i]->LVL = static_cast<Sint32>((buffer >> (i * 8) ) & 0xFF);
+			if ( stats[i] )
+			{
+				stats[i]->LVL =
+					static_cast<Sint32>(
+						net_packet->data[4 + i]
+					);
+			}
 		}
 	}},
 	// Authoritative persistent gate state.
@@ -6969,28 +9390,61 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 	}},
 
-	//Add an item to the chest.
-	{'CITM', [](){
-		ItemType itemType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4]));
-		Status status = static_cast<Status>(SDLNet_Read32(&net_packet->data[8]));
-		Sint16 beatitude = SDLNet_Read32(&net_packet->data[12]);
-		Sint16 count = SDLNet_Read32(&net_packet->data[16]);
-		Uint32 appearance = SDLNet_Read32(&net_packet->data[20]);
-		bool identified = false;
-		if ( net_packet->data[24])   //TODO: Is this right?
-		{
-			identified = true;
-		}
-		else
-		{
-			identified = false;
-		}
-		Item* newitem = newItem(itemType, status, beatitude, count, appearance, identified, nullptr);
-		bool forceNewStack = net_packet->data[25] ? true : false;
-		newitem->x = (Sint8)net_packet->data[26];
-		newitem->y = (Sint8)net_packet->data[27];
-		addItemToChestClientside(clientnum, newitem, forceNewStack, nullptr);
-	}},
+    //Add an item to the chest.
+    {'CITM', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed CITM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "CITM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        const Status status =
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8]));
+        const Sint16 beatitude = SDLNet_Read32(&net_packet->data[12]);
+        const Sint16 count = SDLNet_Read32(&net_packet->data[16]);
+        const Uint32 appearance = SDLNet_Read32(&net_packet->data[20]);
+        const bool identified = net_packet->data[24] != 0;
+        Item* newitem = newItem(
+            static_cast<ItemType>(resolvedType),
+            status,
+            beatitude,
+            count,
+            appearance,
+            identified,
+            nullptr
+        );
+        if ( !newitem )
+        {
+            return;
+        }
+
+        const bool forceNewStack = net_packet->data[25] != 0;
+        newitem->x = static_cast<Sint8>(net_packet->data[26]);
+        newitem->y = static_cast<Sint8>(net_packet->data[27]);
+        addItemToChestClientside(
+            clientnum,
+            newitem,
+            forceNewStack,
+            nullptr
+        );
+    }},
 
 	//Close the chest.
 	{'CCLS', [](){
@@ -7431,14 +9885,109 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// get item
 	{'ITEQ', [](){
+		if ( net_packet->len < 29 )
+		{
+			printlog(
+				"[NET]: ignoring malformed ITEQ packet with length %d.\n",
+				net_packet->len
+			);
+			return;
+		}
+
+		int resolvedType =
+			static_cast<int>(
+				SDLNet_Read32(&net_packet->data[4])
+			);
+
+#ifdef SAM_FRAMEWORK_ENABLED
+		if ( SAMItemRegistryFoundation::
+			isSAMRuntimeItemId(resolvedType) )
+		{
+			if ( net_packet->len <= 29 )
+			{
+				printlog(
+					"[S.A.M] Refusing legacy numeric-only ITEQ custom item runtime %d.\n",
+					resolvedType
+				);
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"A custom multiplayer item was rejected because it had no stable ID."
+				);
+				return;
+			}
+
+			const int payloadLength =
+				net_packet->len - 29;
+			int stableLength = 0;
+			while ( stableLength < payloadLength
+				&& net_packet->data[29 + stableLength] != '\0' )
+			{
+				++stableLength;
+			}
+
+			if ( stableLength <= 0
+				|| stableLength >= payloadLength )
+			{
+				printlog(
+					"[S.A.M] Refusing malformed ITEQ stable-id payload.\n"
+				);
+				return;
+			}
+
+			const std::string stableId(
+				reinterpret_cast<const char*>(
+					&net_packet->data[29]
+				),
+				stableLength
+			);
+
+			resolvedType =
+				SAMItemRegistryFoundation::
+					runtimeIdForStableId(stableId);
+
+			if ( resolvedType < 0
+				|| !SAMItemRegistryFoundation::
+					isRegisteredRuntimeItemId(resolvedType) )
+			{
+				printlog(
+					"[S.A.M] ITEQ custom item unavailable locally: [%s]. Item rejected.\n",
+					stableId.c_str()
+				);
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Required custom item is unavailable: %s",
+					stableId.c_str()
+				);
+				return;
+			}
+
+			printlog(
+				"[S.A.M] Resolved ITEQ custom item [%s] to local runtime %d.\n",
+				stableId.c_str(),
+				resolvedType
+			);
+		}
+#endif
+
 		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+		    static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
 		    SDLNet_Read32(&net_packet->data[20]),
 		    net_packet->data[28],
 		    NULL);
+		if ( !item )
+		{
+			printlog(
+				"[NET]: ITEQ failed to construct item type %d.\n",
+				resolvedType
+			);
+			return;
+		}
+
 		item->ownerUid = SDLNet_Read32(&net_packet->data[24]);
 		Item* pickedUp = itemPickup(clientnum, item);
 		free(item);
@@ -7483,9 +10032,20 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update class from script
 	{ 'SCRC', []() {
-		int player = net_packet->data[4];
-		int classnum = net_packet->data[5];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 6 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SCRC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		const int classnum = net_packet->data[5];
+		if ( player >= 0 )
 		{
 			client_classes[player] = classnum;
 			bool oldIntro = intro;
@@ -7864,7 +10424,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	{ 'ASSU', []() {
 		// server sent player current assist values
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		Sint32 assistance = SDLNet_Read32(&net_packet->data[5]);
 		if ( player == clientnum )
 		{
@@ -7891,10 +10458,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close assist shrine
 	{ 'ASCL', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated ASCL packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* shrine = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].assistShrineGUI.closeAssistShrine();
@@ -7916,10 +10495,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close cauldron
 	{ 'CAUC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated CAUC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].alchemyGUI.closeAlchemyMenu();
@@ -7941,10 +10532,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close workbench
 	{ 'WRKC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated WRKC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].tinkerGUI.closeTinkerMenu();
@@ -7966,10 +10569,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to close mailbox
 	{ 'MBXC', []() {
-		int player = net_packet->data[4];
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			printlog(
+				"[NET]: ignoring truncated MBXC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
 		if ( player == clientnum )
 		{
-			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
+			const Uint32 uid =
+				SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
 			{
 				GenericGUI[clientnum].mailboxGUI.closeMailMenu();
@@ -7979,7 +10594,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// server order to consume key for lock
 	{ 'LKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		bool success = false;
 
 		// reply got packet
@@ -8083,10 +10705,31 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	} },
 
 	{ 'SANM',[]() { // player spellcast animation
-		int player = net_packet->data[4];
-		int pose = net_packet->data[5];
-		int charge = SDLNet_Read16(&net_packet->data[6]);
-		spellcastAnimationUpdateReceive(player, pose, charge);
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SANM packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
+
+		const int pose = net_packet->data[5];
+		const int charge =
+			SDLNet_Read16(&net_packet->data[6]);
+		spellcastAnimationUpdateReceive(
+			player,
+			pose,
+			charge
+		);
 	} },
 
 	// update breakable counter
@@ -8097,7 +10740,17 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 void clientHandlePacket()
 {
+    if ( !net_packet || !net_packet->data || net_packet->len < 4 )
+    {
+        printlog("[NET]: ignored truncated client packet");
+        return;
+    }
 	if (handleSafePacket())
+	{
+		return;
+	}
+	if (clientDeferLateJoinMapPacket(
+			net_packet->data, static_cast<std::size_t>(net_packet->len)))
 	{
 		return;
 	}
@@ -8165,6 +10818,107 @@ void clientHandlePacket()
     }
 }
 
+static void tryReplayClientLateJoinPackets()
+{
+	if (!g_clientLateJoinPacketDeferral || !g_clientLateJoinCatchupComplete
+		|| !g_clientLateJoinMapIsLoaded || g_clientLateJoinReplayingPackets
+		|| !net_packet || !net_packet->data)
+	{
+		return;
+	}
+	std::vector<std::vector<std::uint8_t>> livePackets;
+	const std::vector<std::uint8_t> serializedLive =
+		g_clientLateJoinLivePackets.serialize();
+	if (serializedLive.empty()
+		|| !LateJoinPacketCatchupBuffer::deserialize(
+			serializedLive, livePackets))
+	{
+		printlog("[Late Join] Client discarded invalid deferred live packets.");
+		clientResetLateJoinPacketDeferral();
+		return;
+	}
+	const int savedLength = net_packet->len;
+	const IPaddress savedAddress = net_packet->address;
+	std::vector<Uint8> savedPacket(
+		net_packet->data, net_packet->data + std::max(0, savedLength));
+	g_clientLateJoinReplayingPackets = true;
+	const auto replay = [](const std::vector<std::vector<std::uint8_t>>& packets)
+	{
+		for (const auto& packet : packets)
+		{
+			if (packet.size() > NET_PACKET_SIZE)
+			{
+				continue;
+			}
+			memcpy(net_packet->data, packet.data(), packet.size());
+			net_packet->len = static_cast<int>(packet.size());
+			clientHandlePacket();
+		}
+	};
+	replay(g_clientLateJoinCatchupPackets);
+	replay(livePackets);
+	std::size_t resetStaticFixtures = 0;
+	std::size_t rebuiltEditorLightSources = 0;
+	std::size_t failedEditorLightSources = 0;
+	if (map.entities)
+	{
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (entity
+				&& (entity->behavior == &actTorch
+					|| entity->behavior == &actCrystalShard
+					|| (entity->behavior == &actCampfire
+						&& entity->skill[3] > 0)))
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				++resetStaticFixtures;
+			}
+			if (entity && entity->behavior == &actLightSource)
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				entity->skill[8] = 0;
+				entity->skill[9] = 0;
+				// Authored Always On sources are unconditionally enabled on the
+				// server. Reassert that invariant locally in case their one-time
+				// ENTS update predated this client's connection or its editor UID
+				// did not match during catch-up replay.
+				if (entity->lightSourceAlwaysOn == 1)
+				{
+					entity->skill[10] = 1;
+				}
+				if (entity->skill[10] != 0)
+				{
+					entity->actLightSource();
+					if (entity->light)
+					{
+						++rebuiltEditorLightSources;
+					}
+					else
+					{
+						++failedEditorLightSources;
+					}
+				}
+			}
+		}
+	}
+	if (!savedPacket.empty())
+	{
+		memcpy(net_packet->data, savedPacket.data(), savedPacket.size());
+	}
+	net_packet->len = savedLength;
+	net_packet->address = savedAddress;
+	const std::size_t catchupCount = g_clientLateJoinCatchupPackets.size();
+	const std::size_t liveCount = livePackets.size();
+	clientResetLateJoinPacketDeferral();
+	printlog(
+		"[Late Join] Client applied %zu catch-up and %zu deferred live packet(s); reset %zu static fixture light(s), rebuilt %zu editor light source(s), %zu rebuild failure(s).",
+		catchupCount, liveCount, resetStaticFixtures,
+		rebuiltEditorLightSources, failedEditorLightSources);
+}
+
 /*-------------------------------------------------------------------------------
 
 	clientHandleMessages
@@ -8175,6 +10929,7 @@ void clientHandlePacket()
 
 void clientHandleMessages(Uint32 framerateBreakInterval)
 {
+	clientCheckLateJoinTimeout();
 #ifdef STEAMWORKS
 	if (!directConnect && !net_handler)
 	{
@@ -8274,9 +11029,365 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+	{'JOIN', [](){
+		if (!headlessLateJoinRequested || !directConnect)
+		{
+			memcpy(net_packet->data, "HELO", 4);
+			SDLNet_Write32(MAXPLAYERS + 7, &net_packet->data[4]);
+			net_packet->len = 8;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			printlog("[Late Join] Rejected runtime JOIN while late join is disabled.");
+			return;
+		}
+		if (net_packet->len < 70)
+		{
+			printlog("[Late Join] Rejected truncated runtime JOIN.");
+			return;
+		}
+		const Uint8 requestedSlot = net_packet->data[56];
+		const Uint32 clientSaveKey = SDLNet_Read32(&net_packet->data[61]);
+		bool lockedSlots[MAXPLAYERS] = {};
+		for (int player = 0; player < MAXPLAYERS; ++player)
+		{
+			lockedSlots[player] = MainMenu::isPlayerSlotLocked(player);
+		}
+		int playerIndex = MAXPLAYERS;
+		bool useChunkedHelo = false;
+		g_processingRuntimeJoin = true;
+		const NetworkingLobbyJoinRequestResult result = lobbyPlayerJoinRequest(
+			playerIndex, lockedSlots, useChunkedHelo);
+		g_processingRuntimeJoin = false;
+		if (result != NET_LOBBY_JOIN_DIRECTIP_SUCCESS
+			|| playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+		{
+			return;
+		}
+
+		const bool returningPlayer =
+			requestedSlot != 0 && clientSaveKey != 0;
+		g_lateJoinReturningPlayer[playerIndex] = returningPlayer;
+		if (!g_lateJoinTransactions[playerIndex].holdForClient())
+		{
+			printlog(
+				"[Late Join] Failed to open character selection for player %d.",
+				playerIndex);
+			abortServerLateJoinPlayer(playerIndex, 4);
+			return;
+		}
+		g_lateJoinLastProgressTick[playerIndex] = ticks;
+		printlog(
+			"[Late Join] Player %d is connected and choosing a character.",
+			playerIndex);
+		logServerRosterState("runtime join");
+	}},
+	{'LJHI', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Server rejected malformed client-ready handshake.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0
+			|| !currentPacketSenderMatchesPlayer(player)
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog(
+				"[Late Join] Server rejected character-selection handshake for player %d.",
+				player);
+		}
+		else
+		{
+			g_lateJoinClientHandshake[player] = true;
+			g_lateJoinLastProgressTick[player] = ticks;
+			printlog(
+				"[Late Join] Player %d may customize and press Ready.", player);
+		}
+	}},
+	{'PLYR', [](){
+		if (net_packet->len != 49)
+		{
+			printlog("[Late Join] Server rejected malformed character packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog(
+				"[Late Join] Server rejected character data for player %d.",
+				player);
+			return;
+		}
+		if (!loadingsavegame)
+		{
+			stats[player]->clearStats();
+		}
+		stringCopy(
+			stats[player]->name, reinterpret_cast<char*>(&net_packet->data[5]),
+			sizeof(Stat::name), 32);
+		client_classes[player] = static_cast<int>(
+			SDLNet_Read32(&net_packet->data[37]));
+		stats[player]->sex = static_cast<sex_t>(
+			static_cast<int>(SDLNet_Read32(&net_packet->data[41])));
+		const Uint32 raceAndAppearance =
+			SDLNet_Read32(&net_packet->data[45]);
+		stats[player]->stat_appearance = (raceAndAppearance & 0xFF00) >> 8;
+		stats[player]->playerRace = raceAndAppearance & 0xFF;
+		if (!loadingsavegame)
+		{
+			initClass(player);
+		}
+		for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+		{
+			if (recipient == player
+				|| !serverPlayerCanReceiveGameplayUpdates(recipient))
+			{
+				continue;
+			}
+			memcpy(net_packet->data, "JOIN", 4);
+			net_packet->data[4] = player;
+			net_packet->data[5] = client_classes[player];
+			net_packet->data[6] = stats[player]->sex;
+			net_packet->data[7] =
+				static_cast<Uint8>(stats[player]->stat_appearance);
+			net_packet->data[8] =
+				static_cast<Uint8>(stats[player]->playerRace);
+			stringCopy(
+				reinterpret_cast<char*>(&net_packet->data[9]),
+				stats[player]->name,
+				32,
+				sizeof(Stat::name));
+			net_packet->len = 41;
+			net_packet->address.host = net_clients[recipient - 1].host;
+			net_packet->address.port = net_clients[recipient - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
+		}
+		g_lateJoinLastProgressTick[player] = ticks;
+	}},
+	{'REDY', [](){
+		if (net_packet->len != 6)
+		{
+			printlog("[Late Join] Server rejected malformed Ready packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !g_lateJoinClientHandshake[player]
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog("[Late Join] Server rejected Ready for player %d.", player);
+			return;
+		}
+		if (net_packet->data[5] == 0)
+		{
+			g_lateJoinLastProgressTick[player] = ticks;
+			return;
+		}
+		std::string placementError;
+		if (!prepareAutomatiaLateJoinPlayer(
+				player, g_lateJoinReturningPlayer[player], placementError)
+			|| !startServerLateJoinSnapshotTransfer(player))
+		{
+			printlog(
+				"[Late Join] Failed to prepare Ready player %d: %s",
+				player,
+				placementError.empty()
+					? "snapshot transfer could not start"
+					: placementError.c_str());
+			abortServerLateJoinPlayer(player, 4);
+			return;
+		}
+		players[player]->was_connected_to_game = true;
+		g_lateJoinLastProgressTick[player] = ticks;
+		printlog(
+			"[Late Join] Player %d pressed Ready; snapshot transfer started.",
+			player);
+	}},
+	{'SVFL', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Rejected malformed server-flags request.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[Late Join] Rejected unauthenticated server-flags request.");
+			return;
+		}
+		memcpy(net_packet->data, "SVFL", 4);
+		SDLNet_Write32(svFlags, &net_packet->data[4]);
+		net_packet->len = 8;
+		net_packet->address.host = net_clients[player - 1].host;
+		net_packet->address.port = net_clients[player - 1].port;
+		sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		printlog("[Late Join] Sent server flags to player %d.", player);
+	}},
+	{'CSCN', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Rejected malformed scenario request.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[Late Join] Rejected unauthenticated scenario request.");
+			return;
+		}
+		memcpy(net_packet->data, "CSCN", 4);
+		if (!gameModeManager.currentSession.challengeRun.isActive())
+		{
+			net_packet->data[4] = 0;
+			net_packet->len = 5;
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+			printlog("[Late Join] Sent empty custom scenario to player %d.", player);
+			return;
+		}
+		const std::string& scenario =
+			gameModeManager.currentSession.challengeRun.scenarioStr;
+		constexpr std::size_t chunkBytes = 256;
+		const std::size_t chunkCount = std::max<std::size_t>(
+			1, (scenario.size() + chunkBytes - 1) / chunkBytes);
+		if (chunkCount > 15)
+		{
+			printlog("[Late Join] Custom scenario is too large for player %d.", player);
+			return;
+		}
+		for (std::size_t chunk = 0; chunk < chunkCount; ++chunk)
+		{
+			const std::size_t offset = chunk * chunkBytes;
+			const std::size_t bytes = std::min(chunkBytes, scenario.size() - offset);
+			memcpy(net_packet->data, "CSCN", 4);
+			net_packet->data[4] = static_cast<Uint8>(chunk + 1)
+				| static_cast<Uint8>(chunkCount << 4);
+			memcpy(&net_packet->data[5], scenario.data() + offset, bytes);
+			net_packet->len = static_cast<int>(5 + bytes);
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
+		printlog("[Late Join] Sent custom scenario to player %d in %zu chunk(s).",
+			player, chunkCount);
+	}},
+	{'LJRD', [](){
+		LateJoinProtocol::Ready ready;
+		if (!LateJoinProtocol::decodeReady(
+				net_packet->data, net_packet->len, ready))
+		{
+			printlog("[Late Join] Server rejected malformed snapshot-ready packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(ready.playerIndex);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !ready.snapshotAccepted
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::Complete
+			|| g_lateJoinTransactions[player].transferId()
+				!= ready.transferId
+			|| g_lateJoinTransactions[player].instanceRevision()
+				!= ready.instanceRevision)
+		{
+			printlog(
+				"[Late Join] Server rejected snapshot-ready state for player %d.",
+				player);
+			if (player > 0)
+			{
+				abortServerLateJoinPlayer(player, 2);
+			}
+			return;
+		}
+		LateJoinProtocol::Authorization authorization;
+		authorization.transferId = ready.transferId;
+		authorization.instanceRevision = ready.instanceRevision;
+		authorization.spawnAuthorized = true;
+		if (!queueLateJoinRecordForPlayer(
+				player, LateJoinProtocol::encodeAuthorization(authorization)))
+		{
+			printlog(
+				"[Late Join] Server failed spawn authorization for player %d.",
+				player);
+			abortServerLateJoinPlayer(player, 4);
+			return;
+		}
+		printlog(
+			"[Late Join] Server sent spawn authorization to player %d transfer %u.",
+			player, ready.transferId);
+		g_lateJoinLastProgressTick[player] = ticks;
+	}},
+	{'LJGO', [](){
+		LateJoinProtocol::Ready go;
+		if (!LateJoinProtocol::decodeGo(
+				net_packet->data, net_packet->len, go))
+		{
+			printlog("[Late Join] Server rejected malformed authorization ACK.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(go.playerIndex);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !go.snapshotAccepted
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::Complete
+			|| g_lateJoinTransactions[player].transferId() != go.transferId
+			|| g_lateJoinTransactions[player].instanceRevision()
+				!= go.instanceRevision
+			|| !sendServerLateJoinCatchup(player)
+			|| !sendServerLateJoinStart(player)
+			|| !authorizeServerLateJoinPlayer(player))
+		{
+			printlog(
+				"[Late Join] Server rejected authorization ACK for player %d.",
+				player);
+			if (player > 0)
+			{
+				abortServerLateJoinPlayer(player, 2);
+			}
+			return;
+		}
+		consumeAutomatiaSavedPlayerPlacement(player);
+		g_lateJoinLastProgressTick[player] = 0;
+		printlog(
+			"[Late Join] Server opened live simulation for player %d transfer %u.",
+			player, go.transferId);
+	}},
+	{'LJAB', [](){
+		LateJoinProtocol::Abort abort;
+		if (!LateJoinProtocol::decodeAbort(
+				net_packet->data, net_packet->len, abort))
+		{
+			printlog("[Late Join] Server rejected malformed abort record.");
+			return;
+		}
+		const int player = static_cast<int>(abort.playerIndex);
+		if (!currentPacketSenderMatchesPlayer(player)
+			|| (abort.transferId != 0
+				&& (abort.transferId
+						!= g_lateJoinTransactions[player].transferId()
+					|| abort.instanceRevision
+						!= g_lateJoinTransactions[player].instanceRevision())))
+		{
+			printlog("[Late Join] Server ignored unauthenticated abort record.");
+			return;
+		}
+		printlog("[Late Join] Client %d aborted transfer (reason %u).",
+			player, static_cast<unsigned>(abort.reason));
+		abortServerLateJoinPlayer(player, abort.reason);
+	}},
 	// keep alive
 	{'KPAL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 	}},
 
@@ -8293,7 +11404,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 
 		const int player =
-			static_cast<int>(
+            decodeGameplayPacketPlayerIndex(
 				net_packet->data[4]
 			);
 
@@ -8370,7 +11481,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
-		if ( client_disconnected[j] || players[j]->isLocalPlayer() )
+		if ( client_disconnected[j] || !players[j] || players[j]->isLocalPlayer() )
 		{
 			return;
 		}
@@ -8399,21 +11510,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// pause game
 	{'PAUS', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1118), stats[net_packet->data[4]]->name);
-		const int j = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int j =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( j < 0 )
+		{
+			return;
+		}
 		pauseGame(2, j);
 	}},
 
 	// unpause game
 	{'UNPS', [](){
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1119), stats[net_packet->data[4]]->name);
-		const int j = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int j =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( j < 0 )
+		{
+			return;
+		}
 		pauseGame(1, j);
 	}},
 
 	// check entity existence
 	{'ENTE', [](){
-		const int x = net_packet->data[4];
-		if ( x <= 0 || x >= MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int x = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( x <= 0 )
 		{
 			return;
 		}
@@ -8438,8 +11567,12 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client request item details.
 	{'ITMU', [](){
-		const int x = net_packet->data[4];
-		if ( x <= 0 || x >= MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int x = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( x <= 0 )
 		{
 			return;
 		}
@@ -8447,13 +11580,38 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
-			strcpy((char*)net_packet->data, "ITMU");
-			SDLNet_Write32(uid, &net_packet->data[4]);
+            strcpy((char*)net_packet->data, "ITMU");
+            SDLNet_Write32(uid, &net_packet->data[4]);
 
-			Uint32 itemTypeAndIdentified = ((static_cast<Uint16>(entity->skill[10]) & 0xFFFF) << 16); // type
-			itemTypeAndIdentified |= (static_cast<Uint16>(entity->skill[15]) & 0xFFFF); // identified
+            int transmittedType = entity->skill[10];
+            std::string stableId;
+#ifdef SAM_FRAMEWORK_ENABLED
+            constexpr int samWorldItemTypeSentinel = 0xFFFF;
+            if ( SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(entity->skill[10]) )
+            {
+                stableId =
+                    SAMItemRegistryFoundation::
+                        stableIdForRuntimeId(entity->skill[10]);
+                if ( stableId.empty() )
+                {
+                    printlog(
+                        "[S.A.M] Refusing ITMU world item runtime %d for entity %u: no stable id.\n",
+                        entity->skill[10],
+                        uid
+                    );
+                    return;
+                }
+                transmittedType = samWorldItemTypeSentinel;
+            }
+#endif
 
-			SDLNet_Write32(itemTypeAndIdentified, &net_packet->data[8]);
+            Uint32 itemTypeAndIdentified =
+                ((static_cast<Uint16>(transmittedType) & 0xFFFF) << 16);
+            itemTypeAndIdentified |=
+                (static_cast<Uint16>(entity->skill[15]) & 0xFFFF);
+
+            SDLNet_Write32(itemTypeAndIdentified, &net_packet->data[8]);
 
 			Uint32 statusBeatitudeQuantityAppearance = 0;
 			statusBeatitudeQuantityAppearance |= ((static_cast<Uint8>(entity->skill[11]) & 0xFF) << 24); // status
@@ -8475,17 +11633,53 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			statusBeatitudeQuantityAppearance |= (static_cast<Uint8>(appearance) & 0xFF); // appearance
 			SDLNet_Write32(statusBeatitudeQuantityAppearance, &net_packet->data[12]);
 
-			net_packet->len = 16;
-			if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
-			{
-				if ( items[entity->skill[10]].category == TOME_SPELL )
-				{
-					SDLNet_Write16(entity->skill[14] % TOME_APPEARANCE_MAX, &net_packet->data[16]);
-					net_packet->len = 18;
-				}
-			}
+            net_packet->len = 16;
+#ifdef SAM_FRAMEWORK_ENABLED
+            if ( !stableId.empty() )
+            {
+                const int available = NET_PACKET_SIZE - 17;
+                if ( available <= 0
+                    || static_cast<int>(stableId.size()) > available )
+                {
+                    printlog(
+                        "[S.A.M] Refusing ITMU world item [%s]: stable id is too long.\n",
+                        stableId.c_str()
+                    );
+                    return;
+                }
 
-			net_packet->address.host = net_clients[x - 1].host;
+                memcpy(
+                    &net_packet->data[16],
+                    stableId.c_str(),
+                    stableId.size()
+                );
+                net_packet->data[16 + stableId.size()] = '\0';
+                net_packet->len =
+                    17 + static_cast<int>(stableId.size());
+
+                printlog(
+                    "[S.A.M] Sending ITMU world item [%s] runtime %d for entity %u to player %d.\n",
+                    stableId.c_str(),
+                    entity->skill[10],
+                    uid,
+                    x
+                );
+            }
+            else
+#endif
+            if ( entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS )
+            {
+                if ( items[entity->skill[10]].category == TOME_SPELL )
+                {
+                    SDLNet_Write16(
+                        entity->skill[14] % TOME_APPEARANCE_MAX,
+                        &net_packet->data[16]
+                    );
+                    net_packet->len = 18;
+                }
+            }
+
+            net_packet->address.host = net_clients[x - 1].host;
 			net_packet->address.port = net_clients[x - 1].port;
 			sendPacketSafe(net_sock, -1, net_packet, x - 1);
 		}
@@ -8493,8 +11687,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player move
 	{'PMOV', [](){
-		const int player = net_packet->data[4];
-		if ( player < 0 || player >= MAXPLAYERS )
+        if ( !net_packet || net_packet->len < 19 )
+        {
+            printlog("[NET]: ignored truncated PMOV packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
 		{
 			return;
 		}
@@ -8592,8 +11794,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player ghost move
 	{'GMOV', []() {
-		const int player = net_packet->data[4];
-		if ( player < 0 || player >= MAXPLAYERS )
+        if ( !net_packet || net_packet->len < 20 )
+        {
+            printlog("[NET]: ignored truncated GMOV packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
 		{
 			return;
 		}
@@ -8671,7 +11881,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			playSoundEntityLocal(players[player]->ghost.my, 612 + local_rng.rand() % 3, 64);
 			for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 			{
-				if ( c == player || client_disconnected[c] || players[c]->isLocalPlayer() )
+				if ( c == player || client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 				{
 					continue;
 				}
@@ -8690,7 +11900,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			players[player]->ghost.setActive(deactivated == 0 ? true : false);
 			for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 			{
-				if ( c == player || client_disconnected[c] || players[c]->isLocalPlayer() )
+				if ( c == player || client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
 				{
 					continue;
 				}
@@ -8707,33 +11917,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{'REZZ', []() {
-		// check if the info is outdated
-		if ( net_packet->data[5] != currentlevel || net_packet->data[10] != secretlevel )
+		if ( !net_packet || net_packet->len < 11 )
+		{
+			printlog(
+				"[NET]: ignoring truncated REZZ packet"
+			);
+			return;
+		}
+
+		if ( net_packet->data[5] != currentlevel
+			|| net_packet->data[10] != secretlevel )
 		{
 			return;
 		}
 
-		int player = net_packet->data[4];
-
-		if ( player < 0 || player >= MAXPLAYERS )
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
 		{
 			return;
 		}
-
 		if ( players[player]->entity )
 		{
 			return;
 		}
 
-		int x = SDLNet_Read16(&net_packet->data[6]);
-		int y = SDLNet_Read16(&net_packet->data[8]);
-
-		if ( players[player]->ghost.my )
-		{
-			list_RemoveNode(players[player]->ghost.my->mynode);
-			players[player]->ghost.my = nullptr;
-		}
-		players[player]->ghost.reset();
+		const int x =
+			SDLNet_Read16(&net_packet->data[6]);
+		const int y =
+			SDLNet_Read16(&net_packet->data[8]);
 
 		Entity* entity = newEntity(113, 1, map.entities, nullptr); //Player entity.
 		entity->x = (x * 16) + 8;
@@ -8760,25 +11976,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player created ghost
 	{'GHOS', []() {
-		// check if the info is outdated
-		if ( net_packet->data[5] != currentlevel || net_packet->data[10] != secretlevel )
+		if ( !net_packet || net_packet->len < 11 )
 		{
-			return;
-		}
-		
-		int player = net_packet->data[4];
-
-		if ( player < 0 || player >= MAXPLAYERS )
-		{
+			printlog(
+				"[NET]: ignoring truncated GHOS packet"
+			);
 			return;
 		}
 
-		int x = SDLNet_Read16(&net_packet->data[6]);
-		int y = SDLNet_Read16(&net_packet->data[8]);
+		if ( net_packet->data[5] != currentlevel
+			|| net_packet->data[10] != secretlevel )
+		{
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
+
+		const int x =
+			SDLNet_Read16(&net_packet->data[6]);
+		const int y =
+			SDLNet_Read16(&net_packet->data[8]);
 
 		if ( players[player]->ghost.my )
 		{
-			list_RemoveNode(players[player]->ghost.my->mynode);
+			list_RemoveNode(
+				players[player]->ghost.my->mynode
+			);
 			players[player]->ghost.my = nullptr;
 		}
 		players[player]->ghost.reset();
@@ -8808,17 +12038,46 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// tried to update
 	{'NOUP', [](){
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player <= 0 )
+		{
+			return;
+		}
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
+			if ( entity->behavior == &actPlayer
+				|| entity->behavior == &actDeathGhost )
+			{
+				printlog(
+					"[World State] Rejected player %d NOUP for authoritative player entity UID %u in '%s'.",
+					player,
+					uid,
+					players[player]
+						? players[player]->worldInstance.key().c_str()
+						: "<none>");
+				return;
+			}
 			entity->flags[UPDATENEEDED] = false;
 		}
 	}},
 
 	// client deleted entity
 	/*{'ENTD', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		for ( auto node = entitiesToDelete[player].first; node != NULL; node = node->next )
 		{
 			auto deleteent = (deleteent_t*)node->element;
@@ -8832,20 +12091,121 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked entity in range
 	{'CKIR', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        if ( !net_packet || net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated CKIR packet");
+            return;
+        }
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
+		const bool customPortalHint = net_packet->len >= 19
+			&& net_packet->data[9] == 0xA7
+			&& net_packet->data[10] == 1;
+		if (customPortalHint
+			&& (!entity || entity->behavior != &actCustomPortal))
+		{
+			const real_t hintX = static_cast<Sint16>(
+				SDLNet_Read16(&net_packet->data[11])) / 32.0;
+			const real_t hintY = static_cast<Sint16>(
+				SDLNet_Read16(&net_packet->data[13])) / 32.0;
+			Entity* resolvedPortal = nullptr;
+			real_t bestFixtureDistance = 1.0;
+			std::size_t serverPortalCount = 0;
+			if (map.entities)
+			{
+				for (node_t* node = map.entities->first; node; node = node->next)
+				{
+					Entity* candidate = static_cast<Entity*>(node->element);
+					if (!candidate || candidate->behavior != &actCustomPortal)
+					{
+						continue;
+					}
+					++serverPortalCount;
+					// X/Y identify a static fixture. Z can legitimately differ
+					// while a late client's render interpolation settles.
+					const real_t fixtureDistance =
+						std::abs(candidate->x - hintX)
+						+ std::abs(candidate->y - hintY);
+					if (fixtureDistance <= bestFixtureDistance)
+					{
+						resolvedPortal = candidate;
+						bestFixtureDistance = fixtureDistance;
+					}
+				}
+			}
+			Entity* playerEntity = players[player]
+				? players[player]->entity : nullptr;
+			if (resolvedPortal && playerEntity
+				&& entityDist(resolvedPortal, playerEntity) <= TOUCHRANGE)
+			{
+				printlog(
+					"[Client Activity] Safely resolved player %d local UID %u to authoritative custom exit UID %u by map position.",
+					player, uid, resolvedPortal->getUID());
+				entity = resolvedPortal;
+			}
+			else
+			{
+				printlog(
+					"[Client Activity] Rejected player %d custom-exit hint for local UID %u at (%.2f,%.2f) (server portals=%zu, fixture match=%s, server range=%s).",
+					player, uid, hintX, hintY, serverPortalCount,
+					resolvedPortal ? "yes" : "no",
+					resolvedPortal && playerEntity
+						&& entityDist(resolvedPortal, playerEntity) <= TOUCHRANGE
+						? "yes" : "no");
+				entity = nullptr;
+			}
+		}
 		if ( entity )
 		{
 			client_selected[player] = entity;
 			inrange[player] = true;
+			Entity* playerEntity = players[player]
+				? players[player]->entity : nullptr;
+			const double distance = playerEntity
+				? entityDist(entity, playerEntity) : -1.0;
+			const WorldInstanceIdentity* identity =
+				worldState.activeIdentity();
+			printlog(
+				"[Client Activity] Player %d selected UID %u in '%s' (sprite=%d, type=%s, distance=%.2f, invisible=%s, circuit=%d).",
+				player, uid,
+				identity ? identity->key().c_str() : "<none>",
+				entity->sprite,
+				entity->behavior == &actCustomPortal
+					? "custom-exit" : "other",
+				distance,
+				entity->flags[INVISIBLE] ? "yes" : "no",
+				entity->skill[28]);
+		}
+		else
+		{
+			const WorldInstanceIdentity* identity =
+				worldState.activeIdentity();
+			printlog(
+				"[Client Activity] Player %d selected unknown UID %u in '%s'; interaction was not applied.",
+				player, uid,
+				identity ? identity->key().c_str() : "<none>");
 		}
 	}},
 
 	// tinker salvage
 	{'SALV', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8866,7 +12226,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked wall lock entity in range with key
 	{'LKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8895,7 +12262,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked wall lock entity in range without key
 	{'LNOK', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8920,7 +12294,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client checked valid key for the lock
 	{ 'OKEY', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8970,7 +12351,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// rat feed
 	{'RATF', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -8984,26 +12372,53 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked entity out of range
 	{'CKOR', [](){
+        if ( !net_packet || net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated CKOR packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
+        {
+            return;
+        }
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
-			client_selected[net_packet->data[4]] = entity;
-			inrange[net_packet->data[4]] = false;
+            client_selected[player] = entity;
+            inrange[player] = false;
 		}
 	}},
 
 	// disconnect
 	{'DISC', [](){
-	    // TODO verify packet origin
 		char shortname[32];
-		const int playerDisconnected = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int playerDisconnected =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( playerDisconnected < 0 )
+		{
+			return;
+		}
 	    if (playerDisconnected == 0) {
 	        // yeah right
 	        return;
 	    }
+		if (!currentPacketSenderMatchesPlayer(playerDisconnected))
+		{
+			printlog(
+				"[Roster] Rejected disconnect for player %d from another endpoint.",
+				playerDisconnected);
+			return;
+		}
 		stringCopy(shortname, stats[playerDisconnected]->name, sizeof(shortname), sizeof(Stat::name));
 		client_disconnected[playerDisconnected] = true;
+		resetServerLateJoinPlayer(playerDisconnected);
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
 			if ( client_disconnected[c] == true )
@@ -9019,11 +12434,19 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			messagePlayer(c, MESSAGE_MISC, Language::get(1120), shortname);
 		}
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1120), shortname);
+		logServerRosterState("disconnect");
 	}},
 
 	// client callout
 	{'CALL', []() {
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		if ( pnum != clientnum )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
@@ -9084,7 +12507,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// message
 	{'MSGS', [](){
-		const int pnum = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int pnum =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( pnum < 0 )
+		{
+			return;
+		}
 		client_keepalive[pnum] = ticks;
 		Uint32 color = SDLNet_Read32(&net_packet->data[5]);
 		MessageType type = MESSAGE_CHAT; // the only kind of message you can get from a client.
@@ -9101,7 +12531,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		// relay message to all clients
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( c == pnum || client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( c == pnum || client_disconnected[c] == true || !players[c] || players[c]->isLocalPlayer() )
 			{
 				continue;
 			}
@@ -9118,7 +12548,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// spotting (examining)
 	{'SPOT', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
@@ -9128,32 +12565,102 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	}},
 
-	// item drop
-	{'DROP', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		client_keepalive[player] = ticks;
-		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    &stats[player]->inventory);
-		dropItem(item, player);
-	}},
+    // Item drop. Custom items append stable_id at byte 26.
+    {'DROP', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog(
+                "[NET]: ignoring malformed DROP packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-	// item drop (greasy)
-	{ 'GRES', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		client_keepalive[player] = ticks;
-		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-			SDLNet_Read32(&net_packet->data[12]),
-			SDLNet_Read32(&net_packet->data[16]),
-			SDLNet_Read32(&net_packet->data[20]),
-			net_packet->data[24],
-			&stats[player]->inventory);
-		playerGreasyDropItem(player, item);
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            26,
+            "DROP",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        client_keepalive[player] = ticks;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[player]->inventory
+        );
+        if ( !item )
+        {
+            return;
+        }
+        dropItem(item, player);
+    }},
+
+    // Greasy equipment drop. Custom items append stable_id at byte 27.
+    { 'GRES', []() {
+        if ( net_packet->len < 27 )
+        {
+            printlog(
+                "[NET]: ignoring malformed GRES packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            27,
+            "GRES",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        client_keepalive[player] = ticks;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[player]->inventory
+        );
+        if ( !item )
+        {
+            return;
+        }
+        playerGreasyDropItem(player, item);
 		if ( net_packet->data[26] == 1 )
 		{
 			// shield
@@ -9190,7 +12697,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// duck throw
 	{ 'DCKA', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		client_keepalive[player] = ticks;
 		auto item = newItem(static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9215,63 +12729,123 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	} },
 
-	// item drop (on death)
-	{'DIEI', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    nullptr);
+    // item drop (on death)
+    {'DIEI', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed DIEI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 
-		real_t x = net_packet->data[26];
-		x = (x * 16) + 8;
-		real_t y = net_packet->data[27];
-		y = (y * 16) + 8;
+        const int player =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( player < 0 || !stats[player] || !stats[0] )
+        {
+            return;
+        }
 
-		stats[0]->addItemToLootingBag(player, x, y, *item);
-		if ( item->node )
-		{
-			list_RemoveNode(item->node);
-		}
-		else
-		{
-			free(item);
-		}
-		//{
-		//	auto entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
-		//	entity->x = net_packet->data[26];
-		//	entity->x = entity->x * 16 + 8;
-		//	entity->y = net_packet->data[27];
-		//	entity->y = entity->y * 16 + 8;
-		//	entity->flags[NOUPDATE] = true;
-		//	entity->flags[PASSABLE] = true;
-		//	entity->flags[INVISIBLE] = true;
-		//	for ( int c = item->count; c > 0; c-- )
-		//	{
-		//		int qtyToDrop = 1;
-		//		if ( c >= 10 && (item->type == TOOL_METAL_SCRAP || item->type == TOOL_MAGIC_SCRAP) )
-		//		{
-		//			qtyToDrop = 10;
-		//			c -= 9;
-		//		}
-		//		else if ( itemTypeIsQuiver(item->type) )
-		//		{
-		//			qtyToDrop = item->count;
-		//			c -= item->count;
-		//		}
-		//		dropItemMonster(item, entity, stats[player], qtyToDrop);
-		//	}
-		//	list_RemoveNode(entity->mynode);
-		//}
-	}},
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(resolvedType) )
+        {
+            if ( net_packet->len <= 28 )
+            {
+                printlog(
+                    "[S.A.M] Refusing legacy numeric-only DIEI custom item runtime %d.\n",
+                    resolvedType
+                );
+                return;
+            }
+
+            const int payloadLength = net_packet->len - 28;
+            int stableLength = 0;
+            while ( stableLength < payloadLength
+                && net_packet->data[28 + stableLength] != '\0' )
+            {
+                ++stableLength;
+            }
+            if ( stableLength <= 0 || stableLength >= payloadLength )
+            {
+                printlog(
+                    "[S.A.M] Refusing malformed DIEI stable-id payload.\n"
+                );
+                return;
+            }
+
+            const std::string stableId(
+                reinterpret_cast<const char*>(&net_packet->data[28]),
+                stableLength
+            );
+            resolvedType =
+                SAMItemRegistryFoundation::runtimeIdForStableId(stableId);
+            if ( resolvedType < 0
+                || !SAMItemRegistryFoundation::isRegisteredRuntimeItemId(resolvedType) )
+            {
+                printlog(
+                    "[S.A.M] DIEI custom item unavailable on server: [%s]. Drop rejected.\n",
+                    stableId.c_str()
+                );
+                return;
+            }
+            printlog(
+                "[S.A.M] Resolved DIEI custom item [%s] to server runtime %d.\n",
+                stableId.c_str(),
+                resolvedType
+            );
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            nullptr
+        );
+        if ( !item )
+        {
+            printlog(
+                "[NET]: DIEI failed to construct item type %d.\n",
+                resolvedType
+            );
+            return;
+        }
+
+        real_t x = net_packet->data[26];
+        x = (x * 16) + 8;
+        real_t y = net_packet->data[27];
+        y = (y * 16) + 8;
+
+        stats[0]->addItemToLootingBag(player, x, y, *item);
+        if ( item->node )
+        {
+            list_RemoveNode(item->node);
+        }
+        else
+        {
+            free(item);
+        }
+    }},
 
 	// raise/lower shield
 	{'SHLD', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
+		{
+			return;
+		}
 		stats[player]->defending = net_packet->data[5];
         for (int c = 1; c < MAXPLAYERS; ++c) {
             // relay packet to other players
@@ -9286,7 +12860,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// sneaking
 	{'SNEK', [](){
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0
+			|| !players[player]
+			|| !stats[player] )
+		{
+			return;
+		}
 		stats[player]->sneaking = net_packet->data[5];
         for (int c = 1; c < MAXPLAYERS; ++c) {
             // relay packet to other players
@@ -9301,7 +12884,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// ghost sneaking
 	{ 'GHOD', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 || !players[player] )
+		{
+			return;
+		}
 		if ( players[player]->ghost.my )
 		{
 			players[player]->ghost.my->skill[3] = net_packet->data[5] & (1 << 0);
@@ -9320,6 +12910,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// close shop
 	{'SHPC', [](){
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[8]);
+		if ( player <= 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity((Uint32)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
@@ -9332,8 +12932,23 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// buy item from shop
 	{'SHPB', [](){
+        if ( net_packet->len < 30 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPB packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
-		const int client = std::min(net_packet->data[29], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[29]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity(uidnum);
 		if ( !entity )
 		{
@@ -9346,8 +12961,20 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			printlog("[Shops]: warning: client %d bought item from a \"shop\" that has no stats! (uid=%d)\n", client, uidnum);
 			return;
 		}
-		Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		item->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[8]));
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[8]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            30,
+            "SHPB",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
+        item->type = static_cast<ItemType>(resolvedType);
 		item->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[12]));
 		item->beatitude = SDLNet_Read16(&net_packet->data[16]);
 		item->appearance = SDLNet_Read32(&net_packet->data[20]);
@@ -9488,7 +13115,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Remove a spell from the channeled spells list.
 	{'UNCH', [](){
-		const int client = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if (spellInList(&channeledSpells[client], thespell))
 		{
@@ -9507,8 +13141,23 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// sell item to shop
 	{'SHPS', [](){
+        if ( net_packet->len < 30 )
+        {
+            printlog(
+                "[NET]: ignoring malformed SHPS packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
-		const int client = std::min(net_packet->data[29], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[29]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity(uidnum);
 		if ( !entity )
 		{
@@ -9522,9 +13171,21 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			return;
 		}
 
-		bool identified = net_packet->data[28] == 1;
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[8])),
+        int resolvedType = static_cast<int>(SDLNet_Read32(&net_packet->data[8]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            30,
+            "SHPS",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        bool identified = net_packet->data[28] == 1;
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[12])),
 			SDLNet_Read16(&net_packet->data[16]),
 			SDLNet_Read32(&net_packet->data[24]),
@@ -9583,32 +13244,103 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		//}
 	}},
 
-	// use item
-	{'USEI', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-		    SDLNet_Read32(&net_packet->data[12]),
-		    SDLNet_Read32(&net_packet->data[16]),
-		    SDLNet_Read32(&net_packet->data[20]),
-		    net_packet->data[24],
-		    &stats[client]->inventory);
-		useItem(item, client, nullptr, false, true);
-	}},
+    // Use item. Custom items append stable_id at byte 26.
+    {'USEI', [](){
+        if ( net_packet->len < 26 )
+        {
+            printlog("[NET]: refusing malformed USEI packet.\n");
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[25]
+            );
+        if ( client < 0 )
+        {
+            return;
+        }
+
+        const int transmittedType = static_cast<int>(
+            SDLNet_Read32(&net_packet->data[4])
+        );
+        int resolvedType = transmittedType;
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            transmittedType,
+            26,
+            "USEI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            &stats[client]->inventory);
+        if ( !item )
+        {
+            printlog("[NET]: USEI failed to construct item type %d.\n", resolvedType);
+            return;
+        }
+        useItem(item, client, nullptr, false, true);
+    }},
 
 	// use loot bag
 	{ 'LOOT', []() {
-		const int client = std::min(net_packet->data[8], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[8]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		Uint32 appearance = SDLNet_Read32(&net_packet->data[4]);
 		Stat::emptyLootingBag(client, appearance);
 	} },
 
-	// equip item (as a weapon)
-	{'EQUI', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item as a weapon. Custom items append stable_id at byte 28.
+    {'EQUI', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUI packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUI",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -9633,11 +13365,40 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	}},
 
-	// equip item (as a shield)
-	{'EQUS', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item as a shield. Custom items append stable_id at byte 28.
+    {'EQUS', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUS packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUS",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -9664,7 +13425,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// consume torch item shield slot
 	{ 'COOK', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -9706,11 +13474,40 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 	} },
 
-	// equip item (any other slot)
-	{'EQUM', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+    // Equip item in another slot. Custom items append stable_id at byte 28.
+    {'EQUM', [](){
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed EQUM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+        const int client =
+            decodeGameplayPacketPlayerIndex(net_packet->data[25]);
+        if ( client < 0 || !stats[client] )
+        {
+            return;
+        }
+
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "EQUM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+
+        auto item = newItem(
+            static_cast<ItemType>(resolvedType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -9774,9 +13571,34 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// update appearance of item
 	{ 'EQUA', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
+        if ( net_packet->len < 28 )
+        {
+            printlog("[NET]: refusing short EQUA packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            28,
+            "EQUA",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 			SDLNet_Read32(&net_packet->data[12]),
 			SDLNet_Read32(&net_packet->data[16]),
@@ -9846,74 +13668,216 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	} },
 
 	// update itemType of item
-	{ 'EQUT', []() {
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
-			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
-			SDLNet_Read32(&net_packet->data[12]),
-			SDLNet_Read32(&net_packet->data[16]),
-			SDLNet_Read32(&net_packet->data[20]),
-			net_packet->data[24],
-			nullptr);
+    { 'EQUT', []() {
+        if ( net_packet->len < 31 )
+        {
+            printlog("[NET]: refusing short EQUT packet.\n");
+            return;
+        }
+        const int client =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[25]
+            );
+        if ( client < 0 )
+        {
+            return;
+        }
 
-		Item* slot = nullptr;
-		ItemType newType = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[27]));
+        int previousType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+        int newType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[27]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( net_packet->len > 31 )
+        {
+            if ( net_packet->len < 37 )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT payload.\n");
+                return;
+            }
+            const bool oldIsCustom = net_packet->data[31] != 0;
+            const bool newIsCustom = net_packet->data[32] != 0;
+            const int oldLength =
+                static_cast<int>(SDLNet_Read16(&net_packet->data[33]));
+            int offset = 35;
+            if ( oldLength < 0
+                || offset + oldLength + 2 > net_packet->len )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT old stable id.\n");
+                return;
+            }
+            std::string oldStableId;
+            if ( oldLength > 0 )
+            {
+                oldStableId.assign(
+                    reinterpret_cast<const char*>(&net_packet->data[offset]),
+                    oldLength
+                );
+            }
+            offset += oldLength;
+            const int newLength =
+                static_cast<int>(SDLNet_Read16(&net_packet->data[offset]));
+            offset += 2;
+            if ( newLength < 0
+                || offset + newLength != net_packet->len )
+            {
+                printlog("[S.A.M] Refusing malformed EQUT new stable id.\n");
+                return;
+            }
+            std::string newStableId;
+            if ( newLength > 0 )
+            {
+                newStableId.assign(
+                    reinterpret_cast<const char*>(&net_packet->data[offset]),
+                    newLength
+                );
+            }
+            if ( oldIsCustom )
+            {
+                previousType =
+                    SAMItemRegistryFoundation::runtimeIdForStableId(
+                        oldStableId
+                    );
+                if ( previousType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(previousType) )
+                {
+                    printlog(
+                        "[S.A.M] EQUT old item unavailable locally: [%s].\n",
+                        oldStableId.c_str()
+                    );
+                    return;
+                }
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(previousType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only EQUT old runtime %d.\n",
+                    previousType
+                );
+                return;
+            }
+            if ( newIsCustom )
+            {
+                newType =
+                    SAMItemRegistryFoundation::runtimeIdForStableId(
+                        newStableId
+                    );
+                if ( newType < 0
+                    || !SAMItemRegistryFoundation::
+                        isRegisteredRuntimeItemId(newType) )
+                {
+                    printlog(
+                        "[S.A.M] EQUT new item unavailable locally: [%s].\n",
+                        newStableId.c_str()
+                    );
+                    return;
+                }
+            }
+            else if ( SAMItemRegistryFoundation::
+                isSAMRuntimeItemId(newType) )
+            {
+                printlog(
+                    "[S.A.M] Refusing numeric-only EQUT new runtime %d.\n",
+                    newType
+                );
+                return;
+            }
+        }
+        else if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(previousType)
+            || SAMItemRegistryFoundation::isSAMRuntimeItemId(newType) )
+        {
+            printlog("[S.A.M] Refusing numeric-only EQUT custom item.\n");
+            return;
+        }
+#endif
 
-		switch ( net_packet->data[26] )
-		{
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_WEAPON:
-				slot = stats[client]->weapon;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD:
-				slot = stats[client]->shield;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_MASK:
-				slot = stats[client]->mask;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_HELM:
-				slot = stats[client]->helmet;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_GLOVES:
-				slot = stats[client]->gloves;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BOOTS:
-				slot = stats[client]->shoes;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BREASTPLATE:
-				slot = stats[client]->breastplate;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_CLOAK:
-				slot = stats[client]->cloak;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_AMULET:
-				slot = stats[client]->amulet;
-				break;
-			case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_RING:
-				slot = stats[client]->ring;
-				break;
-			default:
-				break;
-		}
+        auto item = newItem(
+            static_cast<ItemType>(previousType),
+            static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
+            SDLNet_Read32(&net_packet->data[12]),
+            SDLNet_Read32(&net_packet->data[16]),
+            SDLNet_Read32(&net_packet->data[20]),
+            net_packet->data[24],
+            nullptr);
 
-		if ( slot )
-		{
-			if ( !itemCompare(item, slot, false, false) )
-			{
-				slot->type = newType;
-				slot->appearance = item->appearance;
-			}
-		}
+        Item* slot = nullptr;
+        switch ( net_packet->data[26] )
+        {
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_WEAPON:
+                slot = stats[client]->weapon;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD:
+                slot = stats[client]->shield;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_MASK:
+                slot = stats[client]->mask;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_HELM:
+                slot = stats[client]->helmet;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_GLOVES:
+                slot = stats[client]->gloves;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BOOTS:
+                slot = stats[client]->shoes;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_BREASTPLATE:
+                slot = stats[client]->breastplate;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_CLOAK:
+                slot = stats[client]->cloak;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_AMULET:
+                slot = stats[client]->amulet;
+                break;
+            case ItemEquippableSlot::EQUIPPABLE_IN_SLOT_RING:
+                slot = stats[client]->ring;
+                break;
+            default:
+                break;
+        }
 
-		free(item);
-		item = nullptr;
-	} },
+        if ( slot && !itemCompare(item, slot, false, false) )
+        {
+            slot->type = static_cast<ItemType>(newType);
+            slot->appearance = item->appearance;
+        }
+
+        free(item);
+    } },
 
 	// apply item to entity
 	{'APIT', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
+        if ( net_packet->len < 30 )
+        {
+            printlog("[NET]: refusing short APIT packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            30,
+            "APIT",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -9934,9 +13898,34 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// apply item to entity
 	{'APIW', [](){
-		const int client = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
-		auto item = newItem(
-		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+		const int client =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( client < 0 )
+		{
+			return;
+		}
+        if ( net_packet->len < 30 )
+        {
+            printlog("[NET]: refusing short APIW packet.\n");
+            return;
+        }
+        int resolvedItemType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[4]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedItemType,
+            30,
+            "APIW",
+            resolvedItemType
+        ) )
+        {
+            return;
+        }
+#endif
+        auto item = newItem(
+            static_cast<ItemType>(resolvedItemType),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 		    SDLNet_Read32(&net_packet->data[12]),
 		    SDLNet_Read32(&net_packet->data[16]),
@@ -9951,7 +13940,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// attacking
 	{'ATAK', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if (players[player] && players[player]->entity)
 		{
 			ItemType type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[7]));
@@ -9994,7 +13990,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Multiplayer chest code (server).
 	{'CCLS', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if (openedChest[player])
 		{
 			openedChest[player]->closeChestServer();
@@ -10003,7 +14006,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Multiplayer duck code (server).
 	{ 'DUCK', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		const int duck = net_packet->data[5];
 		players[player]->mechanics.pendingDucks.push_back(
 			std::make_pair(duck, ticks + (3 + (local_rng.rand() % 30)) * TICKS_PER_SECOND));
@@ -10011,7 +14021,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client failed some alchemy.
 	{'BOOM', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( players[player] && players[player]->entity )
 		{
 			bool protection = false;
@@ -10040,7 +14057,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client cast a spell.
 	{'SPEL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if ( players[player] && players[player]->entity )
@@ -10068,7 +14092,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client ghost cast a spell.
 	{'GHSP', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
 		if ( players[player] && players[player]->ghost.isActive() )
@@ -10079,14 +14110,50 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client added an item to the chest.
 	{'CITM', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed client CITM packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( net_packet->data[27] == 0 && !openedChest[player])
 		{
 			return;
 		}
 
-		Item* newitem = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		newitem->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "CITM",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* newitem = newItem(
+            static_cast<ItemType>(resolvedType),
+            BROKEN,
+            0,
+            1,
+            0,
+            true,
+            nullptr
+        );
 		newitem->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		newitem->beatitude = SDLNet_Read32(&net_packet->data[13]);
 		newitem->count = SDLNet_Read32(&net_packet->data[17]);
@@ -10113,14 +14180,50 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//The client removed an item from the chest.
 	{'RCIT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+        if ( net_packet->len < 28 )
+        {
+            printlog(
+                "[NET]: ignoring malformed RCIT packet with length %d.\n",
+                net_packet->len
+            );
+            return;
+        }
+
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( net_packet->data[27] == 0 && !openedChest[player])
 		{
 			return;
 		}
 
-		Item* item = newItem(WOODEN_SHIELD, BROKEN, 0, 1, 0, true, nullptr);
-		item->type = static_cast<ItemType>(SDLNet_Read32(&net_packet->data[5]));
+        int resolvedType =
+            static_cast<int>(SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !resolveSAMItemTypeFromPacket(
+            resolvedType,
+            28,
+            "RCIT",
+            resolvedType
+        ) )
+        {
+            return;
+        }
+#endif
+        Item* item = newItem(
+            static_cast<ItemType>(resolvedType),
+            BROKEN,
+            0,
+            1,
+            0,
+            true,
+            nullptr
+        );
 		item->status = static_cast<Status>(SDLNet_Read32(&net_packet->data[9]));
 		item->beatitude = SDLNet_Read32(&net_packet->data[13]);
 		item->count = SDLNet_Read32(&net_packet->data[17]);
@@ -10141,7 +14244,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	// the client removed a curse on his equipment
 	{'RCUR', [](){
 	    Item* item;
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		switch ( net_packet->data[5] )
 		{
 			case 0:
@@ -10186,7 +14296,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client repaired equipment or otherwise modified status of equipment.
 	{'REPA', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		Item* equipment = nullptr;
 
 		switch ( net_packet->data[5] )
@@ -10239,7 +14356,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client repaired tinkering bots
 	{ 'REPT', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		Item* equipment = nullptr;
 
 		switch ( net_packet->data[5] )
@@ -10300,7 +14424,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client changed beatitude of equipment.
 	{'BEAT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		Item* equipment = nullptr;
 		//messagePlayer(0, "client: %d, armornum: %d, status %d", player, net_packet->data[5], net_packet->data[6]);
 		switch ( net_packet->data[5] )
@@ -10348,7 +14479,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client dropped gold
 	{'DGLD', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		int amount = SDLNet_Read32(&net_packet->data[5]);
 
 		if ( stats[player]->GOLD < 0 )
@@ -10388,7 +14526,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client played a sound
 	{'EMOT', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated EMOT packet"
+			);
+			return;
+		}
+
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int sfx = SDLNet_Read16(&net_packet->data[5]);
 		const int vol = std::min(92, (int)(net_packet->data[7]));
 		if ( players[player] && players[player]->entity )
@@ -10397,7 +14550,10 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			for ( int c = 1; c < MAXPLAYERS; ++c )
 			{
 				// send to all other players
-				if ( c != player && !client_disconnected[c] && !players[c]->isLocalPlayer() )
+				if ( c != player
+					&& !client_disconnected[c]
+					&& players[c]
+					&& !players[c]->isLocalPlayer() )
 				{
 					strcpy((char*)net_packet->data, "SNEL");
 					SDLNet_Write16(sfx, &net_packet->data[4]);
@@ -10414,7 +14570,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client asked for a level up
 	{'CLVL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		if ( players[player] && players[player]->entity )
 		{
 			players[player]->entity->getStats()->EXP += 100;
@@ -10423,7 +14586,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client asked for a level up
 	{'CSKL', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int skill = net_packet->data[5];
 		if ( player > 0 && player < MAXPLAYERS && players[player] && players[player]->entity )
 		{
@@ -10436,12 +14606,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client sent a minimap ping packet.
 	{'PMAP', [](){
-		MinimapPing newPing(ticks, net_packet->data[4], 
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player < 0 )
+		{
+			return;
+		}
+		MinimapPing newPing(ticks, player,
 			net_packet->data[5], 
 			net_packet->data[6],
 			net_packet->data[8] ? true : false,
 			(MinimapPing::PingType)net_packet->data[7]);
-		sendMinimapPing(net_packet->data[4], newPing.x, newPing.y, newPing.pingType); // relay self and to other clients.
+		sendMinimapPing(player, newPing.x, newPing.y, newPing.pingType); // relay self and to other clients.
 	}},
 
 	// the client sent a gameplayer preferences update
@@ -10451,7 +14631,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	//Remove vampiric aura
 	{'VAMP', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int spellID = SDLNet_Read32(&net_packet->data[5]);
 		if ( players[player] && players[player]->entity && stats[player] )
 		{
@@ -10473,7 +14660,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client sent a monster command.
 	{'ALLY', [](){
-	    const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[4]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		const int allyCmd = net_packet->data[5];
 		const Uint32 uid = SDLNet_Read32(&net_packet->data[8]);
 		//messagePlayer(0, " received %d, %d, %d, %d, %d", player, allyCmd, net_packet->data[6], net_packet->data[7], uid);
@@ -10495,8 +14689,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{'IDIE', [](){
-		const int playerDie = net_packet->data[4];
-		if ( playerDie >= 1 && playerDie < MAXPLAYERS )
+		if ( net_packet->len < 5 )
+		{
+			return;
+		}
+		const int playerDie =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( playerDie >= 1 )
 		{
 			if ( players[playerDie] && players[playerDie]->entity )
 			{
@@ -10507,7 +14706,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// use automaton food item
 	{'FODA', [](){
-	    const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+	    const int player =
+	    	decodeGameplayPacketPlayerIndex(
+	    		net_packet->data[25]
+	    	);
+	    if ( player < 0 )
+	    {
+	    	return;
+	    }
 		auto item = newItem(
 		    static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 		    static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -10521,7 +14727,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// adorcise item
 	{ 'ADOR', []() {
-		const int player = std::min(net_packet->data[25], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[25]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		auto item = newItem(
 			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -10595,7 +14808,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// broke a mirror
 	{ 'MIRR', []() {
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		if ( players[player]->entity )
 		{
 			if ( players[player]->entity->setEffect(EFF_BLEEDING, true, TICKS_PER_SECOND * 15, true) )
@@ -10609,7 +14829,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	{ 'CMPD', []() {
 		// client ack received the packet
-		const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
 		const Uint8 clientSequence = net_packet->data[5];
 
 		auto find = Compendium_t::Events_t::clientDataStrings[player].find(clientSequence);
@@ -10672,8 +14899,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed assist shrine
 	{ 'ASCL', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* shrine = uidToEntity(uid) )
@@ -10689,8 +14921,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed cauldron
 	{ 'CAUC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
@@ -10706,8 +14943,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed workbench
 	{ 'WRKC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* workbench = uidToEntity(uid) )
@@ -10723,8 +14965,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed mailbox
 	{ 'MBXC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* mailbox = uidToEntity(uid) )
@@ -10783,8 +15030,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	} },
 
 	{ 'FXGD',[]() {
-		int player = net_packet->data[4];
-		if ( player >= 1 && player < MAXPLAYERS && !players[player]->isLocalPlayer() )
+		if ( !net_packet || net_packet->len < 15 )
+		{
+			printlog(
+				"[NET]: ignoring truncated FXGD packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 1
+			&& players[player]
+			&& stats[player]
+			&& !players[player]->isLocalPlayer() )
 		{
 			Sint32 goldSpent = (Sint32)SDLNet_Read32(&net_packet->data[5]);
 			stats[player]->GOLD -= goldSpent;
@@ -10828,34 +15089,79 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{ 'SANM',[]() { // player spellcast animation
-		int player = net_packet->data[4];
-		int pose = net_packet->data[5];
-		int charge = SDLNet_Read16(&net_packet->data[6]);
-		spellcastAnimationUpdateReceive(player, pose, charge);
+		if ( !net_packet || net_packet->len < 8 )
+		{
+			printlog(
+				"[NET]: ignoring truncated SANM packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player < 0 )
+		{
+			return;
+		}
+
+		const int pose = net_packet->data[5];
+		const int charge =
+			SDLNet_Read16(&net_packet->data[6]);
+		spellcastAnimationUpdateReceive(
+			player,
+			pose,
+			charge
+		);
 	} },
 
 	{ 'OVRC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 1 && player < MAXPLAYERS && !players[player]->isLocalPlayer() )
+		if ( !net_packet || net_packet->len < 6 )
 		{
-			if ( players[player] && players[player]->entity && stats[player] )
-			{
-				cast_animation[clientnum].overcharge_init = net_packet->data[5];
-			}
+			printlog(
+				"[NET]: ignoring truncated OVRC packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 1
+			&& players[player]
+			&& players[player]->entity
+			&& stats[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			cast_animation[player].overcharge_init =
+				net_packet->data[5];
 		}
 	} },
 
 	{ 'SPLV',[]() { // player spell level proc
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 15 )
 		{
-			if ( !players[player]->isLocalPlayer() )
+			printlog(
+				"[NET]: ignoring truncated SPLV packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 0
+			&& players[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			if ( players[player]->entity )
 			{
-				if ( players[player]->entity )
-				{
-					int spellID = SDLNet_Read16(&net_packet->data[5]);
-					Uint32 eventType = SDLNet_Read32(&net_packet->data[7]);
-					int eventValue = SDLNet_Read32(&net_packet->data[11]);
+				int spellID = SDLNet_Read16(&net_packet->data[5]);
+				Uint32 eventType = SDLNet_Read32(&net_packet->data[7]);
+				int eventValue = SDLNet_Read32(&net_packet->data[11]);
 					if ( spellID == SPELL_DETECT_FOOD )
 					{
 						players[player]->mechanics.updateSustainedSpellEvent(SPELL_DETECT_FOOD, eventValue * 10, 1.0, nullptr);
@@ -10863,7 +15169,6 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 					else
 					{
 						magicOnSpellCastEvent(players[player]->entity, players[player]->entity, nullptr, spellID, eventType, eventValue);
-					}
 				}
 			}
 		}
@@ -10871,18 +15176,28 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// update breakable counter
 	{ 'GBRK', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( !net_packet || net_packet->len < 6 )
 		{
-			if ( !players[player]->isLocalPlayer() )
+			printlog(
+				"[NET]: ignoring truncated GBRK packet"
+			);
+			return;
+		}
+
+		const int player =
+			decodeGameplayPacketPlayerIndex(
+				net_packet->data[4]
+			);
+		if ( player >= 0
+			&& players[player]
+			&& !players[player]->isLocalPlayer() )
+		{
+			if ( players[player]->entity )
 			{
-				if ( players[player]->entity )
-				{
-					int eventType = net_packet->data[5];
+				int eventType = net_packet->data[5];
 					if ( eventType == (int)Player::PlayerMechanics_t::BreakableEvent::GBREAK_DEGRADE )
 					{
 						players[player]->mechanics.incrementBreakableCounter(Player::PlayerMechanics_t::BreakableEvent::GBREAK_DEGRADE, nullptr);
-					}
 				}
 			}
 		}
@@ -10891,6 +15206,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 void serverHandlePacket()
 {
+    if ( !net_packet || !net_packet->data || net_packet->len < 4 )
+    {
+        printlog("[NET]: ignored truncated server packet");
+        return;
+    }
 	if (handleSafePacket())
 	{
 		return;
@@ -10928,6 +15248,10 @@ void serverHandlePacket()
 
 void serverHandleMessages(Uint32 framerateBreakInterval)
 {
+	const WorldInstanceIdentity* initialIdentity =
+		worldState.activeIdentity();
+	const std::string initialInstanceKey =
+		initialIdentity ? initialIdentity->key() : std::string{};
 #ifdef STEAMWORKS
 	if (!directConnect && !net_handler)
 	{
@@ -10973,6 +15297,7 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 
 		while ( packet = net_handler->getGamePacket() )
 		{
+			g_currentPacketSenderHostIndex = packet->senderHostIndex();
 			memcpy(net_packet->data, packet->data(), packet->len());
 			net_packet->len = packet->len();
 
@@ -10984,6 +15309,7 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 				DebugStats.handlePacketStartLoop = false;
 			}
 			delete packet;
+			g_currentPacketSenderHostIndex = -1;
 			if ( !net_handler )
 			{
 				break;
@@ -11015,6 +15341,51 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 			serverHandlePacket(); //Uses net_packet.
 		}
 	}
+	for (int player = 1; player < MAXPLAYERS; ++player)
+	{
+		const LateJoinSnapshotTransaction::Phase phase =
+			g_lateJoinTransactions[player].phase();
+		if (phase == LateJoinSnapshotTransaction::Phase::Failed)
+		{
+			printlog("[Late Join] Aborting failed transfer for player %d.", player);
+			abortServerLateJoinPlayer(player, 3);
+		}
+		else if ((phase == LateJoinSnapshotTransaction::Phase::AwaitingClient
+				|| phase == LateJoinSnapshotTransaction::Phase::Receiving
+				|| phase == LateJoinSnapshotTransaction::Phase::Complete)
+			&& g_lateJoinLastProgressTick[player] != 0
+			&& ticks - g_lateJoinLastProgressTick[player]
+				> (phase == LateJoinSnapshotTransaction::Phase::AwaitingClient
+					? kLateJoinCharacterSelectionTimeoutTicks
+					: kLateJoinTimeoutTicks))
+		{
+			if (phase == LateJoinSnapshotTransaction::Phase::AwaitingClient)
+			{
+				printlog(
+					"[Late Join] Character selection for player %d timed out after 5 minutes.",
+					player);
+			}
+			else
+			{
+				printlog(
+					"[Late Join] Transfer for player %d timed out after 30 seconds.",
+					player);
+			}
+			abortServerLateJoinPlayer(player, 1);
+		}
+	}
+	if ( !initialInstanceKey.empty()
+		&& worldState.activeIdentity()
+		&& worldState.activeIdentity()->key() != initialInstanceKey )
+	{
+		if ( !worldState.activate(initialInstanceKey) )
+		{
+			printlog(
+				"[NET]: unable to restore active instance '%s' after receiving packets",
+				initialInstanceKey.c_str()
+			);
+		}
+	}
 }
 
 /*-------------------------------------------------------------------------------
@@ -11035,6 +15406,19 @@ bool handleSafePacket()
 	Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
 	if (packetId == 'SAFE')
 	{
+        if ( net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated SAFE packet");
+            return true;
+        }
+        if ( net_packet->data[4] > MAXPLAYERS )
+        {
+            printlog(
+                "[NET]: ignored SAFE packet with invalid sender index %u",
+                static_cast<unsigned>(net_packet->data[4])
+            );
+            return true;
+        }
 		if ( net_packet->data[4] != MAXPLAYERS )
 		{
 			int receivedPacketNum = SDLNet_Read32(&net_packet->data[5]);
@@ -11138,6 +15522,11 @@ bool handleSafePacket()
 	// they got the safe packet
 	else if (packetId == 'GOTP')
 	{
+        if ( net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated GOTP packet");
+            return true;
+        }
 		for ( node = safePacketsSent.first; node != NULL; node = node->next )
 		{
 			packetsend_t* packet = (packetsend_t*)node->element;
@@ -11166,6 +15555,14 @@ void closeNetworkInterfaces()
 	printlog("closing network interfaces...\n");
 
 	receivedclientnum = false;
+	g_clientLateJoinAssembler.reset();
+	g_clientLateJoinBegin = LateJoinProtocol::Begin{};
+	g_clientLateJoinSpawnAuthorized = false;
+	for (int c = 1; c < MAXPLAYERS; ++c)
+	{
+		resetServerLateJoinPlayer(c);
+		g_lateJoinReturningPlayer[c] = false;
+	}
 
 	if (net_handler)
 	{
@@ -11226,10 +15623,11 @@ void closeNetworkInterfaces()
 
 /* ***** MULTITHREADED STEAM PACKET HANDLING ***** */
 
-SteamPacketWrapper::SteamPacketWrapper(Uint8* data, int len)
+SteamPacketWrapper::SteamPacketWrapper(Uint8* data, int len, int senderHostIndex)
 {
 	_data = data;
 	_len = len;
+	_senderHostIndex = senderHostIndex;
 }
 
 SteamPacketWrapper::~SteamPacketWrapper()
@@ -11245,6 +15643,11 @@ Uint8*& SteamPacketWrapper::data()
 int& SteamPacketWrapper::len()
 {
 	return _len;
+}
+
+int SteamPacketWrapper::senderHostIndex() const
+{
+	return _senderHostIndex;
 }
 
 NetHandler::NetHandler()
@@ -11413,7 +15816,11 @@ int EOSPacketThread(void* data)
 			{
 				//Push packet into queue.
 				//TODO: Use lock-free queues?
-				packets.push(new SteamPacketWrapper(packet, packetlen));
+				packets.push(new SteamPacketWrapper(
+					packet,
+					packetlen,
+					EOS.P2PConnectionInfo.getIndexFromPeerId(remoteId)
+				));
 				packet = nullptr;
 			}
 			if ( packet )
@@ -11474,11 +15881,26 @@ int steamPacketThread(void* data)
 			packet = static_cast<Uint8* >(malloc(packetlen));
 			if (SteamNetworking()->ReadP2PPacket(packet, packetlen, &bytes_read, &steam_id_remote, 0))
 			{
-				if (packetlen > sizeof(uint32_t) && mySteamID.ConvertToUint64() != steam_id_remote.ConvertToUint64() && net_packet->data[0])
+				if (packetlen > sizeof(uint32_t) && mySteamID.ConvertToUint64() != steam_id_remote.ConvertToUint64() && packet[0])
 				{
 					//Push packet into queue.
 					//TODO: Use lock-free queues?
-					packets.push(new SteamPacketWrapper(packet, packetlen));
+					int senderHostIndex = -1;
+					for ( int host = 0; host < MAXPLAYERS; ++host )
+					{
+						if ( steamIDRemote[host]
+							&& static_cast<CSteamID*>(steamIDRemote[host])->ConvertToUint64()
+								== steam_id_remote.ConvertToUint64() )
+						{
+							senderHostIndex = host;
+							break;
+						}
+					}
+					packets.push(new SteamPacketWrapper(
+						packet,
+						packetlen,
+						senderHostIndex
+					));
 					packet = nullptr;
 				}
 			}
@@ -11593,14 +16015,27 @@ void handleScanPacket() {
         Uint32 offset = 8 + hostname_len;
         int numplayers = 0;
         for (int c = 0; c < MAXPLAYERS; ++c) {
-            if (!client_disconnected[c]) {
+            if (!LanDiscovery::advertisedDisconnected(
+					headless, c, client_disconnected[c])) {
                 ++numplayers;
             }
         }
         SDLNet_Write32(numplayers, &net_packet->data[offset]);
-        net_packet->data[offset + 4] = intro ? 0 : 1;
+        net_packet->data[offset + 4] = LanDiscovery::advertisedLocked(
+			!intro,
+			headless && headlessLateJoinRequested);
         SDLNet_Write32(svFlags, &net_packet->data[offset + 5]);
         net_packet->len = offset + 9;
+		if (headless)
+		{
+			const std::size_t extensionBytes = LanDiscovery::encodeExtension(
+				&net_packet->data[net_packet->len],
+				NET_PACKET_SIZE - static_cast<std::size_t>(net_packet->len),
+				headlessServerPort,
+				true,
+				headlessLateJoinRequested);
+			net_packet->len += static_cast<int>(extensionBytes);
+		}
         sendPacket(net_sock, -1, net_packet, 0);
     }
 }
@@ -11626,8 +16061,19 @@ void PingNetworkStatus_t::reset()
 
 void PingNetworkStatus_t::receive()
 {
-	int player = net_packet->data[4];
-	if ( player < 0 || player >= MAXPLAYERS )
+	if ( !net_packet || net_packet->len < 9 )
+	{
+		printlog(
+			"[NET]: ignoring truncated PNGR packet"
+		);
+		return;
+	}
+
+	const int player =
+		decodeGameplayPacketPlayerIndex(
+			net_packet->data[4]
+		);
+	if ( player < 0 )
 	{
 		return;
 	}
@@ -11662,8 +16108,19 @@ void PingNetworkStatus_t::receive()
 
 void PingNetworkStatus_t::respond()
 {
-	int player = net_packet->data[4];
-	if ( player < 0 || player >= MAXPLAYERS )
+	if ( !net_packet || net_packet->len < 9 )
+	{
+		printlog(
+			"[NET]: ignoring truncated PNGU packet"
+		);
+		return;
+	}
+
+	const int player =
+		decodeGameplayPacketPlayerIndex(
+			net_packet->data[4]
+		);
+	if ( player < 0 )
 	{
 		return;
 	}
@@ -11806,7 +16263,7 @@ void PingNetworkStatus_t::update()
 		if ( client_disconnected[i] )
 		{
 			p.clear();
-			return;
+			continue;
 		}
 		Uint32 minSequence = 0;
 		for ( auto& keypairs : p.pings )

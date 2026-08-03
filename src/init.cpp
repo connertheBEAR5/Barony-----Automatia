@@ -83,6 +83,7 @@ bool mountBaseDataFolders() {
 		{
 		    PHYSFS_mkdir("books");
 			PHYSFS_mkdir("savegames");
+			PHYSFS_mkdir("savegames/host");
 			PHYSFS_mkdir("scores");
 			PHYSFS_mkdir("scores/processing");
 			//TODO: Will these need special NINTENDO handling?
@@ -393,11 +394,14 @@ int initApp(char const * const title, int fullscreen)
 	SDL_SetEventFilter(event_filter, nullptr);
 #endif
 
+    if ( !headless )
+    {
 #ifdef NINTENDO
-	SDL_GameControllerAddMappingsFromFile(GAME_CONTROLLER_DB_FILEPATH);
+        SDL_GameControllerAddMappingsFromFile(GAME_CONTROLLER_DB_FILEPATH);
 #else
-	SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+        SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
 #endif
+    }
 
 	//printlog("initializing SDL_mixer. rate: %d format: %d channels: %d buffers: %d\n", audio_rate, audio_format, audio_channels, audio_buffers);
 	/*if( Mix_OpenAudio(audio_rate, audio_format, audio_channels, audio_buffers) ) {
@@ -407,7 +411,10 @@ int initApp(char const * const title, int fullscreen)
 	}*/
 
 #ifndef EDITOR
-	initSoundEngine(); //Yes, this silently ignores the return value...(which is not good, but not important either)
+    if ( !headless )
+    {
+        initSoundEngine(); //Yes, this silently ignores the return value...(which is not good, but not important either)
+    }
 #endif
 
 	printlog("initializing SDL_net...\n");
@@ -542,10 +549,10 @@ int initApp(char const * const title, int fullscreen)
 		File* fp;
 		updateLoadingScreen(10);
 #ifndef EDITOR
-		if ( !loadMusic() )
-		{
-			printlog("WARN: loadMusic() from initApp() failed!");
-		}
+        if ( !headless && !loadMusic() )
+        {
+            printlog("WARN: loadMusic() from initApp() failed!");
+        }
 #endif
 		loading_music_done = true;
 	});
@@ -1600,6 +1607,10 @@ bool initVideo()
 	{
         Uint32 flags = 0;
         flags |= SDL_WINDOW_OPENGL;
+        if ( headless )
+        {
+            flags |= SDL_WINDOW_HIDDEN;
+        }
         
 #ifndef EDITOR
         flags |= SDL_WINDOW_ALLOW_HIGHDPI;
@@ -1614,10 +1625,10 @@ bool initVideo()
 #ifdef NINTENDO
     	flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 #else
-        if (fullscreen) {
+        if ( !headless && fullscreen ) {
             flags |= SDL_WINDOW_FULLSCREEN;
         }
-        if (borderless) {
+        if ( !headless && borderless ) {
             flags |= SDL_WINDOW_BORDERLESS;
         }
 #endif

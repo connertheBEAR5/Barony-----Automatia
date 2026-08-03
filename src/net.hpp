@@ -11,7 +11,10 @@
 
 #pragma once
 
+#include "late_join_state.hpp"
+
 #include "game.hpp"
+#include <cstddef>
 #include <queue>
 
 #define DEFAULT_PORT 57165
@@ -27,6 +30,7 @@ extern list_t lobbyChatboxMessages;
 int power(int a, int b);
 int sendPacket(UDPsocket sock, int channel, UDPpacket* packet, int hostnum, bool tryReliable = false);
 int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum);
+int resendPacketSafe(packetsend_t* packet);
 bool messagePlayer(int player, Uint32 type, char const * const message, ...);
 bool messageLocalPlayers(Uint32 type, char const * const message, ...);
 bool messagePlayerColor(int player, Uint32 type, Uint32 color, char const * const message, ...);
@@ -66,15 +70,26 @@ enum NetworkingLobbyJoinRequestResult : int
 	NET_LOBBY_JOIN_DIRECTIP_FAILURE,
 	NET_LOBBY_JOIN_DIRECTIP_SUCCESS
 };
-NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool lockedSlots[4]);
+NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(int& outResult, bool lockedSlots[MAXPLAYERS], bool& outUseChunkedHelo);
 Entity* receiveEntity(Entity* entity);
 void clientActions(Entity* entity);
 void clientHandleMessages(Uint32 framerateBreakInterval);
+void clientHandlePacket();
 void serverHandleMessages(Uint32 framerateBreakInterval);
 bool handleSafePacket();
 bool applyPendingTunnelSpawn();
 void pollNetworkForShutdown();
 void closeNetworkInterfaces();
+void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision);
+bool clientAcceptLateJoinCatchupBegin(const Uint8* data, std::size_t size);
+bool clientAcceptLateJoinCatchupChunk(const Uint8* data, std::size_t size);
+bool clientAcceptLateJoinCatchupComplete(const Uint8* data, std::size_t size);
+bool clientDeferLateJoinMapPacket(const Uint8* data, std::size_t size);
+void clientLateJoinMapLoaded();
+void clientResetLateJoinPacketDeferral();
+void clientCheckLateJoinTimeout();
+void clientNoteLateJoinProgress();
+bool clientLateJoinPacketDeferralActive();
 
 // server/game flags
 extern Uint32 svFlags;
@@ -97,13 +112,15 @@ class SteamPacketWrapper
 {
 	Uint8* _data;
 	int _len;
+	int _senderHostIndex;
 	//TODO: Encapsulate CSteam ID?
 public:
-	SteamPacketWrapper(Uint8* data, int len);
+	SteamPacketWrapper(Uint8* data, int len, int senderHostIndex = -1);
 	~SteamPacketWrapper(); //NOTE: DOES free _data. Don't keep it somewhere else or segfaults will ensue. If you're lucky.
 
 	Uint8*& data();
 	int& len();
+	int senderHostIndex() const;
 };
 
 class NetHandler
@@ -185,3 +202,22 @@ struct PingNetworkStatus_t
 	static void reset();
 };
 extern PingNetworkStatus_t PingNetworkStatus[MAXPLAYERS];
+bool serverPlayerCanReceiveGameplayUpdates(int playerIndex);
+bool serverPlayerCanReceiveActiveMapUpdates(int playerIndex);
+bool beginServerLateJoinSnapshot(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 chunkCount,
+    Uint32 totalBytes
+);
+LateJoinChunkResult acceptServerLateJoinSnapshotChunk(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 sequence,
+    Uint32 payloadBytes,
+    Uint32 payloadChecksum
+);
+bool authorizeServerLateJoinPlayer(int playerIndex);
+void resetServerLateJoinPlayer(int playerIndex);

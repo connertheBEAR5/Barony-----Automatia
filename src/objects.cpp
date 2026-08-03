@@ -196,10 +196,13 @@ void lightDeconstructor(void* data)
 					auto& destination =
 						lightmaps[light->index][doff];
 
-					destination.x -= source.x;
-					destination.y -= source.y;
-					destination.z -= source.z;
-					destination.w -= source.w;
+					// A lightmap can be rebuilt independently of its entity list
+					// during a late map activation. Never let removal of a stale
+					// light field drive overlapping live illumination negative.
+					destination.x = std::max(0.f, destination.x - source.x);
+					destination.y = std::max(0.f, destination.y - source.y);
+					destination.z = std::max(0.f, destination.z - source.z);
+					destination.w = std::max(0.f, destination.w - source.w);
 				}
 				else
 				{
@@ -210,10 +213,10 @@ void lightDeconstructor(void* data)
 						auto& destination =
 							lightmaps[player][doff];
 
-						destination.x -= source.x;
-						destination.y -= source.y;
-						destination.z -= source.z;
-						destination.w -= source.w;
+						destination.x = std::max(0.f, destination.x - source.x);
+						destination.y = std::max(0.f, destination.y - source.y);
+						destination.z = std::max(0.f, destination.z - source.z);
+						destination.w = std::max(0.f, destination.w - source.w);
 					}
 				}
 			}

@@ -28,6 +28,9 @@
 #include "draw.hpp"
 #include "mod_tools.hpp"
 #include "classdescriptions.hpp"
+#include "player_slot_map.hpp"
+#include "status_effect_owner_encoding.hpp"
+#include "world_packet_scope.hpp"
 #include "ui/MainMenu.hpp"
 #include "interface/consolecommand.hpp"
 #ifdef USE_PLAYFAB
@@ -1531,6 +1534,28 @@ void Player::Ghost_t::handleActions()
 					net_packet->address.host = net_server.host;
 					net_packet->address.port = net_server.port;
 					net_packet->len = 9;
+					if (!memcmp(net_packet->data, "CKIR", 4)
+						&& selectedEntity[player.playernum]->behavior
+							== &actCustomPortal)
+					{
+						// Non-authoritative fixture hint. The server still resolves
+						// the portal in this player's active map and validates range.
+						net_packet->data[9] = 0xA7;
+						net_packet->data[10] = 1;
+						SDLNet_Write16(static_cast<Sint16>(
+							selectedEntity[player.playernum]->x * 32),
+							&net_packet->data[11]);
+						SDLNet_Write16(static_cast<Sint16>(
+							selectedEntity[player.playernum]->y * 32),
+							&net_packet->data[13]);
+						SDLNet_Write16(static_cast<Sint16>(
+							selectedEntity[player.playernum]->z * 32),
+							&net_packet->data[15]);
+						SDLNet_Write16(static_cast<Sint16>(
+							selectedEntity[player.playernum]->sprite),
+							&net_packet->data[17]);
+						net_packet->len = 19;
+					}
 					sendPacketSafe(net_sock, -1, net_packet, 0);
 				}
 			}
@@ -2124,29 +2149,54 @@ Uint32 Player::Ghost_t::cooldownTeleportDelay = TICKS_PER_SECOND * 3;
 
 int Player::Ghost_t::getSpriteForPlayer(const int player)
 {
-	if ( !colorblind_lobby )
+	static const int normalPrimary[] = {
+		GHOST_MODEL_P1,
+		GHOST_MODEL_P2,
+		GHOST_MODEL_P3,
+		GHOST_MODEL_P4,
+		GHOST_MODEL_PX
+	};
+	static const int normalCycle[] = {
+		GHOST_MODEL_P2,
+		GHOST_MODEL_P3,
+		GHOST_MODEL_P4
+	};
+	static const int colorblindPrimary[] = {
+		GHOST_MODEL_P3,
+		GHOST_MODEL_P4,
+		GHOST_MODEL_P2,
+		GHOST_MODEL_PX,
+		GHOST_MODEL_PX
+	};
+	static const int colorblindCycle[] = {
+		GHOST_MODEL_P3,
+		GHOST_MODEL_P4,
+		GHOST_MODEL_PX
+	};
+
+	static const PlayerSlotLookup<int, MAXPLAYERS>
+		normalGhostModelByPlayer =
+			buildPlayerSlotLookup<int, MAXPLAYERS>(
+				normalPrimary,
+				normalCycle,
+				GHOST_MODEL_PX
+			);
+	static const PlayerSlotLookup<int, MAXPLAYERS>
+		colorblindGhostModelByPlayer =
+			buildPlayerSlotLookup<int, MAXPLAYERS>(
+				colorblindPrimary,
+				colorblindCycle,
+				GHOST_MODEL_PX
+			);
+
+	if ( player < 0 || player >= MAXPLAYERS )
 	{
-		return ((player < 4) ? (GHOST_MODEL_P1 + player) : GHOST_MODEL_PX);
+		return GHOST_MODEL_PX;
 	}
-	Uint32 index = 4;
-	switch ( player )
-	{
-	case 0:
-		index = 2;
-		break;
-	case 1:
-		index = 3;
-		break;
-	case 2:
-		index = 1;
-		break;
-	case 3:
-		index = 4;
-		break;
-	default:
-		break;
-	}
-	return GHOST_MODEL_P1 + index;
+
+	return colorblind_lobby
+		? colorblindGhostModelByPlayer[player]
+		: normalGhostModelByPlayer[player];
 }
 
 void actDeathGhostLimb(Entity* my)
@@ -10609,6 +10659,26 @@ void actPlayer(Entity* my)
 						net_packet->address.host = net_server.host;
 						net_packet->address.port = net_server.port;
 						net_packet->len = 9;
+						if (!memcmp(net_packet->data, "CKIR", 4)
+							&& selectedEntity[PLAYER_NUM]->behavior
+								== &actCustomPortal)
+						{
+							net_packet->data[9] = 0xA7;
+							net_packet->data[10] = 1;
+							SDLNet_Write16(static_cast<Sint16>(
+								selectedEntity[PLAYER_NUM]->x * 32),
+								&net_packet->data[11]);
+							SDLNet_Write16(static_cast<Sint16>(
+								selectedEntity[PLAYER_NUM]->y * 32),
+								&net_packet->data[13]);
+							SDLNet_Write16(static_cast<Sint16>(
+								selectedEntity[PLAYER_NUM]->z * 32),
+								&net_packet->data[15]);
+							SDLNet_Write16(static_cast<Sint16>(
+								selectedEntity[PLAYER_NUM]->sprite),
+								&net_packet->data[17]);
+							net_packet->len = 19;
+						}
 						sendPacketSafe(net_sock, -1, net_packet, 0);
 					}
 				}
@@ -11841,18 +11911,27 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_FAST) )
 				{
-					for ( int i = 0; i < MAXPLAYERS; ++i )
+					int caster =
+						StatusEffectOwnerEncoding::
+							decodeFastCasterCompat(
+								effectStrength
+							);
+					if ( caster >= 0
+						&& caster < MAXPLAYERS
+						&& players[caster]->entity )
 					{
-						if ( effectStrength & (1 << (i + 1)) && players[i]->entity )
-						{
-							players[i]->mechanics.updateSustainedSpellEvent(SPELL_SPEED, dist, 0.025, nullptr);
-							break;
-						}
+						players[caster]->mechanics.
+							updateSustainedSpellEvent(
+								SPELL_SPEED,
+								dist,
+								0.025,
+								nullptr
+							);
 					}
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_NIMBLENESS) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_NIMBLENESS) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -11863,7 +11942,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_GREATER_MIGHT) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_GREATER_MIGHT) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -11874,7 +11953,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_COUNSEL) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_COUNSEL) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -11885,7 +11964,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_STURDINESS) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_STURDINESS) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -12146,18 +12225,27 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_FAST) )
 				{
-					for ( int i = 0; i < MAXPLAYERS; ++i )
+					int caster =
+						StatusEffectOwnerEncoding::
+							decodeFastCasterCompat(
+								effectStrength
+							);
+					if ( caster >= 0
+						&& caster < MAXPLAYERS
+						&& players[caster]->entity )
 					{
-						if ( effectStrength & (1 << (i + 1)) && players[i]->entity )
-						{
-							players[i]->mechanics.updateSustainedSpellEvent(SPELL_SPEED, dist, 0.025, nullptr);
-							break;
-						}
+						players[caster]->mechanics.
+							updateSustainedSpellEvent(
+								SPELL_SPEED,
+								dist,
+								0.025,
+								nullptr
+							);
 					}
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_NIMBLENESS) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_NIMBLENESS) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -12168,7 +12256,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_GREATER_MIGHT) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_GREATER_MIGHT) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -12179,7 +12267,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_COUNSEL) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_COUNSEL) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -12190,7 +12278,7 @@ void actPlayer(Entity* my)
 				}
 				if ( Uint8 effectStrength = stats[PLAYER_NUM]->getEffectActive(EFF_STURDINESS) )
 				{
-					int caster = ((stats[PLAYER_NUM]->getEffectActive(EFF_STURDINESS) >> 4) & 0xF) - 1;
+					int caster = StatusEffectOwnerEncoding::decodeOwnerNibbleToPlayer(effectStrength);
 					if ( caster >= 0 && caster < MAXPLAYERS )
 					{
 						if ( players[caster]->entity )
@@ -15131,11 +15219,19 @@ void actPlayerLimb(Entity* my)
 		return;
 	}
 
-	if (my->skill[2] < 0 || my->skill[2] >= MAXPLAYERS )
-	{
-		return;
-	}
-	if (players[my->skill[2]] == nullptr || players[my->skill[2]]->entity == nullptr)
+	const int limbPlayer = my->skill[2];
+	Entity* slotHead = limbPlayer >= 0 && limbPlayer < MAXPLAYERS
+		&& players[limbPlayer]
+		? players[limbPlayer]->entity
+		: nullptr;
+	if (!playerLimbMatchesCurrentSlotHead(
+		limbPlayer,
+		MAXPLAYERS,
+		my->parent,
+		slotHead != nullptr,
+		slotHead && slotHead->behavior == &actPlayer,
+		slotHead ? slotHead->skill[2] : -1,
+		slotHead ? slotHead->getUID() : 0))
 	{
 		list_RemoveNode(my->mynode);
 		return;

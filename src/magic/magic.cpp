@@ -16,6 +16,9 @@
 #include "../interface/interface.hpp"
 #include "../engine/audio/sound.hpp"
 #include "../items.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "../sam/sam_item_registry_foundation.hpp"
+#endif
 #include "../net.hpp"
 #include "../player.hpp"
 #include "magic.hpp"
@@ -938,7 +941,35 @@ void spellEffectStealWeapon(Entity& my, spellElement_t& element, Entity* parent,
 							net_packet->address.host = net_clients[player - 1].host;
 							net_packet->address.port = net_clients[player - 1].port;
 							net_packet->len = 26;
-							sendPacketSafe(net_sock, -1, net_packet, player - 1);
+#ifdef SAM_FRAMEWORK_ENABLED
+                                    if ( SAMItemRegistryFoundation::isSAMRuntimeItemId(weapon->type) )
+                                    {
+                                        const std::string& stableId =
+                                            SAMItemRegistryFoundation::stableIdForRuntimeId(weapon->type);
+                                        const int available = NET_PACKET_SIZE - 27;
+                                        if ( !stableId.empty()
+                                            && static_cast<int>(stableId.size()) <= available )
+                                        {
+                                            memcpy(
+                                                &net_packet->data[26],
+                                                stableId.c_str(),
+                                                stableId.size()
+                                            );
+                                            net_packet->data[26 + stableId.size()] = '\0';
+                                            net_packet->len =
+                                                27 + static_cast<int>(stableId.size());
+                                        }
+                                        else
+                                        {
+                                            printlog(
+                                                "[S.A.M] STLA could not serialize custom item runtime %d. "
+                                                "The remote removal update will be rejected safely.\n",
+                                                static_cast<int>(weapon->type)
+                                            );
+                                        }
+                                    }
+#endif
+                            sendPacketSafe(net_sock, -1, net_packet, player - 1);
 						}
 
 						Item** slot = itemSlot(hitstats, weapon);

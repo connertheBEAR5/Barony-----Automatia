@@ -21,6 +21,79 @@
 #include "scores.hpp"
 #include "prng.hpp"
 #include "mod_tools.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
+
+namespace
+{
+    static bool finishShopItemPacketForSend(
+        const Item* item,
+        const int baseLength,
+        const char* packetName
+    )
+    {
+        net_packet->len = baseLength;
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( !item )
+        {
+            return false;
+        }
+
+        const int runtimeType = static_cast<int>(item->type);
+        if ( SAMItemRegistryFoundation::
+            isRegisteredRuntimeItemId(runtimeType) )
+        {
+            const std::string& stableId =
+                SAMItemRegistryFoundation::
+                    stableIdForRuntimeId(runtimeType);
+            if ( stableId.empty() )
+            {
+                printlog(
+                    "[S.A.M] Refusing %s custom item runtime %d: no stable id.\n",
+                    packetName,
+                    runtimeType
+                );
+                return false;
+            }
+
+            const int available = NET_PACKET_SIZE - baseLength - 1;
+            if ( available < 0
+                || static_cast<int>(stableId.size()) > available )
+            {
+                printlog(
+                    "[S.A.M] Refusing %s custom item [%s]: stable id is too long.\n",
+                    packetName,
+                    stableId.c_str()
+                );
+                return false;
+            }
+
+            memcpy(
+                &net_packet->data[baseLength],
+                stableId.c_str(),
+                stableId.size()
+            );
+            net_packet->data[baseLength + stableId.size()] = '\0';
+            net_packet->len =
+                baseLength + 1 + static_cast<int>(stableId.size());
+        }
+        else if ( SAMItemRegistryFoundation::
+            isSAMRuntimeItemId(runtimeType) )
+        {
+            printlog(
+                "[S.A.M] Refusing %s unregistered custom runtime %d.\n",
+                packetName,
+                runtimeType
+            );
+            return false;
+        }
+#endif
+
+        return true;
+    }
+}
 
 list_t* shopInv[MAXPLAYERS] = { nullptr };
 Uint32 shopkeeper[MAXPLAYERS] = { 0 };
@@ -60,9 +133,10 @@ void closeShop(const int player)
 			// inform server that we're done talking to shopkeeper
 			strcpy((char*)net_packet->data, "SHPC");
 			SDLNet_Write32((Uint32)shopkeeper[player], &net_packet->data[4]);
+			net_packet->data[8] = clientnum;
 			net_packet->address.host = net_server.host;
 			net_packet->address.port = net_server.port;
-			net_packet->len = 8;
+			net_packet->len = 9;
 			sendPacketSafe(net_sock, -1, net_packet, 0);
 		}
 	}
@@ -173,10 +247,13 @@ void startTradingServer(Entity* entity, int player)
 			net_packet->data[15] |= ((0xF & item->itemRequireTradingSkillInShop) << 4);
 			net_packet->data[16] = (Sint8)item->x;
 			net_packet->data[17] = (Sint8)item->y;
-			net_packet->address.host = net_clients[player - 1].host;
-			net_packet->address.port = net_clients[player - 1].port;
-			net_packet->len = 18;
-			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+            net_packet->address.host = net_clients[player - 1].host;
+            net_packet->address.port = net_clients[player - 1].port;
+            if ( !finishShopItemPacketForSend(item, 18, "SHPI") )
+            {
+                continue;
+            }
+            sendPacketSafe(net_sock, -1, net_packet, player - 1);
 		}
 	}
 	entity->skill[0] = 4; // talk state
@@ -380,11 +457,14 @@ bool buyItemFromShop(const int player, Item* item, bool& bOutConsumedEntireStack
 			{
 				net_packet->data[28] |= (1 << 4);
 			}
-			net_packet->data[29] = player;
-			net_packet->address.host = net_server.host;
-			net_packet->address.port = net_server.port;
-			net_packet->len = 30;
-			sendPacketSafe(net_sock, -1, net_packet, 0);
+            net_packet->data[29] = player;
+            net_packet->address.host = net_server.host;
+            net_packet->address.port = net_server.port;
+            if ( !finishShopItemPacketForSend(item, 30, "SHPB") )
+            {
+                return false;
+            }
+            sendPacketSafe(net_sock, -1, net_packet, 0);
 		}
 		if ( shopIsMysteriousShopkeeper(entity) )
 		{
@@ -737,11 +817,14 @@ bool sellItemToShop(const int player, Item* item)
 		{
 			net_packet->data[28] = 0;
 		}
-		net_packet->data[29] = player;
-		net_packet->address.host = net_server.host;
-		net_packet->address.port = net_server.port;
-		net_packet->len = 30;
-		sendPacketSafe(net_sock, -1, net_packet, 0);
+        net_packet->data[29] = player;
+        net_packet->address.host = net_server.host;
+        net_packet->address.port = net_server.port;
+        if ( !finishShopItemPacketForSend(item, 30, "SHPS") )
+        {
+            return false;
+        }
+        sendPacketSafe(net_sock, -1, net_packet, 0);
 	}
 	if ( itemTypeIsQuiver(item->type) )
 	{

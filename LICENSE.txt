@@ -1,3 +1,13 @@
+Automatia modifications:
+Copyright (c) 2026 Conner Johnson
+
+## Credits and Licensing
+
+Automatia is an unofficial fork of Barony by Turning Wheel LLC.
+
+It incorporates portions of S.A.M Framework by spider12223 and expanded multiplayer from CrabNicholson-Ba
+
+Automatia is not affiliated with or endorsed by Turning Wheel LLC.
 Barony Open Source License:
 
 This open source release of Barony is licensed under the BSD 2-Clause License:

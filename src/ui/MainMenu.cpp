@@ -10,7 +10,10 @@
 
 #include "../init.hpp"
 #include "../net.hpp"
+#include "../late_join_protocol.hpp"
+#include "../lan_discovery.hpp"
 #include "../player.hpp"
+#include "../world_state.hpp"
 #include "../stat.hpp"
 #include "../menu.hpp"
 #include "../scores.hpp"
@@ -19,6 +22,9 @@
 #include "../draw.hpp"
 #include "../engine/audio/sound.hpp"
 #include "../classdescriptions.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "../sam/sam_class_registry_foundation.hpp"
+#endif
 #include "../lobbies.hpp"
 #include "../interface/consolecommand.hpp"
 #include "../interface/ui.hpp"
@@ -28,7 +34,15 @@
 #include "../scrolls.hpp"
 
 #include <cassert>
+#include <csignal>
+#include <filesystem>
 #include <functional>
+#ifdef WINDOWS
+#include <conio.h>
+#else
+#include <sys/select.h>
+#include <unistd.h>
+#endif
 #ifdef STEAMWORKS
 #include <nfd.h>
 #endif
@@ -80,6 +94,442 @@ namespace MainMenu {
     ConsoleVariable<int> cvar_displayHz("/displayhz", 0);
 	ConsoleVariable<bool> cvar_hdrEnabled("/hdr_enabled", true);
 	static const int numFilters = NUM_SERVER_FLAGS + 2;
+
+	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr Uint8 kJoinCapabilityLateJoinV1 = 0x02;
+	constexpr Uint8 kJoinCapabilityReconnectTokenV1 = 0x04;
+	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
+	constexpr int kHeloChunkHeaderSize = 12;
+	constexpr int kHeloChunkPayloadMax = 900;
+	constexpr int kHeloChunkMaxCount = 32;
+	constexpr Uint32 kHeloChunkReassemblyTimeoutTicks =
+		5 * TICKS_PER_SECOND;
+	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+	static LateJoinProtocol::SnapshotAssembler g_lateJoinAssembler;
+	static LateJoinProtocol::Begin g_lateJoinBegin;
+	static bool g_lateJoinSpawnAuthorized = false;
+
+	static int decodeNetworkPlayerIndex(
+		const Uint8 encodedPlayer
+	)
+	{
+		const int player =
+			static_cast<int>(encodedPlayer);
+
+		if ( player >= MAXPLAYERS )
+		{
+			printlog(
+				"[NET]: ignoring packet with invalid player index %d",
+				player
+			);
+			return -1;
+		}
+
+		return player;
+	}
+
+	struct HeloChunkReassemblyState
+	{
+		bool active = false;
+		Uint16 transferId = 0;
+		Uint8 chunkCount = 0;
+		Uint16 totalLen = 0;
+		Uint32 lastChunkTick = 0;
+		std::vector<std::vector<Uint8>> chunks;
+		std::vector<bool> received;
+		int receivedCount = 0;
+	};
+
+	static HeloChunkReassemblyState
+		g_heloChunkReassemblyState;
+
+#ifdef SOUND
+    static void playIntroMenuMusic(const int track)
+    {
+        if ( no_sound
+            || !intromusic
+            || track < 0
+            || track >= NUMINTROMUSIC
+            || !intromusic[track] )
+        {
+            return;
+        }
+        playMusic(intromusic[track], true, false, false);
+    }
+#endif
+
+	static Uint16 nextHeloTransferIdForPlayer(
+		const int player
+	)
+	{
+		if ( player <= 0 || player >= MAXPLAYERS )
+		{
+			return 0;
+		}
+
+		++g_heloTransferId[player];
+		if ( g_heloTransferId[player] == 0 )
+		{
+			++g_heloTransferId[player];
+		}
+		return g_heloTransferId[player];
+	}
+
+	static void resetHeloChunkReassemblyState()
+	{
+		g_heloChunkReassemblyState =
+			HeloChunkReassemblyState();
+	}
+
+	static void resetHeloChunkReassemblyStateWithLog(
+		const char* reason
+	)
+	{
+		if ( g_heloChunkReassemblyState.active )
+		{
+			printlog(
+				"HELO chunk timeout/reset transfer=%u (%s)",
+				static_cast<unsigned>(
+					g_heloChunkReassemblyState.transferId
+				),
+				reason ? reason : "reset"
+			);
+		}
+		resetHeloChunkReassemblyState();
+	}
+
+	static bool sendChunkedHeloToPeer(
+		const int hostnum,
+		const Uint8* heloData,
+		const int heloLen,
+		const Uint16 transferId,
+		const int playerNumForLog
+	)
+	{
+		if ( !heloData
+			|| heloLen <= 0
+			|| heloLen > NET_PACKET_SIZE )
+		{
+			return false;
+		}
+
+		const int chunkPayloadMax =
+			std::min(
+				kHeloChunkPayloadMax,
+				NET_PACKET_SIZE - kHeloChunkHeaderSize
+			);
+		const int chunkCount =
+			(heloLen + chunkPayloadMax - 1)
+				/ chunkPayloadMax;
+
+		if ( chunkPayloadMax <= 0
+			|| chunkCount <= 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkCount > 0xFF )
+		{
+			return false;
+		}
+
+		printlog(
+			"sending chunked HELO: player=%d transfer=%u chunks=%d total=%d",
+			playerNumForLog,
+			static_cast<unsigned>(transferId),
+			chunkCount,
+			heloLen
+		);
+
+		for ( int chunkIndex = 0;
+			chunkIndex < chunkCount;
+			++chunkIndex )
+		{
+			const int offset =
+				chunkIndex * chunkPayloadMax;
+			const int chunkLen =
+				std::min(
+					chunkPayloadMax,
+					heloLen - offset
+				);
+
+			memcpy(net_packet->data, "HLCN", 4);
+			SDLNet_Write16(
+				transferId,
+				&net_packet->data[4]
+			);
+			net_packet->data[6] =
+				static_cast<Uint8>(chunkIndex);
+			net_packet->data[7] =
+				static_cast<Uint8>(chunkCount);
+			SDLNet_Write16(
+				static_cast<Uint16>(heloLen),
+				&net_packet->data[8]
+			);
+			SDLNet_Write16(
+				static_cast<Uint16>(chunkLen),
+				&net_packet->data[10]
+			);
+			memcpy(
+				&net_packet->data[kHeloChunkHeaderSize],
+				heloData + offset,
+				chunkLen
+			);
+			net_packet->len =
+				kHeloChunkHeaderSize + chunkLen;
+
+			if ( !sendPacketSafe(
+					net_sock,
+					-1,
+					net_packet,
+					hostnum
+				) )
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	static bool ingestHeloChunkAndMaybeAssemble()
+	{
+		if ( net_packet->len < kHeloChunkHeaderSize )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"short packet"
+			);
+			return false;
+		}
+
+		const Uint16 transferId =
+			SDLNet_Read16(&net_packet->data[4]);
+		const Uint8 chunkIndex =
+			net_packet->data[6];
+		const Uint8 chunkCount =
+			net_packet->data[7];
+		const Uint16 totalHeloLen =
+			SDLNet_Read16(&net_packet->data[8]);
+		const Uint16 chunkLen =
+			SDLNet_Read16(&net_packet->data[10]);
+
+		if ( chunkCount == 0
+			|| chunkCount > kHeloChunkMaxCount
+			|| chunkIndex >= chunkCount
+			|| totalHeloLen < 8
+			|| totalHeloLen > NET_PACKET_SIZE
+			|| chunkLen == 0
+			|| chunkLen > kHeloChunkPayloadMax
+			|| kHeloChunkHeaderSize + chunkLen
+				!= net_packet->len
+			|| totalHeloLen
+				> chunkCount * kHeloChunkPayloadMax )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"invalid chunk metadata"
+			);
+			return false;
+		}
+
+		if ( !g_heloChunkReassemblyState.active )
+		{
+			g_heloChunkReassemblyState.active = true;
+			g_heloChunkReassemblyState.transferId =
+				transferId;
+			g_heloChunkReassemblyState.chunkCount =
+				chunkCount;
+			g_heloChunkReassemblyState.totalLen =
+				totalHeloLen;
+			g_heloChunkReassemblyState.chunks.resize(
+				chunkCount
+			);
+			g_heloChunkReassemblyState.received.assign(
+				chunkCount,
+				false
+			);
+		}
+		else if (
+			g_heloChunkReassemblyState.transferId
+				!= transferId
+		)
+		{
+			if ( chunkIndex != 0 )
+			{
+				return false;
+			}
+			resetHeloChunkReassemblyState();
+			g_heloChunkReassemblyState.active = true;
+			g_heloChunkReassemblyState.transferId =
+				transferId;
+			g_heloChunkReassemblyState.chunkCount =
+				chunkCount;
+			g_heloChunkReassemblyState.totalLen =
+				totalHeloLen;
+			g_heloChunkReassemblyState.chunks.resize(
+				chunkCount
+			);
+			g_heloChunkReassemblyState.received.assign(
+				chunkCount,
+				false
+			);
+		}
+
+		if ( g_heloChunkReassemblyState.chunkCount
+				!= chunkCount
+			|| g_heloChunkReassemblyState.totalLen
+				!= totalHeloLen )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"transfer metadata mismatch"
+			);
+			return false;
+		}
+
+		printlog(
+			"recv HLCN: transfer=%u idx=%u/%u len=%u",
+			static_cast<unsigned>(transferId),
+			static_cast<unsigned>(chunkIndex + 1),
+			static_cast<unsigned>(chunkCount),
+			static_cast<unsigned>(chunkLen)
+		);
+
+		g_heloChunkReassemblyState.lastChunkTick = ticks;
+
+		if (
+			g_heloChunkReassemblyState.received[
+				chunkIndex
+			]
+		)
+		{
+			return false;
+		}
+
+		g_heloChunkReassemblyState.chunks[
+			chunkIndex
+		].assign(
+			&net_packet->data[kHeloChunkHeaderSize],
+			&net_packet->data[
+				kHeloChunkHeaderSize + chunkLen
+			]
+		);
+		g_heloChunkReassemblyState.received[
+			chunkIndex
+		] = true;
+		++g_heloChunkReassemblyState.receivedCount;
+
+		if (
+			g_heloChunkReassemblyState.receivedCount
+				< g_heloChunkReassemblyState.chunkCount
+		)
+		{
+			return false;
+		}
+
+		std::vector<Uint8> reassembled(
+			g_heloChunkReassemblyState.totalLen
+		);
+		int offset = 0;
+
+		for ( int i = 0;
+			i < g_heloChunkReassemblyState.chunkCount;
+			++i )
+		{
+			if (
+				!g_heloChunkReassemblyState.received[i]
+			)
+			{
+				resetHeloChunkReassemblyStateWithLog(
+					"missing chunk"
+				);
+				return false;
+			}
+
+			const auto& chunk =
+				g_heloChunkReassemblyState.chunks[i];
+
+			if ( offset
+					+ static_cast<int>(chunk.size())
+				> g_heloChunkReassemblyState.totalLen )
+			{
+				resetHeloChunkReassemblyStateWithLog(
+					"assembly overflow"
+				);
+				return false;
+			}
+
+			memcpy(
+				&reassembled[offset],
+				chunk.data(),
+				chunk.size()
+			);
+			offset +=
+				static_cast<int>(chunk.size());
+		}
+
+		if ( offset
+				!= g_heloChunkReassemblyState.totalLen
+			|| SDLNet_Read32(reassembled.data())
+				!= 'HELO' )
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"bad assembled HELO"
+			);
+			return false;
+		}
+
+		const Uint16 completedTransfer =
+			g_heloChunkReassemblyState.transferId;
+		const Uint16 completedLen =
+			g_heloChunkReassemblyState.totalLen;
+
+		memcpy(
+			net_packet->data,
+			reassembled.data(),
+			reassembled.size()
+		);
+		net_packet->len =
+			static_cast<int>(reassembled.size());
+
+		printlog(
+			"HELO reassembled: transfer=%u total=%u",
+			static_cast<unsigned>(completedTransfer),
+			static_cast<unsigned>(completedLen)
+		);
+
+		resetHeloChunkReassemblyState();
+		return true;
+	}
+
+	static void checkHeloChunkReassemblyTimeout()
+	{
+		if (
+			g_heloChunkReassemblyState.active
+			&& ticks
+				- g_heloChunkReassemblyState.lastChunkTick
+				> kHeloChunkReassemblyTimeoutTicks
+		)
+		{
+			resetHeloChunkReassemblyStateWithLog(
+				"timeout"
+			);
+		}
+	}
+
+	static void processJoinHandshakePacket(
+		bool& gotPacket
+	)
+	{
+		const Uint32 packetId =
+			SDLNet_Read32(&net_packet->data[0]);
+
+		if ( packetId == 'HELO' )
+		{
+			resetHeloChunkReassemblyState();
+			gotPacket = true;
+		}
+		else if ( packetId == 'HLCN' )
+		{
+			gotPacket =
+				ingestHeloChunkAndMaybeAssemble();
+		}
+	}
 	enum Filter : int {
 		UNCHECKED,
 		OFF,
@@ -415,6 +865,7 @@ namespace MainMenu {
 	};
 
 	static LobbyType currentLobbyType = LobbyType::None;
+	static bool creatingRuntimeLateJoinLobby = false;
 	static bool playersInLobby[MAXPLAYERS];
 	static bool playerSlotsLocked[MAXPLAYERS];
 	static bool newPlayer[MAXPLAYERS];
@@ -11795,7 +12246,14 @@ bind_failed:
 				sendPacketSafe(net_sock, -1, net_packet, i - 1);
 			}
 
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 			if (!loadingsavegame) {
 				stats[player]->clearStats();
 			}
@@ -11823,7 +12281,14 @@ bind_failed:
 				net_packet->address.port = net_clients[i - 1].port;
 				sendPacketSafe(net_sock, -1, net_packet, i - 1);
 			}
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    Uint8 status = net_packet->data[5];
 		    createReadyStone((int)player, false, status ? true : false);
 		}},
@@ -11871,7 +12336,14 @@ bind_failed:
 
 		// player disconnected
 		{'DISC', [](){
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
             if (player == 0) {
                 // yeah right
                 return;
@@ -11950,7 +12422,14 @@ bind_failed:
 
 		// keepalive
 		{'KPAL', [](){
-			const Uint8 player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+			const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 			client_keepalive[player] = ticks;
 		}},
 
@@ -12063,7 +12542,13 @@ bind_failed:
 			    }
 
 			    // process incoming join request
-			    NetworkingLobbyJoinRequestResult result = lobbyPlayerJoinRequest(playerNum, playerSlotsLocked);
+				bool useChunkedHelo = false;
+			    NetworkingLobbyJoinRequestResult result =
+					lobbyPlayerJoinRequest(
+						playerNum,
+						playerSlotsLocked,
+						useChunkedHelo
+					);
 
 			    // finalize connections for Steamworks / EOS
 			    if (result == NetworkingLobbyJoinRequestResult::NET_LOBBY_JOIN_P2P_FAILURE) {
@@ -12091,21 +12576,82 @@ bind_failed:
 						}
 						steamIDRemote[playerNum - 1] = new CSteamID();
 						*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]) = newSteamID;
-						for ( int responses = 0; responses < 5; ++responses ) {
-							SteamNetworking()->SendP2PPacket(*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]), net_packet->data, net_packet->len, k_EP2PSendReliable, 0);
-							SDL_Delay(5);
-						}
 #endif // STEAMWORKS
 					}
 					else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY ) {
 #if defined USE_EOS
 						EOS.P2PConnectionInfo.assignPeerIndex(newRemoteProductId, playerNum - 1);
-						for ( int responses = 0; responses < 5; ++responses ) {
-							EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(playerNum - 1), net_packet->data, net_packet->len);
-							SDL_Delay(5);
-						}
 #endif
 					}
+
+					bool sentChunkedHelo = false;
+					if ( useChunkedHelo
+						&& playerNum > 0
+						&& playerNum < MAXPLAYERS )
+					{
+						std::vector<Uint8> heloSnapshot(
+							net_packet->len
+						);
+						memcpy(
+							heloSnapshot.data(),
+							net_packet->data,
+							heloSnapshot.size()
+						);
+
+						const Uint16 transferId =
+							nextHeloTransferIdForPlayer(
+								playerNum
+							);
+
+						sentChunkedHelo =
+							sendChunkedHeloToPeer(
+								playerNum - 1,
+								heloSnapshot.data(),
+								static_cast<int>(
+									heloSnapshot.size()
+								),
+								transferId,
+								playerNum
+							);
+
+						if ( !sentChunkedHelo )
+						{
+							printlog(
+								"[NET]: chunked HELO failed; using legacy HELO for player %d",
+								playerNum
+							);
+							memcpy(
+								net_packet->data,
+								heloSnapshot.data(),
+								heloSnapshot.size()
+							);
+							net_packet->len =
+								static_cast<int>(
+									heloSnapshot.size()
+								);
+						}
+					}
+
+					if ( !sentChunkedHelo )
+					{
+						if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM ) {
+#ifdef STEAMWORKS
+							for ( int responses = 0; responses < 5; ++responses ) {
+								SteamNetworking()->SendP2PPacket(*static_cast<CSteamID*>(steamIDRemote[playerNum - 1]), net_packet->data, net_packet->len, k_EP2PSendReliable, 0);
+								SDL_Delay(5);
+							}
+#endif // STEAMWORKS
+						}
+						else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY ) {
+#if defined USE_EOS
+							for ( int responses = 0; responses < 5; ++responses ) {
+								EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(playerNum - 1), net_packet->data, net_packet->len);
+								SDL_Delay(5);
+							}
+#endif
+						}
+					}
+
 					sendSvFlagsOverNet();
 					sendCustomScenarioOverNet(playerNum);
 				}
@@ -12142,8 +12688,204 @@ bind_failed:
 	}
 
 	static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+		{'LJBG', [](){
+			LateJoinProtocol::Begin begin;
+			if (!LateJoinProtocol::decodeBegin(
+					net_packet->data, net_packet->len, begin)
+				|| !g_lateJoinAssembler.begin(begin))
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected malformed snapshot begin.");
+				return;
+			}
+			g_lateJoinBegin = begin;
+			g_lateJoinSpawnAuthorized = false;
+			clientBeginLateJoinPacketDeferral(
+				begin.transferId, begin.instanceRevision);
+		}},
+		{'LJCH', [](){
+			LateJoinProtocol::Chunk chunk;
+			if (!LateJoinProtocol::decodeChunk(
+					net_packet->data, net_packet->len, chunk)
+				|| g_lateJoinAssembler.accept(chunk)
+					== LateJoinProtocol::ReceiveResult::Rejected)
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected corrupt snapshot chunk.");
+			}
+			else
+			{
+				clientNoteLateJoinProgress();
+			}
+		}},
+		{'LJDN', [](){
+			LateJoinProtocol::Complete complete;
+			if (!LateJoinProtocol::decodeComplete(
+					net_packet->data, net_packet->len, complete)
+				|| g_lateJoinAssembler.finish(complete)
+					!= LateJoinProtocol::ReceiveResult::Complete)
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected incomplete snapshot transfer.");
+				return;
+			}
+			const std::vector<std::uint8_t>& bytes =
+				g_lateJoinAssembler.snapshot();
+			const std::string snapshot(
+				reinterpret_cast<const char*>(bytes.data()), bytes.size());
+			std::string snapshotError;
+			const bool accepted = stageAutomatiaPersistentWorldSnapshot(
+				snapshot,
+				std::to_string(g_lateJoinBegin.sessionKey),
+				snapshotError);
+			LateJoinProtocol::Ready ready;
+			ready.playerIndex = static_cast<std::uint8_t>(clientnum);
+			ready.transferId = complete.transferId;
+			ready.instanceRevision = complete.instanceRevision;
+			ready.snapshotAccepted = accepted;
+			const std::vector<std::uint8_t> readyPacket =
+				LateJoinProtocol::encodeReady(ready);
+			if (readyPacket.empty())
+			{
+				printlog("[Late Join] Lobby client could not encode ready response.");
+				return;
+			}
+			memcpy(net_packet->data, readyPacket.data(), readyPacket.size());
+			net_packet->len = static_cast<int>(readyPacket.size());
+			net_packet->address.host = net_server.host;
+			net_packet->address.port = net_server.port;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			if (!accepted)
+			{
+				printlog(
+					"[Late Join] Lobby client rejected snapshot document: %s",
+					snapshotError.c_str());
+			}
+			else
+			{
+				clientNoteLateJoinProgress();
+			}
+		}},
+		{'LJOK', [](){
+			LateJoinProtocol::Authorization authorization;
+			if (!LateJoinProtocol::decodeAuthorization(
+					net_packet->data, net_packet->len, authorization)
+				|| authorization.transferId != g_lateJoinBegin.transferId
+				|| authorization.instanceRevision
+					!= g_lateJoinBegin.instanceRevision
+				|| !authorization.spawnAuthorized
+				|| !g_lateJoinAssembler.complete())
+			{
+				printlog("[Late Join] Lobby client rejected spawn authorization.");
+				return;
+			}
+			g_lateJoinSpawnAuthorized = true;
+			clientNoteLateJoinProgress();
+			uniqueGameKey = g_lateJoinBegin.sessionKey;
+			LateJoinProtocol::Ready go;
+			go.playerIndex = static_cast<std::uint8_t>(clientnum);
+			go.transferId = authorization.transferId;
+			go.instanceRevision = authorization.instanceRevision;
+			go.snapshotAccepted = true;
+			const std::vector<std::uint8_t> goPacket =
+				LateJoinProtocol::encodeGo(go);
+			memcpy(net_packet->data, goPacket.data(), goPacket.size());
+			net_packet->len = static_cast<int>(goPacket.size());
+			net_packet->address.host = net_server.host;
+			net_packet->address.port = net_server.port;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			printlog(
+				"[Late Join] Lobby client accepted spawn authorization for transfer %u.",
+				authorization.transferId);
+		}},
+		{'LJCB', [](){
+			if (!clientAcceptLateJoinCatchupBegin(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up begin.");
+			}
+		}},
+		{'LJCC', [](){
+			if (!clientAcceptLateJoinCatchupChunk(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up chunk.");
+			}
+		}},
+		{'LJCE', [](){
+			if (!clientAcceptLateJoinCatchupComplete(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up completion.");
+			}
+		}},
+		{'LJAB', [](){
+			LateJoinProtocol::Abort abort;
+			if (!LateJoinProtocol::decodeAbort(
+					net_packet->data, net_packet->len, abort)
+				|| abort.playerIndex != clientnum
+				|| (abort.transferId != 0
+					&& (abort.transferId != g_lateJoinBegin.transferId
+						|| abort.instanceRevision
+							!= g_lateJoinBegin.instanceRevision)))
+			{
+				printlog("[Late Join] Lobby client ignored invalid abort record.");
+				return;
+			}
+			discardAutomatiaPersistentWorldSnapshot();
+			clientResetLateJoinPacketDeferral();
+			g_lateJoinAssembler.reset();
+			g_lateJoinSpawnAuthorized = false;
+			printlog("[Late Join] Server aborted transfer (reason %u).",
+				static_cast<unsigned>(abort.reason));
+		}},
+		{'RJTK', [](){
+			if (net_packet->len != 5 + static_cast<int>(kReconnectTokenLength)
+				|| net_packet->data[4] != clientnum)
+			{
+				printlog("[Late Join] Lobby client rejected malformed reconnect token.");
+				return;
+			}
+			std::string token(
+				reinterpret_cast<const char*>(&net_packet->data[5]),
+				kReconnectTokenLength);
+			if (!ReconnectToken::isValid(token))
+			{
+				printlog("[Late Join] Lobby client rejected invalid reconnect token.");
+				return;
+			}
+			automatiaReconnectTokens[clientnum] = std::move(token);
+			printlog("[Late Join] Lobby client stored reconnect identity for slot %d.",
+				clientnum);
+		}},
 	    // game start
 	    {'STRT', [](){
+			if (net_packet->len >= 18 && net_packet->data[17] == 1)
+			{
+				if (!g_lateJoinSpawnAuthorized || net_packet->len < 28)
+				{
+					printlog("[Late Join] Ignored runtime STRT before authorization.");
+					return;
+				}
+				const std::size_t mapNameLength = net_packet->data[18];
+				const std::size_t metadataOffset = 19 + mapNameLength;
+				if (mapNameLength == 0 || mapNameLength >= sizeof(maptoload)
+					|| net_packet->len != metadataOffset + 9)
+				{
+					printlog("[Late Join] Rejected malformed runtime STRT metadata.");
+					return;
+				}
+				memcpy(maptoload, &net_packet->data[19], mapNameLength);
+				maptoload[mapNameLength] = '\0';
+				currentlevel = static_cast<int>(
+					LateJoinProtocol::read32(net_packet->data, metadataOffset));
+				mapseed = LateJoinProtocol::read32(
+					net_packet->data, metadataOffset + 4);
+				secretlevel = net_packet->data[metadataOffset + 8] != 0;
+				loadingmap = true;
+				genmap = false;
+				g_lateJoinSpawnAuthorized = false;
+			}
             destroyMainMenu();
             createDummyMainMenu();
 	        lobbyWindowSvFlags = SDLNet_Read32(&net_packet->data[4]);
@@ -12159,6 +12901,14 @@ bind_failed:
 	        }
 	    }},
 
+		// Late join-handshake retries may arrive after the lobby transition.
+		{'HELO', [](){
+			return;
+		}},
+		{'HLCN', [](){
+			return;
+		}},
+
 		// we can get an ENTU packet if the server already started and we missed it somehow
 	    /*{'ENTU', [](){
             destroyMainMenu();
@@ -12170,7 +12920,14 @@ bind_failed:
 
 	    // new player
 	    {'JOIN', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    client_disconnected[player] = false;
 		    client_classes[player] = net_packet->data[5];
 		    stats[player]->sex = static_cast<sex_t>(net_packet->data[6]);
@@ -12189,7 +12946,14 @@ bind_failed:
 
 	    // lock/unlock a player slot
 	    {'LOCK', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 	        const bool locked = net_packet->data[5];
 	        playerSlotsLocked[player] = locked;
 
@@ -12205,7 +12969,14 @@ bind_failed:
 
 	    // update player attributes
 	    {'PLYR', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 		    if (player != clientnum) {
 				if (!loadingsavegame) {
 					stats[player]->clearStats();
@@ -12225,7 +12996,14 @@ bind_failed:
 
 	    // update ready status
 	    {'REDY', [](){
-	        const int player = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+	        const int player =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( player < 0 )
+			{
+				return;
+			}
 	        Uint8 status = net_packet->data[5];
 	        if (player != clientnum) {
 	            createReadyStone((int)player, false, status ? true : false);
@@ -12251,7 +13029,14 @@ bind_failed:
 
 		// player disconnect
 	    {'DISC', [](){
-		    const int playerDisconnected = std::min(net_packet->data[4], (Uint8)(MAXPLAYERS - 1));
+		    const int playerDisconnected =
+				decodeNetworkPlayerIndex(
+					net_packet->data[4]
+				);
+			if ( playerDisconnected < 0 )
+			{
+				return;
+			}
 			client_disconnected[playerDisconnected] = true;
 		    if (playerDisconnected == clientnum || playerDisconnected == 0) {
 			    // we got dropped
@@ -12429,14 +13214,12 @@ bind_failed:
 
 			// trying to connect to the server and get a player number
 			// receive the packet:
+			checkHeloChunkReassemblyTimeout();
 			bool gotPacket = false;
 			if (directConnect) {
 			    if (SDLNet_UDP_Recv(net_sock, net_packet)) {
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 			    }
 			} else if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
@@ -12464,10 +13247,7 @@ bind_failed:
 					}
 
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 					break;
 				}
@@ -12480,10 +13260,7 @@ bind_failed:
 					}
 
 			        if (!handleSafePacket()) {
-			            Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
-			            if (packetId == 'HELO') {
-					        gotPacket = true;
-					    }
+						processJoinHandshakePacket(gotPacket);
 					}
 					break;
 				}
@@ -12492,6 +13269,15 @@ bind_failed:
 
 			// parse the packet:
 			if (gotPacket) {
+				if ( net_packet->len < 8 )
+				{
+					printlog(
+						"[NET]: ignoring short HELO packet while joining (len=%d)",
+						net_packet->len
+					);
+					return;
+				}
+
 				clientnum = (int)SDLNet_Read32(&net_packet->data[4]);
 				if (clientnum >= MAXPLAYERS || clientnum <= 0) {
                     int error = clientnum;
@@ -12547,6 +13333,26 @@ bind_failed:
 #endif
                     return;
 				} else {
+					const int heloChunkSize =
+						loadingsavegame
+							? 6 + 32 + 6 * 10
+							: 6 + 32;
+					const int expectedHeloLen =
+						8 + MAXPLAYERS * heloChunkSize;
+					const bool runtimeJoinHandshake =
+						net_packet->len == expectedHeloLen + 1
+						&& net_packet->data[expectedHeloLen] == 1;
+
+					if ( net_packet->len < expectedHeloLen )
+					{
+						printlog(
+							"[NET]: ignoring truncated HELO packet while joining (len=%d expected>=%d)",
+							net_packet->len,
+							expectedHeloLen
+						);
+						return;
+					}
+
 					// join game succeeded, advance to lobby
 					client_keepalive[0] = ticks;
 					PingNetworkStatus_t::reset();
@@ -12599,9 +13405,25 @@ bind_failed:
 						}
 					}
 
-					// open lobby
-                    closePrompt("connect_prompt");
+					// A runtime client must identify the late-join protocol before
+					// its automatically opened character card sends PLYR/REDY.
+					if (runtimeJoinHandshake)
+					{
+						memcpy(net_packet->data, "LJHI", 4);
+						net_packet->data[4] = static_cast<Uint8>(clientnum);
+						net_packet->len = 5;
+						net_packet->address.host = net_server.host;
+						net_packet->address.port = net_server.port;
+						sendPacketSafe(net_sock, -1, net_packet, 0);
+					}
+
+					// Open the lobby after LJHI has been queued. Runtime late join
+					// imports a default/saved character immediately and scrolls to
+					// the page containing the server-assigned slot.
+					closePrompt("connect_prompt");
+					creatingRuntimeLateJoinLobby = runtimeJoinHandshake;
 					createLobby(LobbyType::LobbyJoined);
+					creatingRuntimeLateJoinLobby = false;
 
                     // TODO subscribe to mods!
 #if 0
@@ -12692,6 +13514,11 @@ bind_failed:
 			    if (handleSafePacket()) {
 				    continue;
 			    }
+				if (clientDeferLateJoinMapPacket(
+						net_packet->data,
+						static_cast<std::size_t>(net_packet->len))) {
+					continue;
+				}
 
 			    Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
 			    client_keepalive[0] = ticks;
@@ -12716,6 +13543,14 @@ bind_failed:
 			// I don't know why this can happen, but it can,
 			// and it causes the game to crash. So stop it!
 			return;
+		}
+		const bool lateJoinWasActive =
+			clientLateJoinPacketDeferralActive();
+		clientCheckLateJoinTimeout();
+		if (lateJoinWasActive && !clientLateJoinPacketDeferralActive())
+		{
+			g_lateJoinAssembler.reset();
+			g_lateJoinSpawnAuthorized = false;
 		}
 	    if (multiplayer == SERVER) {
 	        handlePacketsAsServer();
@@ -12848,9 +13683,23 @@ bind_failed:
 	    }
 	    SDLNet_Write32(loadingsavegame, &net_packet->data[61]); // send unique game key
 		SDLNet_Write32(loadinglobbykey, &net_packet->data[65]); // send unique lobby key
+		net_packet->data[69] =
+			kJoinCapabilityHeloChunkV1
+			| kJoinCapabilityLateJoinV1
+			| kJoinCapabilityReconnectTokenV1;
+		memset(&net_packet->data[70], 0, kReconnectTokenLength);
+		if (loadingsavegame
+			&& info.players.size() > index
+			&& info.players[index].reconnect_token.size()
+				== kReconnectTokenLength)
+		{
+			memcpy(&net_packet->data[70],
+				info.players[index].reconnect_token.data(),
+				kReconnectTokenLength);
+		}
 	    net_packet->address.host = net_server.host;
 	    net_packet->address.port = net_server.port;
-	    net_packet->len = 69;
+	    net_packet->len = 70 + kReconnectTokenLength;
 
 	    /*if (!directConnect) {
 		    sendPacket(net_sock, -1, net_packet, 0);
@@ -16901,6 +17750,17 @@ failed:
 	        (*difficulty_stars->getTickCallback())(*difficulty_stars);
         } else {
 		    static auto class_name_fn = [](Field& field, int index){
+#ifdef SAM_FRAMEWORK_ENABLED
+			    if ( const SAMFoundationClassDef* definition =
+					SAMClassRegistryFoundation::getClass(
+						client_classes[index]
+					) )
+			    {
+				    field.setText(definition->name.c_str());
+				    field.setColor(color_dlc0);
+				    return;
+			    }
+#endif
 			    const int i = std::min(std::max(0, client_classes[index]), num_classes - 1);
 			    field.setText(Language::get(playerClassLangEntryCapitalized(i)));
 			    if (i < CLASS_CONJURER) {
@@ -17071,8 +17931,14 @@ failed:
             saveLastCharacter(index, multiplayer);
         });
 
-		const int current_class = std::min(std::max(0, client_classes[index]), num_classes - 1);
-		auto current_class_name = classes_in_order[current_class];
+		const int current_class = client_classes[index];
+		const char* current_class_name =
+			(
+				current_class >= 0
+				&& current_class < num_classes
+			)
+				? classes_in_order[current_class]
+				: "";
 
         bool selected_button = false;
 		static const std::string prefix = "*images/ui/Main Menus/Play/PlayerCreation/ClassSelection/";
@@ -17350,6 +18216,132 @@ failed:
 				}
 			    });
 		}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+		for ( const SAMFoundationClassDef& definition :
+			SAMClassRegistryFoundation::classes() )
+		{
+			const int customIndex =
+				definition.runtimeId - 1000;
+			auto button =
+				subframe->addButton(
+					definition.stableId.c_str()
+				);
+
+			button->setText(definition.name.c_str());
+			button->setFont(smallfont_outline);
+			button->setBackground(
+				(prefix + "ClassSelect_IconBGBase_00.png").c_str()
+			);
+			button->setBackgroundHighlighted(
+				(prefix + "ClassSelect_IconBGBaseHigh_00.png").c_str()
+			);
+			button->setBackgroundActivated(
+				(prefix + "ClassSelect_IconBGBasePress_00.png").c_str()
+			);
+			button->setColor(
+				makeColor(255, 255, 255, 255)
+			);
+			button->setHighlightColor(
+				makeColor(255, 255, 255, 255)
+			);
+
+			const int visualIndex =
+				num_classes + customIndex;
+			button->setSize(
+				SDL_Rect{
+					8 + (visualIndex % 4) * 54,
+					6 + (visualIndex / 4) * 54,
+					54,
+					54
+				}
+			);
+			button->setOwner(index);
+			button->setWidgetSearchParent(
+				(
+					std::string("card")
+					+ std::to_string(index)
+				).c_str()
+			);
+			button->addWidgetAction(
+				"MenuStart",
+				"confirm"
+			);
+			button->addWidgetAction(
+				"MenuAlt1",
+				"randomize_class"
+			);
+			button->addWidgetAction(
+				"MenuAlt2",
+				"class_info"
+			);
+			button->setWidgetBack("back_button");
+
+			if ( current_class == definition.runtimeId )
+			{
+				button->select();
+				button->scrollParent();
+				selected_button = true;
+			}
+
+			button->setCallback([](Button& clicked) {
+				const int player = clicked.getOwner();
+				const int classId =
+					SAMClassRegistryFoundation::
+						runtimeIdForStableId(
+							clicked.getName()
+						);
+				if ( classId < 0 )
+				{
+					soundError();
+					return;
+				}
+
+				soundActivate();
+				client_classes[player] = classId;
+				class_selection[player] = classId;
+				stats[player]->clearStats();
+				initClass(player);
+				sendPlayerOverNet();
+				saveLastCharacter(
+					player,
+					multiplayer
+				);
+			});
+
+			button->setTickCallback([](Widget& widget) {
+				auto button =
+					static_cast<Button*>(&widget);
+				const int player = widget.getOwner();
+				const int classId =
+					SAMClassRegistryFoundation::
+						runtimeIdForStableId(
+							button->getName()
+						);
+				if ( classId < 0 )
+				{
+					return;
+				}
+
+				if ( button->isSelected() )
+				{
+					class_selection[player] = classId;
+				}
+
+				if ( inputs.hasController(player)
+					&& (
+						button->isSelected()
+						|| button->isHighlighted()
+					)
+					&& client_classes[player] != classId )
+				{
+					client_classes[player] = classId;
+					stats[player]->clearStats();
+					initClass(player);
+				}
+			});
+		}
+#endif
 
         if (!selected_button) {
 		    auto first_button = subframe->findButton(reduced_class_list[0]);
@@ -18591,6 +19583,12 @@ failed:
         bool atLeastOnePlayer = false;
 	    bool allReady = true;
 		for (int c = 0; c < MAXPLAYERS; ++c) {
+			if (headless && multiplayer == SERVER && c == 0) {
+				// Slot zero is the dedicated server connection identity, not a
+				// playable lobby participant. Do not require it to press Ready.
+				playersInLobby[c] = false;
+				continue;
+			}
 			auto card = lobby->findFrame((std::string("card") + std::to_string(c)).c_str());
             if (card) {
                 auto backdrop = card->findImage("backdrop"); assert(backdrop);
@@ -19115,14 +20113,21 @@ failed:
 
 		currentLobbyType = type;
 
-        const int lobbySize = type == LobbyType::LobbyLocal ?
+		const int lobbySize = type == LobbyType::LobbyLocal ?
             (Frame::virtualScreenX / 4) * MAX_SPLITSCREEN:
             (Frame::virtualScreenX / 4) * MAXPLAYERS;
+		const int initialLobbyScroll =
+			creatingRuntimeLateJoinLobby && type == LobbyType::LobbyJoined
+				? std::min(
+					(clientnum / 4) * Frame::virtualScreenX,
+					std::max(0, lobbySize - Frame::virtualScreenX))
+				: 0;
         
 		auto lobby = main_menu_frame->addFrame("lobby");
 		lobby->setOwner(clientnum);
 		lobby->setSize(SDL_Rect{0, 0, Frame::virtualScreenX, Frame::virtualScreenY});
-		lobby->setActualSize(SDL_Rect{0, 0, lobbySize, lobby->getSize().h});
+		lobby->setActualSize(SDL_Rect{
+			initialLobbyScroll, 0, lobbySize, lobby->getSize().h});
         lobby->setColor(makeColor(0, 0, 0, 127));
         lobby->setAllowScrollBinds(false);
 		lobby->setBorder(0);
@@ -20118,7 +21123,18 @@ failed:
 		} else if (type == LobbyType::LobbyJoined) {
 		    for (int c = 0; c < MAXPLAYERS; ++c) {
 		        if (clientnum == c) {
-		            createStartButton(c);
+					if (creatingRuntimeLateJoinLobby)
+					{
+						// The server has already authenticated and assigned this
+						// network slot. Open its imported/default character
+						// immediately so Ready is available without a second
+						// local "join player" step.
+						createCharacterCard(c);
+					}
+					else
+					{
+						createStartButton(c);
+					}
 		        } else {
 		            if (client_disconnected[c]) {
 		                if (directConnect) {
@@ -20473,6 +21489,8 @@ failed:
 	    std::string address;
 		int numMods;
 		bool modsDisableAchievements;
+		bool dedicated = false;
+		bool lateJoin = false;
 	    intptr_t index = -1;
 	    LobbyInfo(
 	        const char* _name = "Barony",
@@ -20508,7 +21526,8 @@ failed:
 	        return;
 	    }
         
-        if (info.players <= 0) {
+        if (!LanDiscovery::browserShouldInclude(
+				info.players, info.dedicated)) {
             // do not include empty lobbies
             return;
         }
@@ -21351,14 +22370,20 @@ failed:
 			    if (SDLNet_UDP_Recv(scan.sock, scan.packet)) {
 				    Uint32 packetId = SDLNet_Read32(scan.packet->data);
 				    if (packetId == 'SCAN') {
-                        if (scan.packet->len > 4) {
+                        if (scan.packet->len >= 17) {
 				            char hostname[256] = { '\0' };
-				            Uint32 hostname_len;
-				            hostname_len = SDLNet_Read32(&scan.packet->data[4]);
+				            const Uint32 hostname_len =
+								SDLNet_Read32(&scan.packet->data[4]);
+							const std::size_t offset = 8 + hostname_len;
+							if (hostname_len >= sizeof(hostname)
+								|| offset + 9 > static_cast<std::size_t>(scan.packet->len))
+							{
+								printlog("ignored malformed LAN discovery response");
+								return;
+							}
 				            memcpy(hostname, &scan.packet->data[8], hostname_len);
-
-				            Uint32 offset = 8 + hostname_len;
-				            int players = (int)SDLNet_Read32(&scan.packet->data[offset]);
+				            const int players =
+								static_cast<int>(SDLNet_Read32(&scan.packet->data[offset]));
 
 				            int ping = (int)(ticks - scan_ticks);
 
@@ -21369,6 +22394,14 @@ failed:
 				            info.ping = ping;
 				            info.locked = scan.packet->data[offset + 4];
 				            info.flags = SDLNet_Read32(&scan.packet->data[offset + 5]);
+							const std::size_t legacyLength = offset + 9;
+							const LanDiscovery::Extension extension =
+								LanDiscovery::decodeExtension(
+									&scan.packet->data[legacyLength],
+									static_cast<std::size_t>(scan.packet->len)
+										- legacyLength);
+							info.dedicated = extension.dedicated;
+							info.lateJoin = extension.lateJoin;
 
                             Uint32 host = scan.packet->address.host;
 				            char buf[16];
@@ -21385,7 +22418,15 @@ failed:
 								(uint8_t)((host & 0x00ff0000) >> 16),
 								(uint8_t)((host & 0xff000000) >> 24));
 #endif
-				            info.address = buf;
+							if (extension.present && extension.gamePort != DEFAULT_PORT)
+							{
+								info.address = std::string(buf) + ":"
+									+ std::to_string(extension.gamePort);
+							}
+							else
+							{
+								info.address = buf;
+							}
 				            addLobby(info);
 
 				            printlog("got a SCAN packet from %s\n", buf);
@@ -23388,6 +24429,521 @@ failed:
 		createLobby(LobbyType::LobbyLAN);
 #endif
 	}
+
+
+    bool headlessStartDedicatedServer()
+    {
+        static bool attempted = false;
+        if ( attempted )
+        {
+            return multiplayer == SERVER && net_sock != nullptr;
+        }
+        attempted = true;
+
+        if ( !headless )
+        {
+            printlog("Headless server startup rejected: --headless was not supplied.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_LOOPBACK )
+        {
+            printlog("Headless server is idle: select --LAN, --private, or --public to open a listener.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_PUBLIC )
+        {
+            printlog("Headless public hosting rejected: public listing/authentication is not implemented safely yet.");
+            return false;
+        }
+        if ( headlessServerVisibility == HEADLESS_VISIBILITY_PRIVATE && !headlessPasswordRequested )
+        {
+            printlog("Headless private hosting rejected: --private requires --password=<value>.");
+            return false;
+        }
+        if ( headlessPasswordRequested )
+        {
+            printlog("Headless password hosting rejected: password challenge-response is not implemented yet.");
+            return false;
+        }
+        if ( headlessLateJoinRequested )
+        {
+            printlog("Headless LAN late join enabled with bounded instance snapshots and spawn authorization.");
+        }
+
+        closeNetworkInterfaces();
+        randomizeHostname();
+        setHostname(headlessServerName);
+        directConnect = true;
+        portnumber = headlessServerPort;
+
+        const Uint16 port = headlessServerPort;
+        if ( SDLNet_ResolveHost(&net_server, nullptr, port) == -1 )
+        {
+            printlog("Headless LAN startup failed: could not resolve local endpoint on port %u: %s", port, SDLNet_GetError());
+            return false;
+        }
+        net_sock = SDLNet_UDP_Open(port);
+        if ( !net_sock )
+        {
+            printlog("Headless LAN startup failed: could not open UDP port %u: %s", port, SDLNet_GetError());
+            return false;
+        }
+
+        createLobby(LobbyType::LobbyLAN);
+        printlog("HEADLESS SERVER LISTENING: UDP 0.0.0.0:%u", port);
+        printlog("HEADLESS SERVER MODE: LAN direct-connect lobby; clients may join before game start.");
+        printlog("HEADLESS SERVER NAME: %s", headlessServerName);
+
+        char statusPath[PATH_MAX];
+        snprintf(statusPath, sizeof(statusPath), "%s/headless_server_status.txt", outputdir);
+        FILE* statusFile = fopen(statusPath, "w");
+        if ( statusFile )
+        {
+            fprintf(statusFile, "Barony Automatia Headless Server Status\n");
+            fprintf(statusFile, "State: listening in pre-game LAN lobby\n");
+            fprintf(statusFile, "Server name: %s\n", headlessServerName);
+            fprintf(statusFile, "Visibility: LAN direct-connect\n");
+            fprintf(statusFile, "Listening endpoint: 0.0.0.0:%u UDP\n", port);
+            fprintf(statusFile, "Autostart: %s\n", headlessAutoStart ? "enabled" : "disabled");
+            fprintf(
+                statusFile,
+                "Late join after game start: %s\n",
+                headlessLateJoinRequested
+                    ? "experimental direct-LAN path enabled"
+                    : "disabled (start with --late-join to enable)"
+            );
+            fclose(statusFile);
+        }
+        return true;
+    }
+
+    static void headlessPrintAdminStatus()
+    {
+        const char* state = multiplayer == SERVER && net_sock ? "listening" : "not listening";
+        printlog("HEADLESS STATUS: %s, UDP port %u, ticks %u.", state, headlessServerPort, ticks);
+        printlog(
+            "HEADLESS STATUS: in-progress direct-LAN late join %s; password/public modes unavailable.",
+            headlessLateJoinRequested ? "enabled (experimental)" : "disabled"
+        );
+        printlog(
+            "HEADLESS STATUS: save slot %d, autosave every %u seconds.",
+            headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex,
+            headlessAutosaveIntervalSeconds
+        );
+		const WorldInstanceIdentity* activeIdentity = worldState.activeIdentity();
+		printlog(
+			"HEADLESS STATUS: active map instance %s.",
+			activeIdentity ? activeIdentity->key().c_str() : "<none>"
+		);
+		int connectedPlayers = 0;
+		int reconnectReservedSlots = 0;
+		int availableSlots = 0;
+		for ( int player = 1; player < MAXPLAYERS; ++player )
+		{
+			if ( !client_disconnected[player] )
+			{
+				++connectedPlayers;
+			}
+			else if ( automatiaHasSavedPlayerPlacement(player) )
+			{
+				++reconnectReservedSlots;
+			}
+			else
+			{
+				++availableSlots;
+			}
+		}
+		printlog(
+			"HEADLESS ROSTER: connected=%d reconnect-reserved=%d available=%d.",
+			connectedPlayers, reconnectReservedSlots, availableSlots
+		);
+		for ( const MapInstanceSummary& summary : worldState.instanceSummaries() )
+		{
+			std::string occupants;
+			for ( const int player : summary.playersPresent )
+			{
+				if ( player < 0 || player >= MAXPLAYERS
+					|| client_disconnected[player] )
+				{
+					continue;
+				}
+				if ( !occupants.empty() )
+				{
+					occupants += ',';
+				}
+				occupants += std::to_string(player);
+			}
+			printlog(
+				"HEADLESS INSTANCE: %s rev=%llu loaded=%s initialized=%s active=%s dirty=%s tick=%llu players=[%s].",
+				summary.identity.key().c_str(),
+				static_cast<unsigned long long>(summary.identity.revision),
+				summary.loaded ? "yes" : "no",
+				summary.runtimeInitialized ? "yes" : "no",
+				summary.simulationActive ? "yes" : "no",
+				summary.dirty ? "yes" : "no",
+				static_cast<unsigned long long>(summary.simulationTick),
+				occupants.c_str()
+			);
+			MapInstance* instance = worldState.find(summary.identity.key());
+			std::size_t entityCount = 0;
+			std::size_t behaviorCount = 0;
+			std::size_t customExitCount = 0;
+			std::size_t editorLightCount = 0;
+			if (instance && instance->entities)
+			{
+				for (node_t* node = instance->entities->first;
+					node; node = node->next)
+				{
+					Entity* entity = static_cast<Entity*>(node->element);
+					if (!entity)
+					{
+						continue;
+					}
+					++entityCount;
+					behaviorCount += entity->behavior ? 1 : 0;
+					customExitCount +=
+						entity->behavior == &actCustomPortal ? 1 : 0;
+					editorLightCount +=
+						entity->behavior == &actLightSource ? 1 : 0;
+				}
+			}
+			printlog(
+				"HEADLESS SIMULATION: %s entities=%zu behaviors=%zu custom-exits=%zu editor-lights=%zu.",
+				summary.identity.key().c_str(), entityCount, behaviorCount,
+				customExitCount, editorLightCount);
+		}
+    }
+
+    static bool headlessSaveSession(const char* reason)
+    {
+        if ( intro || multiplayer != SERVER || !net_sock )
+        {
+            printlog("HEADLESS SAVE: no active server game to save (%s).", reason);
+            return false;
+        }
+        if ( !gameModeManager.allowsSaves() )
+        {
+            printlog("HEADLESS SAVE: the active game mode does not permit saves (%s).", reason);
+            return false;
+        }
+
+        const int slot = headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex;
+        if ( saveGame(slot) != 0 )
+        {
+            printlog("HEADLESS SAVE: slot %d failed (%s).", slot, reason);
+            return false;
+        }
+        printlog("HEADLESS SAVE: slot %d saved successfully (%s).", slot, reason);
+        return true;
+    }
+
+    static bool headlessRestoreConfiguredSave()
+    {
+        if ( headlessSaveSlot < 0 )
+        {
+            return true;
+        }
+
+        char primaryPath[PATH_MAX] = "";
+        const std::string primarySave = setSaveGameFileName(
+            false,
+            SaveFileType::JSON,
+            headlessSaveSlot
+        );
+        completePath(primaryPath, primarySave.c_str(), outputdir);
+        std::error_code pathError;
+        const bool primaryExists = std::filesystem::exists(primaryPath, pathError);
+        if ( pathError )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d could not be inspected; startup is stopped.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+        if ( !primaryExists )
+        {
+			discardAutomatiaPersistentWorldSnapshot();
+			resetPersistentWorldSession();
+            printlog(
+                "HEADLESS RECOVERY: slot %d is empty; cleared stale reconnect reservations and started a new session.",
+                headlessSaveSlot
+            );
+            return true;
+        }
+        if ( !saveGameExists(false, headlessSaveSlot) )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d exists but failed validation; startup is stopped to protect it.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+
+        savegameCurrentFileIndex = headlessSaveSlot;
+        const SaveGameInfo info = getSaveGameInfo(false, headlessSaveSlot);
+        if ( info.magic_cookie != "BARONYJSONSAVE"
+            || info.multiplayer_type != DIRECTSERVER
+            || info.players_connected.empty()
+            || !info.players_connected[0] )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d is not a compatible LAN server save; startup is stopped.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+
+        loadingsavegame = info.gamekey;
+        loadinglobbykey = info.lobbykey;
+        for ( int player = 0; player < MAXPLAYERS; ++player )
+        {
+            newPlayer[player] = player != 0;
+            const bool wasConnected =
+                static_cast<std::size_t>(player) < info.players_connected.size()
+                && info.players_connected[player];
+            playerSlotsLocked[player] = headlessLateJoinRequested
+                ? false
+                : !wasConnected;
+            if ( wasConnected && loadGame(player, info) != 0 )
+            {
+                printlog(
+                    "HEADLESS RECOVERY: slot %d failed while restoring player slot %d; startup is stopped.",
+                    headlessSaveSlot,
+                    player
+                );
+                loadingsavegame = 0;
+                loadinglobbykey = 0;
+                return false;
+            }
+        }
+
+        printlog(
+            "HEADLESS RECOVERY: slot %d validated and is ready to resume.",
+            headlessSaveSlot
+        );
+        return true;
+    }
+
+    static volatile std::sig_atomic_t headlessShutdownSignal = 0;
+
+    static void headlessSignalHandler(int signalNumber)
+    {
+        headlessShutdownSignal = signalNumber;
+    }
+
+    static void headlessInstallSignalHandlers()
+    {
+        static bool installed = false;
+        if ( installed )
+        {
+            return;
+        }
+        installed = true;
+        std::signal(SIGINT, headlessSignalHandler);
+#ifndef WINDOWS
+        std::signal(SIGTERM, headlessSignalHandler);
+#endif
+    }
+
+    static void headlessRequestShutdown(const char* reason)
+    {
+        printlog("HEADLESS ADMIN: graceful shutdown requested (%s).", reason);
+        if ( !intro && multiplayer == SERVER )
+        {
+            (void)headlessSaveSession(reason);
+        }
+        mainloop = 0;
+    }
+
+    static void headlessExecuteAdminCommand(const char* command)
+    {
+        if ( !command )
+        {
+            return;
+        }
+
+        if ( !strcmp(command, "help") )
+        {
+            printlog("HEADLESS ADMIN: help | status | start | save | shutdown");
+        }
+        else if ( !strcmp(command, "status") )
+        {
+            headlessPrintAdminStatus();
+        }
+        else if ( !strcmp(command, "start") )
+        {
+            if ( multiplayer == SERVER && net_sock )
+            {
+                printlog("HEADLESS ADMIN: starting game.");
+                startGame();
+            }
+            else
+            {
+                printlog("HEADLESS ADMIN: cannot start; no active server lobby.");
+            }
+        }
+        else if ( !strcmp(command, "save") )
+        {
+            (void)headlessSaveSession("administrator request");
+        }
+        else if ( !strcmp(command, "shutdown") )
+        {
+            headlessRequestShutdown("administrator request");
+        }
+        else if ( command[0] != '\0' )
+        {
+            printlog("HEADLESS ADMIN: unknown command '%s'. Type help.", command);
+        }
+    }
+
+    static void headlessProcessAdminConsole()
+    {
+        static bool announced = false;
+        if ( !announced )
+        {
+            announced = true;
+            printlog("HEADLESS ADMIN: commands are help, status, start, save, shutdown.");
+        }
+
+#ifdef WINDOWS
+        static char command[256] = {};
+        static size_t length = 0;
+
+        while ( _kbhit() )
+        {
+            const int input = _getch();
+            if ( input == '\r' || input == '\n' )
+            {
+                command[length] = '\0';
+                printlog("> %s", command);
+                headlessExecuteAdminCommand(command);
+                length = 0;
+                command[0] = '\0';
+            }
+            else if ( input == '\b' )
+            {
+                if ( length > 0 )
+                {
+                    --length;
+                    command[length] = '\0';
+                }
+            }
+            else if ( input == 0 || input == 224 )
+            {
+                if ( _kbhit() )
+                {
+                    (void)_getch();
+                }
+            }
+            else if ( input >= 32 && input <= 126 && length + 1 < sizeof(command) )
+            {
+                command[length++] = static_cast<char>(input);
+                command[length] = '\0';
+            }
+        }
+#else
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(STDIN_FILENO, &readSet);
+        timeval timeout{};
+        const int ready = select(STDIN_FILENO + 1, &readSet, nullptr, nullptr, &timeout);
+        if ( ready <= 0 || !FD_ISSET(STDIN_FILENO, &readSet) )
+        {
+            return;
+        }
+
+        char command[256] = {};
+        if ( !fgets(command, sizeof(command), stdin) )
+        {
+            return;
+        }
+        size_t length = strlen(command);
+        while ( length > 0 && (command[length - 1] == '\n' || command[length - 1] == '\r') )
+        {
+            command[--length] = '\0';
+        }
+        headlessExecuteAdminCommand(command);
+#endif
+    }
+
+    void headlessDedicatedServerTick()
+    {
+        static bool initialized = false;
+        static Uint32 listeningSince = 0;
+        static bool autostarted = false;
+        static Uint32 lastAutosaveTick = 0;
+        static bool autosaveClockStarted = false;
+
+        if ( headless )
+        {
+            headlessInstallSignalHandlers();
+            if ( headlessShutdownSignal != 0 )
+            {
+                const int signalNumber = headlessShutdownSignal;
+                headlessShutdownSignal = 0;
+                char reason[64];
+                snprintf(reason, sizeof(reason), "signal %d", signalNumber);
+                headlessRequestShutdown(reason);
+                return;
+            }
+            headlessProcessAdminConsole();
+        }
+
+        if ( !headless || initialized )
+        {
+            if ( initialized && headlessAutoStart && !autostarted && multiplayer == SERVER && net_sock )
+            {
+                const Uint32 delayTicks = headlessAutoStartDelaySeconds * TICKS_PER_SECOND;
+                if ( ticks - listeningSince >= delayTicks )
+                {
+                    autostarted = true;
+                    printlog("HEADLESS SERVER: autostarting game after %u seconds.", headlessAutoStartDelaySeconds);
+                    startGame();
+                }
+            }
+            if ( initialized
+                && headlessAutosaveIntervalSeconds > 0
+                && !intro
+                && multiplayer == SERVER
+                && net_sock )
+            {
+                if ( !autosaveClockStarted )
+                {
+                    autosaveClockStarted = true;
+                    lastAutosaveTick = ticks;
+                }
+                const Uint32 intervalTicks =
+                    headlessAutosaveIntervalSeconds * TICKS_PER_SECOND;
+                if ( ticks - lastAutosaveTick >= intervalTicks )
+                {
+                    lastAutosaveTick = ticks;
+                    (void)headlessSaveSession("timed autosave");
+                }
+            }
+            else
+            {
+                autosaveClockStarted = false;
+            }
+            return;
+        }
+        if ( !main_menu_frame )
+        {
+            return;
+        }
+
+        initialized = true;
+        if ( headlessStartDedicatedServer() )
+        {
+            if ( !headlessRestoreConfiguredSave() )
+            {
+                closeNetworkInterfaces();
+                printlog("HEADLESS RECOVERY: listener closed after recovery failure.");
+                return;
+            }
+            listeningSince = ticks;
+        }
+    }
 
 	static void createLocalOrNetworkMenu() {
 		allSettings.classic_mode_enabled = svFlags & SV_FLAG_CLASSIC;
@@ -25942,7 +27498,7 @@ failed:
 		        destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-	            playMusic(intromusic[music], true, false, false);
+	            playIntroMenuMusic(music);
 #endif
 				createTitleScreen();
 
@@ -25973,7 +27529,7 @@ failed:
 				destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-				playMusic(intromusic[music], true, false, false);
+				playIntroMenuMusic(music);
 #endif
 				createMainMenu(false);
 
@@ -26012,7 +27568,7 @@ failed:
 				destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-	            playMusic(intromusic[music], true, false, false);
+	            playIntroMenuMusic(music);
 #endif
 				createMainMenu(false);
 
@@ -26047,7 +27603,7 @@ failed:
                 }
 #ifdef SOUND
                 const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-                playMusic(intromusic[music], true, false, false);
+                playIntroMenuMusic(music);
 #endif
                 createMainMenu(false);
                 if (saved_invite_lobby) {
@@ -26078,7 +27634,7 @@ failed:
 				createDummyMainMenu();
 				createCreditsScreen(true);
 #ifdef SOUND
-	            playMusic(intromusic[0], true, false, false);
+	            playIntroMenuMusic(0);
 #endif
 
 #ifndef NINTENDO

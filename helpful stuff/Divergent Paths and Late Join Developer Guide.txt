@@ -1,0 +1,182 @@
+BARONY AUTOMATIA - DIVERGENT PATHS AND LATE JOIN DEVELOPER GUIDE
+================================================================
+
+CURRENT IMPLEMENTED STAGE
+-------------------------
+DIVERGENT-1A through DIVERGENT-1E now have an implementation path, but the
+independent-transition and simultaneous-simulation portions are compile-tested
+only and must not be treated as runtime-verified. DIVERGENT-1B has broad central
+packet filtering and now retains Steam/EOS sender identity for claimed-player
+validation, but still needs live P2P verification and a complete packet-layout
+audit.
+
+The late-join transaction foundation is also present. It bounds snapshot size
+and chunk count, keys every transfer to a transfer ID and map-instance revision,
+accepts out-of-order chunks once, verifies the exact final byte total, and
+requires an explicit authorization transition before normal active-map updates
+can resume. Disconnect, slot reuse, and network teardown clear transaction
+state. A version-1 wire codec now defines LJBG begin, LJCH data, LJDN completion,
+LJRD client-ready, LJOK spawn authorization, and LJGO client-go records. It uses bounded
+900-byte payloads, network-byte-order sequence/revision fields, per-chunk CRC-32,
+whole-snapshot CRC-32, strict packet lengths, duplicate-content comparison, and
+ordered reassembly after out-of-order receipt. The authoritative save capture
+can now emit the same validated schema-v1 state as a compact network snapshot;
+that snapshot is restricted to the selected active map instance and capped at
+16 MiB before transmission. Client staging revalidates the schema and session
+ID and the S.A.M. catalog fingerprint. An explicit direct-connect LAN server
+started with --late-join now connects this transaction to gameplay JOIN: HELO
+establishes the slot before LJHI requests transfer, LJRD confirms validated
+staging, LJOK authorizes spawn, LJGO confirms client readiness, and an extended
+STRT supplies the selected map identity. A deterministic direct-LAN new-player
+probe passed a seven-chunk scoped snapshot and authorization sequence. Normal
+two-client and corrected returning-player acceptance remain, so the feature is
+not complete. It remains disabled for P2P, public, password-protected, and
+ordinary servers.
+
+Server-side placement for that future handshake is implemented separately. A
+returning session slot selects its pending saved identity and validated position;
+a new slot selects start.lmp#world. The destination is loaded if needed,
+persistent removals/mechanisms and path maps initialize once, deferred Player
+Starts provide safe spawn fallback, and the previous foreground map is restored
+after preparation. This path is connected to the direct-LAN handshake and still
+awaits live JOIN acceptance testing.
+
+DIVERGENT-1A adds a stable world-instance identity to every Player object.
+
+Each identity contains:
+- mapFile, such as start.lmp or village.lmp
+- instanceId, initially world
+- revision, incremented whenever the identity changes
+
+The canonical identity is written as:
+
+    mapFile#instanceId
+
+Examples:
+
+    start.lmp#world
+    village.lmp#world
+    caves.lmp#world
+
+A brand-new player defaults to start.lmp#world.
+
+IMPORTANT LIMITATION
+--------------------
+WorldState can register several loaded maps and can transfer the complete
+owned map_t state between detached storage and the legacy global map view.
+Level, seed, entity-UID sequence, secret-level, and darkness context travel
+with the instance. Pathfinding arrays also travel with the instance, and the
+collision tile index is rebuilt at activation. The active light list and every
+player lightmap also swap with the map, preventing inactive instances from
+freeing or modifying the foreground map's lighting. WorldState can load a
+validated second map into owned detached storage; the entity list is registered
+before file parsing so it receives a separate UID sequence. Runtime assignment
+supports a player spawn mask and can retain unselected Player Start entities as
+hidden deferred starts for later entry. Player entity pointers, shop masks,
+monster counters, positional/entity sounds, and inbound gameplay handlers now
+follow the active instance as well. The server has a narrow occupied-map
+scheduler for world-UI and entity behaviors, and named custom tunnels queue a
+player-specific transition at the end of the current simulation tick. The LVLC
+extension carries selective-spawn and runtime-UID data to the moving client.
+
+Empty instances now capture their persistent state, release owned map/path/light/
+shop storage, and can reload under the same canonical identity. Save capture
+rotates through all loaded maps, player positions come from registry ownership,
+and validated unloaded-instance metadata is hydrated for restart recovery.
+
+The selected player's followers now transfer with copied stats, relative
+placement, destination ownership updates, and source cleanup. Remaining blockers
+include live follower-transition verification, live P2P verification, a final
+packet-coverage review, and real two-client runtime regression. Map-local server
+handlers now route entity/item lookups, minimap pings, suicide, shop close, and
+workstation/cauldron/mailbox/shrine close through the authenticated player-instance
+boundary. Outbound entity effects, projectiles, teleports, NPC/container UI,
+walls, signs, followers, deaths, and mechanism packets are likewise filtered to
+occupants of the active instance, while discovery, latency, and preference
+traffic remains session-global. Treat the new scheduler,
+transition, follower transfer, unload, and restore paths as implemented but
+unverified until those tests pass.
+
+VALIDATION RULES
+----------------
+- mapFile must be nonempty, no longer than 255 characters, end in .lmp, and
+  must not contain a parent-directory traversal component.
+- instanceId must be 1 through 63 characters.
+- instanceId may contain letters, numbers, hyphen, and underscore.
+- Invalid values must be rejected rather than silently changed.
+- A filename is not enough to determine co-location. Both mapFile and
+  instanceId must match.
+
+REQUIRED DEVELOPMENT ORDER
+--------------------------
+1. DIVERGENT-1A - player map-instance identity foundation. Implemented.
+2. DIVERGENT-1B - packet envelope and per-map recipient filtering. Partial.
+3. DIVERGENT-1C - MapInstance runtime container around map, entities, and lists.
+   Implemented; runtime verification remains.
+4. DIVERGENT-1D - server transition manager and occupied-map activation.
+   Implemented but unverified.
+5. DIVERGENT-1E - save/unload empty instances and restore on entry. Implemented
+   but unverified.
+6. DIVERGENT-1F - per-player saved location and restart placement. Implemented;
+   live multi-map verification and authenticated reconnect identity remain.
+7. LATEJOIN-1A - connection handshake and catalog validation during gameplay.
+   Implemented for explicit direct LAN; runtime acceptance remains.
+8. LATEJOIN-1B - map-instance snapshot transfer. Bounded transaction state and
+   pre-authorization live-update gate, wire codec, reassembly, and scoped
+   schema-v1 snapshot serialization implemented. Reliable begin/chunk/complete,
+   client-ready/authorization/client-go transport, gameplay JOIN, and selected-map
+   startup are connected for explicit direct LAN. Live acceptance, timeout and
+   loss stress, and incremental post-snapshot catch-up remain.
+9. LATEJOIN-1C - entity, mechanism, quest, follower, shop, chest, and item sync.
+10. LATEJOIN-1D - new players begin at start.lmp; compatible returning session
+    slots resume their saved map instance. Implemented; runtime acceptance and
+    durable authenticated identity remain.
+11. HEADLESS-PERSIST - restart recovery and automatic server saves.
+
+NETWORKING INVARIANT
+--------------------
+Map-local packets must eventually be delivered only to players whose complete
+WorldInstanceIdentity matches the packet's source instance.
+
+Packets that may remain global include:
+- server announcements
+- player join and leave notices
+- intentionally global chat
+- party or world quest events explicitly marked global
+
+Packets that must become map-local include:
+- entity creation, movement, and deletion
+- items and combat
+- mechanisms and traps
+- chest and shop state
+- local sounds and effects
+- follower simulation
+
+SAVE-FILE INVARIANT
+-------------------
+Save data must store mapFile and instanceId separately for every player and
+MapInstance. Runtime pointers, entity list addresses, and temporary network IDs
+must never be used as persistent map identity.
+
+CURRENT SAVE/RESTORE BOUNDARY
+-----------------------------
+The schema-v1 companion save restores validated tile and entity removals,
+dynamic items, gold, boulders, minimaps, story state, dialogue memory, and
+versioned mechanism payloads. Player coordinates for the currently active map
+are restored only after bounds and obstacle validation. Player identity is
+still the session slot, so this is not yet an authenticated reconnect identity.
+
+Restart recovery now builds a saved-player spawn mask before runtime assignment.
+Players belonging to another map are not created in the foreground instance.
+The server loads each connected player's saved instance, applies persistent map
+and mechanism state, uses bounds/obstacle-validated saved placement with the
+Player Start as fallback, restores character-save followers in that same active
+instance, and returns to the original foreground map. This path is build-tested
+but still requires the multi-map restart acceptance run.
+Players saved on an unloaded map remain pending until instance loading and the
+occupied-map scheduler are complete.
+
+S.A.M. INVARIANT
+----------------
+Custom items in snapshots and saves remain authoritative by stable_id. Runtime
+item IDs are only local session mappings.

@@ -15,6 +15,22 @@
 #include "files.hpp"
 #include "player.hpp"
 #include "light.hpp"
+#include <sys/stat.h>
+#include <cerrno>
+#include <fstream>
+#include <dirent.h>
+#include <algorithm>
+#include <vector>
+#include <string>
+#include <cctype>
+#include <array>
+#include <unordered_map>
+#include <sstream>
+#include <limits>
+#include <cstdlib>
+#include <rapidjson/document.h>
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/stringbuffer.h>
 button_t* butX;
 button_t* but_;
 button_t* butTilePalette;
@@ -70,6 +86,740 @@ button_t* butMonsterItem3;
 button_t* butMonsterItem4;
 button_t* butMonsterItem5;
 button_t* butMonsterItem6;
+/*
+ * Authored squad fields use serialized Stat::MISC_FLAGS slots.
+ * Keep these indexes aligned with actmonster.cpp.
+ */
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_ID = 12;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_OPTIONS = 13;
+static constexpr int STAT_FLAG_AUTHORED_ELITE_PRESET = 14;
+static constexpr int STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID = 15;
+
+button_t* butMonsterInventoryPrev;
+button_t* butMonsterInventoryNext;
+button_t* butMonsterInventoryAddSlot;
+button_t* butMonsterInventoryRemoveSlot;
+button_t* butMonsterInventorySaveTemplate;
+button_t* butMonsterInventoryLoadTemplate;
+button_t* butMonsterEquipmentSaveTemplate;
+button_t* butMonsterEquipmentLoadTemplate;
+button_t* butMonsterEffectsOpenButton;
+button_t* monsterEffectButtons[8][7] = {};
+button_t* monsterEffectsAddButton;
+button_t* monsterEffectsToggleButton;
+button_t* monsterEffectsDoneButton;
+int monsterInventoryPage = 0;
+static bool monsterInventoryRemoveConfirm = false;
+static constexpr int MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX = 31;
+
+static int getMonsterInventoryActiveCount(Stat* stats)
+{
+    if ( stats == nullptr )
+    {
+        return 6;
+    }
+
+    int& storedCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    if ( storedCount < 1 || storedCount > ITEM_SLOT_INVENTORY_COUNT )
+    {
+        int highestUsedSlot = 6;
+        for ( int slot = 0; slot < ITEM_SLOT_INVENTORY_COUNT; ++slot )
+        {
+            const int itemIndex = 10 + slot;
+            if ( stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] != 0 )
+            {
+                highestUsedSlot = slot + 1;
+            }
+        }
+        storedCount = std::max(6, highestUsedSlot);
+    }
+    return storedCount;
+}
+
+static const char* MONSTER_INVENTORY_TEMPLATE_DIRECTORY = "inventory_templates";
+static const char* MONSTER_INVENTORY_TEMPLATE_SUBDIRECTORY = "inventory_templates/inventory";
+static const char* MONSTER_EQUIPMENT_TEMPLATE_SUBDIRECTORY = "inventory_templates/equipment";
+
+enum class MonsterTemplateType
+{
+    Inventory,
+    Equipment
+};
+
+static MonsterTemplateType monsterTemplateType = MonsterTemplateType::Inventory;
+static std::vector<std::string> monsterTemplateFiles;
+static int monsterTemplateSelected = -1;
+static int monsterTemplateScroll = 0;
+static char monsterTemplateName[64] = "";
+static char monsterTemplateStatus[128] = "";
+static std::string monsterTemplateOverwriteConfirmFile;
+static std::string monsterTemplateDeleteConfirmFile;
+static button_t* monsterTemplateRows[8] = {};
+static button_t* monsterTemplateSaveNewButton = nullptr;
+static button_t* monsterTemplateOverwriteButton = nullptr;
+static button_t* monsterTemplateLoadButton = nullptr;
+static button_t* monsterTemplateDeleteButton = nullptr;
+static button_t* monsterTemplateCloseButton = nullptr;
+static button_t* monsterTemplatePrevButton = nullptr;
+static button_t* monsterTemplateNextButton = nullptr;
+
+struct MonsterTemplateStableIDs
+{
+    std::array<std::string, ITEM_SLOT_INVENTORY_COUNT> inventory;
+    std::array<std::string, 10> equipment;
+};
+
+static std::unordered_map<Stat*, MonsterTemplateStableIDs> monsterTemplateStableIDs;
+
+
+struct SAMCatalogItem
+{
+    Sint32 runtimeID = -1;
+    std::string stableID;
+    std::string modNamespace;
+    std::string name;
+    std::string nameUnidentified;
+    std::string description;
+    std::string category;
+    std::string slot;
+};
+
+struct SAMItemCatalog
+{
+    bool loaded = false;
+    int schemaVersion = 0;
+    std::string fingerprint;
+    Sint32 vanillaItemCount = 0;
+    Sint32 totalItemSlots = 0;
+    Sint32 runtimeBase = 0;
+    Sint32 runtimeLimit = 0;
+    std::unordered_map<std::string, SAMCatalogItem> byStableID;
+    std::unordered_map<Sint32, std::string> stableIDByRuntimeID;
+};
+
+static SAMItemCatalog samItemCatalog;
+static std::string samItemCatalogPath;
+
+static std::string getSAMItemCatalogPath()
+{
+    const char* home = std::getenv("HOME");
+    if ( home == nullptr || home[0] == '\0' )
+    {
+        return ".barony/sam_item_catalog.json";
+    }
+    return std::string(home) + "/.barony/sam_item_catalog.json";
+}
+
+static bool readCatalogInt(const rapidjson::Value& object, const char* name, Sint32& value)
+{
+    if ( !object.HasMember(name) || !object[name].IsInt64() )
+    {
+        return false;
+    }
+    const int64_t parsed = object[name].GetInt64();
+    if ( parsed < std::numeric_limits<Sint32>::min()
+        || parsed > std::numeric_limits<Sint32>::max() )
+    {
+        return false;
+    }
+    value = static_cast<Sint32>(parsed);
+    return true;
+}
+
+static bool loadSAMItemCatalog()
+{
+    SAMItemCatalog loadedCatalog;
+    samItemCatalogPath = getSAMItemCatalogPath();
+
+    std::ifstream input(samItemCatalogPath);
+    if ( !input.is_open() )
+    {
+        samItemCatalog = loadedCatalog;
+        return false;
+    }
+
+    const std::string jsonText((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    rapidjson::Document document;
+    document.Parse(jsonText.c_str());
+    if ( document.HasParseError() || !document.IsObject()
+        || !document.HasMember("schema_version") || !document["schema_version"].IsInt()
+        || document["schema_version"].GetInt() != 1
+        || !document.HasMember("items") || !document["items"].IsArray() )
+    {
+        samItemCatalog = loadedCatalog;
+        return false;
+    }
+
+    loadedCatalog.schemaVersion = 1;
+    if ( document.HasMember("fingerprint") && document["fingerprint"].IsString() )
+    {
+        loadedCatalog.fingerprint = document["fingerprint"].GetString();
+    }
+    readCatalogInt(document, "vanilla_item_count", loadedCatalog.vanillaItemCount);
+    readCatalogInt(document, "total_item_slots", loadedCatalog.totalItemSlots);
+    readCatalogInt(document, "runtime_base", loadedCatalog.runtimeBase);
+    readCatalogInt(document, "runtime_limit", loadedCatalog.runtimeLimit);
+
+    for ( const auto& value : document["items"].GetArray() )
+    {
+        if ( !value.IsObject()
+            || !value.HasMember("runtime_id") || !value["runtime_id"].IsInt64()
+            || !value.HasMember("stable_id") || !value["stable_id"].IsString() )
+        {
+            continue;
+        }
+        const int64_t runtimeID64 = value["runtime_id"].GetInt64();
+        if ( runtimeID64 < 0 || runtimeID64 > std::numeric_limits<Sint32>::max() )
+        {
+            continue;
+        }
+
+        SAMCatalogItem item;
+        item.runtimeID = static_cast<Sint32>(runtimeID64);
+        item.stableID = value["stable_id"].GetString();
+        if ( item.stableID.empty() )
+        {
+            continue;
+        }
+        if ( value.HasMember("mod_namespace") && value["mod_namespace"].IsString() ) item.modNamespace = value["mod_namespace"].GetString();
+        if ( value.HasMember("name") && value["name"].IsString() ) item.name = value["name"].GetString();
+        if ( value.HasMember("name_unidentified") && value["name_unidentified"].IsString() ) item.nameUnidentified = value["name_unidentified"].GetString();
+        if ( value.HasMember("description") && value["description"].IsString() ) item.description = value["description"].GetString();
+        if ( value.HasMember("category") && value["category"].IsString() ) item.category = value["category"].GetString();
+        if ( value.HasMember("slot") && value["slot"].IsString() ) item.slot = value["slot"].GetString();
+
+        loadedCatalog.stableIDByRuntimeID[item.runtimeID] = item.stableID;
+        loadedCatalog.byStableID[item.stableID] = item;
+    }
+
+    loadedCatalog.loaded = true;
+    samItemCatalog = std::move(loadedCatalog);
+    return true;
+}
+
+static void ensureSAMItemCatalogLoaded()
+{
+    if ( !samItemCatalog.loaded )
+    {
+        loadSAMItemCatalog();
+    }
+}
+
+static const SAMCatalogItem* findSAMCatalogItemByStableID(const std::string& stableID)
+{
+    if ( stableID.empty() ) return nullptr;
+    ensureSAMItemCatalogLoaded();
+    const auto found = samItemCatalog.byStableID.find(stableID);
+    return found == samItemCatalog.byStableID.end() ? nullptr : &found->second;
+}
+
+static const SAMCatalogItem* findSAMCatalogItemByRuntimeID(const Sint32 runtimeID)
+{
+    ensureSAMItemCatalogLoaded();
+    const auto stableFound = samItemCatalog.stableIDByRuntimeID.find(runtimeID);
+    if ( stableFound == samItemCatalog.stableIDByRuntimeID.end() ) return nullptr;
+    const auto itemFound = samItemCatalog.byStableID.find(stableFound->second);
+    return itemFound == samItemCatalog.byStableID.end() ? nullptr : &itemFound->second;
+}
+
+static void resolveTemplateCustomItem(Sint32& runtimeID, std::string& stableID)
+{
+    if ( !stableID.empty() )
+    {
+        if ( const SAMCatalogItem* item = findSAMCatalogItemByStableID(stableID) )
+        {
+            runtimeID = item->runtimeID;
+        }
+        return;
+    }
+
+    if ( const SAMCatalogItem* item = findSAMCatalogItemByRuntimeID(runtimeID) )
+    {
+        stableID = item->stableID;
+    }
+}
+
+bool editorDescribeSAMItem(Sint32 runtimeID, const char* stableIDText,
+    char* nameOut, size_t nameOutSize, char* detailOut, size_t detailOutSize)
+{
+    if ( nameOut != nullptr && nameOutSize > 0 ) nameOut[0] = '\0';
+    if ( detailOut != nullptr && detailOutSize > 0 ) detailOut[0] = '\0';
+
+    const std::string stableID = stableIDText == nullptr ? "" : stableIDText;
+    const SAMCatalogItem* item = nullptr;
+    if ( !stableID.empty() ) item = findSAMCatalogItemByStableID(stableID);
+    if ( item == nullptr ) item = findSAMCatalogItemByRuntimeID(runtimeID);
+
+    if ( item != nullptr )
+    {
+        if ( nameOut != nullptr && nameOutSize > 0 )
+        {
+            snprintf(nameOut, nameOutSize, "%s", item->name.empty() ? "S.A.M custom item" : item->name.c_str());
+        }
+        if ( detailOut != nullptr && detailOutSize > 0 )
+        {
+            snprintf(detailOut, detailOutSize, "%s  Runtime ID: %d", item->stableID.c_str(), item->runtimeID);
+        }
+        return true;
+    }
+
+    if ( !stableID.empty() )
+    {
+        if ( nameOut != nullptr && nameOutSize > 0 ) snprintf(nameOut, nameOutSize, "Missing custom item");
+        if ( detailOut != nullptr && detailOutSize > 0 ) snprintf(detailOut, detailOutSize, "%s  Last runtime ID: %d", stableID.c_str(), runtimeID);
+        return true;
+    }
+
+    ensureSAMItemCatalogLoaded();
+    if ( runtimeID >= 0 && ((samItemCatalog.runtimeLimit > samItemCatalog.runtimeBase
+            && runtimeID >= samItemCatalog.runtimeBase && runtimeID < samItemCatalog.runtimeLimit)
+        || runtimeID >= NUMITEMS) )
+    {
+        if ( nameOut != nullptr && nameOutSize > 0 ) snprintf(nameOut, nameOutSize, "Unknown custom item ID %d", runtimeID);
+        return true;
+    }
+    return false;
+}
+
+const char* editorGetMonsterSlotStableID(Stat* stats, int itemSlot)
+{
+    static const char* empty = "";
+    if ( stats == nullptr ) return empty;
+    const auto found = monsterTemplateStableIDs.find(stats);
+    if ( found == monsterTemplateStableIDs.end() ) return empty;
+    if ( itemSlot >= 0 && itemSlot < 10 ) return found->second.equipment[itemSlot].c_str();
+    if ( itemSlot >= 10 && itemSlot < 10 + ITEM_SLOT_INVENTORY_COUNT ) return found->second.inventory[itemSlot - 10].c_str();
+    return empty;
+}
+
+static Sint32 parseNonnegativeRuntimeItemID(const char* text)
+{
+    if ( text == nullptr || text[0] == '\0' )
+    {
+        return 0;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(text, &end, 10);
+    if ( end == text || errno == ERANGE || parsed < 0 )
+    {
+        return 0;
+    }
+    if ( parsed > std::numeric_limits<Sint32>::max() )
+    {
+        return std::numeric_limits<Sint32>::max();
+    }
+    return static_cast<Sint32>(parsed);
+}
+
+static bool ensureDirectory(const char* path)
+{
+    if ( mkdir(path, 0755) == 0 )
+    {
+        return true;
+    }
+    return errno == EEXIST;
+}
+
+static bool ensureMonsterInventoryTemplateDirectory()
+{
+    return ensureDirectory(MONSTER_INVENTORY_TEMPLATE_DIRECTORY)
+        && ensureDirectory(MONSTER_INVENTORY_TEMPLATE_SUBDIRECTORY)
+        && ensureDirectory(MONSTER_EQUIPMENT_TEMPLATE_SUBDIRECTORY);
+}
+
+static std::string sanitizeMonsterTemplateName(const char* text)
+{
+    std::string result;
+    if ( text != nullptr )
+    {
+        for ( const unsigned char ch : std::string(text) )
+        {
+            if ( std::isalnum(ch) || ch == '-' || ch == '_' || ch == ' ' )
+            {
+                result.push_back(ch == ' ' ? '_' : static_cast<char>(ch));
+            }
+        }
+    }
+    while ( !result.empty() && result.front() == '_' )
+    {
+        result.erase(result.begin());
+    }
+    while ( !result.empty() && result.back() == '_' )
+    {
+        result.pop_back();
+    }
+    if ( result.size() > 48 )
+    {
+        result.resize(48);
+    }
+    return result;
+}
+
+static const char* getMonsterTemplateDirectory()
+{
+    return monsterTemplateType == MonsterTemplateType::Inventory
+        ? MONSTER_INVENTORY_TEMPLATE_SUBDIRECTORY
+        : MONSTER_EQUIPMENT_TEMPLATE_SUBDIRECTORY;
+}
+
+static std::string getMonsterTemplatePath(const std::string& filename)
+{
+    return std::string(getMonsterTemplateDirectory()) + "/" + filename;
+}
+
+
+static int clampMonsterTemplateProperty(const int property, const int value)
+{
+    switch ( property )
+    {
+        case 0: // item_id
+            return std::max(0, value);
+        case 1: // status
+            return std::max(0, std::min(5, value));
+        case 2: // beatitude
+            return std::max(-9, std::min(9, value));
+        case 3: // quantity
+            return std::max(0, std::min(99, value));
+        case 4: // identified
+            return std::max(0, std::min(2, value));
+        case 5: // chance
+            return std::max(0, std::min(100, value));
+        case 6: // category
+            return std::max(0, std::min(16, value));
+        default:
+            return 0;
+    }
+}
+
+static bool monsterTemplateVersionSupported(const rapidjson::Document& document)
+{
+    if ( !document.HasMember("version") )
+    {
+        return true;
+    }
+    return document["version"].IsInt()
+        && document["version"].GetInt() >= 1
+        && document["version"].GetInt() <= 1;
+}
+
+static bool saveMonsterInventoryTemplate(Stat* stats, const std::string& path)
+{
+    if ( stats == nullptr || !ensureMonsterInventoryTemplateDirectory() )
+    {
+        return false;
+    }
+
+    rapidjson::Document document;
+    document.SetObject();
+    auto& allocator = document.GetAllocator();
+    document.AddMember("format", "barony_monster_inventory_template", allocator);
+    document.AddMember("version", 1, allocator);
+    ensureSAMItemCatalogLoaded();
+    if ( !samItemCatalog.fingerprint.empty() )
+    {
+        rapidjson::Value fingerprint;
+        fingerprint.SetString(samItemCatalog.fingerprint.c_str(), static_cast<rapidjson::SizeType>(samItemCatalog.fingerprint.size()), allocator);
+        document.AddMember("sam_catalog_fingerprint", fingerprint, allocator);
+    }
+    document.AddMember("include_equipment", false, allocator);
+
+    const int activeCount = getMonsterInventoryActiveCount(stats);
+    document.AddMember("active_slots", activeCount, allocator);
+
+    rapidjson::Value slots(rapidjson::kArrayType);
+    for ( int slot = 0; slot < activeCount; ++slot )
+    {
+        const int itemIndex = 10 + slot;
+        rapidjson::Value slotObject(rapidjson::kObjectType);
+        slotObject.AddMember("slot", slot + 1, allocator);
+        Sint32 savedRuntimeID = stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 0];
+        MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
+        resolveTemplateCustomItem(savedRuntimeID, stableIDs.inventory[slot]);
+        slotObject.AddMember("item_id", savedRuntimeID, allocator);
+        const auto stableIt = monsterTemplateStableIDs.find(stats);
+        if ( stableIt != monsterTemplateStableIDs.end()
+            && !stableIt->second.inventory[slot].empty() )
+        {
+            rapidjson::Value stableID;
+            stableID.SetString(
+                stableIt->second.inventory[slot].c_str(),
+                static_cast<rapidjson::SizeType>(stableIt->second.inventory[slot].size()),
+                allocator
+            );
+            slotObject.AddMember("stable_id", stableID, allocator);
+        }
+        slotObject.AddMember("status", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 1], allocator);
+        slotObject.AddMember("beatitude", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 2], allocator);
+        slotObject.AddMember("quantity", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 3], allocator);
+        slotObject.AddMember("identified", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 4], allocator);
+        slotObject.AddMember("chance", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 5], allocator);
+        slotObject.AddMember("category", stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 6], allocator);
+        slots.PushBack(slotObject, allocator);
+    }
+    document.AddMember("inventory", slots, allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    document.Accept(writer);
+
+    std::ofstream output(path, std::ios::out | std::ios::trunc);
+    if ( !output.is_open() )
+    {
+        return false;
+    }
+    output << buffer.GetString() << '\n';
+    return output.good();
+}
+
+static bool loadMonsterInventoryTemplate(Stat* stats, const std::string& path)
+{
+    if ( stats == nullptr )
+    {
+        return false;
+    }
+
+    std::ifstream input(path);
+    if ( !input.is_open() )
+    {
+        return false;
+    }
+    const std::string jsonText((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+
+    rapidjson::Document document;
+    document.Parse(jsonText.c_str());
+    if ( document.HasParseError() || !document.IsObject() )
+    {
+        return false;
+    }
+    if ( !monsterTemplateVersionSupported(document) )
+    {
+        return false;
+    }
+    if ( !document.HasMember("format") || !document["format"].IsString()
+        || strcmp(document["format"].GetString(), "barony_monster_inventory_template") != 0 )
+    {
+        return false;
+    }
+    if ( !document.HasMember("inventory") || !document["inventory"].IsArray() )
+    {
+        return false;
+    }
+
+    int activeCount = 6;
+    if ( document.HasMember("active_slots") && document["active_slots"].IsInt() )
+    {
+        activeCount = std::max(1, std::min(ITEM_SLOT_INVENTORY_COUNT, document["active_slots"].GetInt()));
+    }
+
+    MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
+    for ( std::string& stableID : stableIDs.inventory )
+    {
+        stableID.clear();
+    }
+
+    for ( int slot = 0; slot < ITEM_SLOT_INVENTORY_COUNT; ++slot )
+    {
+        const int itemIndex = 10 + slot;
+        for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+        {
+            stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] = 0;
+        }
+    }
+
+    const char* propertyNames[ITEM_SLOT_NUMPROPERTIES] =
+    {
+        "item_id", "status", "beatitude", "quantity", "identified", "chance", "category"
+    };
+    for ( const auto& slotObject : document["inventory"].GetArray() )
+    {
+        if ( !slotObject.IsObject() || !slotObject.HasMember("slot") || !slotObject["slot"].IsInt() )
+        {
+            continue;
+        }
+        const int slot = slotObject["slot"].GetInt() - 1;
+        if ( slot < 0 || slot >= ITEM_SLOT_INVENTORY_COUNT )
+        {
+            continue;
+        }
+        const int itemIndex = 10 + slot;
+        if ( slotObject.HasMember("stable_id") && slotObject["stable_id"].IsString() )
+        {
+            stableIDs.inventory[slot] = slotObject["stable_id"].GetString();
+        }
+        for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+        {
+            if ( slotObject.HasMember(propertyNames[property]) && slotObject[propertyNames[property]].IsInt() )
+            {
+                stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] =
+                    clampMonsterTemplateProperty(property, slotObject[propertyNames[property]].GetInt());
+            }
+        }
+        resolveTemplateCustomItem(
+            stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES],
+            stableIDs.inventory[slot]
+        );
+    }
+
+    stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX] = activeCount;
+    monsterInventoryPage = 0;
+    monsterInventoryRemoveConfirm = false;
+    return true;
+}
+
+
+static bool saveMonsterEquipmentTemplate(Stat* stats, const std::string& path)
+{
+    if ( stats == nullptr || !ensureMonsterInventoryTemplateDirectory() )
+    {
+        return false;
+    }
+
+    rapidjson::Document document;
+    document.SetObject();
+    auto& allocator = document.GetAllocator();
+    document.AddMember("format", "barony_monster_equipment_template", allocator);
+    document.AddMember("version", 1, allocator);
+    ensureSAMItemCatalogLoaded();
+    if ( !samItemCatalog.fingerprint.empty() )
+    {
+        rapidjson::Value fingerprint;
+        fingerprint.SetString(samItemCatalog.fingerprint.c_str(), static_cast<rapidjson::SizeType>(samItemCatalog.fingerprint.size()), allocator);
+        document.AddMember("sam_catalog_fingerprint", fingerprint, allocator);
+    }
+
+    rapidjson::Value slots(rapidjson::kArrayType);
+    for ( int slot = 0; slot < 10; ++slot )
+    {
+        rapidjson::Value slotObject(rapidjson::kObjectType);
+        slotObject.AddMember("slot", slot, allocator);
+        Sint32 savedRuntimeID = stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 0];
+        MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
+        resolveTemplateCustomItem(savedRuntimeID, stableIDs.equipment[slot]);
+        slotObject.AddMember("item_id", savedRuntimeID, allocator);
+        const auto stableIt = monsterTemplateStableIDs.find(stats);
+        if ( stableIt != monsterTemplateStableIDs.end()
+            && !stableIt->second.equipment[slot].empty() )
+        {
+            rapidjson::Value stableID;
+            stableID.SetString(
+                stableIt->second.equipment[slot].c_str(),
+                static_cast<rapidjson::SizeType>(stableIt->second.equipment[slot].size()),
+                allocator
+            );
+            slotObject.AddMember("stable_id", stableID, allocator);
+        }
+        slotObject.AddMember("status", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 1], allocator);
+        slotObject.AddMember("beatitude", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 2], allocator);
+        slotObject.AddMember("quantity", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 3], allocator);
+        slotObject.AddMember("identified", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 4], allocator);
+        slotObject.AddMember("chance", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 5], allocator);
+        slotObject.AddMember("category", stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 6], allocator);
+        slots.PushBack(slotObject, allocator);
+    }
+    document.AddMember("equipment", slots, allocator);
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+    document.Accept(writer);
+
+    std::ofstream output(path, std::ios::out | std::ios::trunc);
+    if ( !output.is_open() )
+    {
+        return false;
+    }
+    output << buffer.GetString() << '\n';
+    return output.good();
+}
+
+static bool loadMonsterEquipmentTemplate(Stat* stats, const std::string& path)
+{
+    if ( stats == nullptr )
+    {
+        return false;
+    }
+
+    std::ifstream input(path);
+    if ( !input.is_open() )
+    {
+        return false;
+    }
+    const std::string jsonText((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+
+    rapidjson::Document document;
+    document.Parse(jsonText.c_str());
+    if ( document.HasParseError() || !document.IsObject() )
+    {
+        return false;
+    }
+    if ( !monsterTemplateVersionSupported(document) )
+    {
+        return false;
+    }
+    if ( !document.HasMember("format") || !document["format"].IsString()
+        || strcmp(document["format"].GetString(), "barony_monster_equipment_template") != 0 )
+    {
+        return false;
+    }
+    if ( !document.HasMember("equipment") || !document["equipment"].IsArray() )
+    {
+        return false;
+    }
+
+    int loadedItems[10][ITEM_SLOT_NUMPROPERTIES] = {};
+    MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
+    for ( std::string& stableID : stableIDs.equipment )
+    {
+        stableID.clear();
+    }
+    const char* propertyNames[ITEM_SLOT_NUMPROPERTIES] =
+    {
+        "item_id", "status", "beatitude", "quantity", "identified", "chance", "category"
+    };
+
+    for ( const auto& slotObject : document["equipment"].GetArray() )
+    {
+        if ( !slotObject.IsObject() || !slotObject.HasMember("slot") || !slotObject["slot"].IsInt() )
+        {
+            continue;
+        }
+        const int slot = slotObject["slot"].GetInt();
+        if ( slot < 0 || slot >= 10 )
+        {
+            continue;
+        }
+        if ( slotObject.HasMember("stable_id") && slotObject["stable_id"].IsString() )
+        {
+            stableIDs.equipment[slot] = slotObject["stable_id"].GetString();
+        }
+        for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+        {
+            if ( slotObject.HasMember(propertyNames[property]) && slotObject[propertyNames[property]].IsInt() )
+            {
+                loadedItems[slot][property] =
+                    clampMonsterTemplateProperty(property, slotObject[propertyNames[property]].GetInt());
+            }
+        }
+        resolveTemplateCustomItem(loadedItems[slot][0], stableIDs.equipment[slot]);
+    }
+
+    for ( int slot = 0; slot < 10; ++slot )
+    {
+        for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+        {
+            stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + property] = loadedItems[slot][property];
+        }
+    }
+    return true;
+}
+
+bool monsterEffectsShowAll = false;
+char monsterEffectSearchText[64] = "";
+char monsterEffectIdText[8] = "6";
+int monsterEffectSelectedId = EFF_BLIND;
+button_t* monsterEffectsPrevSelectButton = nullptr;
+button_t* monsterEffectsNextSelectButton = nullptr;
 button_t* butMonsterCloak;
 button_t* butMonsterMask;
 button_t* butMonsterOK;
@@ -462,10 +1212,15 @@ void buttonNew(button_t* my)
 	menuVisible = 0;
 	subwindow = 1;
 	newwindow = 1;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 200;
-	suby2 = yres / 2 + 200;
+	// The New Map dialog now contains the custom fog panel in addition to the
+	// original map settings. Give it enough room so the fog controls, map size
+	// fields, and Create/Cancel buttons do not overlap.
+	const int newMapHalfWidth = 240;
+	const int newMapHalfHeight = 280;
+	subx1 = xres / 2 - newMapHalfWidth;
+	subx2 = xres / 2 + newMapHalfWidth;
+	suby1 = yres / 2 - newMapHalfHeight;
+	suby2 = yres / 2 + newMapHalfHeight;
 	strcpy(subtext, "New map:");
 
 	button = newButton();
@@ -2430,31 +3185,26 @@ void buttonSpriteProperties(button_t* my)
 
 				char buf[64] = "";
 				int totalChars = 0;
-				for ( int i = 11; i <= 18; ++i )
+				for ( int i = 11; i <= 18 && totalChars < static_cast<int>(sizeof(buf)) - 1; ++i )
 				{
 					if ( selectedEntity[0]->skill[i] != 0 && i != 28 ) // skill[28] is circuit status.
 					{
-						for ( int c = 0; c < 4; ++c )
+						for ( int c = 0; c < 4 && totalChars < static_cast<int>(sizeof(buf)) - 1; ++c )
 						{
-							if ( static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF) == '\0'
-								&& i != 18 && selectedEntity[0]->skill[i + 1] != 0 )
+							const char value = static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF);
+							if ( value == '\0' && i != 18 && selectedEntity[0]->skill[i + 1] != 0 )
 							{
-								// don't add '\0' termination unless the next skill slot is empty as we have more data to read.
+								// Keep reading packed map-name bytes from the next skill slot.
+								continue;
 							}
-							else
-							{
-								buf[totalChars] = static_cast<char>((selectedEntity[0]->skill[i] >> (c * 8)) & 0xFF);
-								++totalChars;
-							}
+							buf[totalChars++] = value;
 						}
 					}
 				}
-				if ( buf[totalChars] != '\0' )
-				{
-					buf[totalChars] = '\0';
-				}
-				strncpy(spriteProperties[4], buf, 32);
+				buf[std::min(totalChars, static_cast<int>(sizeof(buf)) - 1)] = '\0';
+				snprintf(spriteProperties[4], sizeof(spriteProperties[4]), "%s", buf);
 
+				editproperty = 0;
 				inputstr = spriteProperties[0];
 				cursorflash = ticks;
 				menuVisible = 0;
@@ -3096,7 +3846,9 @@ void buttonSpriteProperties(button_t* my)
 					}
 					
 					pad_y2 += 32 + spacing * 2;
-					itemIndex = 12;
+					const int activeInventorySlots = getMonsterInventoryActiveCount(tmpSpriteStats);
+					monsterInventoryPage = std::min(monsterInventoryPage, (activeInventorySlots - 1) / 6);
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 2);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3112,14 +3864,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem3 = newButton();
 					strcpy(butMonsterItem3->label, tmpStr);
 					butMonsterItem3->x = pad_x4 - 10;
-					butMonsterItem3->y = pad_y2 + spacing - 4;
+					butMonsterItem3->y = pad_y2 + spacing + 4;
 					butMonsterItem3->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem3->sizey = 16;
 					butMonsterItem3->action = &buttonMonsterItems;
-					butMonsterItem3->visible = 1;
+					butMonsterItem3->visible = monsterInventoryPage * 6 + 2 < activeInventorySlots;
 					butMonsterItem3->focused = 1;
 
-					itemIndex = 15;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 5);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3135,15 +3887,15 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem6 = newButton();
 					strcpy(butMonsterItem6->label, tmpStr);
 					butMonsterItem6->x = pad_x4 - 10;
-					butMonsterItem6->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem6->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem6->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem6->sizey = 16;
 					butMonsterItem6->action = &buttonMonsterItems;
-					butMonsterItem6->visible = 1;
+					butMonsterItem6->visible = monsterInventoryPage * 6 + 5 < activeInventorySlots;
 					butMonsterItem6->focused = 1;
 
 					pad_x4 -= 64;
-					itemIndex = 11;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 1);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3159,14 +3911,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem2 = newButton();
 					strcpy(butMonsterItem2->label, tmpStr);
 					butMonsterItem2->x = pad_x4 - 10;
-					butMonsterItem2->y = pad_y2 + spacing - 4;
+					butMonsterItem2->y = pad_y2 + spacing + 4;
 					butMonsterItem2->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem2->sizey = 16;
 					butMonsterItem2->action = &buttonMonsterItems;
-					butMonsterItem2->visible = 1;
+					butMonsterItem2->visible = monsterInventoryPage * 6 + 1 < activeInventorySlots;
 					butMonsterItem2->focused = 1;
 
-					itemIndex = 14;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 4);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3182,15 +3934,15 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem5 = newButton();
 					strcpy(butMonsterItem5->label, tmpStr);
 					butMonsterItem5->x = pad_x4 - 10;
-					butMonsterItem5->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem5->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem5->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem5->sizey = 16;
 					butMonsterItem5->action = &buttonMonsterItems;
-					butMonsterItem5->visible = 1;
+					butMonsterItem5->visible = monsterInventoryPage * 6 + 4 < activeInventorySlots;
 					butMonsterItem5->focused = 1;
 
 					pad_x4 -= 64;
-					itemIndex = 10;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 0);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3206,14 +3958,14 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem1 = newButton();
 					strcpy(butMonsterItem1->label, tmpStr);
 					butMonsterItem1->x = pad_x4 - 10;
-					butMonsterItem1->y = pad_y2 + spacing - 4;
+					butMonsterItem1->y = pad_y2 + spacing + 4;
 					butMonsterItem1->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem1->sizey = 16;
 					butMonsterItem1->action = &buttonMonsterItems;
-					butMonsterItem1->visible = 1;
+					butMonsterItem1->visible = monsterInventoryPage * 6 + 0 < activeInventorySlots;
 					butMonsterItem1->focused = 1;
 
-					itemIndex = 13;
+					itemIndex = 10 + std::min(ITEM_SLOT_INVENTORY_COUNT - 1, monsterInventoryPage * 6 + 3);
 					if ( tmpSpriteStats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES] == 0 )
 					{
 						strcpy(tmpStr, "NULL");
@@ -3229,12 +3981,84 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterItem4 = newButton();
 					strcpy(butMonsterItem4->label, tmpStr);
 					butMonsterItem4->x = pad_x4 - 10;
-					butMonsterItem4->y = pad_y2 + 2 * spacing - 4;
+					butMonsterItem4->y = pad_y2 + 2 * spacing + 4;
 					butMonsterItem4->sizex = pad_x4 + pad_x3 - (pad_x4 - 10);
 					butMonsterItem4->sizey = 16;
 					butMonsterItem4->action = &buttonMonsterItems;
-					butMonsterItem4->visible = 1;
+					butMonsterItem4->visible = monsterInventoryPage * 6 + 3 < activeInventorySlots;
 					butMonsterItem4->focused = 1;
+
+					butMonsterInventoryPrev = newButton();
+					strcpy(butMonsterInventoryPrev->label, "< Previous");
+					butMonsterInventoryPrev->x = pad_x4 - 10;
+					butMonsterInventoryPrev->y = pad_y2 + 2 * spacing + 24;
+					butMonsterInventoryPrev->sizex = 80;
+					butMonsterInventoryPrev->sizey = 16;
+					butMonsterInventoryPrev->action = &buttonMonsterInventoryPrevPage;
+					butMonsterInventoryPrev->visible = monsterInventoryPage > 0;
+					butMonsterInventoryPrev->focused = 1;
+
+					butMonsterInventoryNext = newButton();
+					strcpy(butMonsterInventoryNext->label, "Next >");
+					butMonsterInventoryNext->x = pad_x4 + 78;
+					butMonsterInventoryNext->y = pad_y2 + 2 * spacing + 24;
+					butMonsterInventoryNext->sizex = 64;
+					butMonsterInventoryNext->sizey = 16;
+					butMonsterInventoryNext->action = &buttonMonsterInventoryNextPage;
+					butMonsterInventoryNext->visible = monsterInventoryPage < (activeInventorySlots - 1) / 6;
+					butMonsterInventoryNext->focused = 1;
+
+					butMonsterInventoryAddSlot = newButton();
+					strcpy(butMonsterInventoryAddSlot->label, "Add Slot");
+					butMonsterInventoryAddSlot->x = pad_x4 - 10;
+					butMonsterInventoryAddSlot->y = pad_y2 + 2 * spacing + 42;
+					butMonsterInventoryAddSlot->sizex = 64;
+					butMonsterInventoryAddSlot->sizey = 16;
+					butMonsterInventoryAddSlot->action = &buttonMonsterInventoryAddSlot;
+					butMonsterInventoryAddSlot->visible = activeInventorySlots < ITEM_SLOT_INVENTORY_COUNT;
+					butMonsterInventoryAddSlot->focused = 1;
+
+					butMonsterInventoryRemoveSlot = newButton();
+					strcpy(butMonsterInventoryRemoveSlot->label,
+						monsterInventoryRemoveConfirm ? "Confirm Remove" : "Remove Slot");
+					butMonsterInventoryRemoveSlot->x = pad_x4 + 62;
+					butMonsterInventoryRemoveSlot->y = pad_y2 + 2 * spacing + 42;
+					butMonsterInventoryRemoveSlot->sizex = monsterInventoryRemoveConfirm ? 112 : 96;
+					butMonsterInventoryRemoveSlot->sizey = 16;
+					butMonsterInventoryRemoveSlot->action = &buttonMonsterInventoryRemoveSlot;
+					butMonsterInventoryRemoveSlot->visible = activeInventorySlots > 1;
+					butMonsterInventoryRemoveSlot->focused = 1;
+
+					butMonsterInventorySaveTemplate = newButton();
+					strcpy(butMonsterInventorySaveTemplate->label, "Inv Files");
+					butMonsterInventorySaveTemplate->x = pad_x4 - 18;
+					butMonsterInventorySaveTemplate->y = pad_y2 + 2 * spacing + 60;
+					butMonsterInventorySaveTemplate->sizex = 88;
+					butMonsterInventorySaveTemplate->sizey = 16;
+					butMonsterInventorySaveTemplate->action = &buttonMonsterInventorySaveTemplateFile;
+					butMonsterInventorySaveTemplate->visible = 1;
+					butMonsterInventorySaveTemplate->focused = 1;
+
+					butMonsterEquipmentSaveTemplate = newButton();
+					strcpy(butMonsterEquipmentSaveTemplate->label, "Equip Files");
+					butMonsterEquipmentSaveTemplate->x = pad_x4 + 76;
+					butMonsterEquipmentSaveTemplate->y = pad_y2 + 2 * spacing + 60;
+					butMonsterEquipmentSaveTemplate->sizex = 96;
+					butMonsterEquipmentSaveTemplate->sizey = 16;
+					butMonsterEquipmentSaveTemplate->action = &buttonMonsterEquipmentSaveTemplateFile;
+					butMonsterEquipmentSaveTemplate->visible = 1;
+					butMonsterEquipmentSaveTemplate->focused = 1;
+
+					butMonsterEffectsOpenButton = newButton();
+					strcpy(butMonsterEffectsOpenButton->label, "Effects...");
+					butMonsterEffectsOpenButton->x = subx2 - 160;
+					butMonsterEffectsOpenButton->y = suby2 - 24;
+					butMonsterEffectsOpenButton->sizex = 80;
+					butMonsterEffectsOpenButton->sizey = 16;
+					butMonsterEffectsOpenButton->action = &buttonMonsterEffectsOpen;
+					butMonsterEffectsOpenButton->visible = 1;
+					butMonsterEffectsOpenButton->focused = 1;
+
 				}
 				break;
 			case 3: //items
@@ -3325,7 +4149,23 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						{
 							strcpy(spriteProperties[0], "1");
 						}
-						tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected)* ITEM_SLOT_NUMPROPERTIES] = (Sint32)atoi(spriteProperties[0]);
+						const Sint32 previousItemID =
+                            tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected) * ITEM_SLOT_NUMPROPERTIES];
+                        const Sint32 newItemID = parseNonnegativeRuntimeItemID(spriteProperties[0]);
+                        tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected) * ITEM_SLOT_NUMPROPERTIES] = newItemID;
+                        if ( previousItemID != newItemID )
+                        {
+                            MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[tmpSpriteStats];
+                            if ( itemSlotSelected >= 0 && itemSlotSelected < 10 )
+                            {
+                                stableIDs.equipment[itemSlotSelected].clear();
+                            }
+                            else if ( itemSlotSelected >= 10
+                                && itemSlotSelected < 10 + ITEM_SLOT_INVENTORY_COUNT )
+                            {
+                                stableIDs.inventory[itemSlotSelected - 10].clear();
+                            }
+                        }
 						tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected)* ITEM_SLOT_NUMPROPERTIES + 1] = (Sint32)atoi(spriteProperties[1]);
 						if ( strcmp(spriteProperties[2], "00") == 0 )
 						{
@@ -3494,6 +4334,20 @@ void buttonSpritePropertiesConfirm(button_t* my)
 						tmpSpriteStats->customDialogueID[
 							sizeof(tmpSpriteStats->customDialogueID) - 1
 						] = '\0';
+
+						/*
+						 * Persist the authored squad, elite, and defeat-tag fields.
+						 * These MISC_FLAGS entries are serialized with the monster Stat.
+						 */
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_ID] =
+							std::max(0, atoi(spriteProperties[27]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_OPTIONS] =
+							std::max(0, atoi(spriteProperties[28]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_ELITE_PRESET] =
+							std::max(0, atoi(spriteProperties[29]));
+						tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID] =
+							std::max(0, atoi(spriteProperties[30]));
+
 						if ( !strcmp(spriteProperties[31], "disable") )
 						{
 							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] = 1;
@@ -4041,8 +4895,18 @@ void buttonSpritePropertiesConfirm(button_t* my)
 	}
 }
 
+static void hideFocusedEditorButtons();
+
 void buttonCloseSpriteSubwindow(button_t* my)
 {
+	if ( newwindow == 39 )
+	{
+		hideFocusedEditorButtons();
+		newwindow = 2;
+		buttonSpriteProperties(nullptr);
+		return;
+	}
+
 	Stat* tmpSpriteStats = NULL;
 	// close window
 	if ( my == butMonsterItemCancel || my == butMonsterItemX )
@@ -4083,8 +4947,983 @@ void buttonCloseSpriteSubwindow(button_t* my)
 	}
 }
 
+void buttonMonsterInventoryPrevPage(button_t* my)
+{
+	monsterInventoryRemoveConfirm = false;
+	monsterInventoryPage = std::max(0, monsterInventoryPage - 1);
+	hideFocusedEditorButtons();
+	buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryNextPage(button_t* my)
+{
+	monsterInventoryRemoveConfirm = false;
+	Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+	const int maxPage = (getMonsterInventoryActiveCount(stats) - 1) / 6;
+	monsterInventoryPage = std::min(maxPage, monsterInventoryPage + 1);
+	hideFocusedEditorButtons();
+	buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryAddSlot(button_t* my)
+{
+    monsterInventoryRemoveConfirm = false;
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    if ( stats == nullptr )
+    {
+        return;
+    }
+
+    int& activeCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    activeCount = getMonsterInventoryActiveCount(stats);
+    if ( activeCount < ITEM_SLOT_INVENTORY_COUNT )
+    {
+        ++activeCount;
+        monsterInventoryPage = (activeCount - 1) / 6;
+    }
+    hideFocusedEditorButtons();
+    buttonSpriteProperties(nullptr);
+}
+
+void buttonMonsterInventoryRemoveSlot(button_t* my)
+{
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    if ( stats == nullptr )
+    {
+        monsterInventoryRemoveConfirm = false;
+        return;
+    }
+
+    int& activeCount = stats->MISC_FLAGS[MONSTER_INVENTORY_ACTIVE_COUNT_MISC_INDEX];
+    activeCount = getMonsterInventoryActiveCount(stats);
+    if ( activeCount <= 1 )
+    {
+        monsterInventoryRemoveConfirm = false;
+        return;
+    }
+
+    const int removedSlot = activeCount - 1;
+    const int itemIndex = 10 + removedSlot;
+    bool slotHasData = false;
+    for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+    {
+        if ( stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] != 0 )
+        {
+            slotHasData = true;
+            break;
+        }
+    }
+
+    if ( slotHasData && !monsterInventoryRemoveConfirm )
+    {
+        monsterInventoryRemoveConfirm = true;
+        hideFocusedEditorButtons();
+        buttonSpriteProperties(nullptr);
+        return;
+    }
+
+    for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
+    {
+        stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + property] = 0;
+    }
+    --activeCount;
+    monsterInventoryPage = std::min(monsterInventoryPage, (activeCount - 1) / 6);
+    monsterInventoryRemoveConfirm = false;
+    hideFocusedEditorButtons();
+    buttonSpriteProperties(nullptr);
+}
+
+
+static void refreshMonsterTemplateFiles()
+{
+    monsterTemplateFiles.clear();
+    ensureMonsterInventoryTemplateDirectory();
+    DIR* directory = opendir(getMonsterTemplateDirectory());
+    if ( directory != nullptr )
+    {
+        while ( dirent* entry = readdir(directory) )
+        {
+            const std::string filename = entry->d_name;
+            if ( filename.size() > 5 && filename.substr(filename.size() - 5) == ".json" )
+            {
+                monsterTemplateFiles.push_back(filename);
+            }
+        }
+        closedir(directory);
+    }
+    std::sort(monsterTemplateFiles.begin(), monsterTemplateFiles.end());
+    if ( monsterTemplateSelected >= static_cast<int>(monsterTemplateFiles.size()) )
+    {
+        monsterTemplateSelected = -1;
+    }
+    const int maxScroll = std::max(0, static_cast<int>(monsterTemplateFiles.size()) - 8);
+    monsterTemplateScroll = std::max(0, std::min(monsterTemplateScroll, maxScroll));
+}
+
+static void buildMonsterTemplateBrowserButtons();
+
+static void clearMonsterTemplateConfirmations()
+{
+    monsterTemplateOverwriteConfirmFile.clear();
+    monsterTemplateDeleteConfirmFile.clear();
+    if ( monsterTemplateOverwriteButton != nullptr )
+    {
+        snprintf(monsterTemplateOverwriteButton->label, sizeof(monsterTemplateOverwriteButton->label), "Overwrite");
+    }
+    if ( monsterTemplateDeleteButton != nullptr )
+    {
+        snprintf(monsterTemplateDeleteButton->label, sizeof(monsterTemplateDeleteButton->label), "Delete");
+    }
+}
+
+static void openMonsterTemplateBrowser(MonsterTemplateType type)
+{
+    monsterTemplateType = type;
+    monsterTemplateSelected = -1;
+    monsterTemplateScroll = 0;
+    monsterTemplateName[0] = '\0';
+    monsterTemplateStatus[0] = '\0';
+    monsterTemplateOverwriteConfirmFile.clear();
+    monsterTemplateDeleteConfirmFile.clear();
+    refreshMonsterTemplateFiles();
+    hideFocusedEditorButtons();
+    menuVisible = 0;
+    subwindow = 1;
+    newwindow = 40;
+    subx1 = xres / 2 - 230;
+    subx2 = xres / 2 + 230;
+    suby1 = yres / 2 - 190;
+    suby2 = yres / 2 + 190;
+    strcpy(subtext, type == MonsterTemplateType::Inventory
+        ? "Monster Inventory Templates:"
+        : "Monster Equipment Templates:");
+    inputstr = monsterTemplateName;
+    inputlen = 48;
+    SDL_StartTextInput();
+    buildMonsterTemplateBrowserButtons();
+}
+
+static void buttonMonsterTemplateRow(button_t* my)
+{
+    if ( my == nullptr )
+    {
+        return;
+    }
+    int row = -1;
+    for ( int i = 0; i < 8; ++i )
+    {
+        if ( monsterTemplateRows[i] == my )
+        {
+            row = i;
+            break;
+        }
+    }
+    if ( row < 0 )
+    {
+        return;
+    }
+    const int index = monsterTemplateScroll + row;
+    if ( index < 0 || index >= static_cast<int>(monsterTemplateFiles.size()) )
+    {
+        return;
+    }
+    monsterTemplateSelected = index;
+    clearMonsterTemplateConfirmations();
+    std::string name = monsterTemplateFiles[index];
+    if ( name.size() > 5 )
+    {
+        name.resize(name.size() - 5);
+    }
+    snprintf(monsterTemplateName, sizeof(monsterTemplateName), "%s", name.c_str());
+    inputstr = monsterTemplateName;
+    snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Selected: %s", monsterTemplateFiles[index].c_str());
+}
+
+static void buttonMonsterTemplateSaveNew(button_t* my)
+{
+    clearMonsterTemplateConfirmations();
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    const std::string cleanName = sanitizeMonsterTemplateName(monsterTemplateName);
+    if ( cleanName.empty() )
+    {
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Enter a template name first.");
+        return;
+    }
+    const std::string filename = cleanName + ".json";
+    const std::string path = getMonsterTemplatePath(filename);
+    std::ifstream existing(path);
+    if ( existing.good() )
+    {
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Already exists. Select it and use Overwrite.");
+        return;
+    }
+    const bool saved = monsterTemplateType == MonsterTemplateType::Inventory
+        ? saveMonsterInventoryTemplate(stats, path)
+        : saveMonsterEquipmentTemplate(stats, path);
+    snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), saved ? "Saved %s" : "Could not save %s", filename.c_str());
+    refreshMonsterTemplateFiles();
+    buildMonsterTemplateBrowserButtons();
+}
+
+static void buttonMonsterTemplateOverwrite(button_t* my)
+{
+    if ( monsterTemplateSelected < 0 || monsterTemplateSelected >= static_cast<int>(monsterTemplateFiles.size()) )
+    {
+        clearMonsterTemplateConfirmations();
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Select an existing template first.");
+        return;
+    }
+    const std::string filename = monsterTemplateFiles[monsterTemplateSelected];
+    if ( monsterTemplateOverwriteConfirmFile != filename )
+    {
+        monsterTemplateOverwriteConfirmFile = filename;
+        monsterTemplateDeleteConfirmFile.clear();
+        snprintf(my->label, sizeof(my->label), "Confirm");
+        if ( monsterTemplateDeleteButton != nullptr )
+        {
+            snprintf(monsterTemplateDeleteButton->label, sizeof(monsterTemplateDeleteButton->label), "Delete");
+        }
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Click Confirm to overwrite %s", filename.c_str());
+        return;
+    }
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    const std::string path = getMonsterTemplatePath(filename);
+    const bool saved = monsterTemplateType == MonsterTemplateType::Inventory
+        ? saveMonsterInventoryTemplate(stats, path)
+        : saveMonsterEquipmentTemplate(stats, path);
+    clearMonsterTemplateConfirmations();
+    snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), saved ? "Updated %s" : "Could not update %s", filename.c_str());
+}
+
+static void buttonMonsterTemplateLoad(button_t* my)
+{
+    clearMonsterTemplateConfirmations();
+    if ( monsterTemplateSelected < 0 || monsterTemplateSelected >= static_cast<int>(monsterTemplateFiles.size()) )
+    {
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Select a template first.");
+        return;
+    }
+    Stat* stats = selectedEntity[0] != nullptr ? selectedEntity[0]->getStats() : nullptr;
+    const std::string filename = monsterTemplateFiles[monsterTemplateSelected];
+    const std::string path = getMonsterTemplatePath(filename);
+    const bool loaded = monsterTemplateType == MonsterTemplateType::Inventory
+        ? loadMonsterInventoryTemplate(stats, path)
+        : loadMonsterEquipmentTemplate(stats, path);
+    if ( loaded )
+    {
+        SDL_StopTextInput();
+        hideFocusedEditorButtons();
+        buttonSpriteProperties(nullptr);
+    }
+    else
+    {
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Could not load %s", filename.c_str());
+    }
+}
+
+static void buttonMonsterTemplateDelete(button_t* my)
+{
+    if ( monsterTemplateSelected < 0 || monsterTemplateSelected >= static_cast<int>(monsterTemplateFiles.size()) )
+    {
+        clearMonsterTemplateConfirmations();
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Select a template first.");
+        return;
+    }
+    const std::string filename = monsterTemplateFiles[monsterTemplateSelected];
+    if ( monsterTemplateDeleteConfirmFile != filename )
+    {
+        monsterTemplateDeleteConfirmFile = filename;
+        monsterTemplateOverwriteConfirmFile.clear();
+        snprintf(my->label, sizeof(my->label), "Confirm");
+        if ( monsterTemplateOverwriteButton != nullptr )
+        {
+            snprintf(monsterTemplateOverwriteButton->label, sizeof(monsterTemplateOverwriteButton->label), "Overwrite");
+        }
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Click Confirm to delete %s", filename.c_str());
+        return;
+    }
+    const std::string path = getMonsterTemplatePath(filename);
+    if ( std::remove(path.c_str()) == 0 )
+    {
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Deleted %s", filename.c_str());
+        monsterTemplateSelected = -1;
+        monsterTemplateName[0] = '\0';
+        clearMonsterTemplateConfirmations();
+        refreshMonsterTemplateFiles();
+        buildMonsterTemplateBrowserButtons();
+    }
+    else
+    {
+        clearMonsterTemplateConfirmations();
+        snprintf(monsterTemplateStatus, sizeof(monsterTemplateStatus), "Could not delete %s", filename.c_str());
+    }
+}
+
+static void buttonMonsterTemplatePrev(button_t* my)
+{
+    clearMonsterTemplateConfirmations();
+    monsterTemplateScroll = std::max(0, monsterTemplateScroll - 8);
+    buildMonsterTemplateBrowserButtons();
+}
+
+static void buttonMonsterTemplateNext(button_t* my)
+{
+    clearMonsterTemplateConfirmations();
+    monsterTemplateScroll = std::min(std::max(0, static_cast<int>(monsterTemplateFiles.size()) - 8), monsterTemplateScroll + 8);
+    buildMonsterTemplateBrowserButtons();
+}
+
+static void buttonMonsterTemplateClose(button_t* my)
+{
+    clearMonsterTemplateConfirmations();
+    SDL_StopTextInput();
+    hideFocusedEditorButtons();
+    buttonSpriteProperties(nullptr);
+}
+
+static void buildMonsterTemplateBrowserButtons()
+{
+    hideFocusedEditorButtons();
+    for ( int row = 0; row < 8; ++row )
+    {
+        const int index = monsterTemplateScroll + row;
+        monsterTemplateRows[row] = newButton();
+        monsterTemplateRows[row]->x = subx1 + 20;
+        monsterTemplateRows[row]->y = suby1 + 76 + row * 22;
+        monsterTemplateRows[row]->sizex = 280;
+        monsterTemplateRows[row]->sizey = 18;
+        monsterTemplateRows[row]->action = &buttonMonsterTemplateRow;
+        monsterTemplateRows[row]->visible = index < static_cast<int>(monsterTemplateFiles.size());
+        monsterTemplateRows[row]->focused = 1;
+        if ( index < static_cast<int>(monsterTemplateFiles.size()) )
+        {
+            snprintf(monsterTemplateRows[row]->label, sizeof(monsterTemplateRows[row]->label), "%s%s",
+                index == monsterTemplateSelected ? "> " : "", monsterTemplateFiles[index].c_str());
+        }
+    }
+
+    monsterTemplatePrevButton = newButton();
+    strcpy(monsterTemplatePrevButton->label, "< Prev");
+    monsterTemplatePrevButton->x = subx1 + 310;
+    monsterTemplatePrevButton->y = suby1 + 76;
+    monsterTemplatePrevButton->sizex = 64;
+    monsterTemplatePrevButton->sizey = 18;
+    monsterTemplatePrevButton->action = &buttonMonsterTemplatePrev;
+    monsterTemplatePrevButton->visible = monsterTemplateScroll > 0;
+    monsterTemplatePrevButton->focused = 1;
+
+    monsterTemplateNextButton = newButton();
+    strcpy(monsterTemplateNextButton->label, "Next >");
+    monsterTemplateNextButton->x = subx1 + 380;
+    monsterTemplateNextButton->y = suby1 + 76;
+    monsterTemplateNextButton->sizex = 64;
+    monsterTemplateNextButton->sizey = 18;
+    monsterTemplateNextButton->action = &buttonMonsterTemplateNext;
+    monsterTemplateNextButton->visible = monsterTemplateScroll + 8 < static_cast<int>(monsterTemplateFiles.size());
+    monsterTemplateNextButton->focused = 1;
+
+    monsterTemplateSaveNewButton = newButton();
+    strcpy(monsterTemplateSaveNewButton->label, "Save New");
+    monsterTemplateSaveNewButton->x = subx1 + 20;
+    monsterTemplateSaveNewButton->y = suby2 - 66;
+    monsterTemplateSaveNewButton->sizex = 80;
+    monsterTemplateSaveNewButton->sizey = 18;
+    monsterTemplateSaveNewButton->action = &buttonMonsterTemplateSaveNew;
+    monsterTemplateSaveNewButton->visible = 1;
+    monsterTemplateSaveNewButton->focused = 1;
+
+    monsterTemplateOverwriteButton = newButton();
+    snprintf(monsterTemplateOverwriteButton->label, sizeof(monsterTemplateOverwriteButton->label), "%s",
+        monsterTemplateOverwriteConfirmFile.empty() ? "Overwrite" : "Confirm");
+    monsterTemplateOverwriteButton->x = subx1 + 106;
+    monsterTemplateOverwriteButton->y = suby2 - 66;
+    monsterTemplateOverwriteButton->sizex = 88;
+    monsterTemplateOverwriteButton->sizey = 18;
+    monsterTemplateOverwriteButton->action = &buttonMonsterTemplateOverwrite;
+    monsterTemplateOverwriteButton->visible = 1;
+    monsterTemplateOverwriteButton->focused = 1;
+
+    monsterTemplateLoadButton = newButton();
+    strcpy(monsterTemplateLoadButton->label, "Load");
+    monsterTemplateLoadButton->x = subx1 + 200;
+    monsterTemplateLoadButton->y = suby2 - 66;
+    monsterTemplateLoadButton->sizex = 64;
+    monsterTemplateLoadButton->sizey = 18;
+    monsterTemplateLoadButton->action = &buttonMonsterTemplateLoad;
+    monsterTemplateLoadButton->visible = 1;
+    monsterTemplateLoadButton->focused = 1;
+
+    monsterTemplateDeleteButton = newButton();
+    snprintf(monsterTemplateDeleteButton->label, sizeof(monsterTemplateDeleteButton->label), "%s",
+        monsterTemplateDeleteConfirmFile.empty() ? "Delete" : "Confirm");
+    monsterTemplateDeleteButton->x = subx1 + 270;
+    monsterTemplateDeleteButton->y = suby2 - 66;
+    monsterTemplateDeleteButton->sizex = 64;
+    monsterTemplateDeleteButton->sizey = 18;
+    monsterTemplateDeleteButton->action = &buttonMonsterTemplateDelete;
+    monsterTemplateDeleteButton->visible = 1;
+    monsterTemplateDeleteButton->focused = 1;
+
+    monsterTemplateCloseButton = newButton();
+    strcpy(monsterTemplateCloseButton->label, "Close");
+    monsterTemplateCloseButton->x = subx2 - 86;
+    monsterTemplateCloseButton->y = suby2 - 66;
+    monsterTemplateCloseButton->sizex = 64;
+    monsterTemplateCloseButton->sizey = 18;
+    monsterTemplateCloseButton->action = &buttonMonsterTemplateClose;
+    monsterTemplateCloseButton->visible = 1;
+    monsterTemplateCloseButton->focused = 1;
+}
+
+void drawMonsterTemplateBrowser()
+{
+    drawDepressed(subx1 + 16, suby1 + 42, subx2 - 16, suby1 + 66);
+    printText(font8x8_bmp, subx1 + 22, suby1 + 50, monsterTemplateName);
+    printText(font8x8_bmp, subx1 + 16, suby1 + 28, "Template name / selected file:");
+    printText(font8x8_bmp, subx1 + 310, suby1 + 102, monsterTemplateType == MonsterTemplateType::Inventory
+        ? "Inventory JSON files" : "Equipment JSON files");
+    printText(font8x8_bmp, subx1 + 20, suby2 - 92, monsterTemplateStatus);
+    if ( SDL_IsTextInputActive() && ticks % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+    {
+        printText(font8x8_bmp, subx1 + 22 + static_cast<int>(strlen(monsterTemplateName)) * 8, suby1 + 50, "_");
+    }
+}
+
+void buttonMonsterInventorySaveTemplateFile(button_t* my)
+{
+    openMonsterTemplateBrowser(MonsterTemplateType::Inventory);
+}
+
+void buttonMonsterInventoryLoadTemplateFile(button_t* my)
+{
+    openMonsterTemplateBrowser(MonsterTemplateType::Inventory);
+}
+
+void buttonMonsterEquipmentSaveTemplateFile(button_t* my)
+{
+    openMonsterTemplateBrowser(MonsterTemplateType::Equipment);
+}
+
+void buttonMonsterEquipmentLoadTemplateFile(button_t* my)
+{
+    openMonsterTemplateBrowser(MonsterTemplateType::Equipment);
+}
+
+
+static const char* monsterEffectDisplayNames[135] =
+{
+    "Asleep", // 0
+    "Poisoned", // 1
+    "Stunned", // 2
+    "Confused", // 3
+    "Drunk", // 4
+    "Invisible", // 5
+    "Blind", // 6
+    "Greasy", // 7
+    "Messy", // 8
+    "Fast", // 9
+    "Paralyzed", // 10
+    "Levitating", // 11
+    "Telepathy", // 12
+    "Vomiting", // 13
+    "Bleeding", // 14
+    "Slow", // 15
+    "Magic Resistance", // 16
+    "Magic Reflection", // 17
+    "Vampiric Aura", // 18
+    "Shrine Red Buff", // 19
+    "Shrine Green Buff", // 20
+    "Shrine Blue Buff", // 21
+    "HP Regeneration", // 22
+    "MP Regeneration", // 23
+    "Pacify", // 24
+    "Polymorph", // 25
+    "Knockback", // 26
+    "Withdrawal", // 27
+    "Potion Strength", // 28
+    "Shapeshift", // 29
+    "Webbed", // 30
+    "Fear", // 31
+    "Magic Amplification", // 32
+    "Disoriented", // 33
+    "Shadow Tagged", // 34
+    "Troll's Blood", // 35
+    "Flutter", // 36
+    "Dash", // 37
+    "Distracted Cooldown", // 38
+    "Mimic Locked", // 39
+    "Rooted", // 40
+    "Nausea Protection", // 41
+    "Constitution Bonus", // 42
+    "Power", // 43
+    "Agility", // 44
+    "Rally", // 45
+    "Marigold", // 46
+    "Ensemble Flute", // 47
+    "Ensemble Lyre", // 48
+    "Ensemble Drum", // 49
+    "Ensemble Lute", // 50
+    "Ensemble Horn", // 51
+    "Lift", // 52
+    "Guard Spirit", // 53
+    "Guard Body", // 54
+    "Divine Guard", // 55
+    "Nimbleness", // 56
+    "Greater Might", // 57
+    "Counsel", // 58
+    "Sturdiness", // 59
+    "Bless Food", // 60
+    "Pinpoint", // 61
+    "Penance", // 62
+    "Sacred Path", // 63
+    "Detect Enemies", // 64
+    "Blood Ward", // 65
+    "True Blood", // 66
+    "Divine Zeal", // 67
+    "Maximise", // 68
+    "Minimise", // 69
+    "Weakness", // 70
+    "Incoherence", // 71
+    "Overcharge", // 72
+    "Envenom Weapon", // 73
+    "Magic Grease", // 74
+    "Command", // 75
+    "Mimic Void", // 76
+    "Curse Flesh", // 77
+    "Numbing Bolt", // 78
+    "Delay Pain", // 79
+    "Seek Creature", // 80
+    "Taboo", // 81
+    "Courage", // 82
+    "Cowardice", // 83
+    "Spores", // 84
+    "Abundance", // 85
+    "Greater Abundance", // 86
+    "Preserve", // 87
+    "Mist Form", // 88
+    "Force Shield", // 89
+    "Lighten Load", // 90
+    "Attract Items", // 91
+    "Return Item", // 92
+    "Demesne Door", // 93
+    "Reflector Shield", // 94
+    "Dizzy", // 95
+    "Spin", // 96
+    "Critical Spell", // 97
+    "Magic Well", // 98
+    "Static", // 99
+    "Absorb Magic", // 100
+    "Flame Cloak", // 101
+    "Dusted", // 102
+    "Noise Visibility", // 103
+    "Ration Spicy", // 104
+    "Ration Sour", // 105
+    "Ration Bitter", // 106
+    "Ration Hearty", // 107
+    "Ration Herbal", // 108
+    "Ration Sweet", // 109
+    "Growth", // 110
+    "Thorns", // 111
+    "Bladevines", // 112
+    "Bastion Mushroom", // 113
+    "Bastion Roots", // 114
+    "Foci Light Peace", // 115
+    "Foci Light Justice", // 116
+    "Foci Light Providence", // 117
+    "Foci Light Purity", // 118
+    "Foci Light Sanctuary", // 119
+    "Stasis", // 120
+    "Hp Mp Regen", // 121
+    "Disrupted", // 122
+    "Frost", // 123
+    "Magicians Armor", // 124
+    "Project Spirit", // 125
+    "Defy Flesh", // 126
+    "Pinpoint Damage", // 127
+    "Salamander Heart", // 128
+    "Divine Fire", // 129
+    "Healing Word", // 130
+    "Holy Fire", // 131
+    "Sigil", // 132
+    "Sanctuary", // 133
+    "Ducked", // 134
+};
+const char* monsterEffectDisplayName(int effect)
+{
+    if ( effect >= 0 && effect < 135 && monsterEffectDisplayNames[effect] != nullptr )
+    {
+        return monsterEffectDisplayNames[effect];
+    }
+    return "Unknown Effect";
+}
+
+static const int monsterSafeEffects[] = { EFF_ASLEEP, EFF_POISONED, EFF_STUNNED, EFF_CONFUSED, EFF_DRUNK, EFF_INVISIBLE, EFF_BLIND, EFF_FAST, EFF_PARALYZED, EFF_LEVITATING, EFF_TELEPATH, EFF_BLEEDING, EFF_SLOW, EFF_MAGICRESIST, EFF_MAGICREFLECT, EFF_HP_REGEN, EFF_MP_REGEN, EFF_PACIFY, EFF_WEBBED, EFF_FEAR, EFF_MAGICAMPLIFY, EFF_DISORIENTED, EFF_TROLLS_BLOOD, EFF_ROOTED, EFF_PWR, EFF_AGILITY, EFF_WEAKNESS, EFF_COURAGE, EFF_COWARDICE, EFF_FROST };
+static bool monsterEffectAllowed(int effect)
+{
+    if ( effect < 0 || effect >= 135 ) return false;
+    if ( monsterEffectsShowAll ) return true;
+    for ( int safeEffect : monsterSafeEffects ) if ( safeEffect == effect ) return true;
+    return false;
+}
+
+bool monsterEffectCanSelect(int effect)
+{
+    return monsterEffectAllowed(effect);
+}
+
+static std::string monsterEffectLower(const char* text)
+{
+    std::string result = text ? text : "";
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return result;
+}
+
+void monsterEffectsUpdateSelectionFromFields()
+{
+    if ( inputstr == monsterEffectIdText )
+    {
+        const int requested = atoi(monsterEffectIdText);
+        if ( monsterEffectAllowed(requested) ) monsterEffectSelectedId = requested;
+    }
+    else if ( inputstr == monsterEffectSearchText && monsterEffectSearchText[0] != '\0' )
+    {
+        const std::string query = monsterEffectLower(monsterEffectSearchText);
+        for ( int effect = 0; effect < 135; ++effect )
+        {
+            if ( !monsterEffectAllowed(effect) ) continue;
+            if ( monsterEffectLower(monsterEffectDisplayName(effect)).find(query) != std::string::npos )
+            {
+                monsterEffectSelectedId = effect;
+                snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", effect);
+                break;
+            }
+        }
+    }
+}
+
+static void monsterEffectsSelectDirection(int direction)
+{
+    std::vector<int> allowedEffects;
+    allowedEffects.reserve(135);
+    for ( int effect = 0; effect < 135; ++effect )
+    {
+        if ( monsterEffectAllowed(effect) )
+        {
+            allowedEffects.push_back(effect);
+        }
+    }
+
+    if ( allowedEffects.empty() )
+    {
+        return;
+    }
+
+    auto current = std::find(allowedEffects.begin(), allowedEffects.end(), monsterEffectSelectedId);
+    int selectedIndex = 0;
+    if ( current != allowedEffects.end() )
+    {
+        selectedIndex = static_cast<int>(std::distance(allowedEffects.begin(), current));
+    }
+
+    const int count = static_cast<int>(allowedEffects.size());
+    selectedIndex = (selectedIndex + direction + count) % count;
+    monsterEffectSelectedId = allowedEffects[selectedIndex];
+    snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+    snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+        monsterEffectDisplayName(monsterEffectSelectedId));
+
+    // Leave the search field after using the arrow buttons. Otherwise the
+    // next editor frame can reinterpret the selected effect name as a partial
+    // search and jump to a different earlier matching effect.
+    inputstr = monsterEffectIdText;
+    inputlen = 3;
+    editproperty = 1001;
+    cursorflash = ticks;
+}
+void buttonMonsterEffectsSelectPrev(button_t*) { monsterEffectsSelectDirection(-1); }
+void buttonMonsterEffectsSelectNext(button_t*) { monsterEffectsSelectDirection(1); }
+
+static Stat* monsterEffectsStats() { return selectedEntity[0] ? selectedEntity[0]->getStats() : nullptr; }
+static int monsterEffectAtRow(int target) { Stat* s=monsterEffectsStats(); if(!s) return -1; int row=0; for(int e=0;e<135;++e){ if(s->getEffectActive(e)){ if(row==target) return e; ++row; }} return -1; }
+static int monsterEffectRow(button_t* my,int col){ for(int r=0;r<8;++r) if(monsterEffectButtons[r][col]==my) return r; return -1; }
+static void rebuildMonsterEffectsButtons();
+static void hideFocusedEditorButtons()
+{
+    for ( node_t* node = button_l.first; node != nullptr; node = node->next )
+    {
+        button_t* button = static_cast<button_t*>(node->element);
+        if ( button != nullptr && button->focused )
+        {
+            button->visible = 0;
+            button->focused = 0;
+        }
+    }
+}
+void buttonMonsterEffectsOpen(button_t*)
+{
+    hideFocusedEditorButtons();
+    newwindow = 39;
+    subwindow = 1;
+    menuVisible = 0;
+    subx1 = xres / 2 - 330;
+    subx2 = xres / 2 + 330;
+    suby1 = yres / 2 - 220;
+    suby2 = yres / 2 + 220;
+    strcpy(subtext, "Monster Starting Effects:");
+    rebuildMonsterEffectsButtons();
+}
+void buttonMonsterEffectsDone(button_t*)
+{
+    hideFocusedEditorButtons();
+    newwindow = 2;
+    buttonSpriteProperties(nullptr);
+}
+void buttonMonsterEffectsAdd(button_t*)
+{
+    Stat* stats = monsterEffectsStats();
+    monsterEffectsUpdateSelectionFromFields();
+    if ( !stats || !monsterEffectAllowed(monsterEffectSelectedId) ) return;
+    int count = 0;
+    for ( int effect = 0; effect < 135; ++effect ) count += stats->getEffectActive(effect) ? 1 : 0;
+    if ( count >= 8 || stats->getEffectActive(monsterEffectSelectedId) ) return;
+    stats->setEffectActive(monsterEffectSelectedId, 1);
+    stats->EFFECTS_TIMERS[monsterEffectSelectedId] = 30 * TICKS_PER_SECOND;
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsRemove(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int row = monsterEffectRow(my, 6);
+    const int effect = monsterEffectAtRow(row);
+    if ( !stats || effect < 0 )
+    {
+        return;
+    }
+
+    // setEffectActive() preserves an existing nonzero strength, so it cannot
+    // reliably remove an editor-configured effect. Clear the effect value and
+    // timer directly, then rebuild the rows so the removed row disappears and
+    // all later effects shift upward immediately.
+    stats->setEffectValueUnsafe(effect, 0);
+    stats->EFFECTS_TIMERS[effect] = 0;
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsCycle(button_t* my)
+{
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 0));
+    if ( effect >= 0 )
+    {
+        monsterEffectSelectedId = effect;
+        snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", effect);
+        snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s", monsterEffectDisplayName(effect));
+    }
+}
+
+void buttonMonsterEffectsStrengthDown(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 1));
+    if ( stats && effect >= 0 )
+    {
+        const Uint8 currentStrength = stats->getEffectActive(effect);
+        const Uint8 newStrength = static_cast<Uint8>(std::max<int>(1, currentStrength - 1));
+        stats->setEffectValueUnsafe(effect, newStrength);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsStrengthUp(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 2));
+    if ( stats && effect >= 0 )
+    {
+        stats->setEffectActive(effect, std::min<int>(20, stats->getEffectActive(effect) + 1));
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsDurationDown(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 3));
+    if ( stats && effect >= 0 && stats->EFFECTS_TIMERS[effect] >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = std::max(5 * TICKS_PER_SECOND,
+            stats->EFFECTS_TIMERS[effect] - 5 * TICKS_PER_SECOND);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsDurationUp(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 4));
+    if ( stats && effect >= 0 && stats->EFFECTS_TIMERS[effect] >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = std::min(3600 * TICKS_PER_SECOND,
+            stats->EFFECTS_TIMERS[effect] + 5 * TICKS_PER_SECOND);
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsPermanent(button_t* my)
+{
+    Stat* stats = monsterEffectsStats();
+    const int effect = monsterEffectAtRow(monsterEffectRow(my, 5));
+    if ( stats && effect >= 0 )
+    {
+        stats->EFFECTS_TIMERS[effect] = stats->EFFECTS_TIMERS[effect] < 0
+            ? 30 * TICKS_PER_SECOND : -1;
+    }
+    rebuildMonsterEffectsButtons();
+}
+
+void buttonMonsterEffectsToggleAll(button_t* my)
+{
+    monsterEffectsShowAll = !monsterEffectsShowAll;
+
+    if ( !monsterEffectsShowAll && !monsterEffectAllowed(monsterEffectSelectedId) )
+    {
+        monsterEffectSelectedId = EFF_BLIND;
+        snprintf(monsterEffectIdText, sizeof(monsterEffectIdText), "%d", monsterEffectSelectedId);
+        snprintf(monsterEffectSearchText, sizeof(monsterEffectSearchText), "%s",
+            monsterEffectDisplayName(monsterEffectSelectedId));
+    }
+
+    if ( my )
+    {
+        strcpy(my->label, monsterEffectsShowAll ? "All Effects: ON" : "All Effects: OFF");
+    }
+}
+
+void monsterEffectsSetRowsVisible(bool visible)
+{
+    for ( int row = 0; row < 8; ++row )
+    {
+        for ( int column = 0; column < 7; ++column )
+        {
+            if ( monsterEffectButtons[row][column] )
+            {
+                monsterEffectButtons[row][column]->visible = visible ? 1 : 0;
+            }
+        }
+    }
+}
+
+static void rebuildMonsterEffectsButtons()
+{
+    for ( int row = 0; row < 8; ++row )
+    {
+        for ( int column = 0; column < 7; ++column )
+        {
+            if ( monsterEffectButtons[row][column] )
+            {
+                monsterEffectButtons[row][column]->visible = 0;
+            }
+            monsterEffectButtons[row][column] = nullptr;
+        }
+    }
+
+    Stat* stats = monsterEffectsStats();
+    for ( int row = 0; row < 8; ++row )
+    {
+        const int effect = monsterEffectAtRow(row);
+        if ( effect < 0 )
+        {
+            break;
+        }
+
+        const int y = suby1 + 100 + row * 38;
+        char effectLabel[128];
+        snprintf(effectLabel, sizeof(effectLabel), "%s  (ID %d)", monsterEffectDisplayName(effect), effect);
+
+        const char* labels[7] =
+        {
+            effectLabel,
+            "-",
+            "+",
+            "-",
+            "+",
+            stats && stats->EFFECTS_TIMERS[effect] < 0 ? "[X] Perm" : "[ ] Perm",
+            "Remove"
+        };
+        const int xPositions[7] =
+        {
+            subx1 + 16,
+            subx1 + 288,
+            subx1 + 318,
+            subx1 + 390,
+            subx1 + 420,
+            subx1 + 458,
+            subx1 + 558
+        };
+        const int widths[7] = { 262, 24, 24, 24, 24, 92, 58 };
+        void (*actions[7])(button_t*) =
+        {
+            buttonMonsterEffectsCycle,
+            buttonMonsterEffectsStrengthDown,
+            buttonMonsterEffectsStrengthUp,
+            buttonMonsterEffectsDurationDown,
+            buttonMonsterEffectsDurationUp,
+            buttonMonsterEffectsPermanent,
+            buttonMonsterEffectsRemove
+        };
+
+        for ( int column = 0; column < 7; ++column )
+        {
+            button_t* button = newButton();
+            snprintf(button->label, sizeof(button->label), "%s", labels[column]);
+            button->x = xPositions[column];
+            button->y = y;
+            button->sizex = widths[column];
+            button->sizey = 16;
+            button->action = actions[column];
+            button->visible = 1;
+            button->focused = 1;
+            monsterEffectButtons[row][column] = button;
+        }
+    }
+
+
+    monsterEffectsAddButton = newButton();
+    strcpy(monsterEffectsAddButton->label, "Add Effect");
+    monsterEffectsAddButton->x = subx1 + 16;
+    monsterEffectsAddButton->y = suby2 - 30;
+    monsterEffectsAddButton->sizex = 144;
+    monsterEffectsAddButton->sizey = 16;
+    monsterEffectsAddButton->action = buttonMonsterEffectsAdd;
+    monsterEffectsAddButton->visible = 1;
+    monsterEffectsAddButton->focused = 1;
+
+    monsterEffectsToggleButton = newButton();
+    strcpy(monsterEffectsToggleButton->label,
+        monsterEffectsShowAll ? "All Effects: ON" : "All Effects: OFF");
+    monsterEffectsToggleButton->x = subx1 + 172;
+    monsterEffectsToggleButton->y = suby2 - 30;
+    monsterEffectsToggleButton->sizex = 176;
+    monsterEffectsToggleButton->sizey = 16;
+    monsterEffectsToggleButton->action = buttonMonsterEffectsToggleAll;
+    monsterEffectsToggleButton->visible = 1;
+    monsterEffectsToggleButton->focused = 1;
+
+    monsterEffectsDoneButton = newButton();
+    strcpy(monsterEffectsDoneButton->label, "Done");
+    monsterEffectsDoneButton->x = subx2 - 72;
+    monsterEffectsDoneButton->y = suby2 - 30;
+    monsterEffectsDoneButton->sizex = 56;
+    monsterEffectsDoneButton->sizey = 16;
+    monsterEffectsDoneButton->action = buttonMonsterEffectsDone;
+    monsterEffectsDoneButton->visible = 1;
+    monsterEffectsDoneButton->focused = 1;
+}
+
 void buttonMonsterItems(button_t* my)
 {
+    loadSAMItemCatalog();
 	int spacing = 20;
 	int pad_y2 = suby1 + 28 + 2 * spacing;
 	int pad_x3 = 40;
@@ -4094,12 +5933,26 @@ void buttonMonsterItems(button_t* my)
 
 	itemSelect = 0;
 
-	/*
-	 * Resolve and validate the clicked slot before changing window state or
-	 * dereferencing the selected entity. Buttons can remain queued for one
-	 * frame while property windows are rebuilt, so a stale/unknown button must
-	 * never become item slot -1 and index EDITOR_ITEMS before the array.
-	 */
+	inputstr = spriteProperties[0];
+	cursorflash = ticks;
+	menuVisible = 0;
+	subwindow = 1;
+	slidery = 0;
+	subx1 = xres / 2 - 200;
+	subx2 = xres / 2 + 200;
+	suby1 = yres / 2 - 158;
+	suby2 = yres / 2 + 158;
+	strcpy(subtext, "Monster Item Properties:");
+
+	Stat* tmpSpriteStats = selectedEntity[0]->getStats();
+
+	// stores any modified monster stats, to be restored when window is closed.
+
+	for ( int i = 0; i < sizeof(spriteProperties) / sizeof(spriteProperties[0]); i++ )
+	{
+		strcpy(tmpSpriteProperties[i], spriteProperties[i]);
+	}
+
 	if ( my == butMonsterHelm )
 	{
 		itemSlotSelected = 0;
@@ -4142,69 +5995,33 @@ void buttonMonsterItems(button_t* my)
 	}
 	else if ( my == butMonsterItem1 )
 	{
-		itemSlotSelected = 10;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 0;
 	}
 	else if ( my == butMonsterItem2 )
 	{
-		itemSlotSelected = 11;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 1;
 	}
 	else if ( my == butMonsterItem3 )
 	{
-		itemSlotSelected = 12;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 2;
 	}
 	else if ( my == butMonsterItem4 )
 	{
-		itemSlotSelected = 13;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 3;
 	}
 	else if ( my == butMonsterItem5 )
 	{
-		itemSlotSelected = 14;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 4;
 	}
 	else if ( my == butMonsterItem6 )
 	{
-		itemSlotSelected = 15;
+		itemSlotSelected = 10 + monsterInventoryPage * 6 + 5;
 	}
 	else
 	{
 		itemSlotSelected = -1;
-		return;
 	}
 
-	if ( selectedEntity[0] == NULL )
-	{
-		itemSlotSelected = -1;
-		return;
-	}
-
-	Stat* tmpSpriteStats = selectedEntity[0]->getStats();
-	if ( tmpSpriteStats == NULL )
-	{
-		itemSlotSelected = -1;
-		return;
-	}
-
-	inputstr = spriteProperties[0];
-	cursorflash = ticks;
-	menuVisible = 0;
-	subwindow = 1;
-	slidery = 0;
-	subx1 = xres / 2 - 200;
-	subx2 = xres / 2 + 200;
-	suby1 = yres / 2 - 158;
-	suby2 = yres / 2 + 158;
-	strcpy(subtext, "Monster Item Properties:");
-
-	// stores any modified monster stats, to be restored when window is closed.
-
-	for ( int i = 0; i < sizeof(spriteProperties) / sizeof(spriteProperties[0]); i++ )
-	{
-		strcpy(tmpSpriteProperties[i], spriteProperties[i]);
-	}
-
-	/*
-	 * The slot was already resolved and validated above. Do not resolve it a
-	 * second time after changing the property-window state.
-	 */
 	newwindow = 5;
 
 
@@ -4272,6 +6089,41 @@ void buttonMonsterItems(button_t* my)
 	{
 		butMonsterItem6->visible = 0;
 	}
+	if ( butMonsterInventoryPrev != NULL )
+	{
+		butMonsterInventoryPrev->visible = 0;
+		butMonsterInventoryPrev->focused = 0;
+	}
+	if ( butMonsterInventoryNext != NULL )
+	{
+		butMonsterInventoryNext->visible = 0;
+		butMonsterInventoryNext->focused = 0;
+	}
+	if ( butMonsterInventoryAddSlot != NULL )
+	{
+		butMonsterInventoryAddSlot->visible = 0;
+		butMonsterInventoryAddSlot->focused = 0;
+	}
+	if ( butMonsterInventoryRemoveSlot != NULL )
+	{
+		butMonsterInventoryRemoveSlot->visible = 0;
+		butMonsterInventoryRemoveSlot->focused = 0;
+	}
+	if ( butMonsterInventorySaveTemplate != NULL )
+	{
+		butMonsterInventorySaveTemplate->visible = 0;
+		butMonsterInventorySaveTemplate->focused = 0;
+	}
+	if ( butMonsterEquipmentSaveTemplate != NULL )
+	{
+		butMonsterEquipmentSaveTemplate->visible = 0;
+		butMonsterEquipmentSaveTemplate->focused = 0;
+	}
+	if ( butMonsterEffectsOpenButton != NULL )
+	{
+		butMonsterEffectsOpenButton->visible = 0;
+		butMonsterEffectsOpenButton->focused = 0;
+	}
 	if ( butMonsterOK != NULL )
 	{
 		butMonsterOK->visible = 0;
@@ -4284,36 +6136,20 @@ void buttonMonsterItems(button_t* my)
 	{
 		butMonsterX->visible = 0;
 	}
-
-	const int editorItemValueCount =
-		static_cast<int>(sizeof(tmpSpriteStats->EDITOR_ITEMS)
-		/ sizeof(tmpSpriteStats->EDITOR_ITEMS[0]));
-	const int itemSlotBase = itemSlotSelected * ITEM_SLOT_NUMPROPERTIES;
-	if ( itemSlotSelected < 0
-		|| itemSlotSelected >= 16
-		|| itemSlotBase < 0
-		|| itemSlotBase + ITEM_SLOT_NUMPROPERTIES > editorItemValueCount )
+	snprintf(spriteProperties[0], sizeof(spriteProperties[0]), "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 0]);
+	snprintf(spriteProperties[1], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 1]);
+	if ( (int)tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 2] == 10 )
 	{
-		itemSlotSelected = -1;
-		buttonCloseSpriteSubwindow(nullptr);
-		return;
-	}
-
-	snprintf(spriteProperties[0], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 0]);
-	snprintf(spriteProperties[1], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 1]);
-	if ( static_cast<int>(tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 2]) == 10 )
-	{
-		strcpy(spriteProperties[2], "00"); // bless random
+		strcpy(spriteProperties[2], "00"); //bless random
 	}
 	else
 	{
-		snprintf(spriteProperties[2], 4, "%d",
-			static_cast<int>(tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 2]));
+		snprintf(spriteProperties[2], 4, "%d", (int)tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 2]); //bless
 	}
-	snprintf(spriteProperties[3], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 3]);
-	snprintf(spriteProperties[4], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 4]);
-	snprintf(spriteProperties[5], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 5]);
-	snprintf(spriteProperties[6], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotBase + 6]);
+	snprintf(spriteProperties[3], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 3]);
+	snprintf(spriteProperties[4], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 4]);
+	snprintf(spriteProperties[5], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 5]);
+	snprintf(spriteProperties[6], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 6]);
 
 	butMonsterItemOK = newButton();
 	strcpy(butMonsterItemOK->label, "  OK  ");
@@ -4429,6 +6265,33 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 		spriteProperties[26][
 			sizeof(spriteProperties[26]) - 1
 		] = '\0';
+
+		/* Restore authored squad fields when reopening monster properties. */
+		snprintf(
+			spriteProperties[27],
+			sizeof(spriteProperties[27]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_ID]
+		);
+		snprintf(
+			spriteProperties[28],
+			sizeof(spriteProperties[28]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_OPTIONS]
+		);
+		snprintf(
+			spriteProperties[29],
+			sizeof(spriteProperties[29]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_ELITE_PRESET]
+		);
+		snprintf(
+			spriteProperties[30],
+			sizeof(spriteProperties[30]),
+			"%d",
+			tmpSpriteStats->MISC_FLAGS[STAT_FLAG_AUTHORED_SQUAD_DEFEAT_ID]
+		);
+
 		if ( tmpSpriteStats->MISC_FLAGS[STAT_FLAG_DISABLE_MINIBOSS] == 0 )
 		{
 			strcpy(spriteProperties[31], "");

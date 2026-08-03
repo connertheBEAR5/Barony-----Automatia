@@ -25,9 +25,43 @@
 #include "../prng.hpp"
 #include "magic.hpp"
 #include "../mod_tools.hpp"
+#include "../status_effect_owner_encoding.hpp"
 
 static ConsoleVariable<float> cvar_magic_fx_light_bonus("/magic_fx_light_bonus", 0.25f);
 static ConsoleVariable<bool> cvar_magic_fx_use_vismap("/magic_fx_use_vismap", true);
+
+namespace
+{
+	Uint8 encodePackedEffectOwnerFromPlayerEntity(
+		const Entity* caster
+	)
+	{
+		if ( !caster )
+		{
+			return 0;
+		}
+		if ( caster->behavior == &actPlayer )
+		{
+			return StatusEffectOwnerEncoding::
+				encodeOwnerNibbleFromPlayer(
+					caster->skill[2]
+				);
+		}
+		if ( caster->behavior == &actMonster )
+		{
+			if ( Entity* leader =
+					caster->monsterAllyGetPlayerLeader() )
+			{
+				return StatusEffectOwnerEncoding::
+					encodeOwnerNibbleFromPlayer(
+						leader->skill[2]
+					);
+			}
+		}
+		return 0;
+	}
+}
+
 
 void spawnAdditionalParticleForMissile(Entity* my)
 {
@@ -4241,11 +4275,11 @@ void actMagicMissile(Entity* my)   //TODO: Verify this function.
 								{
 									if ( parent->behavior == &actPlayer )
 									{
-										effectStrength |= (1 + parent->skill[2]) << 4;
+										effectStrength |= StatusEffectOwnerEncoding::encodeOwnerNibbleFromPlayer(parent->skill[2]);
 									}
 									else if ( parent->behavior == &actMonster && parent->monsterAllyGetPlayerLeader() )
 									{
-										effectStrength |= (1 + parent->monsterAllyGetPlayerLeader()->skill[2]) << 4;
+										effectStrength |= StatusEffectOwnerEncoding::encodeOwnerNibbleFromPlayer(parent->monsterAllyGetPlayerLeader()->skill[2]);
 									}
 								}
 								if ( hit.entity->setEffect(EFF_DIVINE_FIRE, effectStrength, duration, false, true, true) )
@@ -4977,7 +5011,7 @@ void actMagicMissile(Entity* my)   //TODO: Verify this function.
 							{
 								if ( parent->behavior == &actPlayer )
 								{
-									effectStrength |= ((parent->skill[2] + 1) << 4) & 0xF0;
+									effectStrength |= StatusEffectOwnerEncoding::encodeOwnerNibbleFromPlayer(parent->skill[2]);
 								}
 							}
 							
@@ -20644,14 +20678,12 @@ void actRadiusMagic(Entity* my)
 					Uint8 effectStrength = std::min(getSpellDamageSecondaryFromID(SPELL_SIGIL, caster, nullptr, my),
 						std::max(1, getSpellDamageFromID(SPELL_SIGIL, caster, nullptr, my)));
 
-					if ( caster && caster->behavior == &actPlayer )
-					{
-						effectStrength |= ((caster->skill[2] + 1) << 4);
-					}
-					else
-					{
-						effectStrength |= ((MAXPLAYERS + 1) << 4);
-					}
+					effectStrength = static_cast<Uint8>(
+						(effectStrength & 0xF)
+						| encodePackedEffectOwnerFromPlayerEntity(
+							caster
+						)
+					);
 
 					if ( Stat* entitystats = ent->getStats() )
 					{
@@ -20686,14 +20718,12 @@ void actRadiusMagic(Entity* my)
 					Uint8 effectStrength = std::min(getSpellDamageSecondaryFromID(SPELL_SANCTUARY, caster, nullptr, my),
 						std::max(1, getSpellDamageFromID(SPELL_SANCTUARY, caster, nullptr, my)));
 
-					if ( caster && caster->behavior == &actPlayer )
-					{
-						effectStrength |= ((caster->skill[2] + 1) << 4);
-					}
-					else
-					{
-						effectStrength |= ((MAXPLAYERS + 1) << 4);
-					}
+					effectStrength = static_cast<Uint8>(
+						(effectStrength & 0xF)
+						| encodePackedEffectOwnerFromPlayerEntity(
+							caster
+						)
+					);
 
 					if ( Stat* entitystats = ent->getStats() )
 					{

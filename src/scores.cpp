@@ -10,6 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "main.hpp"
+#include "automatia_world_save.hpp"
 #include "files.hpp"
 #include "game.hpp"
 #include "stat.hpp"
@@ -27,9 +28,83 @@
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "shops.hpp"
+#include "world_state.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #ifdef USE_PLAYFAB
 #include "playfab.hpp"
 #endif
+
+#include <ctime>
+
+namespace
+{
+    constexpr const char* AUTOMATIA_WORLD_SAVE_SUFFIX =
+        ".automatia-world.json";
+
+    std::string savedStableItemId(const Item* item)
+    {
+#ifdef SAM_FRAMEWORK_ENABLED
+        if ( item )
+        {
+            const int runtimeId =
+                static_cast<int>(item->type);
+            if ( SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(runtimeId) )
+            {
+                return SAMItemRegistryFoundation::
+                    stableIdForRuntimeId(runtimeId);
+            }
+        }
+#endif
+        return "";
+    }
+
+    int resolveSavedItemType(
+        const SaveGameInfo::Player::stat_t::item_t& item
+    )
+    {
+        if ( item.stable_id.empty() )
+        {
+            const int legacyType =
+                static_cast<int>(item.type);
+            return legacyType >= 0
+                && legacyType < NUM_ITEM_SLOTS
+                ? legacyType
+                : -1;
+        }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+        const int runtimeId =
+            SAMItemRegistryFoundation::
+                runtimeIdForStableId(item.stable_id);
+        if ( runtimeId >= 0
+            && SAMItemRegistryFoundation::
+                isRegisteredRuntimeItemId(runtimeId) )
+        {
+            return runtimeId;
+        }
+#endif
+
+        printlog(
+            "[S.A.M] Saved custom item unavailable: [%s]. Item skipped.\n",
+            item.stable_id.c_str()
+        );
+        return -1;
+    }
+
+    bool worldSaveMatchesCharacterSave(
+        const AutomatiaSave::Json& worldDocument,
+        const SaveGameInfo& characterSave
+    )
+    {
+        return worldDocument.contains("session_id")
+            && worldDocument["session_id"].is_string()
+            && worldDocument["session_id"].get<std::string>()
+                == std::to_string(characterSave.gamekey);
+    }
+}
 
 // definitions
 list_t topscores_json;
@@ -38,6 +113,7 @@ list_t topscores_legacy;
 list_t topscoresMultiplayer_legacy;
 int victory = 0;
 Uint32 completionTime = 0;
+std::string automatiaReconnectTokens[MAXPLAYERS];
 bool conductPenniless = true;
 bool conductFoodless = true;
 bool conductVegetarian = true;
@@ -2530,6 +2606,29 @@ int deleteSaveGame(int gametype, int saveIndex)
 	    }
 	}
 
+    const bool singleplayer = gametype == SINGLE;
+    const std::string primarySave = setSaveGameFileName(
+        singleplayer,
+        SaveFileType::JSON,
+        saveIndex
+    );
+    completePath(path, primarySave.c_str(), outputdir);
+    const std::filesystem::path worldSave =
+        std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+    std::error_code worldRemoveError;
+    if ( std::filesystem::exists(worldSave, worldRemoveError)
+        && !std::filesystem::remove(worldSave, worldRemoveError) )
+    {
+        result = 1;
+        printlog(
+            "warning: failed to delete Automatia world save '%s'!",
+            worldSave.string().c_str()
+        );
+    }
+    std::filesystem::path temporaryWorldSave = worldSave;
+    temporaryWorldSave += ".tmp";
+    std::filesystem::remove(temporaryWorldSave, worldRemoveError);
+
 	return result;
 }
 
@@ -2563,6 +2662,19 @@ bool saveGameExists(bool singleplayer, int saveIndex)
 			return false;
 		}
 
+        const std::filesystem::path worldPath =
+            std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::error_code worldPathError;
+        if ( std::filesystem::exists(worldPath, worldPathError) )
+        {
+            AutomatiaSave::Json worldDocument;
+            if ( !AutomatiaSave::load(worldPath, worldDocument)
+                || !worldSaveMatchesCharacterSave(worldDocument, info) )
+            {
+                return false;
+            }
+        }
+
 		return true;
 	}
 }
@@ -2586,6 +2698,68 @@ SaveGameInfo getSaveGameInfo(bool singleplayer, int saveIndex)
 	bool result = FileHelper::readObject(path, info);
 	if (!result) {
 		info.game_version = -1;
+	}
+
+    const std::filesystem::path worldPath =
+        std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+    std::error_code worldPathError;
+    if ( result && std::filesystem::exists(worldPath, worldPathError) )
+    {
+        AutomatiaSave::Json worldDocument;
+        if ( !AutomatiaSave::load(worldPath, worldDocument)
+            || !worldSaveMatchesCharacterSave(worldDocument, info) )
+        {
+            result = false;
+            info.game_version = -1;
+        }
+    }
+
+	/*
+	 * Older save formats may omit players_connected, or may contain
+	 * fewer entries than the serialized player list. Normalize the
+	 * metadata before lobby/savegame code examines the participant
+	 * slots so players above the former four/eight-player limits are
+	 * not silently treated as unavailable.
+	 */
+	if ( result && !info.players.empty() )
+	{
+		const size_t playerCount = info.players.size();
+
+		if ( info.players_connected.empty() )
+		{
+			info.players_connected.assign(playerCount, 0);
+
+			if ( info.multiplayer_type == SINGLE )
+			{
+				info.players_connected[0] = 1;
+			}
+			else
+			{
+				for ( size_t i = 0; i < playerCount; ++i )
+				{
+					info.players_connected[i] = 1;
+				}
+			}
+		}
+		else if (
+			info.players_connected.size() != playerCount
+		)
+		{
+			const int defaultConnectedState =
+				info.multiplayer_type == SINGLE
+					? 0
+					: 1;
+
+			info.players_connected.resize(
+				playerCount,
+				defaultConnectedState
+			);
+
+			if ( info.multiplayer_type == SINGLE )
+			{
+				info.players_connected[0] = 1;
+			}
+		}
 	}
 	
 	// check hash
@@ -3244,7 +3418,11 @@ void updateGameplayStatisticsInMainLoop()
 
 std::string setSaveGameFileName(bool singleplayer, SaveFileType type, int saveIndex)
 {
-	std::string filename = "savegames/savegame" + std::to_string(saveIndex);
+	const char* saveDirectory = headless && !singleplayer
+		? "savegames/host/"
+		: "savegames/";
+	std::string filename = std::string(saveDirectory)
+		+ "savegame" + std::to_string(saveIndex);
 
 	//OLD FORMAT
 	//#define SAVEGAMEFILE "savegame.dat"
@@ -5551,6 +5729,13 @@ void SaveGameInfo::Player::stat_t::item_t::computeHash(Uint32& hash, Uint32& shi
 	hash += (Uint32)((Uint32)identified << (shift % 32)); ++shift;
 	hash += (Uint32)((Uint32)x << (shift % 32)); ++shift;
 	hash += (Uint32)((Uint32)y << (shift % 32)); ++shift;
+	if ( !stable_id.empty() )
+	{
+		hash += djb2Hash(
+			const_cast<char*>(stable_id.c_str())
+		);
+		++shift;
+	}
 }
 
 int SaveGameInfo::populateFromSession(const int playernum)
@@ -5617,9 +5802,15 @@ int SaveGameInfo::populateFromSession(const int playernum)
 	info->players_connected.resize(MAXPLAYERS);
 	info->players.resize(MAXPLAYERS);
 	for ( int c = 0; c < MAXPLAYERS; ++c ) {
-		info->players_connected[c] = client_disconnected[c] && !::players[c]->was_connected_to_game ? 0 : 1;
+		const bool dormantAutomatiaPlayer =
+			headless && multiplayer == SERVER
+			&& automatiaHasSavedPlayerPlacement(c);
+		info->players_connected[c] = dormantAutomatiaPlayer
+			|| !(client_disconnected[c] && !::players[c]->was_connected_to_game)
+			? 1 : 0;
 		if ( info->players_connected[c] ) {
 			auto& player = info->players[c];
+			player.reconnect_token = automatiaReconnectTokens[c];
 			player.char_class = client_classes[c];
 			player.race = stats[c]->playerRace;
 
@@ -5850,7 +6041,8 @@ int SaveGameInfo::populateFromSession(const int playernum)
 						item.count,
 						item.identified,
 						0,
-						0));
+						0,
+						savedStableItemId(&item)));
 				}
 			}
 
@@ -5891,6 +6083,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 								slot.second->identified,
 								slot.second->x,
 								slot.second->y,
+								savedStableItemId(slot.second),
 							}));
 					}
 				}
@@ -5916,6 +6109,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 					item->identified,
 					item->x,
 					item->y,
+					savedStableItemId(item),
 					});
 			}
 
@@ -5933,6 +6127,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 					item->identified,
 					item->x,
 					item->y,
+					savedStableItemId(item),
 					});
 			}
 
@@ -6006,6 +6201,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 									slot.second->identified,
 									slot.second->x,
 									slot.second->y,
+									savedStableItemId(slot.second),
 								}));
 						}
 					}
@@ -6024,6 +6220,7 @@ int SaveGameInfo::populateFromSession(const int playernum)
 							item->identified,
 							item->x,
 							item->y,
+							savedStableItemId(item),
 							});
 					}
 
@@ -6066,9 +6263,37 @@ int saveGame(int saveIndex) {
 
 	char path[PATH_MAX] = "";
 	std::string savefile = setSaveGameFileName(multiplayer == SINGLE, SaveFileType::JSON, saveIndex);
-	completePath(path, savefile.c_str(), outputdir);
-	auto result = FileHelper::writeObject(path, *cvar_saveText ? EFileFormat::Json_Compact : EFileFormat::Binary, info);
-	return result == true ? 0 : 1;
+    completePath(path, savefile.c_str(), outputdir);
+    auto result = FileHelper::writeObject(path, *cvar_saveText ? EFileFormat::Json_Compact : EFileFormat::Binary, info);
+    if ( !result )
+    {
+        return 1;
+    }
+
+    /*
+     * Clients never author shared world state. The host writes the extensible
+     * map-instance document beside the established character save so existing
+     * save compatibility remains intact while restart persistence is staged in.
+     */
+    if ( multiplayer != CLIENT )
+    {
+        const std::filesystem::path worldPath =
+            std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::string worldError;
+        if ( !writeAutomatiaPersistentWorldSave(
+                worldPath.string().c_str(),
+                std::to_string(uniqueGameKey),
+                worldError
+            ) )
+        {
+            printlog(
+                "[Automatia Save] Failed to write world state: %s",
+                worldError.c_str()
+            );
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int SaveGameInfo::getTotalScore(const int playernum, const int victory)
@@ -6360,6 +6585,39 @@ int loadGame(int player, const SaveGameInfo& info) {
 		return 1;
 	}
 
+    if ( multiplayer != CLIENT && player == 0 )
+    {
+        const bool singleplayer =
+            info.multiplayer_type == SINGLE
+            || info.multiplayer_type == SPLITSCREEN;
+        char primaryPath[PATH_MAX] = "";
+        const std::string primarySave = setSaveGameFileName(
+            singleplayer,
+            SaveFileType::JSON,
+            savegameCurrentFileIndex
+        );
+        completePath(primaryPath, primarySave.c_str(), outputdir);
+        const std::filesystem::path worldPath =
+            std::string(primaryPath) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::error_code worldPathError;
+        if ( std::filesystem::exists(worldPath, worldPathError) )
+        {
+            std::string worldError;
+            if ( !loadAutomatiaPersistentWorldSave(
+                    worldPath.string().c_str(),
+                    std::to_string(info.gamekey),
+                    worldError
+                ) )
+            {
+                printlog(
+                    "loadGame() failed: invalid Automatia world save: %s",
+                    worldError.c_str()
+                );
+                return 1;
+            }
+        }
+    }
+
 	//if (info.game_version != getSavegameVersion(VERSION)) {
 	//	printlog("loadGame() failed: game version mismatch");
 	//	return 1;
@@ -6371,6 +6629,11 @@ int loadGame(int player, const SaveGameInfo& info) {
 			printlog("loadGame() failed: given player is not connected");
 		}
 		return 1;
+	}
+	if (info.players.size() > static_cast<std::size_t>(player))
+	{
+		automatiaReconnectTokens[player] =
+			info.players[player].reconnect_token;
 	}
 
 	int statsPlayer = player;
@@ -6568,10 +6831,17 @@ int loadGame(int player, const SaveGameInfo& info) {
 
 		for ( auto& _item : loot.second.items )
 		{
+			const int resolvedType =
+				resolveSavedItemType(_item);
+			if ( resolvedType < 0 )
+			{
+				continue;
+			}
+
 			player_lootbag.items.push_back(Item());
 			auto& item = player_lootbag.items.back();
 
-			item.type = static_cast<ItemType>(_item.type);
+			item.type = static_cast<ItemType>(resolvedType);
 			item.status = static_cast<Status>(_item.status);
 			item.beatitude = _item.beatitude;
 			item.count = _item.count;
@@ -6595,7 +6865,14 @@ int loadGame(int player, const SaveGameInfo& info) {
 	int inventory_index = -1;
 	for (auto& item : p.inventory) {
 		++inventory_index;
-		ItemType type = static_cast<ItemType>(item.type);
+		const int resolvedType =
+			resolveSavedItemType(item);
+		if ( resolvedType < 0 )
+		{
+			continue;
+		}
+		ItemType type =
+			static_cast<ItemType>(resolvedType);
 		Status status = static_cast<Status>(item.status);
 		Sint16 beatitude = item.beatitude;
 		Sint16 count = item.count;
@@ -6614,7 +6891,14 @@ int loadGame(int player, const SaveGameInfo& info) {
 
 	// void chest inventory
 	for ( auto& item : p.void_chest_inventory ) {
-		ItemType type = static_cast<ItemType>(item.type);
+		const int resolvedType =
+			resolveSavedItemType(item);
+		if ( resolvedType < 0 )
+		{
+			continue;
+		}
+		ItemType type =
+			static_cast<ItemType>(resolvedType);
 		Status status = static_cast<Status>(item.status);
 		Sint16 beatitude = item.beatitude;
 		Sint16 count = item.count;
@@ -6662,7 +6946,15 @@ int loadGame(int player, const SaveGameInfo& info) {
 			auto find = slots.find(item.first);
 			if (find != slots.end()) {
 				auto& slot = find->second;
-				ItemType type = (ItemType)item.second.type;
+				const int resolvedType =
+					resolveSavedItemType(item.second);
+				if ( resolvedType < 0 )
+				{
+					slot = nullptr;
+					continue;
+				}
+				ItemType type =
+					static_cast<ItemType>(resolvedType);
 				Status status = (Status)item.second.status;
 				Sint16 beatitude = item.second.beatitude;
 				Sint16 count = item.second.count;
@@ -6957,7 +7249,15 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 
 			// read follower inventory
 			for (auto& item : follower.inventory) {
-				ItemType type = (ItemType)item.type;
+				const int resolvedType =
+					resolveSavedItemType(item);
+				if ( resolvedType < 0 )
+				{
+					continue;
+				}
+
+				ItemType type =
+					static_cast<ItemType>(resolvedType);
 				Status status = (Status)item.status;
 				Sint16 beatitude = item.beatitude;
 				Sint16 count = item.count;
@@ -6986,7 +7286,16 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 				auto find = slots.find(item.first);
 				if (find != slots.end()) {
 					auto& slot = find->second;
-					ItemType type = (ItemType)item.second.type;
+					const int resolvedType =
+						resolveSavedItemType(item.second);
+					if ( resolvedType < 0 )
+					{
+						slot = nullptr;
+						continue;
+					}
+
+					ItemType type =
+						static_cast<ItemType>(resolvedType);
 					Status status = (Status)item.second.status;
 					Sint16 beatitude = item.second.beatitude;
 					Sint16 count = item.second.count;

@@ -35,6 +35,9 @@
 #include "../ui/LoadingScreen.hpp"
 #include "../classdescriptions.hpp"
 #include "../ui/MainMenu.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "../sam/sam_item_registry_foundation.hpp"
+#endif
 
 bool spamming = false;
 bool showfirst = false;
@@ -527,6 +530,264 @@ namespace ConsoleCommands {
 			dropItem(newItem(static_cast<ItemType>(itemType), EXCELLENT, 0, 1, appearance, identified, &stats[clientnum]->inventory), 0);
 		}
 	});
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	static ConsoleCommand ccmd_samgrantitem(
+		"/samgrantitem",
+		"grant one registered S.A.M item by stable id (cheat)",
+		[]CCMD{
+			if ( !(svFlags & SV_FLAG_CHEATS) )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"S.A.M item grant requires cheats."
+				);
+				return;
+			}
+
+			if ( argc != 2 )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Usage: /samgrantitem namespace:item_id"
+				);
+				return;
+			}
+
+			if ( clientnum < 0
+				|| clientnum >= MAXPLAYERS
+				|| !stats[clientnum] )
+			{
+				printlog(
+					"[S.A.M] Cannot grant item: local player stats unavailable.\n"
+				);
+				return;
+			}
+
+			const std::string stableId = argv[1];
+			const int runtimeId =
+				SAMItemRegistryFoundation::
+					runtimeIdForStableId(stableId);
+
+			if ( runtimeId < 0
+				|| !SAMItemRegistryFoundation::
+					isRegisteredRuntimeItemId(runtimeId) )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Unknown or unavailable S.A.M item: %s",
+					stableId.c_str()
+				);
+				return;
+			}
+
+			Item* item = newItem(
+				static_cast<ItemType>(runtimeId),
+				EXCELLENT,
+				0,
+				1,
+				0,
+				true,
+				&stats[clientnum]->inventory
+			);
+
+			if ( !item
+				|| static_cast<int>(item->type) != runtimeId )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Failed to create S.A.M item: %s",
+					stableId.c_str()
+				);
+				return;
+			}
+
+			messagePlayer(
+				clientnum,
+				MESSAGE_MISC,
+				"Granted S.A.M item '%s' (runtime id %d).",
+				item->getName(),
+				runtimeId
+			);
+
+			printlog(
+				"[S.A.M] Granted item [%s] as runtime id %d to player %d.\n",
+				stableId.c_str(),
+				runtimeId,
+				clientnum
+			);
+		}
+	);
+
+	static ConsoleCommand ccmd_samtestequip(
+		"/samtestequip",
+		"create and equip one registered S.A.M melee item (cheat, single-player test)",
+		[]CCMD{
+			if ( !(svFlags & SV_FLAG_CHEATS) )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"S.A.M equipment test requires cheats."
+				);
+				return;
+			}
+
+			if ( argc != 2 )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Usage: /samtestequip namespace:item_id"
+				);
+				return;
+			}
+
+			if ( multiplayer == CLIENT )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"SAM-1O equipment validation is single-player or host only."
+				);
+				return;
+			}
+
+			if ( clientnum < 0
+				|| clientnum >= MAXPLAYERS
+				|| !stats[clientnum] )
+			{
+				printlog(
+					"[S.A.M] Equipment test failed: player stats unavailable.\n"
+				);
+				return;
+			}
+
+			const std::string stableId = argv[1];
+			const int runtimeId =
+				SAMItemRegistryFoundation::
+					runtimeIdForStableId(stableId);
+
+			if ( runtimeId < 0
+				|| !SAMItemRegistryFoundation::
+					isRegisteredRuntimeItemId(runtimeId) )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Unknown or unavailable S.A.M item: %s",
+					stableId.c_str()
+				);
+				return;
+			}
+
+			if ( items[runtimeId].item_slot
+				!= EQUIPPABLE_IN_SLOT_WEAPON )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"SAM-1O only validates weapon-slot custom items."
+				);
+				return;
+			}
+
+			Item* item = newItem(
+				static_cast<ItemType>(runtimeId),
+				EXCELLENT,
+				0,
+				1,
+				0,
+				true,
+				&stats[clientnum]->inventory
+			);
+
+			if ( !item
+				|| static_cast<int>(item->type)
+					!= runtimeId )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Failed to construct S.A.M equipment test item."
+				);
+				return;
+			}
+
+			const EquipItemResult result =
+				equipItem(
+					item,
+					&stats[clientnum]->weapon,
+					clientnum,
+					false
+				);
+
+			const bool equipped =
+				stats[clientnum]->weapon == item;
+			const int attack =
+				item->weaponGetAttack(
+					stats[clientnum]
+				);
+			const int worldModel =
+				itemModel(item, false, nullptr);
+			const int shortModel =
+				itemModel(item, true, nullptr);
+			const int firstPersonModel =
+				itemModelFirstperson(item);
+
+			if ( !equipped )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"S.A.M equip test did not equip '%s' (result %d). Item remains in inventory.",
+					item->getName(),
+					static_cast<int>(result)
+				);
+
+				printlog(
+					"[S.A.M] Equipment test FAILED [%s]: result=%d equipped=0 attack=%d world=%d short=%d fp=%d.\n",
+					stableId.c_str(),
+					static_cast<int>(result),
+					attack,
+					worldModel,
+					shortModel,
+					firstPersonModel
+				);
+				return;
+			}
+
+			messagePlayer(
+				clientnum,
+				MESSAGE_MISC,
+				"S.A.M equip test passed: '%s', ATK %d, runtime id %d.",
+				item->getName(),
+				attack,
+				runtimeId
+			);
+
+			printlog(
+				"[S.A.M] Equipment test PASSED [%s]: runtime=%d slot=%d category=%d attack=%d world=%d short=%d fp=%d.\n",
+				stableId.c_str(),
+				runtimeId,
+				static_cast<int>(
+					items[runtimeId].item_slot
+				),
+				static_cast<int>(
+					items[runtimeId].category
+				),
+				attack,
+				worldModel,
+				shortModel,
+				firstPersonModel
+			);
+		}
+	);
+#endif
 
 	static ConsoleCommand ccmd_spawnitem("/spawnitem", "spawn an item (cheat)", []CCMD{
 		if (!(svFlags & SV_FLAG_CHEATS))
@@ -2076,10 +2337,13 @@ namespace ConsoleCommands {
 			messagePlayer(clientnum, MESSAGE_MISC, Language::get(277));
 			return;
 		}
-		int numPlayers = 4;
+		int numPlayers = MAX_SPLITSCREEN;
 		if ( argc > 1 )
 		{
-			numPlayers = std::max(std::min(atoi(argv[1]), MAXPLAYERS), 2);
+			numPlayers = std::max(
+				std::min(atoi(argv[1]), MAX_SPLITSCREEN),
+				2
+			);
 		}
 		splitscreen = !splitscreen;
 
@@ -2087,17 +2351,19 @@ namespace ConsoleCommands {
 		{
 			for (int i = 1; i < MAXPLAYERS; ++i)
 			{
-				if (i < numPlayers)
-				{
-					client_disconnected[i] = false;
-				}
+				const bool activeSplitscreenPlayer =
+					i < numPlayers
+					&& i < MAX_SPLITSCREEN;
+				client_disconnected[i] =
+					!activeSplitscreenPlayer;
 			}
 		}
 		else
 		{
-			client_disconnected[1] = true;
-			client_disconnected[2] = true;
-			client_disconnected[3] = true;
+			for (int i = 1; i < MAXPLAYERS; ++i)
+			{
+				client_disconnected[i] = true;
+			}
 		}
 
 		int playercount = 1;

@@ -26,6 +26,8 @@
 #include "lobbies.hpp"
 #include "ui/MainMenu.hpp"
 
+#include <array>
+
 #ifdef NINTENDO
 #include "nintendo/baronynx.hpp"
 #endif
@@ -3219,6 +3221,16 @@ Player::Player(int in_playernum, bool in_local_host) :
 	playernum = in_playernum;
 	entity = nullptr;
 	cam = &cameras[playernum];
+}
+
+bool Player::setWorldInstance(const std::string& mapFile, const std::string& instanceId)
+{
+    return worldInstance.set(mapFile, instanceId);
+}
+
+bool Player::sharesWorldInstanceWith(const Player& other) const
+{
+    return worldInstance.matches(other.worldInstance);
 }
 
 Player::~Player()
@@ -7390,16 +7402,48 @@ void Player::clearGUIPointers()
 	players[playernum]->inventoryUI.compendiumItemTooltipDisplay.reset();
 }
 
+namespace
+{
+	const char* getDirectConnectPlayerName(
+		const int playernum
+	)
+	{
+		static std::array<
+			std::array<char, 16>,
+			MAXPLAYERS
+		> directConnectNames{};
+		static bool initialized = false;
+
+		if ( !initialized )
+		{
+			for ( int i = 0; i < MAXPLAYERS; ++i )
+			{
+				snprintf(
+					directConnectNames[i].data(),
+					directConnectNames[i].size(),
+					"Player %d",
+					i + 1
+				);
+			}
+			initialized = true;
+		}
+
+		if ( playernum >= 0
+			&& playernum < MAXPLAYERS )
+		{
+			return directConnectNames[
+				playernum
+			].data();
+		}
+
+		return "...";
+	}
+}
+
 const char* Player::getAccountName() const {
     const char* unknown = "...";
     if (directConnect) {
-	    switch (playernum) {
-	    case 0: return "Player 1";
-	    case 1: return "Player 2";
-	    case 2: return "Player 3";
-	    case 3: return "Player 4";
-	    default: return unknown;
-	    }
+		return getDirectConnectPlayerName(playernum);
     } else {
 		if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
 #ifdef STEAMWORKS
@@ -8064,7 +8108,7 @@ void Player::PlayerMechanics_t::ensembleMusicUpdateServer()
 				net_packet->len = 4 + MAXPLAYERS * 4;
 				for ( int i = 1; i < MAXPLAYERS; ++i )
 				{
-					if ( !client_disconnected[i] )
+					if ( serverPlayerCanReceiveGameplayUpdates(i) )
 					{
 						net_packet->address.host = net_clients[i - 1].host;
 						net_packet->address.port = net_clients[i - 1].port;

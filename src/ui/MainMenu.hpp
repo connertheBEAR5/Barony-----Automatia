@@ -109,6 +109,8 @@ namespace MainMenu {
 	void destroyMainMenu();                 // destroys the main menu tree
 	void createDummyMainMenu();             // creates a main menu devoid of widgets
 	void closeMainMenu();                   // closes the menu and unpauses the game
+    bool headlessStartDedicatedServer();
+    void headlessDedicatedServerTick();
 
 	// special events:
 

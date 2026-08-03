@@ -148,7 +148,7 @@ void initGameDatafilesAsync(bool moddedReload)
 		std::string namesDirectory = PHYSFS_getRealDir(NPCNAMES_FEMALE_FILE.c_str());
 		namesDirectory.append(PHYSFS_getDirSeparator()).append(NPCNAMES_FEMALE_FILE);
 		randomNPCNamesFemale = getLinesFromDataFile(namesDirectory);
-	}
+    }
 #endif
 }
 
@@ -616,12 +616,9 @@ void deinitGame()
 		safePacketsReceivedMap[c].clear();
 	}
 #ifdef SOUND
-#ifdef USE_OPENAL //TODO: OpenAL is now all of the broken...
-#define FMOD_Channel_Stop OPENAL_Channel_Stop
-#define FMOD_Sound_Release OPENAL_Sound_Release
-#endif
 	if ( !no_sound )
 	{
+#ifdef USE_FMOD
 		music_channel->stop();
 		music_channel2->stop();
 		introductionmusic->release();
@@ -737,11 +734,75 @@ void deinitGame()
 		{
 			free(fortressmusic);
 		}
-	}
-#ifdef USE_OPENAL
-#undef FMOD_Channel_Stop
-#undef FMOD_Sound_Release
+#elif defined USE_OPENAL
+        if ( music_channel )
+        {
+            OPENAL_Channel_Stop(music_channel);
+        }
+        if ( music_channel2 )
+        {
+            OPENAL_Channel_Stop(music_channel2);
+        }
+
+        auto releaseMusic = [](OPENAL_BUFFER*& buffer)
+        {
+            if ( buffer )
+            {
+                OPENAL_Sound_Release(buffer);
+                buffer = nullptr;
+            }
+        };
+        auto releaseMusicArray = [&releaseMusic](
+            OPENAL_BUFFER**& musicArray,
+            const size_t count
+        )
+        {
+            if ( !musicArray )
+            {
+                return;
+            }
+            for ( size_t index = 0; index < count; ++index )
+            {
+                releaseMusic(musicArray[index]);
+            }
+            free(musicArray);
+            musicArray = nullptr;
+        };
+
+        releaseMusic(introductionmusic);
+        releaseMusic(intermissionmusic);
+        releaseMusic(minetownmusic);
+        releaseMusic(splashmusic);
+        releaseMusic(librarymusic);
+        releaseMusic(shopmusic);
+        releaseMusic(herxmusic);
+        releaseMusic(templemusic);
+        releaseMusic(endgamemusic);
+        releaseMusic(escapemusic);
+        releaseMusic(devilmusic);
+        releaseMusic(sanctummusic);
+        releaseMusic(gnomishminesmusic);
+        releaseMusic(greatcastlemusic);
+        releaseMusic(sokobanmusic);
+        releaseMusic(caveslairmusic);
+        releaseMusic(bramscastlemusic);
+        releaseMusic(hamletmusic);
+        releaseMusic(tutorialmusic);
+        releaseMusic(gameovermusic);
+        releaseMusic(introstorymusic);
+
+        releaseMusicArray(minesmusic, NUMMINESMUSIC);
+        releaseMusicArray(swampmusic, NUMSWAMPMUSIC);
+        releaseMusicArray(labyrinthmusic, NUMLABYRINTHMUSIC);
+        releaseMusicArray(ruinsmusic, NUMRUINSMUSIC);
+        releaseMusicArray(underworldmusic, NUMUNDERWORLDMUSIC);
+        releaseMusicArray(hellmusic, NUMHELLMUSIC);
+        releaseMusicArray(minotaurmusic, NUMMINOTAURMUSIC);
+        releaseMusicArray(cavesmusic, NUMCAVESMUSIC);
+        releaseMusicArray(citadelmusic, NUMCITADELMUSIC);
+        releaseMusicArray(intromusic, NUMINTROMUSIC);
 #endif
+    }
 #endif
 
 #ifdef USE_FMOD

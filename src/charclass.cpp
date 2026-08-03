@@ -10,6 +10,9 @@
 -------------------------------------------------------------------------------*/
 
 #include "main.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_class_registry_foundation.hpp"
+#endif
 #include "game.hpp"
 #include "stat.hpp"
 #include "interface/interface.hpp"
@@ -631,6 +634,13 @@ void initClassStats(const int classnum, void* myStats)
 		stat->setProficiency(PRO_SHIELD, 10);
 		stat->setProficiency(PRO_LEADERSHIP, 10);
 	}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMClassRegistryFoundation::applyStats(
+		classnum,
+		stat
+	);
+#endif
 
 	if ( gameModeManager.currentSession.challengeRun.isActive() )
 	{
