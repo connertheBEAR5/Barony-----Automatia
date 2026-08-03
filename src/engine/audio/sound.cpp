@@ -599,10 +599,22 @@ bool sfxUseDynamicEnvironmentVolume = true;
 ALCcontext *openal_context = nullptr;
 ALCdevice  *openal_device = nullptr;
 
+void setAudioDevice(const std::string& device)
+{
+    // OpenAL device changes require rebuilding the active context. Keep the
+    // current working device until that transition can be performed safely.
+    (void)device;
+}
+
+void setRecordDevice(const std::string& device)
+{
+    // Voice recording is an FMOD-only feature in the current OpenAL backend.
+    (void)device;
+}
+
 //#define openal_maxchannels 100
 
 OPENAL_BUFFER** sounds = nullptr;
-Uint32 numsounds = 0;
 OPENAL_BUFFER** minesmusic = NULL;
 OPENAL_BUFFER** swampmusic = NULL;
 OPENAL_BUFFER** labyrinthmusic = NULL;
@@ -823,18 +835,19 @@ static int get_firstfreechannel()
 	return i;
 }
 
-void setGlobalVolume(real_t master, real_t music, real_t gameplay, real_t ambient, real_t environment) {
+void setGlobalVolume(real_t master, real_t music, real_t gameplay, real_t ambient, real_t environment, real_t notification) {
     master = std::min(std::max(0.0, master), 1.0);
     music = std::min(std::max(0.0, music / 4.0), 1.0); // music volume cut in half because the music is loud...
     gameplay = std::min(std::max(0.0, gameplay), 1.0);
     ambient = std::min(std::max(0.0, ambient), 1.0);
     environment = std::min(std::max(0.0, environment), 1.0);
+    notification = std::min(std::max(0.0, notification), 1.0);
 
 	OPENAL_ChannelGroup_SetVolume(music_group, master * music);
 	OPENAL_ChannelGroup_SetVolume(sound_group, master * gameplay);
 	OPENAL_ChannelGroup_SetVolume(soundAmbient_group, master * ambient);
 	OPENAL_ChannelGroup_SetVolume(soundEnvironment_group, master * environment);
-	OPENAL_ChannelGroup_SetVolume(music_notification_group, master * gameplay);
+    OPENAL_ChannelGroup_SetVolume(music_notification_group, master * notification);
 }
 
 void sound_update(int player, int index, int numplayers)
@@ -1209,6 +1222,157 @@ void OPENAL_Sound_Release(OPENAL_BUFFER* buffer) {
 
 #endif
 
+#ifdef USE_OPENAL
+extern const std::vector<std::string> themeMusic;
+
+static bool reloadOpenALMusicBuffer(
+    const std::string& filename,
+    OPENAL_BUFFER*& buffer
+)
+{
+    if ( buffer )
+    {
+        OPENAL_Sound_Release(buffer);
+        buffer = nullptr;
+    }
+
+    const int result = musicPreload
+        ? OPENAL_CreateSound(filename.c_str(), false, &buffer)
+        : OPENAL_CreateStreamSound(filename.c_str(), &buffer);
+    if ( result == 0 )
+    {
+        printlog(
+            "[PhysFS]: ERROR: Failed reloading music file \"%s\".",
+            filename.c_str()
+        );
+        return false;
+    }
+    return true;
+}
+
+static bool reloadOpenALMusicArray(
+    const uint32_t count,
+    const char* filenameTemplate,
+    OPENAL_BUFFER** musicArray,
+    const bool reloadAll
+)
+{
+    if ( !musicArray )
+    {
+        return false;
+    }
+    bool success = true;
+    for ( uint32_t index = 0; index < count; ++index )
+    {
+        snprintf(tempstr, 1000, filenameTemplate, index);
+        const char* realDirectory = PHYSFS_getRealDir(tempstr);
+        if ( !realDirectory )
+        {
+            continue;
+        }
+        std::string musicPath = realDirectory;
+        if ( musicPath == "./" && !reloadAll )
+        {
+            continue;
+        }
+        musicPath.append(PHYSFS_getDirSeparator()).append(tempstr);
+        printlog("[PhysFS]: Loading music file %s...", tempstr);
+        success = reloadOpenALMusicBuffer(musicPath, musicArray[index])
+            && success;
+    }
+    return success;
+}
+
+static void physfsReloadMusicOpenAL(
+    bool& introMusicChanged,
+    const bool reloadAll
+)
+{
+    introMusicChanged = false;
+    size_t index = 0;
+    for ( const std::string& filename : themeMusic )
+    {
+        OPENAL_BUFFER** destination = nullptr;
+        switch ( index )
+        {
+            case 0: destination = &introductionmusic; break;
+            case 1: destination = &intermissionmusic; break;
+            case 2: destination = &minetownmusic; break;
+            case 3: destination = &splashmusic; break;
+            case 4: destination = &librarymusic; break;
+            case 5: destination = &shopmusic; break;
+            case 6: destination = &herxmusic; break;
+            case 7: destination = &templemusic; break;
+            case 8: destination = &endgamemusic; break;
+            case 9: destination = &escapemusic; break;
+            case 10: destination = &devilmusic; break;
+            case 11: destination = &sanctummusic; break;
+            case 12: destination = &gnomishminesmusic; break;
+            case 13: destination = &greatcastlemusic; break;
+            case 14: destination = &sokobanmusic; break;
+            case 15: destination = &caveslairmusic; break;
+            case 16: destination = &bramscastlemusic; break;
+            case 17: destination = &hamletmusic; break;
+            case 18: destination = &tutorialmusic; break;
+            case 19: destination = &gameovermusic; break;
+            case 20: destination = &introstorymusic; break;
+            default: break;
+        }
+
+        const char* realDirectory = PHYSFS_getRealDir(filename.c_str());
+        if ( destination && realDirectory )
+        {
+            std::string musicPath = realDirectory;
+            if ( musicPath != "./" || reloadAll )
+            {
+                musicPath += PHYSFS_getDirSeparator() + filename;
+                printlog("[PhysFS]: Loading music file %s...", filename.c_str());
+                reloadOpenALMusicBuffer(musicPath, *destination);
+            }
+        }
+        ++index;
+    }
+
+    reloadOpenALMusicArray(NUMMINESMUSIC, "music/mines%02d.ogg", minesmusic, reloadAll);
+    reloadOpenALMusicArray(NUMSWAMPMUSIC, "music/swamp%02d.ogg", swampmusic, reloadAll);
+    reloadOpenALMusicArray(NUMLABYRINTHMUSIC, "music/labyrinth%02d.ogg", labyrinthmusic, reloadAll);
+    reloadOpenALMusicArray(NUMRUINSMUSIC, "music/ruins%02d.ogg", ruinsmusic, reloadAll);
+    reloadOpenALMusicArray(NUMUNDERWORLDMUSIC, "music/underworld%02d.ogg", underworldmusic, reloadAll);
+    reloadOpenALMusicArray(NUMHELLMUSIC, "music/hell%02d.ogg", hellmusic, reloadAll);
+    reloadOpenALMusicArray(NUMMINOTAURMUSIC, "music/minotaur%02d.ogg", minotaurmusic, reloadAll);
+    reloadOpenALMusicArray(NUMCAVESMUSIC, "music/caves%02d.ogg", cavesmusic, reloadAll);
+    reloadOpenALMusicArray(NUMCITADELMUSIC, "music/citadel%02d.ogg", citadelmusic, reloadAll);
+
+    for ( int intro = 0; intro < NUMINTROMUSIC; ++intro )
+    {
+        if ( intro == 0 )
+        {
+            strcpy(tempstr, "music/intro.ogg");
+        }
+        else
+        {
+            snprintf(tempstr, 1000, "music/intro%02d.ogg", intro);
+        }
+        const char* realDirectory = PHYSFS_getRealDir(tempstr);
+        if ( !realDirectory )
+        {
+            continue;
+        }
+        std::string musicPath = realDirectory;
+        if ( musicPath == "./" && !reloadAll )
+        {
+            continue;
+        }
+        musicPath.append(PHYSFS_getDirSeparator()).append(tempstr);
+        printlog("[PhysFS]: Loading music file %s...", tempstr);
+        if ( reloadOpenALMusicBuffer(musicPath, intromusic[intro]) )
+        {
+            introMusicChanged = true;
+        }
+    }
+}
+#endif
+
 bool physfsSearchMusicToUpdate_helper_findModifiedMusic(uint32_t numMusic, const char* filenameTemplate)
 {
 	for ( int c = 0; c < numMusic; c++ )
@@ -1365,7 +1529,10 @@ bool physfsSearchMusicToUpdate()
 		|| physfsSearchMusicToUpdate_helper_findModifiedMusic(NUMMINOTAURMUSIC, "music/minotaur%02d.ogg")
 		|| physfsSearchMusicToUpdate_helper_findModifiedMusic(NUMCAVESMUSIC, "music/caves%02d.ogg")
 		|| physfsSearchMusicToUpdate_helper_findModifiedMusic(NUMCITADELMUSIC, "music/citadel%02d.ogg")
-		|| physfsSearchMusicToUpdate_helper_findModifiedMusic(NUMFORTRESSMUSIC, "music/fortress%02d.ogg") )
+#ifdef USE_FMOD
+        || physfsSearchMusicToUpdate_helper_findModifiedMusic(NUMFORTRESSMUSIC, "music/fortress%02d.ogg")
+#endif
+        )
 	{
 		return true;
 	}
@@ -1439,15 +1606,10 @@ void physfsReloadMusic(bool &introMusicChanged, bool reloadAll) //TODO: This sho
 		return;
 	}
 #ifdef SOUND
-	int index = 0;
 #ifdef USE_OPENAL
-#define FMOD_System_CreateStream(A, B, C, D, E) OPENAL_CreateStreamSound(B, E) //TODO: If this is still needed, it's probably now broke!
-#define FMOD_SOUND OPENAL_BUFFER
-#define fmod_system 0
-#define FMOD_SOFTWARE 0
-#define FMOD_Sound_Release OPENAL_Sound_Release
-	int fmod_result;
-#endif
+    physfsReloadMusicOpenAL(introMusicChanged, reloadAll);
+#else
+    int index = 0;
 	bool ensembleNeedsUpdate = false;
 	for ( auto it = themeMusic.begin(); it != themeMusic.end(); ++it )
 	{
@@ -1963,56 +2125,67 @@ void physfsReloadMusic(bool &introMusicChanged, bool reloadAll) //TODO: This sho
 #endif
 
 	introMusicChanged = introChanged; // use this variable outside of this function to start playing a new fresh list of tracks in the main menu.
-#ifdef USE_OPENAL
-#undef FMOD_System_CreateStream
-#undef FMOD_SOUND
-#undef fmod_system
-#undef FMOD_SOFTWARE
-#undef FMOD_Sound_Release
-#endif
-
+#endif // USE_OPENAL
 #endif // SOUND
 }
 
 void gamemodsUnloadCustomThemeMusic()
 {
 #ifdef SOUND
-#ifdef USE_OPENAL
-#define FMOD_Sound_Release OPENAL_Sound_Release
-#endif
 	// free custom music slots, not used by official music assets.
 	if ( gnomishminesmusic )
 	{
+#ifdef USE_FMOD
 		gnomishminesmusic->release();
+#else
+        OPENAL_Sound_Release(gnomishminesmusic);
+#endif
 		gnomishminesmusic = nullptr;
 	}
 	if ( greatcastlemusic )
 	{
+#ifdef USE_FMOD
 		greatcastlemusic->release();
+#else
+        OPENAL_Sound_Release(greatcastlemusic);
+#endif
 		greatcastlemusic = nullptr;
 	}
 	if ( sokobanmusic )
 	{
+#ifdef USE_FMOD
 		sokobanmusic->release();
+#else
+        OPENAL_Sound_Release(sokobanmusic);
+#endif
 		sokobanmusic = nullptr;
 	}
 	if ( caveslairmusic )
 	{
+#ifdef USE_FMOD
 		caveslairmusic->release();
+#else
+        OPENAL_Sound_Release(caveslairmusic);
+#endif
 		caveslairmusic = nullptr;
 	}
 	if ( bramscastlemusic )
 	{
+#ifdef USE_FMOD
 		bramscastlemusic->release();
+#else
+        OPENAL_Sound_Release(bramscastlemusic);
+#endif
 		bramscastlemusic = nullptr;
 	}
 	if ( hamletmusic )
 	{
+#ifdef USE_FMOD
 		hamletmusic->release();
+#else
+        OPENAL_Sound_Release(hamletmusic);
+#endif
 		hamletmusic = nullptr;
 	}
-#ifdef USE_OPENAL
-#undef FMOD_Sound_Release
-#endif
 #endif // !SOUND
 }

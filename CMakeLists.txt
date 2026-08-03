@@ -1,6 +1,36 @@
 cmake_minimum_required(VERSION 3.0)
 project(barony)
 
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(
+        automatia_foundation_tests
+        tests/automatia_foundation_tests.cpp
+        src/automatia_save.cpp
+    )
+    target_include_directories(
+        automatia_foundation_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_features(automatia_foundation_tests PRIVATE cxx_std_17)
+    add_test(NAME automatia_foundation COMMAND automatia_foundation_tests)
+
+    if(UNIX)
+        add_executable(
+            late_join_live_probe
+            tests/late_join_live_probe.cpp
+        )
+        target_include_directories(
+            late_join_live_probe
+            PRIVATE
+            "${PROJECT_SOURCE_DIR}/src"
+        )
+        target_compile_features(late_join_live_probe PRIVATE cxx_std_17)
+    endif()
+endif()
+
 if (NOT CMAKE_BUILD_TYPE)
 	set (CMAKE_BUILD_TYPE Release)
 endif(NOT CMAKE_BUILD_TYPE)
@@ -571,6 +601,7 @@ if (GAME_ENABLED)
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_definition_bridge.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_logger.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_errors.cpp"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_sync.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_workshop.cpp"
 	)
 	target_include_directories(

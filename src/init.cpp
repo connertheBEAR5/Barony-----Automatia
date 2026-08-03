@@ -83,6 +83,7 @@ bool mountBaseDataFolders() {
 		{
 		    PHYSFS_mkdir("books");
 			PHYSFS_mkdir("savegames");
+			PHYSFS_mkdir("savegames/host");
 			PHYSFS_mkdir("scores");
 			PHYSFS_mkdir("scores/processing");
 			//TODO: Will these need special NINTENDO handling?

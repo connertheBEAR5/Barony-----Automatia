@@ -27,8 +27,8 @@
 #include "../sam_content_catalog.hpp"
 #include "sam_logger.hpp"
 
-#include "main.hpp"   // multiplayer/SERVER/CLIENT, MAXPLAYERS, net_packet, net_clients, net_sock, client_disconnected, stringCopy
-#include "net.hpp"    // sendPacketSafe
+#include "../../main.hpp"   // multiplayer/SERVER/CLIENT, MAXPLAYERS, net_packet, net_clients, net_sock, client_disconnected, stringCopy
+#include "../../net.hpp"    // sendPacketSafe
 
 #include <algorithm>
 #include <cstdio>

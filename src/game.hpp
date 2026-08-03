@@ -56,7 +56,7 @@ bool persistentStoryNPCNodeWasSeen(const int player, const std::string& mapName,
 class Entity;
 
 #define DEBUG 1
-#define ENTITY_PACKET_LENGTH 47
+#define ENTITY_PACKET_LENGTH 48
 #define NET_PACKET_SIZE 2048
 
 // impulses (bound keystrokes, mousestrokes, and joystick/game controller strokes) //TODO: Player-by-player basis.
@@ -536,6 +536,37 @@ bool applyPersistentShopkeeperInventory(
     Entity* shopkeeperEntity
 );
 void finishClientPersistentWorldSnapshot();
+bool writeAutomatiaPersistentWorldSave(
+    const char* path,
+    const std::string& sessionId,
+    std::string& error
+);
+bool serializeAutomatiaPersistentWorldSnapshot(
+    const std::string& sessionId,
+    std::string& snapshot,
+    std::string& error
+);
+bool stageAutomatiaPersistentWorldSnapshot(
+    const std::string& snapshot,
+    const std::string& sessionId,
+    std::string& error
+);
+void discardAutomatiaPersistentWorldSnapshot();
+bool loadAutomatiaPersistentWorldSave(
+    const char* path,
+    const std::string& sessionId,
+    std::string& error
+);
+void applyAutomatiaSavedPlayerPlacements();
+bool automatiaHasSavedPlayerPlacement(int playerIndex);
+void consumeAutomatiaSavedPlayerPlacement(int playerIndex);
+bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS]);
+bool restoreAutomatiaSavedPlayerInstances();
+bool prepareAutomatiaLateJoinPlayer(
+    int playerIndex,
+    bool returningPlayer,
+    std::string& error
+);
 // net packet send
 typedef struct packetsend_t
 {
@@ -545,6 +576,9 @@ typedef struct packetsend_t
 	int num;
 	int tries;
 	int hostnum;
+	bool mapScoped;
+	Uint64 mapInstanceRevision;
+	char mapInstanceKey[256];
 } packetsend_t;
 extern list_t safePacketsSent;
 extern std::unordered_map<int, Uint32> safePacketsReceivedMap[MAXPLAYERS];
@@ -599,6 +633,13 @@ extern int skipLevelsOnLoad;
 extern bool loadingSameLevelAsCurrent;
 extern std::string loadCustomNextMap;
 extern Sint32 loadCustomNextTunnelID;
+bool queueAutomatiaCustomTransition(
+	int playerIndex,
+	const std::string& destinationMap,
+	Sint32 destinationTunnelID,
+	int destinationLevel,
+	bool destinationSecret
+);
 extern Uint32 forceMapSeed;
 extern int currentlevel;
 extern bool secretlevel;

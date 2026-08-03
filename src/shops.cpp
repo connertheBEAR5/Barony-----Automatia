@@ -133,9 +133,10 @@ void closeShop(const int player)
 			// inform server that we're done talking to shopkeeper
 			strcpy((char*)net_packet->data, "SHPC");
 			SDLNet_Write32((Uint32)shopkeeper[player], &net_packet->data[4]);
+			net_packet->data[8] = clientnum;
 			net_packet->address.host = net_server.host;
 			net_packet->address.port = net_server.port;
-			net_packet->len = 8;
+			net_packet->len = 9;
 			sendPacketSafe(net_sock, -1, net_packet, 0);
 		}
 	}

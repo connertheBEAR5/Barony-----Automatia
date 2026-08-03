@@ -41,6 +41,7 @@ See LICENSE for details.
 #include "ui/GameUI.hpp"
 #include "light.hpp"
 #include "status_effect_owner_encoding.hpp"
+#include "world_state.hpp"
 /*-------------------------------------------------------------------------------
 
 Entity::Entity)
@@ -51,13 +52,21 @@ Construct an Entity
 ConsoleVariable<int> cvar_entity_bodypart_sync_tick("/entity_bodypart_sync_tick", TICKS_PER_SECOND / 4);
 void Entity::setUID(Uint32 new_uid)
 {
-	if ( !mynode ) { return; }
-	if ( mynode->list == map.entities )
-	{
-		map.entities_map.erase(uid);
-		map.entities_map.insert({ new_uid, mynode });
-	}
-	uid = new_uid;
+    if (!mynode)
+    {
+        return;
+    }
+    map_t* owner = worldState.mapForEntities(mynode->list);
+    if (!owner && mynode->list == map.entities)
+    {
+        owner = &map;
+    }
+    if (owner)
+    {
+        owner->entities_map.erase(uid);
+        owner->entities_map.insert({new_uid, mynode});
+    }
+    uid = new_uid;
 }
 
 /*-------------------------------------------------------------------------------

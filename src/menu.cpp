@@ -13,6 +13,7 @@
 #include <list>
 #include "draw.hpp"
 #include "game.hpp"
+#include "world_state.hpp"
 #include "stat.hpp"
 #include "messages.hpp"
 #include "entity.hpp"
@@ -9109,12 +9110,25 @@ void doNewGame(bool makeHighscore) {
 		}
 		applyPersistentMapRemovals();
 
-		assignActions(&map);
+		bool savedPlayerSpawnMask[MAXPLAYERS] = {};
+		const bool useSavedPlayerSpawnMask =
+			loadingsavegame
+			&& prepareAutomatiaSavedPlayerSpawnMask(savedPlayerSpawnMask);
+		assignActions(
+			&map,
+			useSavedPlayerSpawnMask ? savedPlayerSpawnMask : nullptr,
+			useSavedPlayerSpawnMask,
+			false
+		);
 
 		/*
 		* Lever handles and moving gates now exist.
 		*/
 		applyPersistentMechanismStates();
+        if ( loadingsavegame )
+        {
+            applyAutomatiaSavedPlayerPlacements();
+        }
 		if ( !loadingsavegame && challengeRunCustomStartLevel == "minetown" )
 		{
 			std::vector<Entity*> shopkeepersToInsert;
@@ -9143,6 +9157,10 @@ void doNewGame(bool makeHighscore) {
 		}
 
 		generatePathMaps();
+		if ( loadingsavegame )
+		{
+			restoreAutomatiaSavedPlayerInstances();
+		}
         clearChunks();
         createChunks();
 
@@ -9150,8 +9168,34 @@ void doNewGame(bool makeHighscore) {
 
 		if ( loadingsavegame )
 		{
+			const WorldInstanceIdentity* savedForegroundIdentity =
+				worldState.activeIdentity();
+			const std::string savedForegroundKey =
+				savedForegroundIdentity
+				? savedForegroundIdentity->key()
+				: std::string{};
 			for ( int c = 0; c < MAXPLAYERS; c++ )
 			{
+				if ( headless && multiplayer == SERVER && c == 0 )
+				{
+					continue;
+				}
+				if ( players[c]
+					&& players[c]->worldInstance.isValid()
+					&& (!worldState.activeIdentity()
+						|| !players[c]->worldInstance.matches(
+							*worldState.activeIdentity())))
+				{
+					if ( !worldState.activate(players[c]->worldInstance.key()) )
+					{
+						printlog(
+							"[Automatia Save] Skipping player %d effects: instance '%s' could not be activated.",
+							c,
+							players[c]->worldInstance.key().c_str()
+						);
+						continue;
+					}
+				}
 				if ( players[c] && players[c]->entity && !client_disconnected[c] )
 				{
 					if ( stats[c] && stats[c]->getEffectActive(EFF_POLYMORPH) && stats[c]->playerPolymorphStorage != NOTHING )
@@ -9173,13 +9217,45 @@ void doNewGame(bool makeHighscore) {
 					}
 				}
 			}
+			if ( !savedForegroundKey.empty()
+				&& worldState.activeIdentity()
+				&& worldState.activeIdentity()->key() != savedForegroundKey )
+			{
+				worldState.activate(savedForegroundKey);
+			}
 
 			list_t* followers = loadGameFollowers(saveGameInfo);
 			if ( followers )
 			{
+				const WorldInstanceIdentity* followerForegroundIdentity =
+					worldState.activeIdentity();
+				const std::string followerForegroundKey =
+					followerForegroundIdentity
+					? followerForegroundIdentity->key()
+					: std::string{};
 				int c;
 				for ( c = 0; c < MAXPLAYERS; c++ )
 				{
+					if ( headless && multiplayer == SERVER && c == 0 )
+					{
+						continue;
+					}
+					if ( players[c]
+						&& players[c]->worldInstance.isValid()
+						&& (!worldState.activeIdentity()
+							|| !players[c]->worldInstance.matches(
+								*worldState.activeIdentity())))
+					{
+						if ( !worldState.activate(players[c]->worldInstance.key()) )
+						{
+							printlog(
+								"[Automatia Save] Skipping player %d followers: instance '%s' could not be activated.",
+								c,
+								players[c]->worldInstance.key().c_str()
+							);
+							continue;
+						}
+					}
 					node_t* tempNode = list_Node(followers, c);
 					if ( tempNode )
 					{
@@ -9351,6 +9427,13 @@ void doNewGame(bool makeHighscore) {
 						}
 					}
 				}
+				if ( !followerForegroundKey.empty()
+					&& worldState.activeIdentity()
+					&& worldState.activeIdentity()->key()
+						!= followerForegroundKey )
+				{
+					worldState.activate(followerForegroundKey);
+				}
 				list_FreeAll(followers);
 				free(followers);
 			}
@@ -9382,7 +9465,13 @@ void doNewGame(bool makeHighscore) {
 			CalloutMenu[i].callouts.clear();
 		}
 
-		client_disconnected[0] = false;
+		/*
+		 * Preserve the slot-zero connectedness advertised by the server. A
+		 * graphical host advertises slot zero as connected, while a dedicated
+		 * headless host advertises it as disconnected because it has no playable
+		 * body. Forcing this value to false caused clients to convert Player Start
+		 * zero into a visible phantom server character.
+		 */
 
 		// initialize class
 		if ( !loadingsavegame )
@@ -9665,6 +9754,10 @@ void doNewGame(bool makeHighscore) {
 	pauseGame(1, 0);
 	loading = false;
 	intro = false;
+	if (multiplayer == CLIENT)
+	{
+		clientLateJoinMapLoaded();
+	}
 
 	if ( !wasLoadingSaveGame )
 	{

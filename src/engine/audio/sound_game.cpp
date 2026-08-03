@@ -21,7 +21,29 @@
 #include "../../ui/GameUI.hpp"
 #include "../../ui/MainMenu.hpp"
 #include "../../mod_tools.hpp"
+#include "../../world_state.hpp"
 #include "../../ui/Button.hpp"
+
+namespace
+{
+bool activeWorldHasLocalListener()
+{
+	if ( multiplayer != SERVER || !worldState.activeIdentity() )
+	{
+		return true;
+	}
+	for ( int player = 0; player < MAXPLAYERS; ++player )
+	{
+		if ( players[player]
+			&& players[player]->isLocalPlayer()
+			&& worldState.playerSharesActiveInstance(player) )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+}
 
 /*-------------------------------------------------------------------------------
 
@@ -158,7 +180,7 @@ FMOD::Channel* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 
 FMOD::Channel* playSoundPosLocal(real_t x, real_t y, Uint16 snd, Uint8 vol)
 {
-	if (no_sound)
+	if (no_sound || !activeWorldHasLocalListener())
 	{
 		return nullptr;
 	}
@@ -432,6 +454,36 @@ OPENAL_SOUND* playSoundPlayer(int player, Uint16 snd, Uint8 vol)
 	}
 
 	return NULL;
+}
+
+OPENAL_SOUND* playSoundNotification(Uint16 snd, Uint8 vol)
+{
+    return playSound(snd, vol);
+}
+
+OPENAL_SOUND* playSoundNotificationPlayer(int player, Uint16 snd, Uint8 vol)
+{
+    if ( no_sound || player < 0 || player >= MAXPLAYERS )
+    {
+        return nullptr;
+    }
+    if ( players[player]->isLocalPlayer() )
+    {
+        return playSoundNotification(snd, vol);
+    }
+    if ( multiplayer != SERVER || vol == 0
+        || player <= 0 || client_disconnected[player] )
+    {
+        return nullptr;
+    }
+    memcpy(net_packet->data, "SNDN", 4);
+    SDLNet_Write16(snd, &net_packet->data[4]);
+    net_packet->data[6] = vol;
+    net_packet->address.host = net_clients[player - 1].host;
+    net_packet->address.port = net_clients[player - 1].port;
+    net_packet->len = 7;
+    sendPacketSafe(net_sock, -1, net_packet, player - 1);
+    return nullptr;
 }
 
 /*-------------------------------------------------------------------------------

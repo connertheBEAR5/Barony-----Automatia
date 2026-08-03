@@ -83,6 +83,23 @@ bool loadMusic()
 		fortressmusic = (FMOD::Sound**)malloc(sizeof(FMOD::Sound*) * NUMINTROMUSIC);
 		memset(fortressmusic, 0, sizeof(FMOD::Sound*) * NUMINTROMUSIC);
 	}
+#elif defined USE_OPENAL
+    auto allocateMusicArray = [](const size_t count)
+    {
+        return static_cast<OPENAL_BUFFER**>(
+            calloc(count, sizeof(OPENAL_BUFFER*))
+        );
+    };
+    minesmusic = allocateMusicArray(NUMMINESMUSIC);
+    swampmusic = allocateMusicArray(NUMSWAMPMUSIC);
+    labyrinthmusic = allocateMusicArray(NUMLABYRINTHMUSIC);
+    ruinsmusic = allocateMusicArray(NUMRUINSMUSIC);
+    underworldmusic = allocateMusicArray(NUMUNDERWORLDMUSIC);
+    hellmusic = allocateMusicArray(NUMHELLMUSIC);
+    minotaurmusic = allocateMusicArray(NUMMINOTAURMUSIC);
+    cavesmusic = allocateMusicArray(NUMCAVESMUSIC);
+    citadelmusic = allocateMusicArray(NUMCITADELMUSIC);
+    intromusic = allocateMusicArray(NUMINTROMUSIC);
 #endif
 
     bool introMusicChanged;
@@ -173,6 +190,7 @@ void playMusic(FMOD::Sound* sound, bool loop, bool crossfade, bool resume)
 }
 #endif
 
+#ifdef USE_FMOD
 bool shopmusicplaying = false;
 bool combatmusicplaying = false;
 bool minotaurmusicplaying = false;
@@ -182,6 +200,7 @@ bool olddarkmap = false;
 bool sanctummusicplaying = false;
 
 int currenttrack = -1;
+#endif
 
 #ifdef USE_FMOD
 void handleLevelMusic()

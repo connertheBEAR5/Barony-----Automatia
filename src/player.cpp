@@ -8108,7 +8108,7 @@ void Player::PlayerMechanics_t::ensembleMusicUpdateServer()
 				net_packet->len = 4 + MAXPLAYERS * 4;
 				for ( int i = 1; i < MAXPLAYERS; ++i )
 				{
-					if ( !client_disconnected[i] )
+					if ( serverPlayerCanReceiveGameplayUpdates(i) )
 					{
 						net_packet->address.host = net_clients[i - 1].host;
 						net_packet->address.port = net_clients[i - 1].port;

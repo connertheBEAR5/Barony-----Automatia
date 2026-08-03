@@ -10,7 +10,10 @@
 
 #include "../init.hpp"
 #include "../net.hpp"
+#include "../late_join_protocol.hpp"
+#include "../lan_discovery.hpp"
 #include "../player.hpp"
+#include "../world_state.hpp"
 #include "../stat.hpp"
 #include "../menu.hpp"
 #include "../scores.hpp"
@@ -31,6 +34,8 @@
 #include "../scrolls.hpp"
 
 #include <cassert>
+#include <csignal>
+#include <filesystem>
 #include <functional>
 #ifdef WINDOWS
 #include <conio.h>
@@ -91,12 +96,18 @@ namespace MainMenu {
 	static const int numFilters = NUM_SERVER_FLAGS + 2;
 
 	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr Uint8 kJoinCapabilityLateJoinV1 = 0x02;
+	constexpr Uint8 kJoinCapabilityReconnectTokenV1 = 0x04;
+	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
 	constexpr int kHeloChunkHeaderSize = 12;
 	constexpr int kHeloChunkPayloadMax = 900;
 	constexpr int kHeloChunkMaxCount = 32;
 	constexpr Uint32 kHeloChunkReassemblyTimeoutTicks =
 		5 * TICKS_PER_SECOND;
 	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+	static LateJoinProtocol::SnapshotAssembler g_lateJoinAssembler;
+	static LateJoinProtocol::Begin g_lateJoinBegin;
+	static bool g_lateJoinSpawnAuthorized = false;
 
 	static int decodeNetworkPlayerIndex(
 		const Uint8 encodedPlayer
@@ -131,6 +142,21 @@ namespace MainMenu {
 
 	static HeloChunkReassemblyState
 		g_heloChunkReassemblyState;
+
+#ifdef SOUND
+    static void playIntroMenuMusic(const int track)
+    {
+        if ( no_sound
+            || !intromusic
+            || track < 0
+            || track >= NUMINTROMUSIC
+            || !intromusic[track] )
+        {
+            return;
+        }
+        playMusic(intromusic[track], true, false, false);
+    }
+#endif
 
 	static Uint16 nextHeloTransferIdForPlayer(
 		const int player
@@ -839,6 +865,7 @@ namespace MainMenu {
 	};
 
 	static LobbyType currentLobbyType = LobbyType::None;
+	static bool creatingRuntimeLateJoinLobby = false;
 	static bool playersInLobby[MAXPLAYERS];
 	static bool playerSlotsLocked[MAXPLAYERS];
 	static bool newPlayer[MAXPLAYERS];
@@ -12661,8 +12688,204 @@ bind_failed:
 	}
 
 	static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+		{'LJBG', [](){
+			LateJoinProtocol::Begin begin;
+			if (!LateJoinProtocol::decodeBegin(
+					net_packet->data, net_packet->len, begin)
+				|| !g_lateJoinAssembler.begin(begin))
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected malformed snapshot begin.");
+				return;
+			}
+			g_lateJoinBegin = begin;
+			g_lateJoinSpawnAuthorized = false;
+			clientBeginLateJoinPacketDeferral(
+				begin.transferId, begin.instanceRevision);
+		}},
+		{'LJCH', [](){
+			LateJoinProtocol::Chunk chunk;
+			if (!LateJoinProtocol::decodeChunk(
+					net_packet->data, net_packet->len, chunk)
+				|| g_lateJoinAssembler.accept(chunk)
+					== LateJoinProtocol::ReceiveResult::Rejected)
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected corrupt snapshot chunk.");
+			}
+			else
+			{
+				clientNoteLateJoinProgress();
+			}
+		}},
+		{'LJDN', [](){
+			LateJoinProtocol::Complete complete;
+			if (!LateJoinProtocol::decodeComplete(
+					net_packet->data, net_packet->len, complete)
+				|| g_lateJoinAssembler.finish(complete)
+					!= LateJoinProtocol::ReceiveResult::Complete)
+			{
+				g_lateJoinAssembler.fail();
+				printlog("[Late Join] Lobby client rejected incomplete snapshot transfer.");
+				return;
+			}
+			const std::vector<std::uint8_t>& bytes =
+				g_lateJoinAssembler.snapshot();
+			const std::string snapshot(
+				reinterpret_cast<const char*>(bytes.data()), bytes.size());
+			std::string snapshotError;
+			const bool accepted = stageAutomatiaPersistentWorldSnapshot(
+				snapshot,
+				std::to_string(g_lateJoinBegin.sessionKey),
+				snapshotError);
+			LateJoinProtocol::Ready ready;
+			ready.playerIndex = static_cast<std::uint8_t>(clientnum);
+			ready.transferId = complete.transferId;
+			ready.instanceRevision = complete.instanceRevision;
+			ready.snapshotAccepted = accepted;
+			const std::vector<std::uint8_t> readyPacket =
+				LateJoinProtocol::encodeReady(ready);
+			if (readyPacket.empty())
+			{
+				printlog("[Late Join] Lobby client could not encode ready response.");
+				return;
+			}
+			memcpy(net_packet->data, readyPacket.data(), readyPacket.size());
+			net_packet->len = static_cast<int>(readyPacket.size());
+			net_packet->address.host = net_server.host;
+			net_packet->address.port = net_server.port;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			if (!accepted)
+			{
+				printlog(
+					"[Late Join] Lobby client rejected snapshot document: %s",
+					snapshotError.c_str());
+			}
+			else
+			{
+				clientNoteLateJoinProgress();
+			}
+		}},
+		{'LJOK', [](){
+			LateJoinProtocol::Authorization authorization;
+			if (!LateJoinProtocol::decodeAuthorization(
+					net_packet->data, net_packet->len, authorization)
+				|| authorization.transferId != g_lateJoinBegin.transferId
+				|| authorization.instanceRevision
+					!= g_lateJoinBegin.instanceRevision
+				|| !authorization.spawnAuthorized
+				|| !g_lateJoinAssembler.complete())
+			{
+				printlog("[Late Join] Lobby client rejected spawn authorization.");
+				return;
+			}
+			g_lateJoinSpawnAuthorized = true;
+			clientNoteLateJoinProgress();
+			uniqueGameKey = g_lateJoinBegin.sessionKey;
+			LateJoinProtocol::Ready go;
+			go.playerIndex = static_cast<std::uint8_t>(clientnum);
+			go.transferId = authorization.transferId;
+			go.instanceRevision = authorization.instanceRevision;
+			go.snapshotAccepted = true;
+			const std::vector<std::uint8_t> goPacket =
+				LateJoinProtocol::encodeGo(go);
+			memcpy(net_packet->data, goPacket.data(), goPacket.size());
+			net_packet->len = static_cast<int>(goPacket.size());
+			net_packet->address.host = net_server.host;
+			net_packet->address.port = net_server.port;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			printlog(
+				"[Late Join] Lobby client accepted spawn authorization for transfer %u.",
+				authorization.transferId);
+		}},
+		{'LJCB', [](){
+			if (!clientAcceptLateJoinCatchupBegin(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up begin.");
+			}
+		}},
+		{'LJCC', [](){
+			if (!clientAcceptLateJoinCatchupChunk(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up chunk.");
+			}
+		}},
+		{'LJCE', [](){
+			if (!clientAcceptLateJoinCatchupComplete(
+					net_packet->data, net_packet->len))
+			{
+				printlog("[Late Join] Lobby client rejected catch-up completion.");
+			}
+		}},
+		{'LJAB', [](){
+			LateJoinProtocol::Abort abort;
+			if (!LateJoinProtocol::decodeAbort(
+					net_packet->data, net_packet->len, abort)
+				|| abort.playerIndex != clientnum
+				|| (abort.transferId != 0
+					&& (abort.transferId != g_lateJoinBegin.transferId
+						|| abort.instanceRevision
+							!= g_lateJoinBegin.instanceRevision)))
+			{
+				printlog("[Late Join] Lobby client ignored invalid abort record.");
+				return;
+			}
+			discardAutomatiaPersistentWorldSnapshot();
+			clientResetLateJoinPacketDeferral();
+			g_lateJoinAssembler.reset();
+			g_lateJoinSpawnAuthorized = false;
+			printlog("[Late Join] Server aborted transfer (reason %u).",
+				static_cast<unsigned>(abort.reason));
+		}},
+		{'RJTK', [](){
+			if (net_packet->len != 5 + static_cast<int>(kReconnectTokenLength)
+				|| net_packet->data[4] != clientnum)
+			{
+				printlog("[Late Join] Lobby client rejected malformed reconnect token.");
+				return;
+			}
+			std::string token(
+				reinterpret_cast<const char*>(&net_packet->data[5]),
+				kReconnectTokenLength);
+			if (!ReconnectToken::isValid(token))
+			{
+				printlog("[Late Join] Lobby client rejected invalid reconnect token.");
+				return;
+			}
+			automatiaReconnectTokens[clientnum] = std::move(token);
+			printlog("[Late Join] Lobby client stored reconnect identity for slot %d.",
+				clientnum);
+		}},
 	    // game start
 	    {'STRT', [](){
+			if (net_packet->len >= 18 && net_packet->data[17] == 1)
+			{
+				if (!g_lateJoinSpawnAuthorized || net_packet->len < 28)
+				{
+					printlog("[Late Join] Ignored runtime STRT before authorization.");
+					return;
+				}
+				const std::size_t mapNameLength = net_packet->data[18];
+				const std::size_t metadataOffset = 19 + mapNameLength;
+				if (mapNameLength == 0 || mapNameLength >= sizeof(maptoload)
+					|| net_packet->len != metadataOffset + 9)
+				{
+					printlog("[Late Join] Rejected malformed runtime STRT metadata.");
+					return;
+				}
+				memcpy(maptoload, &net_packet->data[19], mapNameLength);
+				maptoload[mapNameLength] = '\0';
+				currentlevel = static_cast<int>(
+					LateJoinProtocol::read32(net_packet->data, metadataOffset));
+				mapseed = LateJoinProtocol::read32(
+					net_packet->data, metadataOffset + 4);
+				secretlevel = net_packet->data[metadataOffset + 8] != 0;
+				loadingmap = true;
+				genmap = false;
+				g_lateJoinSpawnAuthorized = false;
+			}
             destroyMainMenu();
             createDummyMainMenu();
 	        lobbyWindowSvFlags = SDLNet_Read32(&net_packet->data[4]);
@@ -13116,6 +13339,9 @@ bind_failed:
 							: 6 + 32;
 					const int expectedHeloLen =
 						8 + MAXPLAYERS * heloChunkSize;
+					const bool runtimeJoinHandshake =
+						net_packet->len == expectedHeloLen + 1
+						&& net_packet->data[expectedHeloLen] == 1;
 
 					if ( net_packet->len < expectedHeloLen )
 					{
@@ -13179,9 +13405,25 @@ bind_failed:
 						}
 					}
 
-					// open lobby
-                    closePrompt("connect_prompt");
+					// A runtime client must identify the late-join protocol before
+					// its automatically opened character card sends PLYR/REDY.
+					if (runtimeJoinHandshake)
+					{
+						memcpy(net_packet->data, "LJHI", 4);
+						net_packet->data[4] = static_cast<Uint8>(clientnum);
+						net_packet->len = 5;
+						net_packet->address.host = net_server.host;
+						net_packet->address.port = net_server.port;
+						sendPacketSafe(net_sock, -1, net_packet, 0);
+					}
+
+					// Open the lobby after LJHI has been queued. Runtime late join
+					// imports a default/saved character immediately and scrolls to
+					// the page containing the server-assigned slot.
+					closePrompt("connect_prompt");
+					creatingRuntimeLateJoinLobby = runtimeJoinHandshake;
 					createLobby(LobbyType::LobbyJoined);
+					creatingRuntimeLateJoinLobby = false;
 
                     // TODO subscribe to mods!
 #if 0
@@ -13272,6 +13514,11 @@ bind_failed:
 			    if (handleSafePacket()) {
 				    continue;
 			    }
+				if (clientDeferLateJoinMapPacket(
+						net_packet->data,
+						static_cast<std::size_t>(net_packet->len))) {
+					continue;
+				}
 
 			    Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
 			    client_keepalive[0] = ticks;
@@ -13296,6 +13543,14 @@ bind_failed:
 			// I don't know why this can happen, but it can,
 			// and it causes the game to crash. So stop it!
 			return;
+		}
+		const bool lateJoinWasActive =
+			clientLateJoinPacketDeferralActive();
+		clientCheckLateJoinTimeout();
+		if (lateJoinWasActive && !clientLateJoinPacketDeferralActive())
+		{
+			g_lateJoinAssembler.reset();
+			g_lateJoinSpawnAuthorized = false;
 		}
 	    if (multiplayer == SERVER) {
 	        handlePacketsAsServer();
@@ -13429,10 +13684,22 @@ bind_failed:
 	    SDLNet_Write32(loadingsavegame, &net_packet->data[61]); // send unique game key
 		SDLNet_Write32(loadinglobbykey, &net_packet->data[65]); // send unique lobby key
 		net_packet->data[69] =
-			kJoinCapabilityHeloChunkV1;
+			kJoinCapabilityHeloChunkV1
+			| kJoinCapabilityLateJoinV1
+			| kJoinCapabilityReconnectTokenV1;
+		memset(&net_packet->data[70], 0, kReconnectTokenLength);
+		if (loadingsavegame
+			&& info.players.size() > index
+			&& info.players[index].reconnect_token.size()
+				== kReconnectTokenLength)
+		{
+			memcpy(&net_packet->data[70],
+				info.players[index].reconnect_token.data(),
+				kReconnectTokenLength);
+		}
 	    net_packet->address.host = net_server.host;
 	    net_packet->address.port = net_server.port;
-	    net_packet->len = 70;
+	    net_packet->len = 70 + kReconnectTokenLength;
 
 	    /*if (!directConnect) {
 		    sendPacket(net_sock, -1, net_packet, 0);
@@ -19840,14 +20107,21 @@ failed:
 
 		currentLobbyType = type;
 
-        const int lobbySize = type == LobbyType::LobbyLocal ?
+		const int lobbySize = type == LobbyType::LobbyLocal ?
             (Frame::virtualScreenX / 4) * MAX_SPLITSCREEN:
             (Frame::virtualScreenX / 4) * MAXPLAYERS;
+		const int initialLobbyScroll =
+			creatingRuntimeLateJoinLobby && type == LobbyType::LobbyJoined
+				? std::min(
+					(clientnum / 4) * Frame::virtualScreenX,
+					std::max(0, lobbySize - Frame::virtualScreenX))
+				: 0;
         
 		auto lobby = main_menu_frame->addFrame("lobby");
 		lobby->setOwner(clientnum);
 		lobby->setSize(SDL_Rect{0, 0, Frame::virtualScreenX, Frame::virtualScreenY});
-		lobby->setActualSize(SDL_Rect{0, 0, lobbySize, lobby->getSize().h});
+		lobby->setActualSize(SDL_Rect{
+			initialLobbyScroll, 0, lobbySize, lobby->getSize().h});
         lobby->setColor(makeColor(0, 0, 0, 127));
         lobby->setAllowScrollBinds(false);
 		lobby->setBorder(0);
@@ -20843,7 +21117,18 @@ failed:
 		} else if (type == LobbyType::LobbyJoined) {
 		    for (int c = 0; c < MAXPLAYERS; ++c) {
 		        if (clientnum == c) {
-		            createStartButton(c);
+					if (creatingRuntimeLateJoinLobby)
+					{
+						// The server has already authenticated and assigned this
+						// network slot. Open its imported/default character
+						// immediately so Ready is available without a second
+						// local "join player" step.
+						createCharacterCard(c);
+					}
+					else
+					{
+						createStartButton(c);
+					}
 		        } else {
 		            if (client_disconnected[c]) {
 		                if (directConnect) {
@@ -21198,6 +21483,8 @@ failed:
 	    std::string address;
 		int numMods;
 		bool modsDisableAchievements;
+		bool dedicated = false;
+		bool lateJoin = false;
 	    intptr_t index = -1;
 	    LobbyInfo(
 	        const char* _name = "Barony",
@@ -21233,7 +21520,8 @@ failed:
 	        return;
 	    }
         
-        if (info.players <= 0) {
+        if (!LanDiscovery::browserShouldInclude(
+				info.players, info.dedicated)) {
             // do not include empty lobbies
             return;
         }
@@ -22076,14 +22364,20 @@ failed:
 			    if (SDLNet_UDP_Recv(scan.sock, scan.packet)) {
 				    Uint32 packetId = SDLNet_Read32(scan.packet->data);
 				    if (packetId == 'SCAN') {
-                        if (scan.packet->len > 4) {
+                        if (scan.packet->len >= 17) {
 				            char hostname[256] = { '\0' };
-				            Uint32 hostname_len;
-				            hostname_len = SDLNet_Read32(&scan.packet->data[4]);
+				            const Uint32 hostname_len =
+								SDLNet_Read32(&scan.packet->data[4]);
+							const std::size_t offset = 8 + hostname_len;
+							if (hostname_len >= sizeof(hostname)
+								|| offset + 9 > static_cast<std::size_t>(scan.packet->len))
+							{
+								printlog("ignored malformed LAN discovery response");
+								return;
+							}
 				            memcpy(hostname, &scan.packet->data[8], hostname_len);
-
-				            Uint32 offset = 8 + hostname_len;
-				            int players = (int)SDLNet_Read32(&scan.packet->data[offset]);
+				            const int players =
+								static_cast<int>(SDLNet_Read32(&scan.packet->data[offset]));
 
 				            int ping = (int)(ticks - scan_ticks);
 
@@ -22094,6 +22388,14 @@ failed:
 				            info.ping = ping;
 				            info.locked = scan.packet->data[offset + 4];
 				            info.flags = SDLNet_Read32(&scan.packet->data[offset + 5]);
+							const std::size_t legacyLength = offset + 9;
+							const LanDiscovery::Extension extension =
+								LanDiscovery::decodeExtension(
+									&scan.packet->data[legacyLength],
+									static_cast<std::size_t>(scan.packet->len)
+										- legacyLength);
+							info.dedicated = extension.dedicated;
+							info.lateJoin = extension.lateJoin;
 
                             Uint32 host = scan.packet->address.host;
 				            char buf[16];
@@ -22110,7 +22412,15 @@ failed:
 								(uint8_t)((host & 0x00ff0000) >> 16),
 								(uint8_t)((host & 0xff000000) >> 24));
 #endif
-				            info.address = buf;
+							if (extension.present && extension.gamePort != DEFAULT_PORT)
+							{
+								info.address = std::string(buf) + ":"
+									+ std::to_string(extension.gamePort);
+							}
+							else
+							{
+								info.address = buf;
+							}
 				            addLobby(info);
 
 				            printlog("got a SCAN packet from %s\n", buf);
@@ -24151,8 +24461,7 @@ failed:
         }
         if ( headlessLateJoinRequested )
         {
-            printlog("Headless startup rejected: --late-join is unavailable until full world-state snapshots are implemented.");
-            return false;
+            printlog("Headless LAN late join enabled with bounded instance snapshots and spawn authorization.");
         }
 
         closeNetworkInterfaces();
@@ -24190,7 +24499,13 @@ failed:
             fprintf(statusFile, "Visibility: LAN direct-connect\n");
             fprintf(statusFile, "Listening endpoint: 0.0.0.0:%u UDP\n", port);
             fprintf(statusFile, "Autostart: %s\n", headlessAutoStart ? "enabled" : "disabled");
-            fprintf(statusFile, "Late join after game start: unavailable\n");
+            fprintf(
+                statusFile,
+                "Late join after game start: %s\n",
+                headlessLateJoinRequested
+                    ? "experimental direct-LAN path enabled"
+                    : "disabled (start with --late-join to enable)"
+            );
             fclose(statusFile);
         }
         return true;
@@ -24200,7 +24515,239 @@ failed:
     {
         const char* state = multiplayer == SERVER && net_sock ? "listening" : "not listening";
         printlog("HEADLESS STATUS: %s, UDP port %u, ticks %u.", state, headlessServerPort, ticks);
-        printlog("HEADLESS STATUS: in-progress late join unavailable; password/public modes unavailable.");
+        printlog(
+            "HEADLESS STATUS: in-progress direct-LAN late join %s; password/public modes unavailable.",
+            headlessLateJoinRequested ? "enabled (experimental)" : "disabled"
+        );
+        printlog(
+            "HEADLESS STATUS: save slot %d, autosave every %u seconds.",
+            headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex,
+            headlessAutosaveIntervalSeconds
+        );
+		const WorldInstanceIdentity* activeIdentity = worldState.activeIdentity();
+		printlog(
+			"HEADLESS STATUS: active map instance %s.",
+			activeIdentity ? activeIdentity->key().c_str() : "<none>"
+		);
+		int connectedPlayers = 0;
+		int reconnectReservedSlots = 0;
+		int availableSlots = 0;
+		for ( int player = 1; player < MAXPLAYERS; ++player )
+		{
+			if ( !client_disconnected[player] )
+			{
+				++connectedPlayers;
+			}
+			else if ( automatiaHasSavedPlayerPlacement(player) )
+			{
+				++reconnectReservedSlots;
+			}
+			else
+			{
+				++availableSlots;
+			}
+		}
+		printlog(
+			"HEADLESS ROSTER: connected=%d reconnect-reserved=%d available=%d.",
+			connectedPlayers, reconnectReservedSlots, availableSlots
+		);
+		for ( const MapInstanceSummary& summary : worldState.instanceSummaries() )
+		{
+			std::string occupants;
+			for ( const int player : summary.playersPresent )
+			{
+				if ( player < 0 || player >= MAXPLAYERS
+					|| client_disconnected[player] )
+				{
+					continue;
+				}
+				if ( !occupants.empty() )
+				{
+					occupants += ',';
+				}
+				occupants += std::to_string(player);
+			}
+			printlog(
+				"HEADLESS INSTANCE: %s rev=%llu loaded=%s initialized=%s active=%s dirty=%s tick=%llu players=[%s].",
+				summary.identity.key().c_str(),
+				static_cast<unsigned long long>(summary.identity.revision),
+				summary.loaded ? "yes" : "no",
+				summary.runtimeInitialized ? "yes" : "no",
+				summary.simulationActive ? "yes" : "no",
+				summary.dirty ? "yes" : "no",
+				static_cast<unsigned long long>(summary.simulationTick),
+				occupants.c_str()
+			);
+			MapInstance* instance = worldState.find(summary.identity.key());
+			std::size_t entityCount = 0;
+			std::size_t behaviorCount = 0;
+			std::size_t customExitCount = 0;
+			std::size_t editorLightCount = 0;
+			if (instance && instance->entities)
+			{
+				for (node_t* node = instance->entities->first;
+					node; node = node->next)
+				{
+					Entity* entity = static_cast<Entity*>(node->element);
+					if (!entity)
+					{
+						continue;
+					}
+					++entityCount;
+					behaviorCount += entity->behavior ? 1 : 0;
+					customExitCount +=
+						entity->behavior == &actCustomPortal ? 1 : 0;
+					editorLightCount +=
+						entity->behavior == &actLightSource ? 1 : 0;
+				}
+			}
+			printlog(
+				"HEADLESS SIMULATION: %s entities=%zu behaviors=%zu custom-exits=%zu editor-lights=%zu.",
+				summary.identity.key().c_str(), entityCount, behaviorCount,
+				customExitCount, editorLightCount);
+		}
+    }
+
+    static bool headlessSaveSession(const char* reason)
+    {
+        if ( intro || multiplayer != SERVER || !net_sock )
+        {
+            printlog("HEADLESS SAVE: no active server game to save (%s).", reason);
+            return false;
+        }
+        if ( !gameModeManager.allowsSaves() )
+        {
+            printlog("HEADLESS SAVE: the active game mode does not permit saves (%s).", reason);
+            return false;
+        }
+
+        const int slot = headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex;
+        if ( saveGame(slot) != 0 )
+        {
+            printlog("HEADLESS SAVE: slot %d failed (%s).", slot, reason);
+            return false;
+        }
+        printlog("HEADLESS SAVE: slot %d saved successfully (%s).", slot, reason);
+        return true;
+    }
+
+    static bool headlessRestoreConfiguredSave()
+    {
+        if ( headlessSaveSlot < 0 )
+        {
+            return true;
+        }
+
+        char primaryPath[PATH_MAX] = "";
+        const std::string primarySave = setSaveGameFileName(
+            false,
+            SaveFileType::JSON,
+            headlessSaveSlot
+        );
+        completePath(primaryPath, primarySave.c_str(), outputdir);
+        std::error_code pathError;
+        const bool primaryExists = std::filesystem::exists(primaryPath, pathError);
+        if ( pathError )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d could not be inspected; startup is stopped.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+        if ( !primaryExists )
+        {
+			discardAutomatiaPersistentWorldSnapshot();
+			resetPersistentWorldSession();
+            printlog(
+                "HEADLESS RECOVERY: slot %d is empty; cleared stale reconnect reservations and started a new session.",
+                headlessSaveSlot
+            );
+            return true;
+        }
+        if ( !saveGameExists(false, headlessSaveSlot) )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d exists but failed validation; startup is stopped to protect it.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+
+        savegameCurrentFileIndex = headlessSaveSlot;
+        const SaveGameInfo info = getSaveGameInfo(false, headlessSaveSlot);
+        if ( info.magic_cookie != "BARONYJSONSAVE"
+            || info.multiplayer_type != DIRECTSERVER
+            || info.players_connected.empty()
+            || !info.players_connected[0] )
+        {
+            printlog(
+                "HEADLESS RECOVERY: slot %d is not a compatible LAN server save; startup is stopped.",
+                headlessSaveSlot
+            );
+            return false;
+        }
+
+        loadingsavegame = info.gamekey;
+        loadinglobbykey = info.lobbykey;
+        for ( int player = 0; player < MAXPLAYERS; ++player )
+        {
+            newPlayer[player] = player != 0;
+            const bool wasConnected =
+                static_cast<std::size_t>(player) < info.players_connected.size()
+                && info.players_connected[player];
+            playerSlotsLocked[player] = headlessLateJoinRequested
+                ? false
+                : !wasConnected;
+            if ( wasConnected && loadGame(player, info) != 0 )
+            {
+                printlog(
+                    "HEADLESS RECOVERY: slot %d failed while restoring player slot %d; startup is stopped.",
+                    headlessSaveSlot,
+                    player
+                );
+                loadingsavegame = 0;
+                loadinglobbykey = 0;
+                return false;
+            }
+        }
+
+        printlog(
+            "HEADLESS RECOVERY: slot %d validated and is ready to resume.",
+            headlessSaveSlot
+        );
+        return true;
+    }
+
+    static volatile std::sig_atomic_t headlessShutdownSignal = 0;
+
+    static void headlessSignalHandler(int signalNumber)
+    {
+        headlessShutdownSignal = signalNumber;
+    }
+
+    static void headlessInstallSignalHandlers()
+    {
+        static bool installed = false;
+        if ( installed )
+        {
+            return;
+        }
+        installed = true;
+        std::signal(SIGINT, headlessSignalHandler);
+#ifndef WINDOWS
+        std::signal(SIGTERM, headlessSignalHandler);
+#endif
+    }
+
+    static void headlessRequestShutdown(const char* reason)
+    {
+        printlog("HEADLESS ADMIN: graceful shutdown requested (%s).", reason);
+        if ( !intro && multiplayer == SERVER )
+        {
+            (void)headlessSaveSession(reason);
+        }
+        mainloop = 0;
     }
 
     static void headlessExecuteAdminCommand(const char* command)
@@ -24212,7 +24759,7 @@ failed:
 
         if ( !strcmp(command, "help") )
         {
-            printlog("HEADLESS ADMIN: help | status | start | shutdown");
+            printlog("HEADLESS ADMIN: help | status | start | save | shutdown");
         }
         else if ( !strcmp(command, "status") )
         {
@@ -24230,10 +24777,13 @@ failed:
                 printlog("HEADLESS ADMIN: cannot start; no active server lobby.");
             }
         }
+        else if ( !strcmp(command, "save") )
+        {
+            (void)headlessSaveSession("administrator request");
+        }
         else if ( !strcmp(command, "shutdown") )
         {
-            printlog("HEADLESS ADMIN: graceful shutdown requested.");
-            mainloop = 0;
+            headlessRequestShutdown("administrator request");
         }
         else if ( command[0] != '\0' )
         {
@@ -24247,7 +24797,7 @@ failed:
         if ( !announced )
         {
             announced = true;
-            printlog("HEADLESS ADMIN: commands are help, status, start, shutdown.");
+            printlog("HEADLESS ADMIN: commands are help, status, start, save, shutdown.");
         }
 
 #ifdef WINDOWS
@@ -24316,9 +24866,21 @@ failed:
         static bool initialized = false;
         static Uint32 listeningSince = 0;
         static bool autostarted = false;
+        static Uint32 lastAutosaveTick = 0;
+        static bool autosaveClockStarted = false;
 
         if ( headless )
         {
+            headlessInstallSignalHandlers();
+            if ( headlessShutdownSignal != 0 )
+            {
+                const int signalNumber = headlessShutdownSignal;
+                headlessShutdownSignal = 0;
+                char reason[64];
+                snprintf(reason, sizeof(reason), "signal %d", signalNumber);
+                headlessRequestShutdown(reason);
+                return;
+            }
             headlessProcessAdminConsole();
         }
 
@@ -24334,6 +24896,29 @@ failed:
                     startGame();
                 }
             }
+            if ( initialized
+                && headlessAutosaveIntervalSeconds > 0
+                && !intro
+                && multiplayer == SERVER
+                && net_sock )
+            {
+                if ( !autosaveClockStarted )
+                {
+                    autosaveClockStarted = true;
+                    lastAutosaveTick = ticks;
+                }
+                const Uint32 intervalTicks =
+                    headlessAutosaveIntervalSeconds * TICKS_PER_SECOND;
+                if ( ticks - lastAutosaveTick >= intervalTicks )
+                {
+                    lastAutosaveTick = ticks;
+                    (void)headlessSaveSession("timed autosave");
+                }
+            }
+            else
+            {
+                autosaveClockStarted = false;
+            }
             return;
         }
         if ( !main_menu_frame )
@@ -24344,6 +24929,12 @@ failed:
         initialized = true;
         if ( headlessStartDedicatedServer() )
         {
+            if ( !headlessRestoreConfiguredSave() )
+            {
+                closeNetworkInterfaces();
+                printlog("HEADLESS RECOVERY: listener closed after recovery failure.");
+                return;
+            }
             listeningSince = ticks;
         }
     }
@@ -26901,7 +27492,7 @@ failed:
 		        destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-	            playMusic(intromusic[music], true, false, false);
+	            playIntroMenuMusic(music);
 #endif
 				createTitleScreen();
 
@@ -26932,7 +27523,7 @@ failed:
 				destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-				playMusic(intromusic[music], true, false, false);
+				playIntroMenuMusic(music);
 #endif
 				createMainMenu(false);
 
@@ -26971,7 +27562,7 @@ failed:
 				destroyMainMenu();
 #ifdef SOUND
 				const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-	            playMusic(intromusic[music], true, false, false);
+	            playIntroMenuMusic(music);
 #endif
 				createMainMenu(false);
 
@@ -27006,7 +27597,7 @@ failed:
                 }
 #ifdef SOUND
                 const int music = RNG.uniform(0, NUMINTROMUSIC - 2);
-                playMusic(intromusic[music], true, false, false);
+                playIntroMenuMusic(music);
 #endif
                 createMainMenu(false);
                 if (saved_invite_lobby) {
@@ -27037,7 +27628,7 @@ failed:
 				createDummyMainMenu();
 				createCreditsScreen(true);
 #ifdef SOUND
-	            playMusic(intromusic[0], true, false, false);
+	            playIntroMenuMusic(0);
 #endif
 
 #ifndef NINTENDO

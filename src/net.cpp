@@ -35,6 +35,10 @@
 #include "steam.hpp"
 #endif
 #include "player.hpp"
+#include "world_state.hpp"
+#include "world_packet_scope.hpp"
+#include "late_join_protocol.hpp"
+#include "lan_discovery.hpp"
 #include "scores.hpp"
 #include "colors.hpp"
 #include "mod_tools.hpp"
@@ -49,16 +53,345 @@
 
 #include <atomic>
 #include <future>
+#include <random>
 #include <thread>
 
 namespace
 {
 	constexpr Uint8 kJoinCapabilityHeloChunkV1 = 0x01;
+	constexpr Uint8 kJoinCapabilityLateJoinV1 = 0x02;
+	constexpr Uint8 kJoinCapabilityReconnectTokenV1 = 0x04;
+	constexpr Uint8 kEntityArchetypeNone = 0;
+	constexpr Uint8 kEntityArchetypeCustomPortal = 1;
+	constexpr Uint8 kEntityArchetypeEditorLight = 2;
+	constexpr std::size_t kEntityArchetypeOffset = 47;
+	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
 	constexpr int kHeloChunkHeaderSize = 12;
 	constexpr int kHeloChunkPayloadMax = 900;
 	constexpr int kHeloSinglePacketMax = 1100;
 	constexpr int kHeloChunkMaxCount = 32;
 	static Uint16 g_heloTransferId[MAXPLAYERS] = { 0 };
+	static int g_currentPacketSenderHostIndex = -1;
+	static LateJoinSnapshotTransaction g_lateJoinTransactions[MAXPLAYERS];
+	static LateJoinPacketCatchupBuffer g_lateJoinCatchupBuffers[MAXPLAYERS];
+	static LateJoinProtocol::SnapshotAssembler g_clientLateJoinAssembler;
+	static LateJoinProtocol::SnapshotAssembler g_clientLateJoinCatchupAssembler;
+	static LateJoinProtocol::Begin g_clientLateJoinBegin;
+	static bool g_clientLateJoinSpawnAuthorized = false;
+	static bool g_clientLateJoinPacketDeferral = false;
+	static bool g_clientLateJoinCatchupComplete = false;
+	static bool g_clientLateJoinMapIsLoaded = false;
+	static bool g_clientLateJoinReplayingPackets = false;
+	static LateJoinPacketCatchupBuffer g_clientLateJoinLivePackets;
+	static std::vector<std::vector<std::uint8_t>>
+		g_clientLateJoinCatchupPackets;
+	static Uint32 g_lateJoinWireTransferId[MAXPLAYERS] = { 0 };
+	static Uint32 g_lateJoinLastProgressTick[MAXPLAYERS] = { 0 };
+	static bool g_lateJoinReturningPlayer[MAXPLAYERS] = { false };
+	static bool g_lateJoinClientHandshake[MAXPLAYERS] = { false };
+	static bool g_processingRuntimeJoin = false;
+	static Uint32 g_clientLateJoinLastProgressTick = 0;
+	static Uint32 g_clientProvisionalEntityUid = 0x70000000U;
+	static bool g_resendingScopedSafePacket = false;
+	static bool g_removedEntityTombstonesHaveInstanceScope = false;
+	static std::string g_removedEntityTombstoneInstanceKey;
+	static Uint64 g_removedEntityTombstoneRevision = 0;
+	constexpr Uint32 kLateJoinTimeoutTicks = 30 * TICKS_PER_SECOND;
+	constexpr Uint32 kLateJoinCharacterSelectionTimeoutTicks =
+		5 * 60 * TICKS_PER_SECOND;
+
+	static std::string generateReconnectToken()
+	{
+		try
+		{
+			static constexpr char hex[] = "0123456789abcdef";
+			std::random_device source;
+			std::string token(kReconnectTokenLength, '0');
+			for (std::size_t index = 0; index < token.size(); index += 2)
+			{
+				const unsigned value = source();
+				token[index] = hex[(value >> 4U) & 0x0fU];
+				token[index + 1] = hex[value & 0x0fU];
+			}
+			return token;
+		}
+		catch (const std::exception&)
+		{
+			return {};
+		}
+	}
+
+	static void setRemovedEntityTombstoneScope(
+		const WorldInstanceIdentity* identity)
+	{
+		g_removedEntityTombstonesHaveInstanceScope = identity != nullptr;
+		g_removedEntityTombstoneInstanceKey = identity
+			? identity->key()
+			: std::string{};
+		g_removedEntityTombstoneRevision = identity
+			? identity->revision
+			: 0;
+	}
+
+	static bool removedEntityTombstonesApplyToActiveInstance()
+	{
+		const WorldInstanceIdentity* active = worldState.activeIdentity();
+		return removedEntityTombstoneAppliesToInstance(
+			g_removedEntityTombstonesHaveInstanceScope,
+			g_removedEntityTombstoneInstanceKey.c_str(),
+			g_removedEntityTombstoneRevision,
+			active ? active->key().c_str() : "",
+			active ? active->revision : 0);
+	}
+
+	static void prepareRemovedEntityTombstonesForActiveInstance()
+	{
+		if (removedEntityTombstonesApplyToActiveInstance())
+		{
+			return;
+		}
+		list_FreeAll(&removedEntities);
+		setRemovedEntityTombstoneScope(worldState.activeIdentity());
+	}
+
+	static bool serverPlayerSharesActiveMap(int playerIndex)
+	{
+		return playerIndex > 0
+			&& playerIndex < MAXPLAYERS
+			&& !client_disconnected[playerIndex]
+			&& players[playerIndex]
+			&& !players[playerIndex]->isLocalPlayer()
+			&& worldState.playerSharesActiveInstance(playerIndex);
+	}
+
+	static Uint8 networkEntityArchetype(const Entity* entity)
+	{
+		if (!entity)
+		{
+			return kEntityArchetypeNone;
+		}
+		if (entity->behavior == &actCustomPortal)
+		{
+			return kEntityArchetypeCustomPortal;
+		}
+		if (entity->behavior == &actLightSource)
+		{
+			return kEntityArchetypeEditorLight;
+		}
+		return kEntityArchetypeNone;
+	}
+
+	static Uint8 receivedEntityArchetype()
+	{
+		if (!net_packet
+			|| net_packet->len <= static_cast<int>(kEntityArchetypeOffset))
+		{
+			return kEntityArchetypeNone;
+		}
+		return net_packet->data[kEntityArchetypeOffset];
+	}
+
+	static Entity* findUnboundMapFixtureForEntityUpdate(Uint8 archetype)
+	{
+		if (!net_packet || !map.entities
+			|| (archetype != kEntityArchetypeCustomPortal
+				&& archetype != kEntityArchetypeEditorLight))
+		{
+			return nullptr;
+		}
+		const real_t packetX =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[10])) / 32.0;
+		const real_t packetY =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[12])) / 32.0;
+		const real_t packetZ =
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[14])) / 32.0;
+		Entity* best = nullptr;
+		real_t bestDistance = 0.25;
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* candidate = static_cast<Entity*>(node->element);
+			if (!candidate || candidate->lastupdateserver != 0)
+			{
+				continue;
+			}
+			const bool matchingBehavior =
+				(archetype == kEntityArchetypeCustomPortal
+					&& candidate->behavior == &actCustomPortal)
+				|| (archetype == kEntityArchetypeEditorLight
+					&& candidate->behavior == &actLightSource);
+			if (!matchingBehavior)
+			{
+				continue;
+			}
+			const real_t distance = std::abs(candidate->x - packetX)
+				+ std::abs(candidate->y - packetY)
+				+ std::abs(candidate->z - packetZ);
+			if (distance <= bestDistance)
+			{
+				best = candidate;
+				bestDistance = distance;
+			}
+		}
+		return best;
+	}
+
+	static bool currentPacketSenderMatchesPlayer(int playerIndex)
+	{
+		if (playerIndex <= 0 || playerIndex >= MAXPLAYERS || !net_packet)
+		{
+			return false;
+		}
+		if (directConnect)
+		{
+			return net_packet->address.host == net_clients[playerIndex - 1].host
+				&& net_packet->address.port == net_clients[playerIndex - 1].port;
+		}
+		return g_currentPacketSenderHostIndex == playerIndex - 1;
+	}
+
+	static void logServerRosterState(const char* reason)
+	{
+		if (multiplayer != SERVER)
+		{
+			return;
+		}
+		int connected = 0;
+		int reconnectReserved = 0;
+		int available = 0;
+		for (int player = 1; player < MAXPLAYERS; ++player)
+		{
+			if (!client_disconnected[player])
+			{
+				++connected;
+			}
+			else if (automatiaHasSavedPlayerPlacement(player))
+			{
+				++reconnectReserved;
+			}
+			else
+			{
+				++available;
+			}
+		}
+		printlog(
+			"[Roster] %s: connected=%d reconnect-reserved=%d available=%d.",
+			reason ? reason : "updated", connected, reconnectReserved, available);
+	}
+
+	static bool serverRouteActiveMapPacket(
+		int playerIndex, const Uint8* data, std::size_t size)
+	{
+		if (!serverPlayerSharesActiveMap(playerIndex))
+		{
+			return false;
+		}
+		LateJoinSnapshotTransaction& transaction =
+			g_lateJoinTransactions[playerIndex];
+		if (transaction.mayReceiveLiveSimulation())
+		{
+			return true;
+		}
+		const bool capture =
+			transaction.phase() == LateJoinSnapshotTransaction::Phase::Receiving
+			|| transaction.phase() == LateJoinSnapshotTransaction::Phase::Complete;
+		if (!capture || !data || size < 4)
+		{
+			return false;
+		}
+		// Reliable retries already in flight before snapshot capture are stale.
+		// Initial reliable sends reach this function before SAFE wrapping.
+		if (std::memcmp(data, "SAFE", 4) == 0)
+		{
+			return false;
+		}
+		if (!g_lateJoinCatchupBuffers[playerIndex].append(data, size))
+		{
+			transaction.fail();
+			printlog(
+				"[Late Join] Packet catch-up limit exceeded for player %d; transfer will abort.",
+				playerIndex);
+		}
+		return false;
+	}
+
+	static Uint32 moveClientEntityOutOfAuthoritativeUid(Entity* entity)
+	{
+		if (!entity)
+		{
+			return 0;
+		}
+		while (g_clientProvisionalEntityUid > 0x60000000U
+			&& uidToEntity(static_cast<Sint32>(g_clientProvisionalEntityUid)))
+		{
+			--g_clientProvisionalEntityUid;
+		}
+		if (g_clientProvisionalEntityUid <= 0x60000000U)
+		{
+			return 0;
+		}
+		const Uint32 provisionalUid = g_clientProvisionalEntityUid--;
+		const Uint32 oldUid = entity->getUID();
+		entity->setUID(provisionalUid);
+		if (map.entities && oldUid != provisionalUid)
+		{
+			for (node_t* node = map.entities->first; node; node = node->next)
+			{
+				Entity* child = static_cast<Entity*>(node->element);
+				if (child && child != entity && child->parent == oldUid)
+				{
+					child->parent = provisionalUid;
+				}
+			}
+		}
+		return provisionalUid;
+	}
+
+	static void adoptAuthoritativeUidForClientPlayerHead(
+		Entity* entity, Uint32 authoritativeUid)
+	{
+		if (!entity || authoritativeUid == 0)
+		{
+			return;
+		}
+		const Uint32 previousUid = entity->getUID();
+		if (previousUid == authoritativeUid)
+		{
+			return;
+		}
+		entity->setUID(authoritativeUid);
+		if (!map.entities)
+		{
+			return;
+		}
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* attached = static_cast<Entity*>(node->element);
+			if (attached && attached != entity && attached->parent == previousUid)
+			{
+				attached->parent = authoritativeUid;
+			}
+		}
+	}
+
+	static void ensureClientPlayerVisualInitialized(Entity* entity)
+	{
+		if (multiplayer != CLIENT
+			|| !entity
+			|| entity->behavior != &actPlayer
+			|| entity->skill[2] < 0
+			|| entity->skill[2] >= MAXPLAYERS
+			|| entity->skill[0] != 0)
+		{
+			return;
+		}
+		const int player = entity->skill[2];
+		actPlayer(entity);
+		printlog(
+			"[World State] Client initialized player %d UID %u voxel model with %u child node(s).",
+			player,
+			entity->getUID(),
+			static_cast<unsigned>(list_Size(&entity->children)));
+	}
 
 	static int decodeGameplayPacketPlayerIndex(
 		const Uint8 encodedPlayer
@@ -75,6 +408,62 @@ namespace
 			);
 			return -1;
 		}
+        if ( multiplayer == SERVER
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && directConnect
+            && player > 0
+            && (
+                net_packet->address.host != net_clients[player - 1].host
+                || net_packet->address.port != net_clients[player - 1].port
+            ) )
+        {
+            printlog(
+                "[NET]: ignoring map-local packet with invalid sender for player %d",
+                player
+            );
+            return -1;
+        }
+        if ( multiplayer == SERVER
+            && !directConnect
+            && player > 0
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && g_currentPacketSenderHostIndex != player - 1 )
+        {
+            printlog(
+                "[NET]: ignoring map-local P2P packet whose sender does not match player %d",
+                player
+            );
+            return -1;
+        }
+        if ( multiplayer == SERVER
+            && packetUsesActiveMapScope(
+                net_packet ? net_packet->data : nullptr,
+                net_packet ? net_packet->len : 0
+            )
+            && !worldState.playerSharesActiveInstance(player) )
+        {
+            const std::string playerInstanceKey =
+                players[player]
+                ? players[player]->worldInstance.key()
+                : std::string{};
+            if ( playerInstanceKey.empty()
+                || !worldState.activate(playerInstanceKey)
+                || !worldState.playerSharesActiveInstance(player) )
+            {
+                printlog(
+                    "[NET]: ignoring map-local packet for unavailable instance '%s' from player %d",
+                    playerInstanceKey.c_str(),
+                    player
+                );
+                return -1;
+            }
+        }
 
 		return player;
 	}
@@ -273,6 +662,158 @@ namespace
 	}
 }
 
+static void tryReplayClientLateJoinPackets();
+
+void clientResetLateJoinPacketDeferral()
+{
+	g_clientLateJoinPacketDeferral = false;
+	g_clientLateJoinCatchupComplete = false;
+	g_clientLateJoinMapIsLoaded = false;
+	g_clientLateJoinReplayingPackets = false;
+	g_clientLateJoinCatchupAssembler.reset();
+	g_clientLateJoinLivePackets.reset();
+	g_clientLateJoinCatchupPackets.clear();
+	g_clientLateJoinLastProgressTick = 0;
+}
+
+void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
+{
+	clientResetLateJoinPacketDeferral();
+	if (transferId == 0)
+	{
+		return;
+	}
+	g_clientLateJoinBegin.transferId = transferId;
+	g_clientLateJoinBegin.instanceRevision = revision;
+	g_clientLateJoinPacketDeferral = true;
+	g_clientLateJoinLastProgressTick = ticks;
+}
+
+bool clientAcceptLateJoinCatchupBegin(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Complete metadata;
+	if (!g_clientLateJoinPacketDeferral
+		|| !LateJoinProtocol::decodeCatchupBegin(data, size, metadata)
+		|| metadata.transferId != g_clientLateJoinBegin.transferId
+		|| metadata.instanceRevision != g_clientLateJoinBegin.instanceRevision
+		|| metadata.totalBytes > LateJoinPacketCatchupBuffer::maxSerializedBytes)
+	{
+		return false;
+	}
+	LateJoinProtocol::Begin begin;
+	begin.transferId = metadata.transferId;
+	begin.instanceRevision = metadata.instanceRevision;
+	begin.chunkCount = metadata.chunkCount;
+	begin.totalBytes = metadata.totalBytes;
+	begin.snapshotChecksum = metadata.snapshotChecksum;
+	const bool accepted = g_clientLateJoinCatchupAssembler.begin(begin);
+	if (accepted)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+	return accepted;
+}
+
+bool clientAcceptLateJoinCatchupChunk(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Chunk chunk;
+	const bool accepted = g_clientLateJoinPacketDeferral
+		&& LateJoinProtocol::decodeCatchupChunk(data, size, chunk)
+		&& g_clientLateJoinCatchupAssembler.accept(chunk)
+			!= LateJoinProtocol::ReceiveResult::Rejected;
+	if (accepted)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+	return accepted;
+}
+
+bool clientAcceptLateJoinCatchupComplete(const Uint8* data, std::size_t size)
+{
+	LateJoinProtocol::Complete complete;
+	if (!g_clientLateJoinPacketDeferral
+		|| !LateJoinProtocol::decodeCatchupComplete(data, size, complete)
+		|| g_clientLateJoinCatchupAssembler.finish(complete)
+			!= LateJoinProtocol::ReceiveResult::Complete
+		|| !LateJoinPacketCatchupBuffer::deserialize(
+			g_clientLateJoinCatchupAssembler.snapshot(),
+			g_clientLateJoinCatchupPackets))
+	{
+		return false;
+	}
+	g_clientLateJoinCatchupComplete = true;
+	g_clientLateJoinLastProgressTick = ticks;
+	tryReplayClientLateJoinPackets();
+	return true;
+}
+
+void clientCheckLateJoinTimeout()
+{
+	if (!g_clientLateJoinPacketDeferral
+		|| g_clientLateJoinLastProgressTick == 0
+		|| ticks - g_clientLateJoinLastProgressTick <= kLateJoinTimeoutTicks)
+	{
+		return;
+	}
+	LateJoinProtocol::Abort abort;
+	abort.playerIndex = static_cast<std::uint8_t>(clientnum);
+	abort.transferId = g_clientLateJoinBegin.transferId;
+	abort.instanceRevision = g_clientLateJoinBegin.instanceRevision;
+	abort.reason = 1;
+	const std::vector<std::uint8_t> record =
+		LateJoinProtocol::encodeAbort(abort);
+	if (net_packet && net_sock && !record.empty())
+	{
+		memcpy(net_packet->data, record.data(), record.size());
+		net_packet->len = static_cast<int>(record.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+	}
+	printlog("[Late Join] Client aborted an incomplete transfer after 30 seconds.");
+	discardAutomatiaPersistentWorldSnapshot();
+	g_clientLateJoinAssembler.reset();
+	g_clientLateJoinSpawnAuthorized = false;
+	clientResetLateJoinPacketDeferral();
+}
+
+bool clientLateJoinPacketDeferralActive()
+{
+	return g_clientLateJoinPacketDeferral;
+}
+
+void clientNoteLateJoinProgress()
+{
+	if (g_clientLateJoinPacketDeferral)
+	{
+		g_clientLateJoinLastProgressTick = ticks;
+	}
+}
+
+bool clientDeferLateJoinMapPacket(const Uint8* data, std::size_t size)
+{
+	if (!g_clientLateJoinPacketDeferral || g_clientLateJoinReplayingPackets
+		|| !packetUsesActiveMapScope(data, size))
+	{
+		return false;
+	}
+	if (!g_clientLateJoinLivePackets.append(data, size))
+	{
+		printlog("[Late Join] Client live-packet deferral limit exceeded.");
+	}
+	return true;
+}
+
+void clientLateJoinMapLoaded()
+{
+	if (!g_clientLateJoinPacketDeferral)
+	{
+		return;
+	}
+	g_clientLateJoinMapIsLoaded = true;
+	tryReplayClientLateJoinPackets();
+}
+
 NetHandler* net_handler = nullptr;
 struct PendingTunnelSpawn
 {
@@ -284,6 +825,9 @@ struct PendingTunnelSpawn
 };
 
 static PendingTunnelSpawn pendingTunnelSpawn;
+static bool pendingIndependentLevelChange = false;
+static int pendingIndependentPlayer = -1;
+static Uint32 pendingIndependentRuntimeUid = 0;
 char last_ip[64] = "";
 char last_port[64] = "";
 char lobbyChatbox[LOBBY_CHATBOX_LENGTH];
@@ -378,7 +922,7 @@ void pollNetworkForShutdown() {
 			nextnode = node->next;
 
 			packetsend_t* packet = (packetsend_t*)node->element;
-			sendPacket(packet->sock, packet->channel, packet->packet, packet->hostnum);
+			resendPacketSafe(packet);
 			packet->tries++;
 			if ( packet->tries >= MAXTRIES )
 			{
@@ -418,6 +962,15 @@ void pollNetworkForShutdown() {
 
 int sendPacket(UDPsocket sock, int channel, UDPpacket* packet, int hostnum, bool tryReliable)
 {
+    if ( multiplayer == SERVER
+		&& !g_resendingScopedSafePacket
+        && packetUsesActiveMapScope(packet ? packet->data : nullptr, packet ? packet->len : 0)
+        && !serverRouteActiveMapPacket(
+			hostnum + 1, packet ? packet->data : nullptr,
+			packet ? static_cast<std::size_t>(packet->len) : 0) )
+    {
+        return 0;
+    }
 	if ( directConnect )
 	{
 		return SDLNet_UDP_Send(sock, channel, packet);
@@ -471,6 +1024,14 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		printlog("[NET]: Error - attempt to send to non-valid hostnum: %d", hostnum);
 		return 0;
 	}
+    if ( multiplayer == SERVER
+        && packetUsesActiveMapScope(packet ? packet->data : nullptr, packet ? packet->len : 0)
+        && !serverRouteActiveMapPacket(
+			hostnum + 1, packet ? packet->data : nullptr,
+			packet ? static_cast<std::size_t>(packet->len) : 0) )
+    {
+        return 0;
+    }
 
 	if ( !directConnect )
 	{
@@ -495,6 +1056,11 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 	}
 
 	packetsend_t* packetsend = (packetsend_t*) malloc(sizeof(packetsend_t));
+	if (!packetsend)
+	{
+		return 0;
+	}
+	memset(packetsend, 0, sizeof(*packetsend));
 	if (!(packetsend->packet = SDLNet_AllocPacket(NET_PACKET_SIZE)))
 	{
 		printlog("warning: packet allocation failed: %s\n", SDLNet_GetError());
@@ -522,6 +1088,24 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 	SDLNet_Write32(packetnum, &packetsend->packet->data[5]);
 	packetsend->num = packetnum;
 	packetsend->tries = 0;
+	if (multiplayer == SERVER
+		&& packetUsesActiveMapScope(packet->data, packet->len))
+	{
+		const WorldInstanceIdentity* identity = worldState.activeIdentity();
+		if (!identity)
+		{
+			SDLNet_FreePacket(packetsend->packet);
+			free(packetsend);
+			return 0;
+		}
+		packetsend->mapScoped = true;
+		packetsend->mapInstanceRevision = identity->revision;
+		stringCopy(
+			packetsend->mapInstanceKey,
+			identity->key().c_str(),
+			sizeof(packetsend->mapInstanceKey),
+			identity->key().size() + 1);
+	}
 	packetnum++;
 
 	node_t* node = list_AddNodeFirst(&safePacketsSent);
@@ -556,6 +1140,47 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		}
 		return 0;
 	}
+}
+
+int resendPacketSafe(packetsend_t* packet)
+{
+	if (!packet || !packet->packet)
+	{
+		return 0;
+	}
+	if (multiplayer == SERVER && packet->mapScoped)
+	{
+		const int recipient = packet->hostnum + 1;
+		if (recipient <= 0 || recipient >= MAXPLAYERS
+			|| client_disconnected[recipient]
+			|| !players[recipient]
+			|| !scopedReliablePacketCanRetry(
+				packet->mapInstanceKey,
+				packet->mapInstanceRevision,
+				players[recipient]->worldInstance.key().c_str(),
+				players[recipient]->worldInstance.revision,
+				g_lateJoinTransactions[recipient]
+					.mayReceiveLiveSimulation()))
+		{
+			packet->tries = MAXTRIES;
+			return 0;
+		}
+		g_resendingScopedSafePacket = true;
+		const int result = sendPacket(
+			packet->sock,
+			packet->channel,
+			packet->packet,
+			packet->hostnum,
+			true);
+		g_resendingScopedSafePacket = false;
+		return result;
+	}
+	return sendPacket(
+		packet->sock,
+		packet->channel,
+		packet->packet,
+		packet->hostnum,
+		true);
 }
 
 /*-------------------------------------------------------------------------------
@@ -773,6 +1398,388 @@ void sendEntityTCP(Entity* entity, int c)
 	// deprecated
 }
 
+bool serverPlayerCanReceiveActiveMapUpdates(int playerIndex)
+{
+	if (!serverPlayerSharesActiveMap(playerIndex))
+	{
+		return false;
+	}
+	const LateJoinSnapshotTransaction::Phase phase =
+		g_lateJoinTransactions[playerIndex].phase();
+	return g_lateJoinTransactions[playerIndex].mayReceiveLiveSimulation()
+		|| phase == LateJoinSnapshotTransaction::Phase::Receiving
+		|| phase == LateJoinSnapshotTransaction::Phase::Complete;
+}
+
+bool serverPlayerCanReceiveGameplayUpdates(int playerIndex)
+{
+	return playerIndex > 0
+		&& playerIndex < MAXPLAYERS
+		&& !client_disconnected[playerIndex]
+		&& players[playerIndex]
+		&& !players[playerIndex]->isLocalPlayer()
+		&& g_lateJoinTransactions[playerIndex].mayReceiveLiveSimulation();
+}
+
+bool beginServerLateJoinSnapshot(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 chunkCount,
+    Uint32 totalBytes
+)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+	{
+		return false;
+	}
+	g_lateJoinCatchupBuffers[playerIndex].reset();
+	return g_lateJoinTransactions[playerIndex].begin(
+		transferId, instanceRevision, chunkCount, totalBytes);
+}
+
+LateJoinChunkResult acceptServerLateJoinSnapshotChunk(
+    int playerIndex,
+    Uint32 transferId,
+    Uint64 instanceRevision,
+    Uint32 sequence,
+    Uint32 payloadBytes,
+    Uint32 payloadChecksum
+)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+    {
+        return LateJoinChunkResult::Rejected;
+    }
+    return g_lateJoinTransactions[playerIndex].acceptChunk(
+        transferId,
+        instanceRevision,
+        sequence,
+        payloadBytes,
+        payloadChecksum
+    );
+}
+
+bool authorizeServerLateJoinPlayer(int playerIndex)
+{
+    return playerIndex > 0
+        && playerIndex < MAXPLAYERS
+        && g_lateJoinTransactions[playerIndex].authorize();
+}
+
+void resetServerLateJoinPlayer(int playerIndex)
+{
+    if (playerIndex > 0 && playerIndex < MAXPLAYERS)
+    {
+        g_lateJoinTransactions[playerIndex].reset();
+		g_lateJoinCatchupBuffers[playerIndex].reset();
+		g_lateJoinLastProgressTick[playerIndex] = 0;
+		g_lateJoinReturningPlayer[playerIndex] = false;
+		g_lateJoinClientHandshake[playerIndex] = false;
+    }
+}
+
+static bool queueLateJoinRecordForPlayer(
+    int playerIndex,
+    const std::vector<std::uint8_t>& record
+)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+        || client_disconnected[playerIndex] || !net_packet || !net_sock
+        || record.empty() || record.size() > NET_PACKET_SIZE - 9)
+    {
+        return false;
+    }
+    memcpy(net_packet->data, record.data(), record.size());
+    net_packet->len = static_cast<int>(record.size());
+    net_packet->address.host = net_clients[playerIndex - 1].host;
+    net_packet->address.port = net_clients[playerIndex - 1].port;
+    sendPacketSafe(net_sock, -1, net_packet, playerIndex - 1);
+    return true;
+}
+
+static void abortServerLateJoinPlayer(int playerIndex, Uint8 reason)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+	{
+		return;
+	}
+	LateJoinProtocol::Abort abort;
+	abort.playerIndex = static_cast<std::uint8_t>(playerIndex);
+	abort.transferId = g_lateJoinTransactions[playerIndex].transferId();
+	abort.instanceRevision =
+		g_lateJoinTransactions[playerIndex].instanceRevision();
+	abort.reason = reason ? reason : 1;
+	queueLateJoinRecordForPlayer(
+		playerIndex, LateJoinProtocol::encodeAbort(abort));
+	worldState.removePlayer(playerIndex);
+	client_disconnected[playerIndex] = true;
+	resetServerLateJoinPlayer(playerIndex);
+}
+
+static bool startServerLateJoinSnapshotTransfer(int playerIndex)
+{
+    if (multiplayer != SERVER || playerIndex <= 0
+        || playerIndex >= MAXPLAYERS || client_disconnected[playerIndex]
+        || !players[playerIndex]
+        || !players[playerIndex]->worldInstance.isValid())
+    {
+        return false;
+    }
+
+    const WorldInstanceIdentity* foreground = worldState.activeIdentity();
+    const std::string foregroundKey =
+        foreground ? foreground->key() : std::string{};
+    const std::string destinationKey =
+        players[playerIndex]->worldInstance.key();
+    if (!worldState.activate(destinationKey))
+    {
+        printlog(
+            "[Late Join] Cannot activate destination '%s' for player %d.",
+            destinationKey.c_str(), playerIndex);
+        return false;
+    }
+
+    std::string snapshot;
+    std::string snapshotError;
+    const bool captured = serializeAutomatiaPersistentWorldSnapshot(
+        std::to_string(uniqueGameKey), snapshot, snapshotError);
+    if (!foregroundKey.empty() && foregroundKey != destinationKey
+        && !worldState.activate(foregroundKey))
+    {
+        printlog(
+            "[Late Join] Failed to restore foreground '%s' after snapshot capture.",
+            foregroundKey.c_str());
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    if (!captured)
+    {
+        printlog(
+            "[Late Join] Snapshot capture failed for player %d: %s",
+            playerIndex, snapshotError.c_str());
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+
+    Uint32 transferId = ++g_lateJoinWireTransferId[playerIndex];
+    if (transferId == 0)
+    {
+        transferId = ++g_lateJoinWireTransferId[playerIndex];
+    }
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (snapshot.size() + LateJoinProtocol::maxChunkPayload - 1)
+        / LateJoinProtocol::maxChunkPayload);
+    const Uint64 revision = players[playerIndex]->worldInstance.revision;
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(snapshot.data()),
+        snapshot.size());
+    if (!beginServerLateJoinSnapshot(
+            playerIndex, transferId, revision, chunkCount,
+            static_cast<Uint32>(snapshot.size())))
+    {
+        return false;
+    }
+
+	// Light sources normally synchronize skill[10] only when their powered
+	// state changes. A client that joins after that event would otherwise load
+	// the authored default and never learn the current enabled state.
+	std::size_t synchronizedLightSources = 0;
+	MapInstance* destinationInstance = worldState.find(destinationKey);
+	if (destinationInstance && destinationInstance->entities)
+	{
+		for (node_t* node = destinationInstance->entities->first;
+			node; node = node->next)
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (!entity || entity->behavior != &actLightSource)
+			{
+				continue;
+			}
+			std::vector<std::uint8_t> state(13, 0);
+			memcpy(state.data(), "ENTS", 4);
+			LateJoinProtocol::write32(
+				state, 4, static_cast<Uint32>(entity->getUID()));
+			state[8] = 10;
+			LateJoinProtocol::write32(
+				state, 9, static_cast<Uint32>(entity->skill[10]));
+			if (!g_lateJoinCatchupBuffers[playerIndex].append(
+					state.data(), state.size()))
+			{
+				printlog(
+					"[Late Join] Could not queue light-source state for player %d.",
+					playerIndex);
+				resetServerLateJoinPlayer(playerIndex);
+				return false;
+			}
+			++synchronizedLightSources;
+		}
+	}
+
+    LateJoinProtocol::Begin begin;
+    begin.transferId = transferId;
+    begin.instanceRevision = revision;
+    begin.chunkCount = chunkCount;
+    begin.totalBytes = static_cast<Uint32>(snapshot.size());
+    begin.snapshotChecksum = checksum;
+    begin.sessionKey = uniqueGameKey;
+    if (!queueLateJoinRecordForPlayer(
+            playerIndex, LateJoinProtocol::encodeBegin(begin)))
+    {
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+
+    for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence)
+            * LateJoinProtocol::maxChunkPayload;
+        const std::size_t payloadSize = std::min(
+            LateJoinProtocol::maxChunkPayload,
+            snapshot.size() - offset);
+        LateJoinProtocol::Chunk chunk;
+        chunk.transferId = transferId;
+        chunk.instanceRevision = revision;
+        chunk.sequence = sequence;
+        const std::uint8_t* payloadBegin =
+            reinterpret_cast<const std::uint8_t*>(snapshot.data() + offset);
+        chunk.payload.assign(payloadBegin, payloadBegin + payloadSize);
+        const Uint32 chunkChecksum = LateJoinProtocol::crc32(
+            chunk.payload.data(), chunk.payload.size());
+        if (!queueLateJoinRecordForPlayer(
+                playerIndex, LateJoinProtocol::encodeChunk(chunk)))
+        {
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
+        const LateJoinChunkResult chunkResult =
+            acceptServerLateJoinSnapshotChunk(
+                playerIndex, transferId, revision, sequence,
+                static_cast<Uint32>(payloadSize), chunkChecksum);
+        if (chunkResult == LateJoinChunkResult::Rejected)
+        {
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
+    }
+
+    LateJoinProtocol::Complete complete;
+    complete.transferId = transferId;
+    complete.instanceRevision = revision;
+    complete.chunkCount = chunkCount;
+    complete.totalBytes = static_cast<Uint32>(snapshot.size());
+    complete.snapshotChecksum = checksum;
+    if (!queueLateJoinRecordForPlayer(
+            playerIndex, LateJoinProtocol::encodeComplete(complete)))
+    {
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    printlog(
+        "[Late Join] Queued transfer %u for player %d: %u chunk(s), %zu bytes, %zu editor light source state(s), instance '%s' revision %llu.",
+        transferId, playerIndex, chunkCount, snapshot.size(),
+		synchronizedLightSources,
+        destinationKey.c_str(),
+        static_cast<unsigned long long>(revision));
+    return true;
+}
+
+static bool sendServerLateJoinStart(int playerIndex)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+        || !players[playerIndex]
+        || !players[playerIndex]->worldInstance.isValid())
+    {
+        return false;
+    }
+    const WorldInstanceIdentity& identity =
+        players[playerIndex]->worldInstance;
+    const MapInstance* instance = worldState.find(identity.key());
+    if (!instance || !instance->loadedMap
+        || identity.mapFile.empty() || identity.mapFile.size() > 255)
+    {
+        return false;
+    }
+    const std::size_t metadataOffset = 19 + identity.mapFile.size();
+    std::vector<std::uint8_t> record(metadataOffset + 9, 0);
+    memcpy(record.data(), "STRT", 4);
+    LateJoinProtocol::write32(record, 4, svFlags);
+    LateJoinProtocol::write32(record, 8, uniqueGameKey);
+    record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
+    LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
+    record[17] = 1;
+    record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
+    memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
+    LateJoinProtocol::write32(
+        record, metadataOffset, static_cast<Uint32>(instance->dungeonLevel));
+    LateJoinProtocol::write32(record, metadataOffset + 4, instance->mapSeed);
+    record[metadataOffset + 8] = instance->secretLevel ? 1 : 0;
+    return queueLateJoinRecordForPlayer(playerIndex, record);
+}
+
+static bool sendServerLateJoinCatchup(int playerIndex)
+{
+	if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+		|| g_lateJoinCatchupBuffers[playerIndex].failed())
+	{
+		return false;
+	}
+	const std::vector<std::uint8_t> bytes =
+		g_lateJoinCatchupBuffers[playerIndex].serialize();
+	if (bytes.empty())
+	{
+		return false;
+	}
+	const Uint32 transferId = g_lateJoinTransactions[playerIndex].transferId();
+	const Uint64 revision =
+		g_lateJoinTransactions[playerIndex].instanceRevision();
+	const Uint32 chunkCount = static_cast<Uint32>(
+		(bytes.size() + LateJoinProtocol::maxChunkPayload - 1)
+		/ LateJoinProtocol::maxChunkPayload);
+	LateJoinProtocol::Complete metadata;
+	metadata.transferId = transferId;
+	metadata.instanceRevision = revision;
+	metadata.chunkCount = chunkCount;
+	metadata.totalBytes = static_cast<Uint32>(bytes.size());
+	metadata.snapshotChecksum = LateJoinProtocol::crc32(
+		bytes.data(), bytes.size());
+	if (!queueLateJoinRecordForPlayer(
+			playerIndex, LateJoinProtocol::encodeCatchupBegin(metadata)))
+	{
+		return false;
+	}
+	for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+	{
+		const std::size_t offset =
+			static_cast<std::size_t>(sequence)
+			* LateJoinProtocol::maxChunkPayload;
+		const std::size_t payloadSize = std::min(
+			LateJoinProtocol::maxChunkPayload, bytes.size() - offset);
+		LateJoinProtocol::Chunk chunk;
+		chunk.transferId = transferId;
+		chunk.instanceRevision = revision;
+		chunk.sequence = sequence;
+		chunk.payload.assign(
+			bytes.begin() + offset, bytes.begin() + offset + payloadSize);
+		if (!queueLateJoinRecordForPlayer(
+				playerIndex, LateJoinProtocol::encodeCatchupChunk(chunk)))
+		{
+			return false;
+		}
+	}
+	if (!queueLateJoinRecordForPlayer(
+			playerIndex, LateJoinProtocol::encodeCatchupComplete(metadata)))
+	{
+		return false;
+	}
+	printlog(
+		"[Late Join] Queued %zu catch-up packet(s), %zu serialized bytes for player %d transfer %u.",
+		g_lateJoinCatchupBuffers[playerIndex].packetCount(),
+		bytes.size(), playerIndex, transferId);
+	return true;
+}
+
 void sendEntityUDP(Entity* entity, int c, bool guarantee)
 {
 	int j;
@@ -785,9 +1792,7 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		return;
 	}
-	if ( client_disconnected[c]
-		|| !players[c]
-		|| players[c]->isLocalPlayer() )
+    if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 	{
 		return;
 	}
@@ -842,6 +1847,8 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 			net_packet->data[46 + j / 8] |= power(2, j - (j / 8) * 8);
 		}
 	}
+	net_packet->data[kEntityArchetypeOffset] =
+		networkEntityArchetype(entity);
 	net_packet->address.host = net_clients[c - 1].host;
 	net_packet->address.port = net_clients[c - 1].port;
 	net_packet->len = ENTITY_PACKET_LENGTH;
@@ -898,13 +1905,41 @@ void sendMapTCP(int c)
 void serverUpdateBodypartIDs(Entity* entity)
 {
 	int c;
-	if ( multiplayer != SERVER )
+	if ( multiplayer != SERVER || !entity )
 	{
 		return;
 	}
+	const bool monsterBodyparts = entity->behavior == &actMonster;
+	const std::size_t packetLength = bodypartIdPacketLength(
+		list_Size(&entity->children), monsterBodyparts);
+	if (packetLength > NET_PACKET_SIZE)
+	{
+		printlog(
+			"[NET]: refusing oversized BDYI packet for UID %u (%zu bytes).",
+			entity->getUID(),
+			packetLength);
+		return;
+	}
+	int childIndex = 0;
+	for (node_t* node = entity->children.first;
+		node;
+		node = node->next, ++childIndex)
+	{
+		if (childIndex < (monsterBodyparts ? 2 : 1))
+		{
+			continue;
+		}
+		if (!node->element)
+		{
+			printlog(
+				"[NET]: refusing BDYI packet for UID %u with a null transmitted child.",
+				entity->getUID());
+			return;
+		}
+	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -930,7 +1965,7 @@ void serverUpdateBodypartIDs(Entity* entity)
 		}
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 8 + (list_Size(&entity->children) - 2) * 4;
+		net_packet->len = static_cast<int>(packetLength);
 		sendPacketSafe(net_sock, -1, net_packet, c - 1);
 	}
 }
@@ -950,13 +1985,13 @@ void serverUpdateBodypartIDs(Entity* entity)
 void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 {
 	int c;
-	if ( multiplayer != SERVER )
+	if ( multiplayer != SERVER || !entity )
 	{
 		return;
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -964,7 +1999,7 @@ void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 		SDLNet_Write32(entity->getUID(), &net_packet->data[4]);
 		net_packet->data[8] = bodypart;
 		node_t* node = list_Node(&entity->children, bodypart);
-		if ( !node )
+		if ( !node || !node->element )
 		{
 			continue;
 		}
@@ -1015,7 +2050,7 @@ void serverUpdateEntitySprite(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1046,7 +2081,7 @@ void serverUpdateEntitySkill(Entity* entity, int skill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1082,7 +2117,7 @@ void serverUpdateEntityStatFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1114,7 +2149,7 @@ void serverUpdateEntityFSkill(Entity* entity, int fskill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1146,7 +2181,7 @@ void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSpri
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1182,7 +2217,7 @@ void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int partic
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1219,7 +2254,7 @@ void serverUpdateEntityFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1243,7 +2278,7 @@ void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-		if ( client_disconnected[c] || !players[c] || players[c]->isLocalPlayer() )
+        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
 		{
 			continue;
 		}
@@ -1495,9 +2530,7 @@ void serverUpdatePlayerStats()
 
 	for ( int c = 1; c < MAXPLAYERS; ++c )
 	{
-		if ( client_disconnected[c]
-			|| !players[c]
-			|| players[c]->isLocalPlayer() )
+		if ( !serverPlayerCanReceiveGameplayUpdates(c) )
 		{
 			continue;
 		}
@@ -2018,6 +3051,22 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 			net_packet->data[69]
 				& kJoinCapabilityHeloChunkV1
 		);
+	const bool clientSupportsLateJoin =
+		net_packet->len >= 70
+		&& (net_packet->data[69] & kJoinCapabilityLateJoinV1);
+	const bool clientSupportsReconnectToken =
+		net_packet->len >= 70 + static_cast<int>(kReconnectTokenLength)
+		&& (net_packet->data[69] & kJoinCapabilityReconnectTokenV1);
+	const Uint32 clientms = SDLNet_Read32(&net_packet->data[57]);
+	const Uint32 clientlsg = SDLNet_Read32(&net_packet->data[61]);
+	const Uint32 clientlobbyKey = SDLNet_Read32(&net_packet->data[65]);
+	const Uint32 expectedGameKey =
+		g_processingRuntimeJoin ? uniqueGameKey : loadingsavegame;
+	const bool runtimeNewPlayer =
+		g_processingRuntimeJoin && clientlsg == 0;
+	const bool sendSavedEquipment =
+		expectedGameKey != 0 && !runtimeNewPlayer;
+	SaveGameInfo savegameinfo;
 
 	char clientVersion[versionFieldLength + 1] = { 0 };
 	memcpy(
@@ -2027,7 +3076,11 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 	);
 
 	Uint32 result = MAXPLAYERS;
-	if ( strncmp(
+	if (g_processingRuntimeJoin && !clientSupportsLateJoin)
+	{
+		result = MAXPLAYERS + 7;
+	}
+	else if ( strncmp(
 			VERSION,
 			clientVersion,
 			versionFieldLength
@@ -2037,15 +3090,15 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 	}
 	else
 	{
-		Uint32 clientms = SDLNet_Read32(&net_packet->data[57]);
-		Uint32 clientlsg = SDLNet_Read32(&net_packet->data[61]);
-		Uint32 clientlobbyKey = (net_packet->len > 65) ? SDLNet_Read32(&net_packet->data[65]) : 0;
 		if ( net_packet->data[56] == 0 )
 		{
 			// client will enter any player spot
 			for ( result = 1; result < MAXPLAYERS; result++ )
 			{
-				if ( client_disconnected[result] == true && !lockedSlots[result] )
+				if ( client_disconnected[result] == true
+					&& !lockedSlots[result]
+					&& (!runtimeNewPlayer
+						|| !automatiaHasSavedPlayerPlacement(result)) )
 				{
 					break;    // no more player slots
 				}
@@ -2060,29 +3113,51 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 				result = MAXPLAYERS;  // client wants to fill a space that is already filled
 			}
 		}
-		SaveGameInfo savegameinfo;
-		if (loadingsavegame) {
+		if (expectedGameKey != 0 && !runtimeNewPlayer) {
 			savegameinfo = getSaveGameInfo(false);
 		}
-		if ( clientlsg != loadingsavegame && loadingsavegame == 0 )
+		if (runtimeNewPlayer && net_packet->data[56] != 0)
+		{
+			result = MAXPLAYERS + 8;
+		}
+		else if (runtimeNewPlayer)
+		{
+			// A new late joiner intentionally has no copy of the running save.
+		}
+		else if ( clientlsg != expectedGameKey && expectedGameKey == 0 )
 		{
 			result = MAXPLAYERS + 2;  // client shouldn't load save game
 		}
-		else if ( clientlsg == 0 && loadingsavegame != 0 )
+		else if ( clientlsg == 0 && expectedGameKey != 0 )
 		{
 			result = MAXPLAYERS + 3;  // client is trying to join a save game without a save of their own
 		}
-		else if ( clientlsg != loadingsavegame )
+		else if ( clientlsg != expectedGameKey )
 		{
 			result = MAXPLAYERS + 4;  // client is trying to join the game with an incompatible save
 		}
-		else if ( loadingsavegame && savegameinfo.mapseed != clientms )
+		else if ( expectedGameKey != 0 && savegameinfo.mapseed != clientms )
 		{
 			result = MAXPLAYERS + 5;  // client is trying to join the game with a slightly incompatible save (wrong level)
 		}
-		else if ( (loadingsavegame && clientlobbyKey != savegameinfo.lobbykey) )
+		else if ( expectedGameKey != 0
+			&& clientlobbyKey
+				!= (g_processingRuntimeJoin
+					? uniqueLobbyKey
+					: savegameinfo.lobbykey) )
 		{
 			result = MAXPLAYERS + 6; // lobby key not matching
+		}
+		else if (g_processingRuntimeJoin && clientlsg != 0
+			&& result < MAXPLAYERS
+			&& (net_packet->data[56] == 0
+				|| !clientSupportsReconnectToken
+				|| savegameinfo.players.size() <= result
+				|| !ReconnectToken::equals(
+					savegameinfo.players[result].reconnect_token,
+					&net_packet->data[70])))
+		{
+			result = MAXPLAYERS + 9;
 		}
 	}
 	outResult = result;
@@ -2111,9 +3186,38 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 	else
 	{
 	    const int c = result;
+		if (g_processingRuntimeJoin && clientlsg != 0
+			&& savegameinfo.players.size() > static_cast<std::size_t>(c))
+		{
+			automatiaReconnectTokens[c] =
+				savegameinfo.players[c].reconnect_token;
+		}
+		if (!ReconnectToken::isValid(automatiaReconnectTokens[c]))
+		{
+			automatiaReconnectTokens[c] = generateReconnectToken();
+		}
+		if (!ReconnectToken::isValid(automatiaReconnectTokens[c]))
+		{
+			outResult = MAXPLAYERS + 9;
+			memcpy(net_packet->data, "HELO", 4);
+			SDLNet_Write32(outResult, &net_packet->data[4]);
+			net_packet->len = 8;
+			printlog("[Late Join] Reconnect identity generation failed closed.");
+			if (directConnect)
+			{
+				sendPacketSafe(net_sock, -1, net_packet, 0);
+				return NET_LOBBY_JOIN_DIRECTIP_FAILURE;
+			}
+			return NET_LOBBY_JOIN_P2P_FAILURE;
+		}
 
 		// on success, client gets legit player number
+		resetServerLateJoinPlayer(c);
 		client_disconnected[c] = false;
+		if (!g_processingRuntimeJoin)
+		{
+			worldState.placePlayer(c, map);
+		}
         stringCopy(stats[c]->name, (const char*)net_packet->data + 4, sizeof(Stat::name), 32);
 		client_classes[c] = (int)SDLNet_Read32(&net_packet->data[36]);
 		stats[c]->sex = static_cast<sex_t>((int)SDLNet_Read32(&net_packet->data[40]));
@@ -2126,8 +3230,10 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 
 		printlog("client %d connected.\n", c);
 
-		// send existing clients info on new client
-		for ( int x = 1; x < MAXPLAYERS; x++ )
+		// Normal lobby clients need the provisional roster immediately. Runtime
+		// clients may still change this character; their finalized JOIN is sent
+		// after PLYR instead, when in-game recipients can consume it.
+		for ( int x = 1; !g_processingRuntimeJoin && x < MAXPLAYERS; x++ )
 		{
 			if ( client_disconnected[x] || c == x )
 			{
@@ -2153,7 +3259,7 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 		// send new client their id number + info on other clients
 		memcpy(net_packet->data, "HELO", 4);
 		SDLNet_Write32(c, &net_packet->data[4]);
-		if (loadingsavegame) {
+		if (sendSavedEquipment) {
 			constexpr int chunk_size = 6 + 32 + 6 * 10; // 6 bytes for player stats, 32 for name, 60 for equipment
 			static_assert(
 				8 + MAXPLAYERS * chunk_size <= NET_PACKET_SIZE,
@@ -2161,7 +3267,9 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
-				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
+				net_packet->data[8 + x * chunk_size + 0] =
+					LanDiscovery::advertisedDisconnected(
+						headless, x, client_disconnected[x]); // connectedness
 				net_packet->data[8 + x * chunk_size + 1] = lockedSlots[x]; // locked state
 				net_packet->data[8 + x * chunk_size + 2] = client_classes[x]; // class
 				net_packet->data[8 + x * chunk_size + 3] = stats[x]->sex; // sex
@@ -2169,7 +3277,7 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 				net_packet->data[8 + x * chunk_size + 5] = (Uint8)stats[x]->playerRace; // player race
 
 				char shortname[32];
-				snprintf(shortname, sizeof(shortname), "%s", stats[x]->name);
+                stringCopy(shortname, stats[x]->name, sizeof(shortname), sizeof(Stat::name));
 				memcpy(net_packet->data + 8 + x * chunk_size + 6, shortname, sizeof(shortname)); // name
 
 				const Item* player_slots[] = {
@@ -2206,7 +3314,9 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 			);
 			for ( int x = 0; x < MAXPLAYERS; x++ )
 			{
-				net_packet->data[8 + x * chunk_size + 0] = client_disconnected[x]; // connectedness
+				net_packet->data[8 + x * chunk_size + 0] =
+					LanDiscovery::advertisedDisconnected(
+						headless, x, client_disconnected[x]); // connectedness
 				net_packet->data[8 + x * chunk_size + 1] = lockedSlots[x]; // locked state
 				net_packet->data[8 + x * chunk_size + 2] = client_classes[x]; // class
 				net_packet->data[8 + x * chunk_size + 3] = stats[x]->sex; // sex
@@ -2214,7 +3324,7 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 				net_packet->data[8 + x * chunk_size + 5] = (Uint8)stats[x]->playerRace; // player race
 
 				char shortname[32];
-				snprintf(shortname, sizeof(shortname), "%s", stats[x]->name);
+                stringCopy(shortname, stats[x]->name, sizeof(shortname), sizeof(Stat::name));
 				memcpy(net_packet->data + 8 + x * chunk_size + 6, shortname, sizeof(shortname)); // name
 			}
 			net_packet->len = 8 + MAXPLAYERS * chunk_size;
@@ -2222,8 +3332,13 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
 
+		if (g_processingRuntimeJoin && net_packet->len < NET_PACKET_SIZE)
+		{
+			net_packet->data[net_packet->len++] = 1;
+		}
+
 		const bool shouldChunkHelo =
-			loadingsavegame
+			sendSavedEquipment
 			&& net_packet->len > kHeloSinglePacketMax;
 		outUseChunkedHelo =
 			clientSupportsHeloChunk
@@ -2285,6 +3400,14 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 					0
 				);
 			}
+			memcpy(net_packet->data, "RJTK", 4);
+			net_packet->data[4] = static_cast<Uint8>(c);
+			memcpy(&net_packet->data[5],
+				automatiaReconnectTokens[c].data(), kReconnectTokenLength);
+			net_packet->len = 5 + static_cast<int>(kReconnectTokenLength);
+			net_packet->address.host = net_clients[c - 1].host;
+			net_packet->address.port = net_clients[c - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 
 			return NET_LOBBY_JOIN_DIRECTIP_SUCCESS;
 		}
@@ -2443,17 +3566,15 @@ Entity* receiveEntity(Entity* entity)
 	}
 	for (c = 0; c < 16; ++c)
 	{
-		if ( net_packet->data[34 + c / 8]&power(2, c - (c / 8) * 8) )
-		{
-			entity->flags[c] = true;
-		}
+		entity->flags[c] =
+			(net_packet->data[34 + c / 8]
+				& power(2, c - (c / 8) * 8)) != 0;
 	}
 	for ( c = 0; c < 8; ++c ) // new flags 16-23
 	{
-		if ( net_packet->data[46 + c / 8] & power(2, c - (c / 8) * 8) )
-		{
-			entity->flags[c + 16] = true;
-		}
+		entity->flags[c + 16] =
+			(net_packet->data[46 + c / 8]
+				& power(2, c - (c / 8) * 8)) != 0;
 	}
 	entity->vel_x = ((Sint16)SDLNet_Read16(&net_packet->data[40])) / 32.0;
 	entity->vel_y = ((Sint16)SDLNet_Read16(&net_packet->data[42])) / 32.0;
@@ -2514,6 +3635,25 @@ void clientActions(Entity* entity)
 			entity->behavior = &actCampfire;
 			entity->flags[NOUPDATE] = true;
 			break;
+		case 131:
+		{
+			// Runtime catch-up clears behaviors before rebuilding them here.
+			// Editor light sources are invisible by design, but must keep their
+			// behavior on clients so they reconstruct their local light field.
+			const bool initializeLightSource =
+				entity->behavior != &actLightSource;
+			entity->behavior = &actLightSource;
+			entity->flags[SPRITE] = true;
+			entity->flags[INVISIBLE] = true;
+			entity->flags[PASSABLE] = true;
+			if (initializeLightSource)
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				entity->skill[8] = 0;
+			}
+			break;
+		}
 		case 163:
 			entity->skill[2] = (int)SDLNet_Read32(&net_packet->data[30]);
 			entity->behavior = &actFountain;
@@ -2831,11 +3971,23 @@ void clientActions(Entity* entity)
 
 static void changeLevel()
 {
+    WorldInstanceIdentity previousPlayerInstances[MAXPLAYERS];
+    for ( int player = 0; player < MAXPLAYERS; ++player )
+    {
+        if ( players[player] )
+        {
+            previousPlayerInstances[player] =
+                players[player]->worldInstance;
+        }
+    }
     // A normal or older level-change packet has no tunnel request.
     // Reset first so an unrelated later transition cannot reuse a
     // previous custom tunnel ID.
     loadCustomNextMap = "";
     loadCustomNextTunnelID = 0;
+    pendingIndependentLevelChange = false;
+    pendingIndependentPlayer = -1;
+    pendingIndependentRuntimeUid = 0;
 
     constexpr size_t customMapOffset = 14;
 
@@ -2888,6 +4040,19 @@ static void changeLevel()
                             ]
                         )
                     );
+
+                const size_t extensionOffset =
+                    tunnelIDOffset + sizeof(Uint32);
+                if ( net_packet->len >= extensionOffset + 6
+                    && net_packet->data[extensionOffset] == 0xA1 )
+                {
+                    pendingIndependentPlayer =
+                        net_packet->data[extensionOffset + 1];
+                    pendingIndependentRuntimeUid =
+                        SDLNet_Read32(&net_packet->data[extensionOffset + 2]);
+                    pendingIndependentLevelChange =
+                        pendingIndependentPlayer == clientnum;
+                }
             }
         }
         else
@@ -3018,6 +4183,7 @@ static void changeLevel()
 	}
 
 	list_FreeAll(&removedEntities);
+	setRemovedEntityTombstoneScope(worldState.activeIdentity());
 	for ( auto node = map.entities->first; node != nullptr; node = node->next )
 	{
 		auto entity = (Entity*)node->element;
@@ -3080,6 +4246,12 @@ static void changeLevel()
 			false,
 			&checkMapHash
 		);
+		if ( pendingIndependentLevelChange )
+		{
+			// Raw editor entities consume their ordinary load-time UIDs first.
+			// The server-provided value is the shared start of runtime creation.
+			entity_uids = pendingIndependentRuntimeUid;
+		}
 
 		/*
 		* Multiplayer sync is a pain :( but cool!
@@ -3103,7 +4275,16 @@ static void changeLevel()
 		updateLoadingScreen(50);
 
 		numplayers = 0;
-		assignActions(&map);
+		if ( pendingIndependentLevelChange )
+		{
+			bool playerMask[MAXPLAYERS] = {};
+			playerMask[clientnum] = true;
+			assignActions(&map, playerMask);
+		}
+		else
+		{
+			assignActions(&map);
+		}
 
 		/*
 		* Lever handles and runtime gate entities now exist. Restore their
@@ -3139,6 +4320,30 @@ static void changeLevel()
     destroyLoadingScreen();
 	loading = false;
     int result = loading_task.get();
+    if ( pendingIndependentLevelChange )
+    {
+        for ( int player = 0; player < MAXPLAYERS; ++player )
+        {
+            if ( player != clientnum )
+            {
+                worldState.removePlayer(player);
+                if ( players[player] )
+                {
+                    players[player]->worldInstance =
+                        previousPlayerInstances[player];
+					// This client no longer owns or simulates the remote player's
+					// source map. Do not retain a pointer into the map storage that
+					// was just replaced; a later map-local ENTU will bind the new
+					// authoritative entity if that player follows us.
+					players[player]->entity = nullptr;
+                }
+            }
+        }
+        worldState.placePlayer(clientnum, map);
+        pendingIndependentLevelChange = false;
+        pendingIndependentPlayer = -1;
+        pendingIndependentRuntimeUid = 0;
+    }
     
     clearChunks();
     createChunks();
@@ -3308,6 +4513,197 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+	{'JOIN', [](){
+		if (!net_packet || net_packet->len != 41)
+		{
+			printlog("[Roster] Client rejected malformed in-game JOIN packet.");
+			return;
+		}
+		const int player = net_packet->data[4];
+		if (player <= 0 || player >= MAXPLAYERS || !stats[player])
+		{
+			printlog("[Roster] Client rejected invalid in-game JOIN slot %d.", player);
+			return;
+		}
+		client_disconnected[player] = false;
+		client_classes[player] = net_packet->data[5];
+		stats[player]->sex = static_cast<sex_t>(net_packet->data[6]);
+		stats[player]->stat_appearance = net_packet->data[7];
+		stats[player]->playerRace = net_packet->data[8];
+		stringCopy(
+			stats[player]->name,
+			reinterpret_cast<char*>(&net_packet->data[9]),
+			sizeof(Stat::name),
+			32);
+		printlog("[Roster] Client accepted finalized character for player %d.", player);
+	}},
+	{'LJBG', [](){
+		LateJoinProtocol::Begin begin;
+		if (!LateJoinProtocol::decodeBegin(
+				net_packet->data, net_packet->len, begin)
+			|| !g_clientLateJoinAssembler.begin(begin))
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected malformed snapshot begin.");
+			return;
+		}
+		g_clientLateJoinBegin = begin;
+		g_clientLateJoinSpawnAuthorized = false;
+		clientBeginLateJoinPacketDeferral(
+			begin.transferId, begin.instanceRevision);
+	}},
+	{'LJCH', [](){
+		LateJoinProtocol::Chunk chunk;
+		if (!LateJoinProtocol::decodeChunk(
+				net_packet->data, net_packet->len, chunk)
+			|| g_clientLateJoinAssembler.accept(chunk)
+				== LateJoinProtocol::ReceiveResult::Rejected)
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected corrupt snapshot chunk.");
+		}
+		else
+		{
+			clientNoteLateJoinProgress();
+		}
+	}},
+	{'LJDN', [](){
+		LateJoinProtocol::Complete complete;
+		if (!LateJoinProtocol::decodeComplete(
+				net_packet->data, net_packet->len, complete)
+			|| g_clientLateJoinAssembler.finish(complete)
+				!= LateJoinProtocol::ReceiveResult::Complete)
+		{
+			g_clientLateJoinAssembler.fail();
+			printlog("[Late Join] Client rejected incomplete snapshot transfer.");
+			return;
+		}
+		const std::vector<std::uint8_t>& bytes =
+			g_clientLateJoinAssembler.snapshot();
+		const std::string snapshot(
+			reinterpret_cast<const char*>(bytes.data()), bytes.size());
+		std::string snapshotError;
+		const bool accepted = stageAutomatiaPersistentWorldSnapshot(
+			snapshot, std::to_string(g_clientLateJoinBegin.sessionKey), snapshotError);
+		LateJoinProtocol::Ready ready;
+		ready.playerIndex = static_cast<std::uint8_t>(clientnum);
+		ready.transferId = complete.transferId;
+		ready.instanceRevision = complete.instanceRevision;
+		ready.snapshotAccepted = accepted;
+		const std::vector<std::uint8_t> readyPacket =
+			LateJoinProtocol::encodeReady(ready);
+		if (readyPacket.empty())
+		{
+			printlog("[Late Join] Client could not encode snapshot-ready response.");
+			return;
+		}
+		memcpy(net_packet->data, readyPacket.data(), readyPacket.size());
+		net_packet->len = static_cast<int>(readyPacket.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+		if (!accepted)
+		{
+			printlog(
+				"[Late Join] Client rejected snapshot document: %s",
+				snapshotError.c_str());
+		}
+		else
+		{
+			clientNoteLateJoinProgress();
+		}
+	}},
+	{'LJOK', [](){
+		LateJoinProtocol::Authorization authorization;
+		if (!LateJoinProtocol::decodeAuthorization(
+				net_packet->data, net_packet->len, authorization)
+			|| authorization.transferId != g_clientLateJoinBegin.transferId
+			|| authorization.instanceRevision
+				!= g_clientLateJoinBegin.instanceRevision
+			|| !authorization.spawnAuthorized
+			|| !g_clientLateJoinAssembler.complete())
+		{
+			printlog("[Late Join] Client rejected invalid spawn authorization.");
+			return;
+		}
+		g_clientLateJoinSpawnAuthorized = true;
+		clientNoteLateJoinProgress();
+		LateJoinProtocol::Ready go;
+		go.playerIndex = static_cast<std::uint8_t>(clientnum);
+		go.transferId = authorization.transferId;
+		go.instanceRevision = authorization.instanceRevision;
+		go.snapshotAccepted = true;
+		const std::vector<std::uint8_t> goPacket =
+			LateJoinProtocol::encodeGo(go);
+		memcpy(net_packet->data, goPacket.data(), goPacket.size());
+		net_packet->len = static_cast<int>(goPacket.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		sendPacketSafe(net_sock, -1, net_packet, 0);
+		printlog(
+			"[Late Join] Client accepted spawn authorization for transfer %u.",
+			authorization.transferId);
+	}},
+	{'LJCB', [](){
+		if (!clientAcceptLateJoinCatchupBegin(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up begin.");
+		}
+	}},
+	{'LJCC', [](){
+		if (!clientAcceptLateJoinCatchupChunk(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up chunk.");
+		}
+	}},
+	{'LJCE', [](){
+		if (!clientAcceptLateJoinCatchupComplete(
+				net_packet->data, net_packet->len))
+		{
+			printlog("[Late Join] Client rejected catch-up completion.");
+		}
+	}},
+	{'LJAB', [](){
+		LateJoinProtocol::Abort abort;
+		if (!LateJoinProtocol::decodeAbort(
+				net_packet->data, net_packet->len, abort)
+			|| abort.playerIndex != clientnum
+			|| (abort.transferId != 0
+				&& (abort.transferId != g_clientLateJoinBegin.transferId
+					|| abort.instanceRevision
+						!= g_clientLateJoinBegin.instanceRevision)))
+		{
+			printlog("[Late Join] Client ignored invalid abort record.");
+			return;
+		}
+		discardAutomatiaPersistentWorldSnapshot();
+		clientResetLateJoinPacketDeferral();
+		g_clientLateJoinAssembler.reset();
+		g_clientLateJoinSpawnAuthorized = false;
+		printlog("[Late Join] Server aborted transfer (reason %u).",
+			static_cast<unsigned>(abort.reason));
+	}},
+	{'RJTK', [](){
+		if (net_packet->len != 5 + static_cast<int>(kReconnectTokenLength)
+			|| net_packet->data[4] != clientnum)
+		{
+			printlog("[Late Join] Client rejected malformed reconnect token.");
+			return;
+		}
+		const std::string token(
+			reinterpret_cast<const char*>(&net_packet->data[5]),
+			kReconnectTokenLength);
+		if (!ReconnectToken::isValid(token))
+		{
+			printlog("[Late Join] Client rejected invalid reconnect token.");
+			return;
+		}
+		automatiaReconnectTokens[clientnum] = token;
+		printlog("[Late Join] Client stored reconnect identity for slot %d.",
+			clientnum);
+	}},
 	// keep alive
 	{'KPAL', [](){
 		client_keepalive[0] = ticks;
@@ -3316,9 +4712,87 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// entity update
 	{'ENTU', [](){
 		client_keepalive[0] = ticks; // don't timeout
-		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
+		const Uint8 archetype = receivedEntityArchetype();
+		const Uint32 authoritativeUid = SDLNet_Read32(&net_packet->data[4]);
+		const int incomingSprite = static_cast<int>(
+			SDLNet_Read16(&net_packet->data[8]));
+		const int incomingPlayer = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[30]));
+		Entity *entity = uidToEntity(static_cast<Sint32>(authoritativeUid));
+		if (entity && authoritativePlayerUpdateConflicts(
+				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingPlayer,
+				MAXPLAYERS,
+				entity->behavior == &actPlayer,
+				entity->skill[2]))
+		{
+			const int oldSprite = entity->sprite;
+			const Uint32 provisionalUid =
+				moveClientEntityOutOfAuthoritativeUid(entity);
+			if (provisionalUid != 0)
+			{
+				printlog(
+					"[World State] Client moved provisional entity sprite %d from UID %u to UID %u before accepting player %d.",
+					oldSprite,
+					authoritativeUid,
+					provisionalUid,
+					incomingPlayer);
+				entity = nullptr;
+			}
+			else
+			{
+				printlog(
+					"[World State] Client could not resolve authoritative player %d UID %u collision.",
+					incomingPlayer,
+					authoritativeUid);
+				return;
+			}
+		}
+		if (!entity
+			&& incomingPlayer >= 0
+			&& incomingPlayer < MAXPLAYERS
+			&& players[incomingPlayer])
+		{
+			Entity* slotHead = players[incomingPlayer]->entity;
+			if (authoritativePlayerCanAdoptSlotHead(
+				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingPlayer,
+				MAXPLAYERS,
+				slotHead != nullptr,
+				slotHead && slotHead->mynode
+					&& slotHead->mynode->list == map.entities,
+				slotHead && slotHead->behavior == &actPlayer,
+				slotHead ? slotHead->skill[2] : -1))
+			{
+				const Uint32 provisionalUid = slotHead->getUID();
+				adoptAuthoritativeUidForClientPlayerHead(
+					slotHead, authoritativeUid);
+				entity = slotHead;
+				printlog(
+					"[World State] Client adopted provisional player %d head UID %u as authoritative UID %u in '%s'.",
+					incomingPlayer,
+					provisionalUid,
+					authoritativeUid,
+					worldState.activeIdentity()
+						? worldState.activeIdentity()->key().c_str()
+						: "unbound");
+			}
+		}
+		if (!entity)
+		{
+			// Static editor fixtures can have a different provisional UID on a
+			// late client. Bind the authoritative update to the fixture at the
+			// same location so its authored skills are retained.
+			entity = findUnboundMapFixtureForEntityUpdate(archetype);
+		}
 		if ( entity )
 		{
+			const bool preserveCustomPortalBehavior =
+				entity->behavior == &actCustomPortal
+				|| archetype == kEntityArchetypeCustomPortal;
+			const bool preserveEditorLightBehavior =
+				entity->behavior == &actLightSource
+				|| archetype == kEntityArchetypeEditorLight;
 			if ( (Uint32)SDLNet_Read32(&net_packet->data[36]) < (Uint32)entity->lastupdateserver )
 			{
 				// old packet, not used
@@ -3346,12 +4820,67 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			{
 				// receive the entity
 				receiveEntity(entity);
-				entity->behavior = NULL;
-				clientActions(entity);
+				if (preserveCustomPortalBehavior)
+				{
+					// Custom exits deliberately use an editor-selected runtime
+					// sprite, so their behavior cannot be recovered from the
+					// sprite switch below. Keep the map-authored behavior across
+					// ordinary ENTU refreshes or the portal becomes noninteractive.
+					entity->behavior = &actCustomPortal;
+				}
+				else if (preserveEditorLightBehavior)
+				{
+					// The light field is client-local. Do not tear it down on every
+					// ordinary position update.
+					entity->behavior = &actLightSource;
+				}
+				else
+				{
+					entity->behavior = NULL;
+					clientActions(entity);
+				}
+			}
+			if (entity->behavior == &actPlayer
+				&& entity->skill[2] >= 0
+				&& entity->skill[2] < MAXPLAYERS
+				&& players[entity->skill[2]])
+			{
+				const int remotePlayer = entity->skill[2];
+				const bool changedInstance = !worldState.activeIdentity()
+					|| !players[remotePlayer]->worldInstance.matches(
+						*worldState.activeIdentity());
+				players[remotePlayer]->entity = entity;
+				if (worldState.placePlayer(remotePlayer, map) && changedInstance)
+				{
+					printlog(
+						"[World State] Client placed authoritative player %d UID %u into '%s'.",
+						remotePlayer,
+						entity->getUID(),
+						players[remotePlayer]->worldInstance.key().c_str());
+				}
+				ensureClientPlayerVisualInitialized(entity);
 			}
 			return;
 		}
 
+		if (!removedEntityTombstonesApplyToActiveInstance()
+			&& removedEntities.first)
+		{
+			const std::size_t staleCount = list_Size(&removedEntities);
+			const WorldInstanceIdentity* active = worldState.activeIdentity();
+			printlog(
+				"[World State] Cleared %zu source-instance entity tombstone(s) from '%s' revision %llu before accepting UID %u in '%s' revision %llu.",
+				staleCount,
+				g_removedEntityTombstoneInstanceKey.c_str(),
+				static_cast<unsigned long long>(
+					g_removedEntityTombstoneRevision),
+				authoritativeUid,
+				active ? active->key().c_str() : "unbound",
+				static_cast<unsigned long long>(
+					active ? active->revision : 0));
+			list_FreeAll(&removedEntities);
+			setRemovedEntityTombstoneScope(active);
+		}
 		for ( auto node = removedEntities.first; node != NULL; node = node->next )
 		{
 			auto entity2 = (Entity*)node->element;
@@ -3363,7 +4892,39 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 		entity = receiveEntity(NULL);
 		// IMPORTANT! Assign actions to the objects the client has control over
-		clientActions(entity);
+		if (archetype == kEntityArchetypeCustomPortal)
+		{
+			entity->behavior = &actCustomPortal;
+			if (entity->portalCustomSprite == 0)
+			{
+				entity->portalCustomSprite = entity->sprite;
+			}
+		}
+		else if (archetype == kEntityArchetypeEditorLight)
+		{
+			entity->behavior = &actLightSource;
+		}
+		else
+		{
+			clientActions(entity);
+		}
+		if (entity->behavior == &actPlayer
+			&& entity->skill[2] >= 0
+			&& entity->skill[2] < MAXPLAYERS
+			&& players[entity->skill[2]])
+		{
+			const int remotePlayer = entity->skill[2];
+			players[remotePlayer]->entity = entity;
+			if (worldState.placePlayer(remotePlayer, map))
+			{
+				printlog(
+					"[World State] Client created authoritative player %d UID %u in '%s'.",
+					remotePlayer,
+					entity->getUID(),
+					players[remotePlayer]->worldInstance.key().c_str());
+			}
+			ensureClientPlayerVisualInitialized(entity);
+		}
 
 		//if ( entity->behavior == &actPlayer && entity->skill[2] >= 0 && entity->skill[2] < MAXPLAYERS ) // respawned
 		//{
@@ -3529,11 +5090,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update entity bodypart
 	{'ENTB', [](){
+		if (net_packet->len < 14)
+		{
+			printlog("[NET]: ignored truncated ENTB packet.");
+			return;
+		}
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
-			node_t* childNode = list_Node(&entity->children, net_packet->data[8]);
-			if ( childNode )
+			const int bodypart = net_packet->data[8];
+			if ((entity->behavior == &actPlayer && bodypart < 1)
+				|| (entity->behavior == &actMonster && bodypart < 2))
+			{
+				return;
+			}
+			node_t* childNode = list_Node(&entity->children, bodypart);
+			if ( childNode && childNode->element )
 			{
 				Entity* tempEntity = (Entity*)childNode->element;
 				tempEntity->sprite = SDLNet_Read32(&net_packet->data[9]);
@@ -3557,9 +5129,29 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// bodypart ids
 	{'BDYI', [](){
+		if (net_packet->len < 8)
+		{
+			printlog("[NET]: ignored truncated BDYI packet.");
+			return;
+		}
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
+			const std::size_t expectedLength = bodypartIdPacketLength(
+				list_Size(&entity->children),
+				entity->behavior == &actMonster);
+			if (!bodypartIdPacketIsComplete(
+				static_cast<std::size_t>(net_packet->len),
+				list_Size(&entity->children),
+				entity->behavior == &actMonster))
+			{
+				printlog(
+					"[NET]: ignored truncated BDYI packet for UID %u (%d of %zu bytes).",
+					entity->getUID(),
+					net_packet->len,
+					expectedLength);
+				return;
+			}
 			node_t* childNode;
 			int c;
 			for ( c = 0, childNode = entity->children.first; childNode != nullptr; childNode = childNode->next, c++ )
@@ -4874,6 +6466,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
+			prepareRemovedEntityTombstonesForActiveInstance();
 			auto entity2 = newEntity(entity->sprite, 1, &removedEntities, nullptr);
 			if ( entity2 )
 			{
@@ -9133,7 +10726,17 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 void clientHandlePacket()
 {
+    if ( !net_packet || !net_packet->data || net_packet->len < 4 )
+    {
+        printlog("[NET]: ignored truncated client packet");
+        return;
+    }
 	if (handleSafePacket())
+	{
+		return;
+	}
+	if (clientDeferLateJoinMapPacket(
+			net_packet->data, static_cast<std::size_t>(net_packet->len)))
 	{
 		return;
 	}
@@ -9201,6 +10804,107 @@ void clientHandlePacket()
     }
 }
 
+static void tryReplayClientLateJoinPackets()
+{
+	if (!g_clientLateJoinPacketDeferral || !g_clientLateJoinCatchupComplete
+		|| !g_clientLateJoinMapIsLoaded || g_clientLateJoinReplayingPackets
+		|| !net_packet || !net_packet->data)
+	{
+		return;
+	}
+	std::vector<std::vector<std::uint8_t>> livePackets;
+	const std::vector<std::uint8_t> serializedLive =
+		g_clientLateJoinLivePackets.serialize();
+	if (serializedLive.empty()
+		|| !LateJoinPacketCatchupBuffer::deserialize(
+			serializedLive, livePackets))
+	{
+		printlog("[Late Join] Client discarded invalid deferred live packets.");
+		clientResetLateJoinPacketDeferral();
+		return;
+	}
+	const int savedLength = net_packet->len;
+	const IPaddress savedAddress = net_packet->address;
+	std::vector<Uint8> savedPacket(
+		net_packet->data, net_packet->data + std::max(0, savedLength));
+	g_clientLateJoinReplayingPackets = true;
+	const auto replay = [](const std::vector<std::vector<std::uint8_t>>& packets)
+	{
+		for (const auto& packet : packets)
+		{
+			if (packet.size() > NET_PACKET_SIZE)
+			{
+				continue;
+			}
+			memcpy(net_packet->data, packet.data(), packet.size());
+			net_packet->len = static_cast<int>(packet.size());
+			clientHandlePacket();
+		}
+	};
+	replay(g_clientLateJoinCatchupPackets);
+	replay(livePackets);
+	std::size_t resetStaticFixtures = 0;
+	std::size_t rebuiltEditorLightSources = 0;
+	std::size_t failedEditorLightSources = 0;
+	if (map.entities)
+	{
+		for (node_t* node = map.entities->first; node; node = node->next)
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (entity
+				&& (entity->behavior == &actTorch
+					|| entity->behavior == &actCrystalShard
+					|| (entity->behavior == &actCampfire
+						&& entity->skill[3] > 0)))
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				++resetStaticFixtures;
+			}
+			if (entity && entity->behavior == &actLightSource)
+			{
+				entity->removeLightField();
+				entity->light = nullptr;
+				entity->skill[8] = 0;
+				entity->skill[9] = 0;
+				// Authored Always On sources are unconditionally enabled on the
+				// server. Reassert that invariant locally in case their one-time
+				// ENTS update predated this client's connection or its editor UID
+				// did not match during catch-up replay.
+				if (entity->lightSourceAlwaysOn == 1)
+				{
+					entity->skill[10] = 1;
+				}
+				if (entity->skill[10] != 0)
+				{
+					entity->actLightSource();
+					if (entity->light)
+					{
+						++rebuiltEditorLightSources;
+					}
+					else
+					{
+						++failedEditorLightSources;
+					}
+				}
+			}
+		}
+	}
+	if (!savedPacket.empty())
+	{
+		memcpy(net_packet->data, savedPacket.data(), savedPacket.size());
+	}
+	net_packet->len = savedLength;
+	net_packet->address = savedAddress;
+	const std::size_t catchupCount = g_clientLateJoinCatchupPackets.size();
+	const std::size_t liveCount = livePackets.size();
+	clientResetLateJoinPacketDeferral();
+	printlog(
+		"[Late Join] Client applied %zu catch-up and %zu deferred live packet(s); reset %zu static fixture light(s), rebuilt %zu editor light source(s), %zu rebuild failure(s).",
+		catchupCount, liveCount, resetStaticFixtures,
+		rebuiltEditorLightSources, failedEditorLightSources);
+}
+
 /*-------------------------------------------------------------------------------
 
 	clientHandleMessages
@@ -9211,6 +10915,7 @@ void clientHandlePacket()
 
 void clientHandleMessages(Uint32 framerateBreakInterval)
 {
+	clientCheckLateJoinTimeout();
 #ifdef STEAMWORKS
 	if (!directConnect && !net_handler)
 	{
@@ -9310,6 +11015,355 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+	{'JOIN', [](){
+		if (!headlessLateJoinRequested || !directConnect)
+		{
+			memcpy(net_packet->data, "HELO", 4);
+			SDLNet_Write32(MAXPLAYERS + 7, &net_packet->data[4]);
+			net_packet->len = 8;
+			sendPacketSafe(net_sock, -1, net_packet, 0);
+			printlog("[Late Join] Rejected runtime JOIN while late join is disabled.");
+			return;
+		}
+		if (net_packet->len < 70)
+		{
+			printlog("[Late Join] Rejected truncated runtime JOIN.");
+			return;
+		}
+		const Uint8 requestedSlot = net_packet->data[56];
+		const Uint32 clientSaveKey = SDLNet_Read32(&net_packet->data[61]);
+		bool lockedSlots[MAXPLAYERS] = {};
+		for (int player = 0; player < MAXPLAYERS; ++player)
+		{
+			lockedSlots[player] = MainMenu::isPlayerSlotLocked(player);
+		}
+		int playerIndex = MAXPLAYERS;
+		bool useChunkedHelo = false;
+		g_processingRuntimeJoin = true;
+		const NetworkingLobbyJoinRequestResult result = lobbyPlayerJoinRequest(
+			playerIndex, lockedSlots, useChunkedHelo);
+		g_processingRuntimeJoin = false;
+		if (result != NET_LOBBY_JOIN_DIRECTIP_SUCCESS
+			|| playerIndex <= 0 || playerIndex >= MAXPLAYERS)
+		{
+			return;
+		}
+
+		const bool returningPlayer =
+			requestedSlot != 0 && clientSaveKey != 0;
+		g_lateJoinReturningPlayer[playerIndex] = returningPlayer;
+		if (!g_lateJoinTransactions[playerIndex].holdForClient())
+		{
+			printlog(
+				"[Late Join] Failed to open character selection for player %d.",
+				playerIndex);
+			abortServerLateJoinPlayer(playerIndex, 4);
+			return;
+		}
+		g_lateJoinLastProgressTick[playerIndex] = ticks;
+		printlog(
+			"[Late Join] Player %d is connected and choosing a character.",
+			playerIndex);
+		logServerRosterState("runtime join");
+	}},
+	{'LJHI', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Server rejected malformed client-ready handshake.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0
+			|| !currentPacketSenderMatchesPlayer(player)
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog(
+				"[Late Join] Server rejected character-selection handshake for player %d.",
+				player);
+		}
+		else
+		{
+			g_lateJoinClientHandshake[player] = true;
+			g_lateJoinLastProgressTick[player] = ticks;
+			printlog(
+				"[Late Join] Player %d may customize and press Ready.", player);
+		}
+	}},
+	{'PLYR', [](){
+		if (net_packet->len != 49)
+		{
+			printlog("[Late Join] Server rejected malformed character packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog(
+				"[Late Join] Server rejected character data for player %d.",
+				player);
+			return;
+		}
+		if (!loadingsavegame)
+		{
+			stats[player]->clearStats();
+		}
+		stringCopy(
+			stats[player]->name, reinterpret_cast<char*>(&net_packet->data[5]),
+			sizeof(Stat::name), 32);
+		client_classes[player] = static_cast<int>(
+			SDLNet_Read32(&net_packet->data[37]));
+		stats[player]->sex = static_cast<sex_t>(
+			static_cast<int>(SDLNet_Read32(&net_packet->data[41])));
+		const Uint32 raceAndAppearance =
+			SDLNet_Read32(&net_packet->data[45]);
+		stats[player]->stat_appearance = (raceAndAppearance & 0xFF00) >> 8;
+		stats[player]->playerRace = raceAndAppearance & 0xFF;
+		if (!loadingsavegame)
+		{
+			initClass(player);
+		}
+		for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+		{
+			if (recipient == player
+				|| !serverPlayerCanReceiveGameplayUpdates(recipient))
+			{
+				continue;
+			}
+			memcpy(net_packet->data, "JOIN", 4);
+			net_packet->data[4] = player;
+			net_packet->data[5] = client_classes[player];
+			net_packet->data[6] = stats[player]->sex;
+			net_packet->data[7] =
+				static_cast<Uint8>(stats[player]->stat_appearance);
+			net_packet->data[8] =
+				static_cast<Uint8>(stats[player]->playerRace);
+			stringCopy(
+				reinterpret_cast<char*>(&net_packet->data[9]),
+				stats[player]->name,
+				32,
+				sizeof(Stat::name));
+			net_packet->len = 41;
+			net_packet->address.host = net_clients[recipient - 1].host;
+			net_packet->address.port = net_clients[recipient - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
+		}
+		g_lateJoinLastProgressTick[player] = ticks;
+	}},
+	{'REDY', [](){
+		if (net_packet->len != 6)
+		{
+			printlog("[Late Join] Server rejected malformed Ready packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !g_lateJoinClientHandshake[player]
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::AwaitingClient)
+		{
+			printlog("[Late Join] Server rejected Ready for player %d.", player);
+			return;
+		}
+		if (net_packet->data[5] == 0)
+		{
+			g_lateJoinLastProgressTick[player] = ticks;
+			return;
+		}
+		std::string placementError;
+		if (!prepareAutomatiaLateJoinPlayer(
+				player, g_lateJoinReturningPlayer[player], placementError)
+			|| !startServerLateJoinSnapshotTransfer(player))
+		{
+			printlog(
+				"[Late Join] Failed to prepare Ready player %d: %s",
+				player,
+				placementError.empty()
+					? "snapshot transfer could not start"
+					: placementError.c_str());
+			abortServerLateJoinPlayer(player, 4);
+			return;
+		}
+		players[player]->was_connected_to_game = true;
+		g_lateJoinLastProgressTick[player] = ticks;
+		printlog(
+			"[Late Join] Player %d pressed Ready; snapshot transfer started.",
+			player);
+	}},
+	{'SVFL', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Rejected malformed server-flags request.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[Late Join] Rejected unauthenticated server-flags request.");
+			return;
+		}
+		memcpy(net_packet->data, "SVFL", 4);
+		SDLNet_Write32(svFlags, &net_packet->data[4]);
+		net_packet->len = 8;
+		net_packet->address.host = net_clients[player - 1].host;
+		net_packet->address.port = net_clients[player - 1].port;
+		sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		printlog("[Late Join] Sent server flags to player %d.", player);
+	}},
+	{'CSCN', [](){
+		if (net_packet->len != 5)
+		{
+			printlog("[Late Join] Rejected malformed scenario request.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[Late Join] Rejected unauthenticated scenario request.");
+			return;
+		}
+		memcpy(net_packet->data, "CSCN", 4);
+		if (!gameModeManager.currentSession.challengeRun.isActive())
+		{
+			net_packet->data[4] = 0;
+			net_packet->len = 5;
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+			printlog("[Late Join] Sent empty custom scenario to player %d.", player);
+			return;
+		}
+		const std::string& scenario =
+			gameModeManager.currentSession.challengeRun.scenarioStr;
+		constexpr std::size_t chunkBytes = 256;
+		const std::size_t chunkCount = std::max<std::size_t>(
+			1, (scenario.size() + chunkBytes - 1) / chunkBytes);
+		if (chunkCount > 15)
+		{
+			printlog("[Late Join] Custom scenario is too large for player %d.", player);
+			return;
+		}
+		for (std::size_t chunk = 0; chunk < chunkCount; ++chunk)
+		{
+			const std::size_t offset = chunk * chunkBytes;
+			const std::size_t bytes = std::min(chunkBytes, scenario.size() - offset);
+			memcpy(net_packet->data, "CSCN", 4);
+			net_packet->data[4] = static_cast<Uint8>(chunk + 1)
+				| static_cast<Uint8>(chunkCount << 4);
+			memcpy(&net_packet->data[5], scenario.data() + offset, bytes);
+			net_packet->len = static_cast<int>(5 + bytes);
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
+		printlog("[Late Join] Sent custom scenario to player %d in %zu chunk(s).",
+			player, chunkCount);
+	}},
+	{'LJRD', [](){
+		LateJoinProtocol::Ready ready;
+		if (!LateJoinProtocol::decodeReady(
+				net_packet->data, net_packet->len, ready))
+		{
+			printlog("[Late Join] Server rejected malformed snapshot-ready packet.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(ready.playerIndex);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !ready.snapshotAccepted
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::Complete
+			|| g_lateJoinTransactions[player].transferId()
+				!= ready.transferId
+			|| g_lateJoinTransactions[player].instanceRevision()
+				!= ready.instanceRevision)
+		{
+			printlog(
+				"[Late Join] Server rejected snapshot-ready state for player %d.",
+				player);
+			if (player > 0)
+			{
+				abortServerLateJoinPlayer(player, 2);
+			}
+			return;
+		}
+		LateJoinProtocol::Authorization authorization;
+		authorization.transferId = ready.transferId;
+		authorization.instanceRevision = ready.instanceRevision;
+		authorization.spawnAuthorized = true;
+		if (!queueLateJoinRecordForPlayer(
+				player, LateJoinProtocol::encodeAuthorization(authorization)))
+		{
+			printlog(
+				"[Late Join] Server failed spawn authorization for player %d.",
+				player);
+			abortServerLateJoinPlayer(player, 4);
+			return;
+		}
+		printlog(
+			"[Late Join] Server sent spawn authorization to player %d transfer %u.",
+			player, ready.transferId);
+		g_lateJoinLastProgressTick[player] = ticks;
+	}},
+	{'LJGO', [](){
+		LateJoinProtocol::Ready go;
+		if (!LateJoinProtocol::decodeGo(
+				net_packet->data, net_packet->len, go))
+		{
+			printlog("[Late Join] Server rejected malformed authorization ACK.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(go.playerIndex);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+			|| !go.snapshotAccepted
+			|| g_lateJoinTransactions[player].phase()
+				!= LateJoinSnapshotTransaction::Phase::Complete
+			|| g_lateJoinTransactions[player].transferId() != go.transferId
+			|| g_lateJoinTransactions[player].instanceRevision()
+				!= go.instanceRevision
+			|| !sendServerLateJoinCatchup(player)
+			|| !sendServerLateJoinStart(player)
+			|| !authorizeServerLateJoinPlayer(player))
+		{
+			printlog(
+				"[Late Join] Server rejected authorization ACK for player %d.",
+				player);
+			if (player > 0)
+			{
+				abortServerLateJoinPlayer(player, 2);
+			}
+			return;
+		}
+		consumeAutomatiaSavedPlayerPlacement(player);
+		g_lateJoinLastProgressTick[player] = 0;
+		printlog(
+			"[Late Join] Server opened live simulation for player %d transfer %u.",
+			player, go.transferId);
+	}},
+	{'LJAB', [](){
+		LateJoinProtocol::Abort abort;
+		if (!LateJoinProtocol::decodeAbort(
+				net_packet->data, net_packet->len, abort))
+		{
+			printlog("[Late Join] Server rejected malformed abort record.");
+			return;
+		}
+		const int player = static_cast<int>(abort.playerIndex);
+		if (!currentPacketSenderMatchesPlayer(player)
+			|| (abort.transferId != 0
+				&& (abort.transferId
+						!= g_lateJoinTransactions[player].transferId()
+					|| abort.instanceRevision
+						!= g_lateJoinTransactions[player].instanceRevision())))
+		{
+			printlog("[Late Join] Server ignored unauthenticated abort record.");
+			return;
+		}
+		printlog("[Late Join] Client %d aborted transfer (reason %u).",
+			player, static_cast<unsigned>(abort.reason));
+		abortServerLateJoinPlayer(player, abort.reason);
+	}},
 	// keep alive
 	{'KPAL', [](){
 	    const int player =
@@ -9336,7 +11390,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		}
 
 		const int player =
-			static_cast<int>(
+            decodeGameplayPacketPlayerIndex(
 				net_packet->data[4]
 			);
 
@@ -9469,8 +11523,12 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// check entity existence
 	{'ENTE', [](){
-		const int x = net_packet->data[4];
-		if ( x <= 0 || x >= MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int x = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( x <= 0 )
 		{
 			return;
 		}
@@ -9495,8 +11553,12 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client request item details.
 	{'ITMU', [](){
-		const int x = net_packet->data[4];
-		if ( x <= 0 || x >= MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int x = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( x <= 0 )
 		{
 			return;
 		}
@@ -9611,8 +11673,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player move
 	{'PMOV', [](){
-		const int player = net_packet->data[4];
-		if ( player < 0 || player >= MAXPLAYERS )
+        if ( !net_packet || net_packet->len < 19 )
+        {
+            printlog("[NET]: ignored truncated PMOV packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
 		{
 			return;
 		}
@@ -9710,8 +11780,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// player ghost move
 	{'GMOV', []() {
-		const int player = net_packet->data[4];
-		if ( player < 0 || player >= MAXPLAYERS )
+        if ( !net_packet || net_packet->len < 20 )
+        {
+            printlog("[NET]: ignored truncated GMOV packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
 		{
 			return;
 		}
@@ -9946,10 +12024,32 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// tried to update
 	{'NOUP', [](){
+		if ( !net_packet || net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player <= 0 )
+		{
+			return;
+		}
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
+			if ( entity->behavior == &actPlayer
+				|| entity->behavior == &actDeathGhost )
+			{
+				printlog(
+					"[World State] Rejected player %d NOUP for authoritative player entity UID %u in '%s'.",
+					player,
+					uid,
+					players[player]
+						? players[player]->worldInstance.key().c_str()
+						: "<none>");
+				return;
+			}
 			entity->flags[UPDATENEEDED] = false;
 		}
 	}},
@@ -9977,6 +12077,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked entity in range
 	{'CKIR', [](){
+        if ( !net_packet || net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated CKIR packet");
+            return;
+        }
 	    const int player =
 	    	decodeGameplayPacketPlayerIndex(
 	    		net_packet->data[4]
@@ -9988,10 +12093,92 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		client_keepalive[player] = ticks;
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
+		const bool customPortalHint = net_packet->len >= 19
+			&& net_packet->data[9] == 0xA7
+			&& net_packet->data[10] == 1;
+		if (customPortalHint
+			&& (!entity || entity->behavior != &actCustomPortal))
+		{
+			const real_t hintX = static_cast<Sint16>(
+				SDLNet_Read16(&net_packet->data[11])) / 32.0;
+			const real_t hintY = static_cast<Sint16>(
+				SDLNet_Read16(&net_packet->data[13])) / 32.0;
+			Entity* resolvedPortal = nullptr;
+			real_t bestFixtureDistance = 1.0;
+			std::size_t serverPortalCount = 0;
+			if (map.entities)
+			{
+				for (node_t* node = map.entities->first; node; node = node->next)
+				{
+					Entity* candidate = static_cast<Entity*>(node->element);
+					if (!candidate || candidate->behavior != &actCustomPortal)
+					{
+						continue;
+					}
+					++serverPortalCount;
+					// X/Y identify a static fixture. Z can legitimately differ
+					// while a late client's render interpolation settles.
+					const real_t fixtureDistance =
+						std::abs(candidate->x - hintX)
+						+ std::abs(candidate->y - hintY);
+					if (fixtureDistance <= bestFixtureDistance)
+					{
+						resolvedPortal = candidate;
+						bestFixtureDistance = fixtureDistance;
+					}
+				}
+			}
+			Entity* playerEntity = players[player]
+				? players[player]->entity : nullptr;
+			if (resolvedPortal && playerEntity
+				&& entityDist(resolvedPortal, playerEntity) <= TOUCHRANGE)
+			{
+				printlog(
+					"[Client Activity] Safely resolved player %d local UID %u to authoritative custom exit UID %u by map position.",
+					player, uid, resolvedPortal->getUID());
+				entity = resolvedPortal;
+			}
+			else
+			{
+				printlog(
+					"[Client Activity] Rejected player %d custom-exit hint for local UID %u at (%.2f,%.2f) (server portals=%zu, fixture match=%s, server range=%s).",
+					player, uid, hintX, hintY, serverPortalCount,
+					resolvedPortal ? "yes" : "no",
+					resolvedPortal && playerEntity
+						&& entityDist(resolvedPortal, playerEntity) <= TOUCHRANGE
+						? "yes" : "no");
+				entity = nullptr;
+			}
+		}
 		if ( entity )
 		{
 			client_selected[player] = entity;
 			inrange[player] = true;
+			Entity* playerEntity = players[player]
+				? players[player]->entity : nullptr;
+			const double distance = playerEntity
+				? entityDist(entity, playerEntity) : -1.0;
+			const WorldInstanceIdentity* identity =
+				worldState.activeIdentity();
+			printlog(
+				"[Client Activity] Player %d selected UID %u in '%s' (sprite=%d, type=%s, distance=%.2f, invisible=%s, circuit=%d).",
+				player, uid,
+				identity ? identity->key().c_str() : "<none>",
+				entity->sprite,
+				entity->behavior == &actCustomPortal
+					? "custom-exit" : "other",
+				distance,
+				entity->flags[INVISIBLE] ? "yes" : "no",
+				entity->skill[28]);
+		}
+		else
+		{
+			const WorldInstanceIdentity* identity =
+				worldState.activeIdentity();
+			printlog(
+				"[Client Activity] Player %d selected unknown UID %u in '%s'; interaction was not applied.",
+				player, uid,
+				identity ? identity->key().c_str() : "<none>");
 		}
 	}},
 
@@ -10171,18 +12358,30 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// clicked entity out of range
 	{'CKOR', [](){
+        if ( !net_packet || net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated CKOR packet");
+            return;
+        }
+        const int player =
+            decodeGameplayPacketPlayerIndex(
+                net_packet->data[4]
+            );
+        if ( player < 0 )
+        {
+            return;
+        }
 		Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 		Entity* entity = uidToEntity(uid);
 		if ( entity )
 		{
-			client_selected[net_packet->data[4]] = entity;
-			inrange[net_packet->data[4]] = false;
+            client_selected[player] = entity;
+            inrange[player] = false;
 		}
 	}},
 
 	// disconnect
 	{'DISC', [](){
-	    // TODO verify packet origin
 		char shortname[32];
 		const int playerDisconnected =
 			decodeGameplayPacketPlayerIndex(
@@ -10196,8 +12395,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	        // yeah right
 	        return;
 	    }
+		if (!currentPacketSenderMatchesPlayer(playerDisconnected))
+		{
+			printlog(
+				"[Roster] Rejected disconnect for player %d from another endpoint.",
+				playerDisconnected);
+			return;
+		}
 		stringCopy(shortname, stats[playerDisconnected]->name, sizeof(shortname), sizeof(Stat::name));
 		client_disconnected[playerDisconnected] = true;
+		resetServerLateJoinPlayer(playerDisconnected);
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
 			if ( client_disconnected[c] == true )
@@ -10213,6 +12420,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			messagePlayer(c, MESSAGE_MISC, Language::get(1120), shortname);
 		}
 		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1120), shortname);
+		logServerRosterState("disconnect");
 	}},
 
 	// client callout
@@ -10688,6 +12896,16 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// close shop
 	{'SHPC', [](){
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[8]);
+		if ( player <= 0 )
+		{
+			return;
+		}
 		Entity* entity = uidToEntity((Uint32)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
@@ -12374,12 +14592,22 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// the client sent a minimap ping packet.
 	{'PMAP', [](){
-		MinimapPing newPing(ticks, net_packet->data[4], 
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player < 0 )
+		{
+			return;
+		}
+		MinimapPing newPing(ticks, player,
 			net_packet->data[5], 
 			net_packet->data[6],
 			net_packet->data[8] ? true : false,
 			(MinimapPing::PingType)net_packet->data[7]);
-		sendMinimapPing(net_packet->data[4], newPing.x, newPing.y, newPing.pingType); // relay self and to other clients.
+		sendMinimapPing(player, newPing.x, newPing.y, newPing.pingType); // relay self and to other clients.
 	}},
 
 	// the client sent a gameplayer preferences update
@@ -12447,8 +14675,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	}},
 
 	{'IDIE', [](){
-		const int playerDie = net_packet->data[4];
-		if ( playerDie >= 1 && playerDie < MAXPLAYERS )
+		if ( net_packet->len < 5 )
+		{
+			return;
+		}
+		const int playerDie =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( playerDie >= 1 )
 		{
 			if ( players[playerDie] && players[playerDie]->entity )
 			{
@@ -12652,8 +14885,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed assist shrine
 	{ 'ASCL', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* shrine = uidToEntity(uid) )
@@ -12669,8 +14907,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed cauldron
 	{ 'CAUC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* cauldron = uidToEntity(uid) )
@@ -12686,8 +14929,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed workbench
 	{ 'WRKC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* workbench = uidToEntity(uid) )
@@ -12703,8 +14951,13 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// client closed mailbox
 	{ 'MBXC', []() {
-		int player = net_packet->data[4];
-		if ( player >= 0 && player < MAXPLAYERS )
+		if ( net_packet->len < 9 )
+		{
+			return;
+		}
+		const int player =
+			decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if ( player >= 0 )
 		{
 			Uint32 uid = SDLNet_Read32(&net_packet->data[5]);
 			if ( Entity* mailbox = uidToEntity(uid) )
@@ -12939,6 +15192,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 void serverHandlePacket()
 {
+    if ( !net_packet || !net_packet->data || net_packet->len < 4 )
+    {
+        printlog("[NET]: ignored truncated server packet");
+        return;
+    }
 	if (handleSafePacket())
 	{
 		return;
@@ -12976,6 +15234,10 @@ void serverHandlePacket()
 
 void serverHandleMessages(Uint32 framerateBreakInterval)
 {
+	const WorldInstanceIdentity* initialIdentity =
+		worldState.activeIdentity();
+	const std::string initialInstanceKey =
+		initialIdentity ? initialIdentity->key() : std::string{};
 #ifdef STEAMWORKS
 	if (!directConnect && !net_handler)
 	{
@@ -13021,6 +15283,7 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 
 		while ( packet = net_handler->getGamePacket() )
 		{
+			g_currentPacketSenderHostIndex = packet->senderHostIndex();
 			memcpy(net_packet->data, packet->data(), packet->len());
 			net_packet->len = packet->len();
 
@@ -13032,6 +15295,7 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 				DebugStats.handlePacketStartLoop = false;
 			}
 			delete packet;
+			g_currentPacketSenderHostIndex = -1;
 			if ( !net_handler )
 			{
 				break;
@@ -13063,6 +15327,51 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 			serverHandlePacket(); //Uses net_packet.
 		}
 	}
+	for (int player = 1; player < MAXPLAYERS; ++player)
+	{
+		const LateJoinSnapshotTransaction::Phase phase =
+			g_lateJoinTransactions[player].phase();
+		if (phase == LateJoinSnapshotTransaction::Phase::Failed)
+		{
+			printlog("[Late Join] Aborting failed transfer for player %d.", player);
+			abortServerLateJoinPlayer(player, 3);
+		}
+		else if ((phase == LateJoinSnapshotTransaction::Phase::AwaitingClient
+				|| phase == LateJoinSnapshotTransaction::Phase::Receiving
+				|| phase == LateJoinSnapshotTransaction::Phase::Complete)
+			&& g_lateJoinLastProgressTick[player] != 0
+			&& ticks - g_lateJoinLastProgressTick[player]
+				> (phase == LateJoinSnapshotTransaction::Phase::AwaitingClient
+					? kLateJoinCharacterSelectionTimeoutTicks
+					: kLateJoinTimeoutTicks))
+		{
+			if (phase == LateJoinSnapshotTransaction::Phase::AwaitingClient)
+			{
+				printlog(
+					"[Late Join] Character selection for player %d timed out after 5 minutes.",
+					player);
+			}
+			else
+			{
+				printlog(
+					"[Late Join] Transfer for player %d timed out after 30 seconds.",
+					player);
+			}
+			abortServerLateJoinPlayer(player, 1);
+		}
+	}
+	if ( !initialInstanceKey.empty()
+		&& worldState.activeIdentity()
+		&& worldState.activeIdentity()->key() != initialInstanceKey )
+	{
+		if ( !worldState.activate(initialInstanceKey) )
+		{
+			printlog(
+				"[NET]: unable to restore active instance '%s' after receiving packets",
+				initialInstanceKey.c_str()
+			);
+		}
+	}
 }
 
 /*-------------------------------------------------------------------------------
@@ -13083,6 +15392,19 @@ bool handleSafePacket()
 	Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
 	if (packetId == 'SAFE')
 	{
+        if ( net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated SAFE packet");
+            return true;
+        }
+        if ( net_packet->data[4] > MAXPLAYERS )
+        {
+            printlog(
+                "[NET]: ignored SAFE packet with invalid sender index %u",
+                static_cast<unsigned>(net_packet->data[4])
+            );
+            return true;
+        }
 		if ( net_packet->data[4] != MAXPLAYERS )
 		{
 			int receivedPacketNum = SDLNet_Read32(&net_packet->data[5]);
@@ -13186,6 +15508,11 @@ bool handleSafePacket()
 	// they got the safe packet
 	else if (packetId == 'GOTP')
 	{
+        if ( net_packet->len < 9 )
+        {
+            printlog("[NET]: ignored truncated GOTP packet");
+            return true;
+        }
 		for ( node = safePacketsSent.first; node != NULL; node = node->next )
 		{
 			packetsend_t* packet = (packetsend_t*)node->element;
@@ -13214,6 +15541,14 @@ void closeNetworkInterfaces()
 	printlog("closing network interfaces...\n");
 
 	receivedclientnum = false;
+	g_clientLateJoinAssembler.reset();
+	g_clientLateJoinBegin = LateJoinProtocol::Begin{};
+	g_clientLateJoinSpawnAuthorized = false;
+	for (int c = 1; c < MAXPLAYERS; ++c)
+	{
+		resetServerLateJoinPlayer(c);
+		g_lateJoinReturningPlayer[c] = false;
+	}
 
 	if (net_handler)
 	{
@@ -13274,10 +15609,11 @@ void closeNetworkInterfaces()
 
 /* ***** MULTITHREADED STEAM PACKET HANDLING ***** */
 
-SteamPacketWrapper::SteamPacketWrapper(Uint8* data, int len)
+SteamPacketWrapper::SteamPacketWrapper(Uint8* data, int len, int senderHostIndex)
 {
 	_data = data;
 	_len = len;
+	_senderHostIndex = senderHostIndex;
 }
 
 SteamPacketWrapper::~SteamPacketWrapper()
@@ -13293,6 +15629,11 @@ Uint8*& SteamPacketWrapper::data()
 int& SteamPacketWrapper::len()
 {
 	return _len;
+}
+
+int SteamPacketWrapper::senderHostIndex() const
+{
+	return _senderHostIndex;
 }
 
 NetHandler::NetHandler()
@@ -13461,7 +15802,11 @@ int EOSPacketThread(void* data)
 			{
 				//Push packet into queue.
 				//TODO: Use lock-free queues?
-				packets.push(new SteamPacketWrapper(packet, packetlen));
+				packets.push(new SteamPacketWrapper(
+					packet,
+					packetlen,
+					EOS.P2PConnectionInfo.getIndexFromPeerId(remoteId)
+				));
 				packet = nullptr;
 			}
 			if ( packet )
@@ -13522,11 +15867,26 @@ int steamPacketThread(void* data)
 			packet = static_cast<Uint8* >(malloc(packetlen));
 			if (SteamNetworking()->ReadP2PPacket(packet, packetlen, &bytes_read, &steam_id_remote, 0))
 			{
-				if (packetlen > sizeof(uint32_t) && mySteamID.ConvertToUint64() != steam_id_remote.ConvertToUint64() && net_packet->data[0])
+				if (packetlen > sizeof(uint32_t) && mySteamID.ConvertToUint64() != steam_id_remote.ConvertToUint64() && packet[0])
 				{
 					//Push packet into queue.
 					//TODO: Use lock-free queues?
-					packets.push(new SteamPacketWrapper(packet, packetlen));
+					int senderHostIndex = -1;
+					for ( int host = 0; host < MAXPLAYERS; ++host )
+					{
+						if ( steamIDRemote[host]
+							&& static_cast<CSteamID*>(steamIDRemote[host])->ConvertToUint64()
+								== steam_id_remote.ConvertToUint64() )
+						{
+							senderHostIndex = host;
+							break;
+						}
+					}
+					packets.push(new SteamPacketWrapper(
+						packet,
+						packetlen,
+						senderHostIndex
+					));
 					packet = nullptr;
 				}
 			}
@@ -13641,14 +16001,27 @@ void handleScanPacket() {
         Uint32 offset = 8 + hostname_len;
         int numplayers = 0;
         for (int c = 0; c < MAXPLAYERS; ++c) {
-            if (!client_disconnected[c]) {
+            if (!LanDiscovery::advertisedDisconnected(
+					headless, c, client_disconnected[c])) {
                 ++numplayers;
             }
         }
         SDLNet_Write32(numplayers, &net_packet->data[offset]);
-        net_packet->data[offset + 4] = intro ? 0 : 1;
+        net_packet->data[offset + 4] = LanDiscovery::advertisedLocked(
+			!intro,
+			headless && headlessLateJoinRequested);
         SDLNet_Write32(svFlags, &net_packet->data[offset + 5]);
         net_packet->len = offset + 9;
+		if (headless)
+		{
+			const std::size_t extensionBytes = LanDiscovery::encodeExtension(
+				&net_packet->data[net_packet->len],
+				NET_PACKET_SIZE - static_cast<std::size_t>(net_packet->len),
+				headlessServerPort,
+				true,
+				headlessLateJoinRequested);
+			net_packet->len += static_cast<int>(extensionBytes);
+		}
         sendPacket(net_sock, -1, net_packet, 0);
     }
 }

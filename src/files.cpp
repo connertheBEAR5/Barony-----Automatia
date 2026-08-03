@@ -33,6 +33,9 @@
 #include "init.hpp"
 #include "mod_tools.hpp"
 #include "ui/LoadingScreen.hpp"
+#ifndef EDITOR
+#include "world_state.hpp"
+#endif
 #ifdef EDITOR
 #include "editor.hpp"
 #endif
@@ -3572,6 +3575,13 @@ fp->read(&numentities, sizeof(Uint32), 1);
 	memcpy(destmap->filename, mapShortName.c_str(), size);
 	destmap->filename[size] = '\0';
 
+#ifndef EDITOR
+    if ( destmap == &map )
+    {
+        worldState.bindLegacyMap(*destmap, mapShortName);
+    }
+#endif
+
 	if ( destmap == &map )
 	{
 		nummonsters = 0;
@@ -3756,6 +3766,9 @@ fp->read(&numentities, sizeof(Uint32), 1);
 				shoparea[y + x * destmap->height] = false;
 			}
 		}
+#ifndef EDITOR
+		worldState.refreshActiveContext();
+#endif
 	}
 
 

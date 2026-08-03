@@ -15,6 +15,8 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <cstring>
+#include <limits>
 #include <vector>
 
 //Don't create a FileBase or derivative class (such as this one) directly, use FileIO::open to get one...
@@ -24,30 +26,40 @@ class FilePC : public FileBase
 public:
 	size_t write(const void* src, size_t size, size_t count) override
 	{
-		if (0U == FileBase::write(src, size, count)) {
-			return 0U;
-		}
+        if (0U == FileBase::write(src, size, count)
+            || size == 0U
+            || count == 0U
+            || count > std::numeric_limits<size_t>::max() / size
+            || pos > data.size())
+        {
+            return 0U;
+        }
         const size_t writeSize = size * count;
+        if (writeSize > data.max_size() - data.size())
+        {
+            return 0U;
+        }
         (void)data.insert(data.begin() + pos, (const uint8_t*)src, (const uint8_t*)src + writeSize);
         pos += writeSize;
-		return writeSize / size;
-	}
+        return count;
+    }
 
 	size_t read(void* buffer, size_t size, size_t count) override
 	{
-		if (0U == FileBase::read(buffer, size, count)) {
-			return 0U;
-		}
-		size_t readSize = 0U;
-		size_t end = std::min(this->size(), pos + size * count);
-		uint8_t* buf = (uint8_t*)buffer;
-		for (size_t c = pos; c < end; ++c) {
-			*buf = data[c]; ++buf;
-			++readSize;
-		}
-		pos += readSize;
-		return readSize / size;
-	}
+        if (0U == FileBase::read(buffer, size, count)
+            || size == 0U
+            || count == 0U
+            || count > std::numeric_limits<size_t>::max() / size
+            || pos >= data.size())
+        {
+            return 0U;
+        }
+        const size_t requestedSize = size * count;
+        const size_t readSize = std::min(requestedSize, data.size() - pos);
+        std::memcpy(buffer, data.data() + pos, readSize);
+        pos += readSize;
+        return readSize / size;
+    }
 
 	size_t size() override
 	{
@@ -61,17 +73,49 @@ public:
 
 	int seek(ptrdiff_t offset, SeekMode mode) override
 	{
-		switch (mode) {
-		case SeekMode::SET: pos = offset; break;
-		case SeekMode::ADD: pos += offset; break;
-		case SeekMode::SETEND: pos = size() + offset; break;
-		}
-		if (eof()) {
-			return -1;
-		} else {
-			return 0;
-		}
-	}
+        size_t base = 0U;
+        switch (mode)
+        {
+            case SeekMode::SET:
+                base = 0U;
+                break;
+            case SeekMode::ADD:
+                base = pos;
+                break;
+            case SeekMode::SETEND:
+                base = data.size();
+                break;
+            default:
+                return -1;
+        }
+
+        size_t target = base;
+        if (offset < 0)
+        {
+            const size_t distance = static_cast<size_t>(-(offset + 1)) + 1U;
+            if (distance > base)
+            {
+                return -1;
+            }
+            target = base - distance;
+        }
+        else
+        {
+            const size_t distance = static_cast<size_t>(offset);
+            if (distance > data.size() - std::min(base, data.size()))
+            {
+                return -1;
+            }
+            target = base + distance;
+        }
+
+        if (target > data.size())
+        {
+            return -1;
+        }
+        pos = target;
+        return eof() ? -1 : 0;
+    }
 
 	long int tell() override
 	{
@@ -91,14 +135,18 @@ private:
 		    data.resize(end);
 		    size_t c = 0;
 		    for (; c < end;) {
-		        size_t result = fread(data.data(), sizeof(uint8_t), end - c, fp);
+                size_t result = fread(data.data() + c, sizeof(uint8_t), end - c, fp);
 		        if (!result) {
 		            // failed to read, try to read just a chunk
 		            constexpr size_t chunk_size = 1024;
 		            size_t chunk = std::min(end - c, chunk_size);
 		            printlog("[FILES] failed to read %llu bytes from '%s', trying %llu bytes instead", end - c, path, chunk);
-		            result = fread(data.data(), sizeof(uint8_t), chunk, fp);
-		            assert(result);
+                    result = fread(data.data() + c, sizeof(uint8_t), chunk, fp);
+                    if (!result) {
+                        printlog("[FILES] unable to continue reading '%s'", path);
+                        data.resize(c);
+                        break;
+                    }
 		        }
 		        c += result;
 		    }
@@ -117,14 +165,17 @@ private:
 	        size_t c = 0u;
 	        size_t end = size();
 		    for (; c < end;) {
-		        size_t result = fwrite(data.data(), sizeof(uint8_t), end - c, fp);
+                size_t result = fwrite(data.data() + c, sizeof(uint8_t), end - c, fp);
 		        if (!result) {
 		            // failed to write, try to write just a chunk
 		            constexpr size_t chunk_size = 1024;
 		            size_t chunk = std::min(end - c, chunk_size);
 		            printlog("[FILES] failed to write %llu bytes to '%s', trying %llu bytes instead", end - c, path.c_str(), chunk);
-		            result = fwrite(data.data(), sizeof(uint8_t), chunk, fp);
-		            assert(result);
+                    result = fwrite(data.data() + c, sizeof(uint8_t), chunk, fp);
+                    if (!result) {
+                        printlog("[FILES] unable to continue writing '%s'", path.c_str());
+                        break;
+                    }
 		        }
 		        c += result;
 		    }

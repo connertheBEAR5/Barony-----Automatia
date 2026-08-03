@@ -488,6 +488,7 @@ struct SaveGameInfo {
 	std::string serializeToOnlineHiscore(const int playernum, const int victory);
 
 	struct Player {
+		std::string reconnect_token;
 		Uint32 char_class = 0;
 		Uint32 race = 0;
 		std::vector<int> kills;
@@ -719,6 +720,7 @@ struct SaveGameInfo {
 		std::vector<stat_t> followers;
 		
 		bool serialize(FileInterface* fp) {
+			fp->property("reconnect_token", reconnect_token);
 			fp->property("char_class", char_class);
 			fp->property("race", race);
 			fp->property("kills", kills);
@@ -806,6 +808,8 @@ struct SaveGameInfo {
 
 	void computeHash(const int playernum, Uint32& hash);
 };
+
+extern std::string automatiaReconnectTokens[MAXPLAYERS];
 
 int saveGame(int saveIndex = savegameCurrentFileIndex);
 int loadGame(int player, const SaveGameInfo& info);

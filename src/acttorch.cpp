@@ -107,15 +107,18 @@ if ( !map.tiles[
 	}
 
 	// lighting
-	if ( !TORCH_LIGHTING )
+	if ( !my->light )
 	{
 		my->light = addLight(
 	my->x / 16,
 	my->y / 16,
 	lightLayer,
-	"torch_wall"
+	TORCH_LIGHTING == 2 ? "torch_wall_flicker" : "torch_wall"
 );
-		TORCH_LIGHTING = 1;
+		if ( !TORCH_LIGHTING )
+		{
+			TORCH_LIGHTING = 1;
+		}
 	}
 	if ( flickerLights )
 	{
@@ -300,15 +303,18 @@ void actCrystalShard(Entity* my)
 	}
 
 	// lighting
-	if ( !TORCH_LIGHTING )
+	if ( !my->light )
 	{
 		my->light = addLight(
 	my->x / 16,
 	my->y / 16,
 	lightLayer,
-	"crystal_shard_wall"
+	TORCH_LIGHTING == 2 ? "crystal_shard_wall_flicker" : "crystal_shard_wall"
 );
-		TORCH_LIGHTING = 1;
+		if ( !TORCH_LIGHTING )
+		{
+			TORCH_LIGHTING = 1;
+		}
 	}
 
 	if ( flickerLights )
@@ -430,6 +436,54 @@ void Entity::actLightSource()
 {
 const int lightLayer =
 	entityZToLightmapLayer(z);
+	// Light fields are client-local additive records. If a late map/lightmap
+	// rebuild retained this pointer without retaining its contribution, repair
+	// it before another overlapping light is removed from the same tiles.
+	if ( multiplayer == CLIENT && lightSourceAlwaysOn == 1 && light
+		&& light->tiles && light->radius > 0
+		&& x / 16 >= 0 && y / 16 >= 0
+		&& x / 16 < map.width && y / 16 < map.height )
+	{
+		const int diameter = light->radius * 2 + 1;
+		const int centerOffset = light->radius
+			+ light->radius * diameter;
+		const size_t mapOffset = lightmapIndex3D(
+			static_cast<int>(x / 16), static_cast<int>(y / 16),
+			light->layer, map.width, map.height);
+		const int lightmapPlayer = light->index
+			? light->index
+			: std::max(0, std::min(clientnum, MAXPLAYERS));
+		if (mapOffset < lightmaps[lightmapPlayer].size())
+		{
+			const vec4_t& expected = light->tiles[centerOffset];
+			const vec4_t& actual = lightmaps[lightmapPlayer][mapOffset];
+			constexpr float tolerance = 0.5f;
+			const bool missingContribution =
+				(expected.x > tolerance && actual.x + tolerance < expected.x)
+				|| (expected.y > tolerance && actual.y + tolerance < expected.y)
+				|| (expected.z > tolerance && actual.z + tolerance < expected.z)
+				|| (expected.w > tolerance && actual.w + tolerance < expected.w);
+			if (missingContribution)
+			{
+				printlog(
+					"[Lighting] Repairing stale Always On light field UID %u at (%d,%d), layer %d.",
+					getUID(), static_cast<int>(x / 16),
+					static_cast<int>(y / 16), light->layer);
+				removeLightField();
+				LIGHTSOURCE_LIGHT = 0;
+			}
+		}
+	}
+	// Always On is an authored invariant, not a transient network state. A
+	// late client can receive an old disabled ENTS record after rebuilding its
+	// local lightmap; immediately heal that state so the source stays lit.
+	if ( multiplayer == CLIENT
+		&& lightSourceAlwaysOn == 1
+		&& !LIGHTSOURCE_ENABLED )
+	{
+		LIGHTSOURCE_ENABLED = 1;
+		LIGHTSOURCE_LIGHT = 0;
+	}
 	if ( multiplayer != CLIENT )
 	{
 		if ( lightSourceDelay > 0 && lightSourceDelayCounter == 0 )

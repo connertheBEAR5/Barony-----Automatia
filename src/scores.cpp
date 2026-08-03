@@ -10,6 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "main.hpp"
+#include "automatia_world_save.hpp"
 #include "files.hpp"
 #include "game.hpp"
 #include "stat.hpp"
@@ -27,6 +28,7 @@
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "shops.hpp"
+#include "world_state.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #endif
@@ -34,8 +36,13 @@
 #include "playfab.hpp"
 #endif
 
+#include <ctime>
+
 namespace
 {
+    constexpr const char* AUTOMATIA_WORLD_SAVE_SUFFIX =
+        ".automatia-world.json";
+
     std::string savedStableItemId(const Item* item)
     {
 #ifdef SAM_FRAMEWORK_ENABLED
@@ -86,6 +93,17 @@ namespace
         );
         return -1;
     }
+
+    bool worldSaveMatchesCharacterSave(
+        const AutomatiaSave::Json& worldDocument,
+        const SaveGameInfo& characterSave
+    )
+    {
+        return worldDocument.contains("session_id")
+            && worldDocument["session_id"].is_string()
+            && worldDocument["session_id"].get<std::string>()
+                == std::to_string(characterSave.gamekey);
+    }
 }
 
 // definitions
@@ -95,6 +113,7 @@ list_t topscores_legacy;
 list_t topscoresMultiplayer_legacy;
 int victory = 0;
 Uint32 completionTime = 0;
+std::string automatiaReconnectTokens[MAXPLAYERS];
 bool conductPenniless = true;
 bool conductFoodless = true;
 bool conductVegetarian = true;
@@ -2587,6 +2606,29 @@ int deleteSaveGame(int gametype, int saveIndex)
 	    }
 	}
 
+    const bool singleplayer = gametype == SINGLE;
+    const std::string primarySave = setSaveGameFileName(
+        singleplayer,
+        SaveFileType::JSON,
+        saveIndex
+    );
+    completePath(path, primarySave.c_str(), outputdir);
+    const std::filesystem::path worldSave =
+        std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+    std::error_code worldRemoveError;
+    if ( std::filesystem::exists(worldSave, worldRemoveError)
+        && !std::filesystem::remove(worldSave, worldRemoveError) )
+    {
+        result = 1;
+        printlog(
+            "warning: failed to delete Automatia world save '%s'!",
+            worldSave.string().c_str()
+        );
+    }
+    std::filesystem::path temporaryWorldSave = worldSave;
+    temporaryWorldSave += ".tmp";
+    std::filesystem::remove(temporaryWorldSave, worldRemoveError);
+
 	return result;
 }
 
@@ -2620,6 +2662,19 @@ bool saveGameExists(bool singleplayer, int saveIndex)
 			return false;
 		}
 
+        const std::filesystem::path worldPath =
+            std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::error_code worldPathError;
+        if ( std::filesystem::exists(worldPath, worldPathError) )
+        {
+            AutomatiaSave::Json worldDocument;
+            if ( !AutomatiaSave::load(worldPath, worldDocument)
+                || !worldSaveMatchesCharacterSave(worldDocument, info) )
+            {
+                return false;
+            }
+        }
+
 		return true;
 	}
 }
@@ -2644,6 +2699,20 @@ SaveGameInfo getSaveGameInfo(bool singleplayer, int saveIndex)
 	if (!result) {
 		info.game_version = -1;
 	}
+
+    const std::filesystem::path worldPath =
+        std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+    std::error_code worldPathError;
+    if ( result && std::filesystem::exists(worldPath, worldPathError) )
+    {
+        AutomatiaSave::Json worldDocument;
+        if ( !AutomatiaSave::load(worldPath, worldDocument)
+            || !worldSaveMatchesCharacterSave(worldDocument, info) )
+        {
+            result = false;
+            info.game_version = -1;
+        }
+    }
 
 	/*
 	 * Older save formats may omit players_connected, or may contain
@@ -3349,7 +3418,11 @@ void updateGameplayStatisticsInMainLoop()
 
 std::string setSaveGameFileName(bool singleplayer, SaveFileType type, int saveIndex)
 {
-	std::string filename = "savegames/savegame" + std::to_string(saveIndex);
+	const char* saveDirectory = headless && !singleplayer
+		? "savegames/host/"
+		: "savegames/";
+	std::string filename = std::string(saveDirectory)
+		+ "savegame" + std::to_string(saveIndex);
 
 	//OLD FORMAT
 	//#define SAVEGAMEFILE "savegame.dat"
@@ -5729,9 +5802,15 @@ int SaveGameInfo::populateFromSession(const int playernum)
 	info->players_connected.resize(MAXPLAYERS);
 	info->players.resize(MAXPLAYERS);
 	for ( int c = 0; c < MAXPLAYERS; ++c ) {
-		info->players_connected[c] = client_disconnected[c] && !::players[c]->was_connected_to_game ? 0 : 1;
+		const bool dormantAutomatiaPlayer =
+			headless && multiplayer == SERVER
+			&& automatiaHasSavedPlayerPlacement(c);
+		info->players_connected[c] = dormantAutomatiaPlayer
+			|| !(client_disconnected[c] && !::players[c]->was_connected_to_game)
+			? 1 : 0;
 		if ( info->players_connected[c] ) {
 			auto& player = info->players[c];
+			player.reconnect_token = automatiaReconnectTokens[c];
 			player.char_class = client_classes[c];
 			player.race = stats[c]->playerRace;
 
@@ -6184,9 +6263,37 @@ int saveGame(int saveIndex) {
 
 	char path[PATH_MAX] = "";
 	std::string savefile = setSaveGameFileName(multiplayer == SINGLE, SaveFileType::JSON, saveIndex);
-	completePath(path, savefile.c_str(), outputdir);
-	auto result = FileHelper::writeObject(path, *cvar_saveText ? EFileFormat::Json_Compact : EFileFormat::Binary, info);
-	return result == true ? 0 : 1;
+    completePath(path, savefile.c_str(), outputdir);
+    auto result = FileHelper::writeObject(path, *cvar_saveText ? EFileFormat::Json_Compact : EFileFormat::Binary, info);
+    if ( !result )
+    {
+        return 1;
+    }
+
+    /*
+     * Clients never author shared world state. The host writes the extensible
+     * map-instance document beside the established character save so existing
+     * save compatibility remains intact while restart persistence is staged in.
+     */
+    if ( multiplayer != CLIENT )
+    {
+        const std::filesystem::path worldPath =
+            std::string(path) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::string worldError;
+        if ( !writeAutomatiaPersistentWorldSave(
+                worldPath.string().c_str(),
+                std::to_string(uniqueGameKey),
+                worldError
+            ) )
+        {
+            printlog(
+                "[Automatia Save] Failed to write world state: %s",
+                worldError.c_str()
+            );
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int SaveGameInfo::getTotalScore(const int playernum, const int victory)
@@ -6478,6 +6585,39 @@ int loadGame(int player, const SaveGameInfo& info) {
 		return 1;
 	}
 
+    if ( multiplayer != CLIENT && player == 0 )
+    {
+        const bool singleplayer =
+            info.multiplayer_type == SINGLE
+            || info.multiplayer_type == SPLITSCREEN;
+        char primaryPath[PATH_MAX] = "";
+        const std::string primarySave = setSaveGameFileName(
+            singleplayer,
+            SaveFileType::JSON,
+            savegameCurrentFileIndex
+        );
+        completePath(primaryPath, primarySave.c_str(), outputdir);
+        const std::filesystem::path worldPath =
+            std::string(primaryPath) + AUTOMATIA_WORLD_SAVE_SUFFIX;
+        std::error_code worldPathError;
+        if ( std::filesystem::exists(worldPath, worldPathError) )
+        {
+            std::string worldError;
+            if ( !loadAutomatiaPersistentWorldSave(
+                    worldPath.string().c_str(),
+                    std::to_string(info.gamekey),
+                    worldError
+                ) )
+            {
+                printlog(
+                    "loadGame() failed: invalid Automatia world save: %s",
+                    worldError.c_str()
+                );
+                return 1;
+            }
+        }
+    }
+
 	//if (info.game_version != getSavegameVersion(VERSION)) {
 	//	printlog("loadGame() failed: game version mismatch");
 	//	return 1;
@@ -6489,6 +6629,11 @@ int loadGame(int player, const SaveGameInfo& info) {
 			printlog("loadGame() failed: given player is not connected");
 		}
 		return 1;
+	}
+	if (info.players.size() > static_cast<std::size_t>(player))
+	{
+		automatiaReconnectTokens[player] =
+			info.players[player].reconnect_token;
 	}
 
 	int statsPlayer = player;

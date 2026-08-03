@@ -900,7 +900,12 @@ SDL_Cursor* newCursor(char const * const image[]);
 
 // function prototypes for maps.c:
 int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> mapParameters = std::make_tuple(-1, -1, -1, 0)); // secretLevelChance of -1 is default Barony generation.
-void assignActions(map_t* map);
+void assignActions(
+	map_t* map,
+	const bool* playerSpawnMask = nullptr,
+	bool deferUnselectedPlayerStarts = false,
+	bool playerStartsOnly = false
+);
 
 // Cursor bitmap definitions
 extern char const *cursor_pencil[];
@@ -929,6 +934,8 @@ extern char headlessServerName[64];
 extern char headlessServerPassword[128];
 extern bool headlessAutoStart;
 extern Uint32 headlessAutoStartDelaySeconds;
+extern Uint32 headlessAutosaveIntervalSeconds;
+extern int headlessSaveSlot;
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

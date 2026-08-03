@@ -9,6 +9,8 @@
 #pragma once
 
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
 #include <string>
 
 struct WorldInstanceIdentity
@@ -20,13 +22,43 @@ struct WorldInstanceIdentity
     std::string instanceId = "world";
     std::uint64_t revision = 0;
 
+    static std::string canonicalMapFile(std::string value)
+    {
+        const std::size_t lastSeparator = value.find_last_of("/\\");
+        if (lastSeparator != std::string::npos)
+        {
+            value = value.substr(lastSeparator + 1);
+        }
+        if (value.empty())
+        {
+            return "";
+        }
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](const unsigned char character)
+            {
+                return static_cast<char>(std::tolower(character));
+            }
+        );
+        if (value.size() < 4 || value.substr(value.size() - 4) != ".lmp")
+        {
+            value += ".lmp";
+        }
+        return value;
+    }
+
     static bool isSafeMapFile(const std::string& value)
     {
         if (value.empty() || value.size() > MAX_MAP_FILE_LENGTH)
         {
             return false;
         }
-        if (value.find('\0') != std::string::npos)
+        if (value.find('\0') != std::string::npos
+            || value.find('/') != std::string::npos
+            || value.find('\\') != std::string::npos
+            || value.find(':') != std::string::npos)
         {
             return false;
         }
@@ -34,7 +66,14 @@ struct WorldInstanceIdentity
         {
             return false;
         }
-        return value.size() >= 4 && value.substr(value.size() - 4) == ".lmp";
+        for (const unsigned char character : value)
+        {
+            if (character < 0x20 || character == 0x7f)
+            {
+                return false;
+            }
+        }
+        return value.size() > 4 && value.substr(value.size() - 4) == ".lmp";
     }
 
     static bool isSafeInstanceId(const std::string& value)
@@ -59,13 +98,20 @@ struct WorldInstanceIdentity
 
     bool set(const std::string& newMapFile, const std::string& newInstanceId)
     {
-        if (!isSafeMapFile(newMapFile) || !isSafeInstanceId(newInstanceId))
+        if (newMapFile.find('/') != std::string::npos
+            || newMapFile.find('\\') != std::string::npos
+            || newMapFile.find("..") != std::string::npos)
         {
             return false;
         }
-        if (mapFile != newMapFile || instanceId != newInstanceId)
+        const std::string canonicalFile = canonicalMapFile(newMapFile);
+        if (!isSafeMapFile(canonicalFile) || !isSafeInstanceId(newInstanceId))
         {
-            mapFile = newMapFile;
+            return false;
+        }
+        if (mapFile != canonicalFile || instanceId != newInstanceId)
+        {
+            mapFile = canonicalFile;
             instanceId = newInstanceId;
             ++revision;
         }

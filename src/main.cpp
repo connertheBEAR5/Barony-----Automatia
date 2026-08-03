@@ -537,6 +537,8 @@ char headlessServerName[64] = "Barony Dedicated Server";
 char headlessServerPassword[128] = "";
 bool headlessAutoStart = false;
 Uint32 headlessAutoStartDelaySeconds = 0;
+Uint32 headlessAutosaveIntervalSeconds = 0;
+int headlessSaveSlot = -1;
 
 //Entity *players[4];
 

@@ -17,13 +17,17 @@ Public mode needs explicit Steam/EOS/platform lobby registration, server
 identity, removal on shutdown, stale-listing recovery, and abuse controls.
 Opening a UDP socket is not public-listing support.
 
-3. LATE JOIN
-------------
-Late join requires a versioned authoritative snapshot. At minimum it must send
-map identity and seed, tiles, entity creation/state, mechanisms, active players,
-followers, inventories, shops, containers, quests/dialogue, persistent IDs,
-and every custom item by S.A.M. stable_id. The snapshot needs sequencing,
-acknowledgement, delta buffering, timeout handling, and catalog validation.
+3. LATE JOIN REMAINING ACCEPTANCE AND SECURITY
+----------------------------------------------
+The explicit direct-connect LAN path now has a versioned, bounded authoritative
+map-instance snapshot; per-chunk and whole-transfer checksums; reliable
+begin/data/complete records; S.A.M. fingerprint validation; and a
+ready/authorize/client-go barrier before live output. It is build- and
+foundation-tested, not yet live-verified. Required remaining work includes a
+real server/two-client run, loss/reordering and timeout stress, incremental delta
+catch-up, malformed-client testing, Windows coverage, P2P transport integration,
+and durable authenticated reconnect identity. Public or password-protected late
+join must remain unavailable until their authentication requirements are met.
 
 4. TRUE RENDERLESS STARTUP
 --------------------------
@@ -33,9 +37,13 @@ short simulated session with no DISPLAY/Wayland server.
 
 5. SAVE AND RESTART RECOVERY
 ----------------------------
-Implement this with the final persistent-world save system. Use atomic temporary
-writes plus rename, schema versions, checksums, migrations, stable IDs, unknown
-custom-item preservation, and clean-shutdown markers.
+The numeric-slot Linux LAN path uses the versioned persistent-world companion,
+atomic temporary write plus rename, stable custom-item identity, graceful
+shutdown save, and fail-closed validation. A single-map FMOD
+start/save/restart/resave acceptance cycle passes. Remaining work is divergent-
+player recovery, unknown-item removal/rehydration acceptance, corrupted-save
+fixtures, clean-shutdown/crash markers, migration coverage, and Windows runtime
+verification.
 
 6. TESTING
 ----------

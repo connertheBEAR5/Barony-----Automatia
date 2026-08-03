@@ -11,6 +11,9 @@ See LICENSE for details.
 
 
 #include "entity.hpp"
+#ifndef EDITOR
+#include "world_state.hpp"
+#endif
 Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creaturelist) :
 	lightBonus(0.f),
 	chanceToPutOutFire(skill[37]),
@@ -497,23 +500,36 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	{
 		flags[c] = false;
 	}
-	if ( entlist != nullptr && entlist == map.entities )
-	{
-		if ( multiplayer != CLIENT || loading )
-		{
-			uid = entity_uids;
-			entity_uids++;
-			map.entities_map.insert({ uid, mynode });
-		}
-		else
-		{
-			uid = -2;
-		}
-	}
-	else
-	{
-		uid = -2;
-	}
+    map_t* owner = nullptr;
+    if (entlist && entlist == map.entities)
+    {
+        owner = &map;
+    }
+#ifndef EDITOR
+    if (!owner)
+    {
+        owner = worldState.mapForEntities(entlist);
+    }
+#endif
+    if (owner && (multiplayer != CLIENT || loading))
+    {
+#ifndef EDITOR
+        MapInstance* instance = worldState.instanceFor(*owner);
+        if (owner != &map && instance)
+        {
+            uid = instance->nextEntityUid++;
+        }
+        else
+#endif
+        {
+            uid = entity_uids++;
+        }
+        owner->entities_map.insert({uid, mynode});
+    }
+    else
+    {
+        uid = -2;
+    }
 	behavior = nullptr;
 	ranbehavior = false;
 	parent = 0;
