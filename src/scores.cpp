@@ -25,10 +25,14 @@
 #include "sys/stat.h"
 #include "paths.hpp"
 #include "collision.hpp"
+#include "classdescriptions.hpp"
 #include "mod_tools.hpp"
 #include "lobbies.hpp"
 #include "shops.hpp"
 #include "world_state.hpp"
+#ifdef STEAMWORKS
+#include <steam/steam_api.h>
+#endif
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #endif
@@ -37,6 +41,15 @@
 #endif
 
 #include <ctime>
+#include <atomic>
+#include <cctype>
+#include <cstdint>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 
 namespace
 {
@@ -104,6 +117,899 @@ namespace
             && worldDocument["session_id"].get<std::string>()
                 == std::to_string(characterSave.gamekey);
     }
+
+
+    constexpr std::size_t AUTOMATIA_CHARACTER_SAVE_MAX_BYTES =
+        4U * 1024U * 1024U;
+    constexpr const char* AUTOMATIA_CHARACTER_SAVE_FORMAT_KEY =
+        "automatia_character_save_format";
+    constexpr const char* AUTOMATIA_CHARACTER_SAVE_FORMAT_VALUE =
+        "barony_automatia_character_v1";
+    constexpr const char* AUTOMATIA_CHARACTER_SAVE_MODE_KEY =
+        "automatia_character_identity_mode";
+    constexpr const char* AUTOMATIA_CHARACTER_SAVE_ID_KEY =
+        "automatia_character_identity";
+    constexpr const char* AUTOMATIA_CHARACTER_MAP_FILE_KEY =
+        "automatia_character_map_file";
+    constexpr const char* AUTOMATIA_CHARACTER_INSTANCE_ID_KEY =
+        "automatia_character_instance_id";
+    constexpr const char* AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY =
+        "automatia_character_instance_revision";
+    constexpr const char* AUTOMATIA_CHARACTER_POSITION_X_KEY =
+        "automatia_character_position_x";
+    constexpr const char* AUTOMATIA_CHARACTER_POSITION_Y_KEY =
+        "automatia_character_position_y";
+    constexpr const char* AUTOMATIA_CHARACTER_POSITION_Z_KEY =
+        "automatia_character_position_z";
+    constexpr const char* AUTOMATIA_CHARACTER_ROTATION_YAW_KEY =
+        "automatia_character_rotation_yaw";
+    constexpr const char* AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY =
+        "automatia_character_rotation_pitch";
+    constexpr const char* AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY =
+        "automatia_character_rotation_roll";
+    constexpr const char* AUTOMATIA_CHARACTER_POLYMORPH_KEY =
+        "automatia_character_effect_polymorph";
+    constexpr const char* AUTOMATIA_CHARACTER_SHAPESHIFT_KEY =
+        "automatia_character_effect_shapeshift";
+
+    struct AutomatiaCharacterRuntimeState
+    {
+        std::string identity;
+        WorldInstanceIdentity worldIdentity;
+        real_t x = 0.0;
+        real_t y = 0.0;
+        real_t z = 0.0;
+        real_t yaw = 0.0;
+        real_t pitch = 0.0;
+        real_t roll = 0.0;
+        Sint32 effectPolymorph = NOTHING;
+        Sint32 effectShapeshift = NOTHING;
+        bool valid = false;
+    };
+
+    AutomatiaCharacterRuntimeState
+        automatiaCharacterRuntimeState[MAXPLAYERS];
+
+    std::string trimAndLowerCharacterIdentity(const char* text)
+    {
+        std::string result = text ? text : "";
+        const auto isSpace = [](unsigned char character)
+        {
+            return std::isspace(character) != 0;
+        };
+        while (!result.empty()
+            && isSpace(static_cast<unsigned char>(result.front())))
+        {
+            result.erase(result.begin());
+        }
+        while (!result.empty()
+            && isSpace(static_cast<unsigned char>(result.back())))
+        {
+            result.pop_back();
+        }
+        for (char& character : result)
+        {
+            character = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(character)));
+        }
+        return result;
+    }
+
+    std::string hexadecimalCharacterIdentity(const std::string& identity)
+    {
+        static constexpr char hex[] = "0123456789abcdef";
+        std::string encoded;
+        encoded.reserve(identity.size() * 2);
+        for (const unsigned char character : identity)
+        {
+            encoded.push_back(hex[(character >> 4U) & 0x0fU]);
+            encoded.push_back(hex[character & 0x0fU]);
+        }
+        return encoded;
+    }
+
+    const char* characterSaveModeName(CharacterSaveMode mode)
+    {
+        switch (mode)
+        {
+            case CharacterSaveMode::LOCAL:
+                return "local";
+            case CharacterSaveMode::STEAM:
+                return "steam";
+            default:
+                return "none";
+        }
+    }
+
+    bool characterIdentityForPlayer(
+        int player,
+        CharacterSaveMode mode,
+        std::string& identity,
+        std::string& error)
+    {
+        identity.clear();
+        error.clear();
+        if (player < 0 || player >= MAXPLAYERS || !stats[player])
+        {
+            error = "player slot is not initialized";
+            return false;
+        }
+        if (mode == CharacterSaveMode::LOCAL)
+        {
+            identity = trimAndLowerCharacterIdentity(stats[player]->name);
+            if (identity.empty())
+            {
+                error = "character name is empty";
+                return false;
+            }
+            return true;
+        }
+        if (mode == CharacterSaveMode::STEAM)
+        {
+#ifdef STEAMWORKS
+            if (multiplayer == SERVER && player > 0
+                && steamIDRemote[player - 1])
+            {
+                identity = std::to_string(
+                    static_cast<CSteamID*>(steamIDRemote[player - 1])
+                        ->ConvertToUint64());
+            }
+            else if (multiplayer == CLIENT && SteamUser())
+            {
+                identity = std::to_string(
+                    SteamUser()->GetSteamID().ConvertToUint64());
+            }
+            if (!identity.empty())
+            {
+                return true;
+            }
+            error = "Steam ID is unavailable";
+#else
+            error = "this build has no Steam support";
+#endif
+            return false;
+        }
+        error = "character save mode is disabled";
+        return false;
+    }
+
+    std::filesystem::path characterSavePath(
+        CharacterSaveMode mode,
+        const std::string& identity)
+    {
+        char root[PATH_MAX] = "";
+        completePath(root, "savegames/characters", outputdir);
+        return std::filesystem::path(root)
+            / characterSaveModeName(mode)
+            / (hexadecimalCharacterIdentity(identity) + ".json");
+    }
+
+    void eraseCharacterMetadata(SaveGameInfo& info)
+    {
+        info.additional_data.erase(
+            std::remove_if(
+                info.additional_data.begin(),
+                info.additional_data.end(),
+                [](const std::pair<std::string, std::string>& value)
+                {
+                    return value.first == AUTOMATIA_CHARACTER_SAVE_FORMAT_KEY
+                        || value.first == AUTOMATIA_CHARACTER_SAVE_MODE_KEY
+                        || value.first == AUTOMATIA_CHARACTER_SAVE_ID_KEY;
+                }),
+            info.additional_data.end());
+    }
+
+    void stampCharacterMetadata(
+        SaveGameInfo& info,
+        CharacterSaveMode mode,
+        const std::string& identity)
+    {
+        eraseCharacterMetadata(info);
+        info.additional_data.emplace_back(
+            AUTOMATIA_CHARACTER_SAVE_FORMAT_KEY,
+            AUTOMATIA_CHARACTER_SAVE_FORMAT_VALUE);
+        info.additional_data.emplace_back(
+            AUTOMATIA_CHARACTER_SAVE_MODE_KEY,
+            characterSaveModeName(mode));
+        info.additional_data.emplace_back(
+            AUTOMATIA_CHARACTER_SAVE_ID_KEY,
+            identity);
+    }
+
+    bool findCharacterMetadata(
+        const SaveGameInfo& info,
+        const char* key,
+        std::string& value)
+    {
+        for (const auto& entry : info.additional_data)
+        {
+            if (entry.first == key)
+            {
+                value = entry.second;
+                return true;
+            }
+        }
+        value.clear();
+        return false;
+    }
+
+
+    void setCharacterMetadata(
+        SaveGameInfo& info,
+        const char* key,
+        const std::string& value)
+    {
+        for (auto& entry : info.additional_data)
+        {
+            if (entry.first == key)
+            {
+                entry.second = value;
+                return;
+            }
+        }
+        info.additional_data.emplace_back(key, value);
+    }
+
+    bool isCharacterRuntimeMetadataKey(const std::string& key)
+    {
+        return key == AUTOMATIA_CHARACTER_MAP_FILE_KEY
+            || key == AUTOMATIA_CHARACTER_INSTANCE_ID_KEY
+            || key == AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY
+            || key == AUTOMATIA_CHARACTER_POSITION_X_KEY
+            || key == AUTOMATIA_CHARACTER_POSITION_Y_KEY
+            || key == AUTOMATIA_CHARACTER_POSITION_Z_KEY
+            || key == AUTOMATIA_CHARACTER_ROTATION_YAW_KEY
+            || key == AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY
+            || key == AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY
+            || key == AUTOMATIA_CHARACTER_POLYMORPH_KEY
+            || key == AUTOMATIA_CHARACTER_SHAPESHIFT_KEY;
+    }
+
+    void eraseCharacterRuntimeMetadata(SaveGameInfo& info)
+    {
+        info.additional_data.erase(
+            std::remove_if(
+                info.additional_data.begin(),
+                info.additional_data.end(),
+                [](const std::pair<std::string, std::string>& value)
+                {
+                    return isCharacterRuntimeMetadataKey(value.first);
+                }),
+            info.additional_data.end());
+    }
+
+    std::string characterRealMetadata(real_t value)
+    {
+        std::ostringstream output;
+        output << std::setprecision(
+            std::numeric_limits<real_t>::max_digits10) << value;
+        return output.str();
+    }
+
+    bool parseCharacterRealMetadata(
+        const SaveGameInfo& info,
+        const char* key,
+        real_t& value)
+    {
+        std::string text;
+        if (!findCharacterMetadata(info, key, text) || text.empty())
+        {
+            return false;
+        }
+        try
+        {
+            std::size_t consumed = 0;
+            const double parsed = std::stod(text, &consumed);
+            if (consumed != text.size() || !std::isfinite(parsed))
+            {
+                return false;
+            }
+            value = static_cast<real_t>(parsed);
+            return std::isfinite(static_cast<double>(value));
+        }
+        catch (const std::exception&)
+        {
+            return false;
+        }
+    }
+
+    bool parseCharacterSint32Metadata(
+        const SaveGameInfo& info,
+        const char* key,
+        Sint32& value)
+    {
+        std::string text;
+        if (!findCharacterMetadata(info, key, text) || text.empty())
+        {
+            return false;
+        }
+        try
+        {
+            std::size_t consumed = 0;
+            const long long parsed = std::stoll(text, &consumed, 10);
+            if (consumed != text.size()
+                || parsed < std::numeric_limits<Sint32>::min()
+                || parsed > std::numeric_limits<Sint32>::max())
+            {
+                return false;
+            }
+            value = static_cast<Sint32>(parsed);
+            return true;
+        }
+        catch (const std::exception&)
+        {
+            return false;
+        }
+    }
+
+    bool parseCharacterUint64Metadata(
+        const SaveGameInfo& info,
+        const char* key,
+        Uint64& value)
+    {
+        std::string text;
+        if (!findCharacterMetadata(info, key, text) || text.empty())
+        {
+            return false;
+        }
+        try
+        {
+            std::size_t consumed = 0;
+            const unsigned long long parsed =
+                std::stoull(text, &consumed, 10);
+            if (consumed != text.size())
+            {
+                return false;
+            }
+            value = static_cast<Uint64>(parsed);
+            return true;
+        }
+        catch (const std::exception&)
+        {
+            return false;
+        }
+    }
+
+    void stampCharacterRuntimeMetadata(
+        SaveGameInfo& info,
+        int player,
+        const std::string& identity)
+    {
+        eraseCharacterRuntimeMetadata(info);
+        if (player < 0 || player >= MAXPLAYERS
+            || info.players.empty())
+        {
+            return;
+        }
+
+        const AutomatiaCharacterRuntimeState& runtime =
+            automatiaCharacterRuntimeState[player];
+        if (!runtime.valid || runtime.identity != identity
+            || !runtime.worldIdentity.isValid())
+        {
+            return;
+        }
+
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_MAP_FILE_KEY,
+            runtime.worldIdentity.mapFile);
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_INSTANCE_ID_KEY,
+            runtime.worldIdentity.instanceId);
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY,
+            std::to_string(runtime.worldIdentity.revision));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_POSITION_X_KEY,
+            characterRealMetadata(runtime.x));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_POSITION_Y_KEY,
+            characterRealMetadata(runtime.y));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_POSITION_Z_KEY,
+            characterRealMetadata(runtime.z));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_ROTATION_YAW_KEY,
+            characterRealMetadata(runtime.yaw));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY,
+            characterRealMetadata(runtime.pitch));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY,
+            characterRealMetadata(runtime.roll));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_POLYMORPH_KEY,
+            std::to_string(runtime.effectPolymorph));
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_SHAPESHIFT_KEY,
+            std::to_string(runtime.effectShapeshift));
+
+        SaveGameInfo::Player::stat_t& savedStats =
+            info.players[0].stats;
+        if (stats[player])
+        {
+            savedStats.type = stats[player]->type;
+        }
+        constexpr std::size_t miscFlagCount =
+            sizeof(Stat::MISC_FLAGS) / sizeof(Stat::MISC_FLAGS[0]);
+        if (savedStats.MISC_FLAGS.size() < miscFlagCount)
+        {
+            savedStats.MISC_FLAGS.resize(miscFlagCount, 0);
+        }
+        savedStats.MISC_FLAGS[5] = runtime.effectPolymorph;
+        savedStats.MISC_FLAGS[13] = runtime.effectShapeshift;
+    }
+
+    Sint32 savedCharacterPolymorphTarget(
+        const SaveGameInfo& info,
+        int savedPlayerIndex)
+    {
+        Sint32 target = NOTHING;
+        if (parseCharacterSint32Metadata(
+                info, AUTOMATIA_CHARACTER_POLYMORPH_KEY, target))
+        {
+            return target;
+        }
+
+        const SaveGameInfo::Player::stat_t& savedStats =
+            info.players[savedPlayerIndex].stats;
+        if (savedStats.MISC_FLAGS.size() > 5
+            && savedStats.MISC_FLAGS[5] != NOTHING)
+        {
+            return savedStats.MISC_FLAGS[5];
+        }
+        if (savedStats.EFFECTS.size() > EFF_POLYMORPH
+            && savedStats.EFFECTS[EFF_POLYMORPH] != 0)
+        {
+            if (savedStats.type == HUMAN)
+            {
+                const int appearance = std::max(
+                    0,
+                    std::min(
+                        static_cast<int>(NUMAPPEARANCES) - 1,
+                        static_cast<int>(
+                            savedStats.statscore_appearance)));
+                return 100 + appearance;
+            }
+            if (savedStats.type > NOTHING
+                && savedStats.type < NUMMONSTERS)
+            {
+                return static_cast<Sint32>(savedStats.type);
+            }
+        }
+        return NOTHING;
+    }
+
+    Sint32 savedCharacterShapeshiftTarget(
+        const SaveGameInfo& info,
+        int savedPlayerIndex)
+    {
+        Sint32 target = NOTHING;
+        if (parseCharacterSint32Metadata(
+                info, AUTOMATIA_CHARACTER_SHAPESHIFT_KEY, target))
+        {
+            return target;
+        }
+        const SaveGameInfo::Player::stat_t& savedStats =
+            info.players[savedPlayerIndex].stats;
+        if (savedStats.MISC_FLAGS.size() > 13)
+        {
+            return savedStats.MISC_FLAGS[13];
+        }
+        return NOTHING;
+    }
+
+    void applyCharacterTransientState(
+        const SaveGameInfo& info,
+        int player,
+        int savedPlayerIndex)
+    {
+        if (player < 0 || player >= MAXPLAYERS
+            || savedPlayerIndex < 0
+            || savedPlayerIndex >= static_cast<int>(info.players.size())
+            || !stats[player])
+        {
+            return;
+        }
+
+        const SaveGameInfo::Player::stat_t& savedStats =
+            info.players[savedPlayerIndex].stats;
+        stats[player]->type =
+            static_cast<Monster>(savedStats.type);
+
+        const Sint32 polymorphTarget =
+            savedCharacterPolymorphTarget(info, savedPlayerIndex);
+        const Sint32 shapeshiftTarget =
+            savedCharacterShapeshiftTarget(info, savedPlayerIndex);
+
+        if (stats[player]->getEffectActive(EFF_POLYMORPH))
+        {
+            stats[player]->playerPolymorphStorage = polymorphTarget;
+        }
+        else
+        {
+            stats[player]->playerPolymorphStorage = NOTHING;
+        }
+        if (stats[player]->getEffectActive(EFF_SHAPESHIFT))
+        {
+            stats[player]->playerShapeshiftStorage = shapeshiftTarget;
+        }
+        else
+        {
+            stats[player]->playerShapeshiftStorage = NOTHING;
+        }
+
+        if (!players[player] || !players[player]->entity)
+        {
+            return;
+        }
+
+        Entity* entity = players[player]->entity;
+        entity->effectPolymorph =
+            stats[player]->getEffectActive(EFF_POLYMORPH)
+                ? stats[player]->playerPolymorphStorage
+                : NOTHING;
+        entity->effectShapeshift =
+            stats[player]->getEffectActive(EFF_SHAPESHIFT)
+                ? stats[player]->playerShapeshiftStorage
+                : NOTHING;
+        entity->bNeedsRenderPositionInit = true;
+        for (Entity* bodypart : entity->bodyparts)
+        {
+            if (bodypart)
+            {
+                bodypart->bNeedsRenderPositionInit = true;
+            }
+        }
+
+        if (multiplayer == SERVER)
+        {
+            serverUpdateEntitySkill(entity, 50);
+            serverUpdateEntitySkill(entity, 53);
+            serverUpdateEffects(player);
+        }
+    }
+
+    bool stageCharacterPlacementFromMetadata(
+        const SaveGameInfo& info,
+        int player)
+    {
+        std::string mapFile;
+        std::string instanceId;
+        if (!findCharacterMetadata(
+                info, AUTOMATIA_CHARACTER_MAP_FILE_KEY, mapFile)
+            || !findCharacterMetadata(
+                info, AUTOMATIA_CHARACTER_INSTANCE_ID_KEY, instanceId))
+        {
+            return false;
+        }
+
+        real_t x = 0.0;
+        real_t y = 0.0;
+        real_t z = 0.0;
+        real_t yaw = 0.0;
+        real_t pitch = 0.0;
+        real_t roll = 0.0;
+        Uint64 revision = 0;
+        if (!parseCharacterRealMetadata(
+                info, AUTOMATIA_CHARACTER_POSITION_X_KEY, x)
+            || !parseCharacterRealMetadata(
+                info, AUTOMATIA_CHARACTER_POSITION_Y_KEY, y)
+            || !parseCharacterRealMetadata(
+                info, AUTOMATIA_CHARACTER_POSITION_Z_KEY, z))
+        {
+            return false;
+        }
+        (void)parseCharacterRealMetadata(
+            info, AUTOMATIA_CHARACTER_ROTATION_YAW_KEY, yaw);
+        (void)parseCharacterRealMetadata(
+            info, AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY, pitch);
+        (void)parseCharacterRealMetadata(
+            info, AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY, roll);
+        (void)parseCharacterUint64Metadata(
+            info, AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY, revision);
+
+        return stageAutomatiaCharacterSavedPlacement(
+            player,
+            mapFile,
+            instanceId,
+            revision,
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
+            roll);
+    }
+
+    bool validateCharacterSaveInfo(
+        const SaveGameInfo& info,
+        CharacterSaveMode mode,
+        const std::string& identity,
+        std::string& error)
+    {
+        if (info.magic_cookie != "BARONYJSONSAVE"
+            || info.game_version < 410
+            || info.players.size() != 1
+            || info.players_connected.size() != 1
+            || !info.players_connected[0]
+            || info.player_num != 0)
+        {
+            error = "character save has an invalid structure";
+            return false;
+        }
+        std::string format;
+        std::string savedMode;
+        std::string savedIdentity;
+        if (!findCharacterMetadata(
+                info, AUTOMATIA_CHARACTER_SAVE_FORMAT_KEY, format)
+            || format != AUTOMATIA_CHARACTER_SAVE_FORMAT_VALUE
+            || !findCharacterMetadata(
+                info, AUTOMATIA_CHARACTER_SAVE_MODE_KEY, savedMode)
+            || savedMode != characterSaveModeName(mode)
+            || !findCharacterMetadata(
+                info, AUTOMATIA_CHARACTER_SAVE_ID_KEY, savedIdentity)
+            || savedIdentity != identity)
+        {
+            error = "character save identity metadata does not match";
+            return false;
+        }
+        Uint32 computedHash = 0;
+        SaveGameInfo hashCopy = info;
+        hashCopy.computeHash(0, computedHash);
+        if (computedHash != info.hash)
+        {
+            error = "character save hash does not match";
+            return false;
+        }
+        return true;
+    }
+
+    std::filesystem::path characterTransferTemporaryPath(int player)
+    {
+        static std::atomic<Uint64> transferSerial{0};
+        char root[PATH_MAX] = "";
+        completePath(root, "savegames/characters/.transfer", outputdir);
+        std::ostringstream filename;
+        filename << "character-" << player
+            << '-' << SDL_GetTicks()
+            << '-' << std::hex
+            << reinterpret_cast<std::uintptr_t>(&transferSerial)
+            << '-' << ++transferSerial
+            << ".tmp";
+        return std::filesystem::path(root)
+            / filename.str();
+    }
+
+    bool saveInfoToBytes(
+        const SaveGameInfo& info,
+        int player,
+        std::string& payload,
+        std::string& error)
+    {
+        payload.clear();
+        const std::filesystem::path temporary =
+            characterTransferTemporaryPath(player);
+        std::error_code filesystemError;
+        std::filesystem::create_directories(
+            temporary.parent_path(), filesystemError);
+        if (filesystemError)
+        {
+            error = "could not create the character transfer directory";
+            return false;
+        }
+        SaveGameInfo writableInfo = info;
+        if (!FileHelper::writeObject(
+                temporary.string().c_str(),
+                EFileFormat::Json_Compact,
+                writableInfo))
+        {
+            std::filesystem::remove(temporary, filesystemError);
+            error = "could not serialize character data";
+            return false;
+        }
+        std::ifstream input(temporary, std::ios::binary);
+        if (!input.is_open())
+        {
+            std::filesystem::remove(temporary, filesystemError);
+            error = "could not reopen serialized character data";
+            return false;
+        }
+        payload.assign(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>());
+        input.close();
+        std::filesystem::remove(temporary, filesystemError);
+        if (payload.empty()
+            || payload.size() > AUTOMATIA_CHARACTER_SAVE_MAX_BYTES)
+        {
+            payload.clear();
+            error = "serialized character data is empty or exceeds 4 MiB";
+            return false;
+        }
+        return true;
+    }
+
+    bool loadInfoFromBytes(
+        const std::string& payload,
+        int player,
+        SaveGameInfo& info,
+        std::string& error)
+    {
+        if (payload.empty()
+            || payload.size() > AUTOMATIA_CHARACTER_SAVE_MAX_BYTES)
+        {
+            error = "character transfer is empty or exceeds 4 MiB";
+            return false;
+        }
+        const std::filesystem::path temporary =
+            characterTransferTemporaryPath(player);
+        std::error_code filesystemError;
+        std::filesystem::create_directories(
+            temporary.parent_path(), filesystemError);
+        if (filesystemError)
+        {
+            error = "could not create the character transfer directory";
+            return false;
+        }
+        {
+            std::ofstream output(
+                temporary, std::ios::binary | std::ios::trunc);
+            output.write(payload.data(),
+                static_cast<std::streamsize>(payload.size()));
+            if (!output.good())
+            {
+                output.close();
+                std::filesystem::remove(temporary, filesystemError);
+                error = "could not stage received character data";
+                return false;
+            }
+        }
+        const bool read = FileHelper::readObject(
+            temporary.string().c_str(), info);
+        std::filesystem::remove(temporary, filesystemError);
+        if (!read)
+        {
+            error = "received character data could not be parsed";
+            return false;
+        }
+        return true;
+    }
+
+    bool writeCharacterSaveFile(
+        const SaveGameInfo& info,
+        CharacterSaveMode mode,
+        const std::string& identity,
+        std::string& error)
+    {
+        const std::filesystem::path destination =
+            characterSavePath(mode, identity);
+        const std::filesystem::path temporary =
+            destination.string() + ".tmp";
+        std::error_code filesystemError;
+        std::filesystem::create_directories(
+            destination.parent_path(), filesystemError);
+        if (filesystemError)
+        {
+            error = "could not create the character save directory";
+            return false;
+        }
+        SaveGameInfo writableInfo = info;
+        if (!FileHelper::writeObject(
+                temporary.string().c_str(),
+                EFileFormat::Json_Compact,
+                writableInfo))
+        {
+            std::filesystem::remove(temporary, filesystemError);
+            error = "could not write the temporary character save";
+            return false;
+        }
+        std::filesystem::rename(temporary, destination, filesystemError);
+        if (filesystemError)
+        {
+            filesystemError.clear();
+            std::filesystem::remove(destination, filesystemError);
+            filesystemError.clear();
+            std::filesystem::rename(temporary, destination, filesystemError);
+        }
+        if (filesystemError)
+        {
+            std::filesystem::remove(temporary, filesystemError);
+            error = "could not replace the character save atomically";
+            return false;
+        }
+        return true;
+    }
+}
+
+bool captureAutomatiaCharacterSaveRuntimeState(int player)
+{
+    if (multiplayer != SERVER
+        || characterSaveMode == CharacterSaveMode::NONE
+        || player <= 0 || player >= MAXPLAYERS
+        || !stats[player] || !players[player]
+        || !players[player]->entity)
+    {
+        return false;
+    }
+
+    std::string identity;
+    std::string error;
+    if (!characterIdentityForPlayer(
+            player, characterSaveMode, identity, error))
+    {
+        return false;
+    }
+
+    WorldInstanceIdentity identityState =
+        players[player]->worldInstance;
+    if (!identityState.isValid())
+    {
+        const WorldInstanceIdentity* active =
+            worldState.activeIdentity();
+        if (!active || !active->isValid())
+        {
+            return false;
+        }
+        identityState = *active;
+    }
+
+    Entity* entity = players[player]->entity;
+    AutomatiaCharacterRuntimeState& runtime =
+        automatiaCharacterRuntimeState[player];
+    runtime.identity = identity;
+    runtime.worldIdentity = identityState;
+    runtime.x = entity->x;
+    runtime.y = entity->y;
+    runtime.z = entity->z;
+    runtime.yaw = entity->yaw;
+    runtime.pitch = entity->pitch;
+    runtime.roll = entity->roll;
+    runtime.effectPolymorph = entity->effectPolymorph;
+    runtime.effectShapeshift = entity->effectShapeshift;
+    if (stats[player]->getEffectActive(EFF_POLYMORPH)
+        && runtime.effectPolymorph == NOTHING)
+    {
+        runtime.effectPolymorph =
+            stats[player]->playerPolymorphStorage;
+    }
+    if (stats[player]->getEffectActive(EFF_SHAPESHIFT)
+        && runtime.effectShapeshift == NOTHING)
+    {
+        runtime.effectShapeshift =
+            stats[player]->playerShapeshiftStorage;
+    }
+    runtime.valid =
+        std::isfinite(static_cast<double>(runtime.x))
+        && std::isfinite(static_cast<double>(runtime.y))
+        && std::isfinite(static_cast<double>(runtime.z))
+        && std::isfinite(static_cast<double>(runtime.yaw))
+        && std::isfinite(static_cast<double>(runtime.pitch))
+        && std::isfinite(static_cast<double>(runtime.roll));
+
+    if (runtime.valid)
+    {
+        printlog(
+            "[Character Save] Captured player %d location in '%s' "
+            "at %.2f, %.2f, %.2f.",
+            player,
+            runtime.worldIdentity.key().c_str(),
+            runtime.x,
+            runtime.y,
+            runtime.z);
+    }
+    return runtime.valid;
 }
 
 // definitions
@@ -5803,14 +6709,37 @@ int SaveGameInfo::populateFromSession(const int playernum)
 	info->players.resize(MAXPLAYERS);
 	for ( int c = 0; c < MAXPLAYERS; ++c ) {
 		const bool dormantAutomatiaPlayer =
-			headless && multiplayer == SERVER
+			characterSaveMode == CharacterSaveMode::NONE
+			&& headless && multiplayer == SERVER
 			&& automatiaHasSavedPlayerPlacement(c);
-		info->players_connected[c] = dormantAutomatiaPlayer
-			|| !(client_disconnected[c] && !::players[c]->was_connected_to_game)
-			? 1 : 0;
+		if (headless && multiplayer == SERVER
+			&& characterSaveMode != CharacterSaveMode::NONE)
+		{
+			// Per-character files own remote character persistence. A normal
+			// world save must not reserve disconnected slots or resurrect bodies.
+			info->players_connected[c] =
+				(c == 0 || !client_disconnected[c]) ? 1 : 0;
+		}
+		else
+		{
+			info->players_connected[c] = dormantAutomatiaPlayer
+				|| !(client_disconnected[c]
+					&& !::players[c]->was_connected_to_game)
+				? 1 : 0;
+		}
 		if ( info->players_connected[c] ) {
 			auto& player = info->players[c];
 			player.reconnect_token = automatiaReconnectTokens[c];
+#ifdef STEAMWORKS
+			if ( characterSaveMode == CharacterSaveMode::STEAM
+				&& c > 0
+				&& steamIDRemote[c - 1] )
+			{
+				player.steam_id = std::to_string(
+					static_cast<CSteamID*>(steamIDRemote[c - 1])->ConvertToUint64()
+				);
+			}
+#endif
 			player.char_class = client_classes[c];
 			player.race = stats[c]->playerRace;
 
@@ -6771,6 +7700,7 @@ int loadGame(int player, const SaveGameInfo& info) {
 	stringCopy(stats[statsPlayer]->name, p.name.c_str(), sizeof(Stat::name), p.name.size());
 	stats[statsPlayer]->sex = static_cast<sex_t>(p.sex);
 	stats[statsPlayer]->stat_appearance = p.statscore_appearance;
+	stats[statsPlayer]->type = static_cast<Monster>(p.type);
 	stats[statsPlayer]->HP = p.HP;
 	stats[statsPlayer]->MAXHP = p.maxHP;
 	stats[statsPlayer]->MP = p.MP;
@@ -7146,6 +8076,647 @@ int loadGame(int player, const SaveGameInfo& info) {
 	}
 
 	return 0;
+}
+
+int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPlayerIndex)
+{
+	if (player < 0 || player >= MAXPLAYERS)
+	{
+		printlog("restoreAutomatiaCharacter() failed: invalid player index");
+		return 1;
+	}
+	if (savedPlayerIndex < 0
+		|| savedPlayerIndex >= static_cast<int>(info.players.size()))
+	{
+		printlog("restoreAutomatiaCharacter() failed: invalid saved player index");
+		return 1;
+	}
+	if (info.magic_cookie != "BARONYJSONSAVE")
+	{
+		printlog("restoreAutomatiaCharacter() failed: magic cookie is incorrect");
+		return 1;
+	}
+	if (!stats[player] || !players[player])
+	{
+		printlog("restoreAutomatiaCharacter() failed: player slot is not initialized");
+		return 1;
+	}
+
+	const int statsPlayer = player;
+	stats[statsPlayer]->clearStats();
+
+	// load player data
+	client_classes[statsPlayer] = info.players[savedPlayerIndex].char_class;
+	stats[statsPlayer]->playerRace = info.players[savedPlayerIndex].race;
+	// read spells
+	players[statsPlayer]->magic.clearSelectedSpells();
+	list_FreeAll(&players[statsPlayer]->magic.spellList);
+	Uint32 spellIndex = 0;
+	for (auto& s : info.players[savedPlayerIndex].spells)
+	{
+		spell_t* spell = copySpell(getSpellFromID(s));
+		node_t* node = list_AddNodeLast(&players[statsPlayer]->magic.spellList);
+		node->element = spell;
+		node->deconstructor = &spellDeconstructor;
+		node->size = sizeof(spell);
+
+		if (info.players[savedPlayerIndex].selected_spell == spellIndex)
+		{
+			players[statsPlayer]->magic.equipSpell(spell);
+		}
+		for (int i = 0; i < NUM_HOTBAR_ALTERNATES; ++i)
+		{
+			if (info.players[savedPlayerIndex].selected_spell_alternate[i] == spellIndex)
+			{
+				players[statsPlayer]->magic.selected_spell_alternate[i] = spell;
+			}
+		}
+		++spellIndex;
+	}
+	players[statsPlayer]->magic.selected_spell_last_appearance =
+		info.players[savedPlayerIndex].selected_spell_last_appearance;
+
+	// read alchemy recipes
+	clientLearnedAlchemyRecipes[statsPlayer].clear();
+	for (auto& r : info.players[savedPlayerIndex].known_recipes)
+	{
+		clientLearnedAlchemyRecipes[statsPlayer].push_back(r);
+	}
+
+	// read scroll labels
+	clientLearnedScrollLabels[statsPlayer].clear();
+	for (auto& s : info.players[savedPlayerIndex].known_scrolls)
+	{
+		clientLearnedScrollLabels[statsPlayer].insert(s);
+	}
+
+	// player stats
+	auto& p = info.players[savedPlayerIndex].stats;
+	stringCopy(stats[statsPlayer]->name, p.name.c_str(), sizeof(Stat::name), p.name.size());
+	stats[statsPlayer]->sex = static_cast<sex_t>(p.sex);
+	stats[statsPlayer]->stat_appearance = p.statscore_appearance;
+	stats[statsPlayer]->HP = p.HP;
+	stats[statsPlayer]->MAXHP = p.maxHP;
+	stats[statsPlayer]->MP = p.MP;
+	stats[statsPlayer]->MAXMP = p.maxMP;
+	stats[statsPlayer]->STR = p.STR;
+	stats[statsPlayer]->DEX = p.DEX;
+	stats[statsPlayer]->CON = p.CON;
+	stats[statsPlayer]->INT = p.INT;
+	stats[statsPlayer]->PER = p.PER;
+	stats[statsPlayer]->CHR = p.CHR;
+	stats[statsPlayer]->EXP = p.EXP;
+	stats[statsPlayer]->LVL = p.LVL;
+	stats[statsPlayer]->GOLD = p.GOLD;
+	stats[statsPlayer]->HUNGER = p.HUNGER;
+	for (int c = 0; c < NUMPROFICIENCIES && c < p.PROFICIENCIES.size(); ++c)
+	{
+		stats[statsPlayer]->setProficiency(c, p.PROFICIENCIES[c]);
+	}
+
+	for (int c = 0; c < NUMEFFECTS; ++c)
+	{
+		if (c < p.EFFECTS.size())
+		{
+			stats[statsPlayer]->setEffectValueUnsafe(c, (Uint8)p.EFFECTS[c]);
+			if (c < p.EFFECTS_TIMERS.size())
+			{
+				stats[statsPlayer]->EFFECTS_TIMERS[c] = p.EFFECTS_TIMERS[c];
+			}
+			else
+			{
+				stats[statsPlayer]->EFFECTS_TIMERS[c] = 0;
+			}
+		}
+		else
+		{
+			stats[statsPlayer]->clearEffect(c);
+			stats[statsPlayer]->EFFECTS_TIMERS[c] = 0;
+		}
+		if (c < p.EFFECTS_ACCRETION_TIME.size())
+		{
+			stats[statsPlayer]->EFFECTS_ACCRETION_TIME[c] = p.EFFECTS_ACCRETION_TIME[c];
+		}
+		else
+		{
+			stats[statsPlayer]->EFFECTS_ACCRETION_TIME[c] = 0;
+		}
+	}
+	constexpr int NUMMISCFLAGS = sizeof(Stat::MISC_FLAGS) / sizeof(Stat::MISC_FLAGS[0]);
+	for (int c = 0; c < NUMMISCFLAGS && c < p.MISC_FLAGS.size(); ++c)
+	{
+		stats[statsPlayer]->MISC_FLAGS[c] = p.MISC_FLAGS[c];
+	}
+	for (auto& loot : p.player_lootbags)
+	{
+		auto& player_lootbag = stats[statsPlayer]->player_lootbags[loot.first];
+		player_lootbag.spawn_x = loot.second.spawn_x;
+		player_lootbag.spawn_y = loot.second.spawn_y;
+		player_lootbag.spawnedOnGround = loot.second.spawnedOnGround;
+		player_lootbag.looted = loot.second.looted;
+
+		for (auto& _item : loot.second.items)
+		{
+			const int resolvedType = resolveSavedItemType(_item);
+			if (resolvedType < 0)
+			{
+				continue;
+			}
+			player_lootbag.items.push_back(Item());
+			auto& item = player_lootbag.items.back();
+			item.type = static_cast<ItemType>(resolvedType);
+			item.status = static_cast<Status>(_item.status);
+			item.beatitude = _item.beatitude;
+			item.count = _item.count;
+			item.appearance = _item.appearance;
+			item.identified = _item.identified;
+		}
+	}
+
+	players[statsPlayer]->inventoryUI.appraisal.appraisalProgressionItems.clear();
+	bool checkAppraisalProgress = players[statsPlayer]->isLocalPlayer();
+	std::map<int, int> appraisalMap;
+	if (checkAppraisalProgress)
+	{
+		for (auto& pair : info.players[savedPlayerIndex].appraisal_item_progress)
+		{
+			appraisalMap[pair.first] = pair.second;
+		}
+	}
+
+	// inventory
+	int inventory_index = -1;
+	for (auto& item : p.inventory)
+	{
+		++inventory_index;
+		const int resolvedType = resolveSavedItemType(item);
+		if (resolvedType < 0)
+		{
+			continue;
+		}
+		ItemType type = static_cast<ItemType>(resolvedType);
+		Status status = static_cast<Status>(item.status);
+		Sint16 beatitude = item.beatitude;
+		Sint16 count = item.count;
+		Uint32 appearance = item.appearance;
+		bool identified = item.identified;
+		Item* i = newItem(type, status, beatitude, count,
+			appearance, identified, &stats[statsPlayer]->inventory);
+		i->x = item.x;
+		i->y = item.y;
+
+		if (appraisalMap.find(inventory_index) != appraisalMap.end())
+		{
+			players[statsPlayer]->inventoryUI.appraisal.appraisalProgressionItems[i->uid] = appraisalMap[inventory_index];
+		}
+	}
+
+	// void chest inventory
+	for (auto& item : p.void_chest_inventory)
+	{
+		const int resolvedType = resolveSavedItemType(item);
+		if (resolvedType < 0)
+		{
+			continue;
+		}
+		ItemType type = static_cast<ItemType>(resolvedType);
+		Status status = static_cast<Status>(item.status);
+		Sint16 beatitude = item.beatitude;
+		Sint16 count = item.count;
+		Uint32 appearance = item.appearance;
+		bool identified = item.identified;
+		Item* i = newItem(type, status, beatitude, count,
+			appearance, identified, &stats[statsPlayer]->void_chest_inventory);
+		i->x = item.x;
+		i->y = item.y;
+	}
+
+	// equipment
+	const std::unordered_map<std::string, Item*&> slots = {
+		{"helmet", stats[statsPlayer]->helmet},
+		{"breastplate", stats[statsPlayer]->breastplate},
+		{"gloves", stats[statsPlayer]->gloves},
+		{"shoes", stats[statsPlayer]->shoes},
+		{"shield", stats[statsPlayer]->shield},
+		{"weapon", stats[statsPlayer]->weapon},
+		{"cloak", stats[statsPlayer]->cloak},
+		{"amulet", stats[statsPlayer]->amulet},
+		{"ring", stats[statsPlayer]->ring},
+		{"mask", stats[statsPlayer]->mask},
+	};
+	if (!p.player_equipment.empty())
+	{
+		// Character-transfer saves contain the authoritative inventory even
+		// when they are being restored into a remote server slot. Prefer the
+		// inventory-index mapping so the server and joining client equip the
+		// same actual items.
+		for (auto& item : p.player_equipment)
+		{
+			auto find = slots.find(item.first);
+			if (find == slots.end())
+			{
+				continue;
+			}
+			auto& slot = find->second;
+			auto node = list_Node(&stats[statsPlayer]->inventory, item.second);
+			slot = node ? static_cast<Item*>(node->element) : nullptr;
+		}
+	}
+	else
+	{
+		// Compatibility fallback for a save that only contains remote/NPC
+		// equipment snapshots rather than a complete player inventory.
+		for (auto& item : p.npc_equipment)
+		{
+			auto find = slots.find(item.first);
+			if (find == slots.end())
+			{
+				continue;
+			}
+			auto& slot = find->second;
+			const int resolvedType = resolveSavedItemType(item.second);
+			if (resolvedType < 0)
+			{
+				slot = nullptr;
+				continue;
+			}
+			Item* restoredItem = newItem(
+				static_cast<ItemType>(resolvedType),
+				static_cast<Status>(item.second.status),
+				item.second.beatitude,
+				item.second.count,
+				item.second.appearance,
+				item.second.identified,
+				nullptr);
+			restoredItem->x = item.second.x;
+			restoredItem->y = item.second.y;
+			slot = restoredItem;
+		}
+	}
+
+	// assign hotbar items
+	auto& hotbar = players[statsPlayer]->hotbar.slots();
+	auto& hotbar_alternate = players[statsPlayer]->hotbar.slotsAlternate();
+	for (int c = 0; c < NUM_HOTBAR_SLOTS; ++c)
+	{
+		node_t* node = list_Node(&stats[statsPlayer]->inventory,
+			info.players[savedPlayerIndex].hotbar[c]);
+		if (node)
+		{
+			Item* item = (Item*)node->element;
+			hotbar[c].item = item->uid;
+			hotbar[c].storeLastItem(item);
+		}
+		else
+		{
+			hotbar[c].item = 0;
+			hotbar[c].resetLastItem();
+		}
+
+		for (int d = 0; d < NUM_HOTBAR_ALTERNATES; ++d)
+		{
+			node_t* node = list_Node(&stats[statsPlayer]->inventory,
+				info.players[savedPlayerIndex].hotbar_alternate[d][c]);
+			if (node)
+			{
+				Item* item = (Item*)node->element;
+				hotbar_alternate[d][c].item = item->uid;
+				hotbar_alternate[d][c].storeLastItem(item);
+			}
+			else
+			{
+				hotbar_alternate[d][c].item = 0;
+				hotbar_alternate[d][c].resetLastItem();
+			}
+		}
+	}
+
+	// reset certain variables
+	list_FreeAll(&stats[statsPlayer]->FOLLOWERS);
+	stats[statsPlayer]->monster_sound = nullptr;
+	stats[statsPlayer]->monster_idlevar = 0;
+	stats[statsPlayer]->leader_uid = 0;
+
+	// shopkeeper hostility
+	{
+		auto& h = ShopkeeperPlayerHostility.playerHostility[statsPlayer];
+		h.clear();
+		for (auto& hostility : info.players[savedPlayerIndex].shopkeeperHostility)
+		{
+			h[(Uint32)hostility.first] = ShopkeeperPlayerHostility_t::PlayerRaceHostility_t();
+			h[(Uint32)hostility.first].wantedLevel = (ShopkeeperPlayerHostility_t::WantedLevel)hostility.second.wantedLevel;
+			if (info.game_version < 412)
+			{
+				if (h[(Uint32)hostility.first].wantedLevel > ShopkeeperPlayerHostility_t::NO_WANTED_LEVEL)
+				{
+					h[(Uint32)hostility.first].wantedLevel =
+						(ShopkeeperPlayerHostility_t::WantedLevel)(h[(Uint32)hostility.first].wantedLevel + 1);
+				}
+			}
+			h[(Uint32)hostility.first].playerRace = (Monster)hostility.second.playerRace;
+			if (info.game_version < 412)
+			{
+				h[(Uint32)hostility.first].type = h[(Uint32)hostility.first].playerRace;
+			}
+			else
+			{
+				h[(Uint32)hostility.first].sex = (sex_t)hostility.second.sex;
+				h[(Uint32)hostility.first].equipment = (Uint8)hostility.second.equipment;
+				h[(Uint32)hostility.first].type = (Uint32)hostility.second.type;
+			}
+			h[(Uint32)hostility.first].player = hostility.second.player;
+			h[(Uint32)hostility.first].numAggressions = hostility.second.numAggressions;
+			h[(Uint32)hostility.first].numKills = hostility.second.numKills;
+			h[(Uint32)hostility.first].numAccessories = hostility.second.numAccessories;
+		}
+	}
+
+	// compendium progress
+	{
+		auto& compendiumProgress = players[statsPlayer]->compendiumProgress;
+		compendiumProgress.itemEvents.clear();
+		for (auto& compendium_item_events : info.players[savedPlayerIndex].compendium_item_events)
+		{
+			for (auto itr = compendium_item_events.second.begin(); itr != compendium_item_events.second.end(); )
+			{
+				int first = *itr;
+				++itr;
+				if (itr != compendium_item_events.second.end())
+				{
+					Sint32 second = *itr;
+					compendiumProgress.itemEvents[compendium_item_events.first][first] = second;
+				}
+				++itr;
+			}
+		}
+	}
+
+	// player rng stuff
+	{
+		auto& mechanics = players[statsPlayer]->mechanics;
+		mechanics.itemDegradeRng.clear();
+		mechanics.learnedSpells.clear();
+		mechanics.ducksInARow.clear();
+		mechanics.favoriteBooksAchievement.clear();
+		mechanics.sustainedSpellIDCounter.clear();
+		hamletShopkeeperSkillLimit[statsPlayer].clear();
+		mechanics.baseSpellLevelUpProcs.clear();
+		mechanics.escalatingRngRolls.clear();
+		mechanics.escalatingSpellRngRolls.clear();
+		for (auto& pair : info.players[savedPlayerIndex].itemDegradeRNG)
+		{
+			mechanics.itemDegradeRng[pair.first] = pair.second;
+		}
+		for (auto learnedSpell : info.players[savedPlayerIndex].learnedSpells)
+		{
+			mechanics.learnedSpells.insert(learnedSpell);
+		}
+		for (auto& duck : info.players[savedPlayerIndex].ducksInARow)
+		{
+			mechanics.ducksInARow.push_back(duck);
+		}
+		for (auto& pair : info.players[savedPlayerIndex].favoriteBooksAchievement)
+		{
+			mechanics.favoriteBooksAchievement[pair.first] = pair.second;
+		}
+		for (auto& pair : info.players[savedPlayerIndex].sustainedSpellIDCounter)
+		{
+			mechanics.sustainedSpellIDCounter[pair.first] = pair.second;
+		}
+		for (auto& pair : info.players[savedPlayerIndex].escalatingRngRolls)
+		{
+			mechanics.escalatingRngRolls[pair.first] = pair.second;
+		}
+		for (auto& pair : info.players[savedPlayerIndex].escalatingSpellRngRolls)
+		{
+			mechanics.escalatingSpellRngRolls[pair.first] = pair.second;
+		}
+		mechanics.sustainedSpellMPUsedSorcery = info.players[savedPlayerIndex].sustainedSpellMPUsedSorcery;
+		mechanics.sustainedSpellMPUsedMysticism = info.players[savedPlayerIndex].sustainedSpellMPUsedMysticism;
+		mechanics.sustainedSpellMPUsedThaumaturgy = info.players[savedPlayerIndex].sustainedSpellMPUsedThaumaturgy;
+		mechanics.baseSpellMPUsedSorcery = info.players[savedPlayerIndex].baseSpellMPUsedSorcery;
+		mechanics.baseSpellMPUsedMysticism = info.players[savedPlayerIndex].baseSpellMPUsedMysticism;
+		mechanics.baseSpellMPUsedThaumaturgy = info.players[savedPlayerIndex].baseSpellMPUsedThaumaturgy;
+	}
+
+	return 0;
+}
+
+bool buildAutomatiaCharacterTransferPayload(
+    int player,
+    CharacterSaveMode mode,
+    std::string& payload,
+    std::string& error)
+{
+    payload.clear();
+    error.clear();
+    if (mode == CharacterSaveMode::NONE)
+    {
+        error = "character save mode is disabled";
+        return false;
+    }
+    if (player < 0 || player >= MAXPLAYERS
+        || !players[player] || !stats[player])
+    {
+        error = "player slot is not initialized";
+        return false;
+    }
+
+    std::string identity;
+    if (!characterIdentityForPlayer(player, mode, identity, error))
+    {
+        return false;
+    }
+
+    SaveGameInfo info;
+    if (info.populateFromSession(player) != 0
+        || static_cast<std::size_t>(player) >= info.players.size())
+    {
+        error = "could not capture the active character";
+        return false;
+    }
+
+    SaveGameInfo::Player savedPlayer = std::move(info.players[player]);
+    info.players.clear();
+    info.players.push_back(std::move(savedPlayer));
+    info.players_connected.assign(1, 1);
+    info.player_num = 0;
+    info.gamename = info.players[0].stats.name;
+    stampCharacterMetadata(info, mode, identity);
+    info.hash = 0;
+    info.computeHash(0, info.hash);
+    return saveInfoToBytes(info, player, payload, error);
+}
+
+bool storeAutomatiaCharacterTransferPayload(
+    int player,
+    const std::string& payload,
+    std::string& error)
+{
+    error.clear();
+    if (multiplayer != SERVER || characterSaveMode == CharacterSaveMode::NONE)
+    {
+        error = "server character saves are disabled";
+        return false;
+    }
+
+    std::string identity;
+    if (!characterIdentityForPlayer(
+            player, characterSaveMode, identity, error))
+    {
+        return false;
+    }
+
+    SaveGameInfo info;
+    if (!loadInfoFromBytes(payload, player, info, error))
+    {
+        return false;
+    }
+    if (info.magic_cookie != "BARONYJSONSAVE"
+        || info.game_version < 410
+        || info.players.size() != 1)
+    {
+        error = "received character data has an invalid structure";
+        return false;
+    }
+    if (characterSaveMode == CharacterSaveMode::LOCAL
+        && trimAndLowerCharacterIdentity(
+            info.players[0].stats.name.c_str()) != identity)
+    {
+        error = "received character name does not match the joined identity";
+        return false;
+    }
+
+    (void)captureAutomatiaCharacterSaveRuntimeState(player);
+    stampCharacterRuntimeMetadata(info, player, identity);
+
+    info.players_connected.assign(1, 1);
+    info.player_num = 0;
+    info.gamename = info.players[0].stats.name;
+#ifdef STEAMWORKS
+    if (characterSaveMode == CharacterSaveMode::STEAM)
+    {
+        info.players[0].steam_id = identity;
+    }
+#endif
+    stampCharacterMetadata(info, characterSaveMode, identity);
+    info.hash = 0;
+    info.computeHash(0, info.hash);
+    if (!writeCharacterSaveFile(
+            info, characterSaveMode, identity, error))
+    {
+        return false;
+    }
+
+    printlog(
+        "[Character Save] Stored '%s' for %s identity %s.",
+        info.players[0].stats.name.c_str(),
+        characterSaveModeName(characterSaveMode),
+        identity.c_str());
+    return true;
+}
+
+int restoreAutomatiaCharacterFromPayload(
+    int player,
+    CharacterSaveMode mode,
+    const std::string& payload,
+    std::string& error)
+{
+    error.clear();
+    std::string identity;
+    if (!characterIdentityForPlayer(player, mode, identity, error))
+    {
+        return 1;
+    }
+    SaveGameInfo info;
+    if (!loadInfoFromBytes(payload, player, info, error)
+        || !validateCharacterSaveInfo(info, mode, identity, error))
+    {
+        return 1;
+    }
+    if (restoreAutomatiaCharacter(player, info, 0) != 0)
+    {
+        return 1;
+    }
+    applyCharacterTransientState(info, player, 0);
+    return 0;
+}
+
+int restoreAutomatiaCharacterFromSave(
+    int player,
+    std::string* serializedPayload)
+{
+    if (player < 0 || player >= MAXPLAYERS
+        || characterSaveMode == CharacterSaveMode::NONE
+        || multiplayer != SERVER || !headless
+        || !stats[player] || !players[player])
+    {
+        return 1;
+    }
+
+    std::string identity;
+    std::string error;
+    if (!characterIdentityForPlayer(
+            player, characterSaveMode, identity, error))
+    {
+        printlog(
+            "[Character Save] Cannot resolve player %d identity: %s.",
+            player, error.c_str());
+        return 1;
+    }
+
+    const std::filesystem::path path =
+        characterSavePath(characterSaveMode, identity);
+    SaveGameInfo info;
+    if (!FileHelper::readObject(path.string().c_str(), info))
+    {
+        printlog(
+            "[Character Save] No saved character found for player %d ('%s').",
+            player, stats[player]->name);
+        return 1;
+    }
+    if (!validateCharacterSaveInfo(
+            info, characterSaveMode, identity, error))
+    {
+        printlog(
+            "[Character Save] Rejected '%s': %s.",
+            path.string().c_str(), error.c_str());
+        return 1;
+    }
+    if (restoreAutomatiaCharacter(player, info, 0) != 0)
+    {
+        return 1;
+    }
+    applyCharacterTransientState(info, player, 0);
+    if (stageCharacterPlacementFromMetadata(info, player))
+    {
+        printlog(
+            "[Character Save] Staged the saved map position for player %d.",
+            player);
+    }
+    else
+    {
+        printlog(
+            "[Character Save] Character '%s' has no saved map position; "
+            "using the normal late-join start.",
+            info.players[0].stats.name.c_str());
+    }
+    if (serializedPayload
+        && !saveInfoToBytes(info, player, *serializedPayload, error))
+    {
+        printlog(
+            "[Character Save] Restored player %d but could not stage client data: %s.",
+            player, error.c_str());
+        serializedPayload->clear();
+        return 1;
+    }
+    printlog(
+        "[Character Save] Restored player %d ('%s') from %s identity %s.",
+        player,
+        info.players[0].stats.name.c_str(),
+        characterSaveModeName(characterSaveMode),
+        identity.c_str());
+    return 0;
 }
 
 list_t* loadGameFollowers(const SaveGameInfo& info) {

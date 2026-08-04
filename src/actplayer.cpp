@@ -7379,6 +7379,28 @@ void actPlayer(Entity* my)
 		return;
 	}
 
+	/*
+	 * Character-save restoration may rebuild the player entity after the
+	 * effect arrays and MISC_FLAGS have already been restored. Hydrate the
+	 * entity transformation skills before the first model-selection pass so
+	 * the body is created as the saved polymorph/shapeshift instead of the
+	 * character's base race.
+	 */
+	if ( stats[PLAYER_NUM]->getEffectActive(EFF_POLYMORPH)
+		&& my->effectPolymorph == NOTHING
+		&& stats[PLAYER_NUM]->playerPolymorphStorage != NOTHING )
+	{
+		my->effectPolymorph =
+			stats[PLAYER_NUM]->playerPolymorphStorage;
+	}
+	if ( stats[PLAYER_NUM]->getEffectActive(EFF_SHAPESHIFT)
+		&& my->effectShapeshift == NOTHING
+		&& stats[PLAYER_NUM]->playerShapeshiftStorage != NOTHING )
+	{
+		my->effectShapeshift =
+			stats[PLAYER_NUM]->playerShapeshiftStorage;
+	}
+
 	Monster playerRace = HUMAN;
 	int spriteTorso = 106 + 12 * stats[PLAYER_NUM]->sex;
 	int spriteLegRight = 107 + 12 * stats[PLAYER_NUM]->sex;

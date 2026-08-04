@@ -11570,6 +11570,7 @@ bind_failed:
 				}
 			} else if (multiplayer == CLIENT) {
 				// send disconnect message to server
+				(void)clientSendAutomatiaCharacterSaveNow("leave lobby");
 				strcpy((char*)net_packet->data, "DISC");
 				net_packet->data[4] = clientnum;
 				net_packet->address.host = net_server.host;
@@ -11596,6 +11597,8 @@ bind_failed:
 		    client_disconnected[c] = true;
 	    }
 		currentLobbyType = LobbyType::None;
+        clientConnectedToDedicatedServer = false;
+        clientServerCharacterSaveMode = CharacterSaveMode::NONE;
 
 		lobbyCustomScenarioClient.clear();
 		gameModeManager.currentSession.restoreSavedServerFlags();
@@ -11911,6 +11914,20 @@ bind_failed:
 	    if (multiplayer != SERVER && multiplayer != CLIENT) {
 	        return;
 	    }
+
+		// Ready is the authoritative character-save restore trigger. Resend
+		// the current character card first so an unchanged prefilled name is
+		// still known to the server before REDY is processed.
+		if (multiplayer == CLIENT
+			&& ready
+			&& index == clientnum
+			&& clientServerCharacterSaveMode != CharacterSaveMode::NONE)
+		{
+			sendPlayerOverNet();
+			printlog(
+				"[Character Save] Sent current character identity '%s' before Ready.",
+				stats[index] ? stats[index]->name : "");
+		}
 
         // packet header
         memcpy(net_packet->data, "REDY", 4);
@@ -13339,9 +13356,32 @@ bind_failed:
 							: 6 + 32;
 					const int expectedHeloLen =
 						8 + MAXPLAYERS * heloChunkSize;
+					const bool hasAutomatiaHeloExtension =
+						net_packet->len >= expectedHeloLen + 2
+						&& net_packet->data[expectedHeloLen] <= 1
+						&& net_packet->data[expectedHeloLen + 1]
+							<= static_cast<Uint8>(CharacterSaveMode::STEAM);
 					const bool runtimeJoinHandshake =
-						net_packet->len == expectedHeloLen + 1
+						hasAutomatiaHeloExtension
 						&& net_packet->data[expectedHeloLen] == 1;
+					clientServerCharacterSaveMode =
+						hasAutomatiaHeloExtension
+							? static_cast<CharacterSaveMode>(
+								net_packet->data[expectedHeloLen + 1])
+							: CharacterSaveMode::NONE;
+					if (hasAutomatiaHeloExtension)
+					{
+						const char* modeName =
+							clientServerCharacterSaveMode == CharacterSaveMode::LOCAL
+								? "local-name"
+								: clientServerCharacterSaveMode == CharacterSaveMode::STEAM
+									? "steam-id"
+									: "disabled";
+						printlog(
+							"[Character Save] Server advertised %s mode (%s join).",
+							modeName,
+							runtimeJoinHandshake ? "runtime" : "lobby");
+					}
 
 					if ( net_packet->len < expectedHeloLen )
 					{
@@ -13362,6 +13402,12 @@ bind_failed:
 					if (!loadingsavegame) {
 						stats[clientnum]->stat_appearance = stats[0]->stat_appearance;
 					}
+
+					// The dedicated host advertises slot zero as disconnected even
+                    // though clients later keep slot zero internally connected for
+                    // networking. Preserve that visual distinction separately.
+                    clientConnectedToDedicatedServer =
+                        net_packet->data[8] != 0;
 
 					// now set up everybody else
 					for (int c = 0; c < MAXPLAYERS; c++) {
@@ -24530,6 +24576,15 @@ failed:
             headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex,
             headlessAutosaveIntervalSeconds
         );
+        printlog(
+            "HEADLESS STATUS: character saves %s, snapshots every %u seconds.",
+            characterSaveMode == CharacterSaveMode::LOCAL
+                ? "local-name"
+                : characterSaveMode == CharacterSaveMode::STEAM
+                    ? "steam-id"
+                    : "disabled",
+            headlessCharacterSaveIntervalSeconds
+        );
 		const WorldInstanceIdentity* activeIdentity = worldState.activeIdentity();
 		printlog(
 			"HEADLESS STATUS: active map instance %s.",
@@ -24627,6 +24682,11 @@ failed:
             return false;
         }
 
+        if ( characterSaveMode != CharacterSaveMode::NONE )
+        {
+            serverRequestAllAutomatiaCharacterSaves(reason);
+        }
+
         const int slot = headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex;
         if ( saveGame(slot) != 0 )
         {
@@ -24702,6 +24762,14 @@ failed:
             const bool wasConnected =
                 static_cast<std::size_t>(player) < info.players_connected.size()
                 && info.players_connected[player];
+            if ( characterSaveMode != CharacterSaveMode::NONE
+                && player > 0 )
+            {
+                client_disconnected[player] = true;
+                newPlayer[player] = true;
+                playerSlotsLocked[player] = !headlessLateJoinRequested;
+                continue;
+            }
             playerSlotsLocked[player] = headlessLateJoinRequested
                 ? false
                 : !wasConnected;
@@ -24874,6 +24942,8 @@ failed:
         static bool autostarted = false;
         static Uint32 lastAutosaveTick = 0;
         static bool autosaveClockStarted = false;
+        static Uint32 lastCharacterSaveTick = 0;
+        static bool characterSaveClockStarted = false;
 
         if ( headless )
         {
@@ -24924,6 +24994,30 @@ failed:
             else
             {
                 autosaveClockStarted = false;
+            }
+            if ( initialized
+                && characterSaveMode != CharacterSaveMode::NONE
+                && headlessCharacterSaveIntervalSeconds > 0
+                && !intro
+                && multiplayer == SERVER
+                && net_sock )
+            {
+                if ( !characterSaveClockStarted )
+                {
+                    characterSaveClockStarted = true;
+                    lastCharacterSaveTick = ticks;
+                }
+                const Uint32 intervalTicks =
+                    headlessCharacterSaveIntervalSeconds * TICKS_PER_SECOND;
+                if ( ticks - lastCharacterSaveTick >= intervalTicks )
+                {
+                    lastCharacterSaveTick = ticks;
+                    serverRequestAllAutomatiaCharacterSaves("periodic snapshot");
+                }
+            }
+            else
+            {
+                characterSaveClockStarted = false;
             }
             return;
         }

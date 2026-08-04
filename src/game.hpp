@@ -560,6 +560,17 @@ bool loadAutomatiaPersistentWorldSave(
 void applyAutomatiaSavedPlayerPlacements();
 bool automatiaHasSavedPlayerPlacement(int playerIndex);
 void consumeAutomatiaSavedPlayerPlacement(int playerIndex);
+bool stageAutomatiaCharacterSavedPlacement(
+    int playerIndex,
+    const std::string& mapFile,
+    const std::string& instanceId,
+    Uint64 revision,
+    real_t x,
+    real_t y,
+    real_t z,
+    real_t yaw,
+    real_t pitch,
+    real_t roll);
 bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS]);
 bool restoreAutomatiaSavedPlayerInstances();
 bool prepareAutomatiaLateJoinPlayer(

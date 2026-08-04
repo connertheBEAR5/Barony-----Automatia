@@ -9010,6 +9010,14 @@ void doNewGame(bool makeHighscore) {
 			}
 		}
 
+		if ( multiplayer == CLIENT
+			&& !clientReapplyAutomatiaCharacterRestoreAfterPlayerInit() )
+		{
+			printlog(
+				"[Character Save] Warning: restored character state was not finalized before map creation."
+			);
+		}
+
 		for ( node_t* node = map.entities->first; node != nullptr; node = node->next )
 		{
 			Entity* entity = (Entity*)node->element;
@@ -10068,6 +10076,7 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 		// send disconnect messages
 		if (multiplayer == CLIENT)
 		{
+			(void)clientSendAutomatiaCharacterSaveNow("client menu exit");
 			strcpy((char*)net_packet->data, "DISC");
 			net_packet->data[4] = clientnum;
 			net_packet->address.host = net_server.host;

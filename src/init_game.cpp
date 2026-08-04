@@ -491,6 +491,7 @@ void deinitGame()
 	if (multiplayer != SINGLE) {
 	    if ( multiplayer == CLIENT )
 	    {
+		    (void)clientSendAutomatiaCharacterSaveNow("client shutdown");
 		    strcpy((char*)net_packet->data, "DISC");
 		    net_packet->data[4] = clientnum;
 		    net_packet->address.host = net_server.host;

@@ -99,6 +99,136 @@ namespace
 	constexpr Uint32 kLateJoinTimeoutTicks = 30 * TICKS_PER_SECOND;
 	constexpr Uint32 kLateJoinCharacterSelectionTimeoutTicks =
 		5 * 60 * TICKS_PER_SECOND;
+	constexpr std::size_t kCharacterSaveMaxBytes = 4U * 1024U * 1024U;
+	constexpr std::size_t kCharacterSaveChunkPayload = 1800;
+	constexpr Uint32 kCharacterSaveMaxChunks = 3000;
+
+	struct CharacterSaveAssembler
+	{
+		Uint32 transferId = 0;
+		Uint32 chunkCount = 0;
+		Uint32 totalBytes = 0;
+		Uint32 checksum = 0;
+		Uint32 receivedChunks = 0;
+		std::size_t receivedBytes = 0;
+		std::vector<std::vector<std::uint8_t>> chunks;
+		std::vector<bool> received;
+		bool endReceived = false;
+		bool failed = false;
+
+		void reset()
+		{
+			transferId = 0;
+			chunkCount = 0;
+			totalBytes = 0;
+			checksum = 0;
+			receivedChunks = 0;
+			receivedBytes = 0;
+			chunks.clear();
+			received.clear();
+			endReceived = false;
+			failed = false;
+		}
+
+		bool begin(Uint32 id, Uint32 count, Uint32 bytes, Uint32 crc)
+		{
+			reset();
+			if (id == 0 || count == 0 || count > kCharacterSaveMaxChunks
+				|| bytes == 0 || bytes > kCharacterSaveMaxBytes
+				|| count > bytes)
+			{
+				failed = true;
+				return false;
+			}
+			transferId = id;
+			chunkCount = count;
+			totalBytes = bytes;
+			checksum = crc;
+			chunks.resize(count);
+			received.assign(count, false);
+			return true;
+		}
+
+		bool markEnd(Uint32 id)
+		{
+			if (failed || id == 0 || id != transferId)
+			{
+				failed = true;
+				return false;
+			}
+			endReceived = true;
+			return true;
+		}
+
+		bool ready() const
+		{
+			return endReceived && !failed
+				&& receivedChunks == chunkCount
+				&& receivedBytes == totalBytes;
+		}
+
+		bool accept(Uint32 id, Uint32 sequence,
+			const std::uint8_t* data, std::size_t size)
+		{
+			if (failed || id != transferId || sequence >= chunkCount
+				|| !data || size == 0 || size > kCharacterSaveChunkPayload)
+			{
+				failed = true;
+				return false;
+			}
+			if (received[sequence])
+			{
+				return chunks[sequence].size() == size
+					&& std::equal(chunks[sequence].begin(),
+						chunks[sequence].end(), data);
+			}
+			if (size > totalBytes
+				|| receivedBytes > static_cast<std::size_t>(totalBytes) - size)
+			{
+				failed = true;
+				return false;
+			}
+			chunks[sequence].assign(data, data + size);
+			received[sequence] = true;
+			++receivedChunks;
+			receivedBytes += size;
+			return true;
+		}
+
+		bool complete(Uint32 id, std::string& payload)
+		{
+			payload.clear();
+			if (!ready() || id != transferId
+				)
+			{
+				return false;
+			}
+			payload.reserve(totalBytes);
+			for (const auto& chunk : chunks)
+			{
+				payload.append(
+					reinterpret_cast<const char*>(chunk.data()),
+					chunk.size());
+			}
+			if (payload.size() != totalBytes
+				|| LateJoinProtocol::crc32(
+					reinterpret_cast<const std::uint8_t*>(payload.data()),
+					payload.size()) != checksum)
+			{
+				payload.clear();
+				failed = true;
+				return false;
+			}
+			return true;
+		}
+	};
+
+	static CharacterSaveAssembler g_serverCharacterSaveAssemblers[MAXPLAYERS];
+	static CharacterSaveAssembler g_clientCharacterRestoreAssembler;
+	static bool g_clientCharacterRestoreApplied = false;
+	static std::string g_clientPendingCharacterRestorePayload;
+	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
+	static Uint32 g_characterSaveTransferId = 0;
 
 	static std::string generateReconnectToken()
 	{
@@ -662,7 +792,577 @@ namespace
 	}
 }
 
+static std::vector<std::uint8_t> makeCharacterSaveBeginRecord(
+    int player,
+    Uint32 transferId,
+    Uint32 chunkCount,
+    Uint32 totalBytes,
+    Uint32 checksum)
+{
+    std::vector<std::uint8_t> record(21, 0);
+    memcpy(record.data(), "CSBG", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    LateJoinProtocol::write32(record, 9, chunkCount);
+    LateJoinProtocol::write32(record, 13, totalBytes);
+    LateJoinProtocol::write32(record, 17, checksum);
+    return record;
+}
+
+static std::vector<std::uint8_t> makeCharacterSaveChunkRecord(
+    int player,
+    Uint32 transferId,
+    Uint32 sequence,
+    const std::uint8_t* data,
+    std::size_t size)
+{
+    std::vector<std::uint8_t> record(15 + size, 0);
+    memcpy(record.data(), "CSCH", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    LateJoinProtocol::write32(record, 9, sequence);
+    record[13] = static_cast<std::uint8_t>(size >> 8U);
+    record[14] = static_cast<std::uint8_t>(size);
+    if (size > 0)
+    {
+        memcpy(record.data() + 15, data, size);
+    }
+    return record;
+}
+
+static std::vector<std::uint8_t> makeCharacterSaveEndRecord(
+    int player,
+    Uint32 transferId)
+{
+    std::vector<std::uint8_t> record(9, 0);
+    memcpy(record.data(), "CSED", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    return record;
+}
+
+static bool appendCharacterTransferToLateJoinCatchup(
+    int player,
+    const std::string& payload)
+{
+    if (player <= 0 || player >= MAXPLAYERS
+        || payload.empty() || payload.size() > kCharacterSaveMaxBytes)
+    {
+        return false;
+    }
+    Uint32 transferId = ++g_characterSaveTransferId;
+    if (transferId == 0)
+    {
+        transferId = ++g_characterSaveTransferId;
+    }
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (payload.size() + kCharacterSaveChunkPayload - 1)
+        / kCharacterSaveChunkPayload);
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(payload.data()),
+        payload.size());
+    const auto begin = makeCharacterSaveBeginRecord(
+        player, transferId, chunkCount,
+        static_cast<Uint32>(payload.size()), checksum);
+    if (!g_lateJoinCatchupBuffers[player].append(
+            begin.data(), begin.size()))
+    {
+        return false;
+    }
+    for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence)
+            * kCharacterSaveChunkPayload;
+        const std::size_t bytes = std::min(
+            kCharacterSaveChunkPayload, payload.size() - offset);
+        const auto chunk = makeCharacterSaveChunkRecord(
+            player, transferId, sequence,
+            reinterpret_cast<const std::uint8_t*>(payload.data() + offset),
+            bytes);
+        if (!g_lateJoinCatchupBuffers[player].append(
+                chunk.data(), chunk.size()))
+        {
+            return false;
+        }
+    }
+    const auto complete = makeCharacterSaveEndRecord(player, transferId);
+    return g_lateJoinCatchupBuffers[player].append(
+        complete.data(), complete.size());
+}
+
+static bool sendCharacterTransferToServer(
+    int player,
+    const std::string& payload)
+{
+    if (multiplayer != CLIENT || !net_packet || !net_sock
+        || player <= 0 || player >= MAXPLAYERS
+        || payload.empty() || payload.size() > kCharacterSaveMaxBytes)
+    {
+        return false;
+    }
+    Uint32 transferId = ++g_characterSaveTransferId;
+    if (transferId == 0)
+    {
+        transferId = ++g_characterSaveTransferId;
+    }
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (payload.size() + kCharacterSaveChunkPayload - 1)
+        / kCharacterSaveChunkPayload);
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(payload.data()),
+        payload.size());
+
+    const auto sendRecord = [&](const std::vector<std::uint8_t>& record)
+    {
+        if (record.empty() || record.size() > NET_PACKET_SIZE - 9)
+        {
+            return false;
+        }
+        memcpy(net_packet->data, record.data(), record.size());
+        net_packet->len = static_cast<int>(record.size());
+        net_packet->address.host = net_server.host;
+        net_packet->address.port = net_server.port;
+        return sendPacketSafe(net_sock, -1, net_packet, 0) != 0;
+    };
+
+    if (!sendRecord(makeCharacterSaveBeginRecord(
+            player, transferId, chunkCount,
+            static_cast<Uint32>(payload.size()), checksum)))
+    {
+        return false;
+    }
+    for (Uint32 sequence = 0; sequence < chunkCount; ++sequence)
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence)
+            * kCharacterSaveChunkPayload;
+        const std::size_t bytes = std::min(
+            kCharacterSaveChunkPayload, payload.size() - offset);
+        if (!sendRecord(makeCharacterSaveChunkRecord(
+                player, transferId, sequence,
+                reinterpret_cast<const std::uint8_t*>(payload.data() + offset),
+                bytes)))
+        {
+            return false;
+        }
+    }
+    return sendRecord(makeCharacterSaveEndRecord(player, transferId));
+}
+
+bool clientSendAutomatiaCharacterSaveNow(const char* reason)
+{
+    if (multiplayer != CLIENT
+        || clientServerCharacterSaveMode == CharacterSaveMode::NONE
+        || clientnum <= 0 || clientnum >= MAXPLAYERS
+        || intro
+        || !players[clientnum] || !stats[clientnum]
+        || !players[clientnum]->was_connected_to_game)
+    {
+        return false;
+    }
+    std::string payload;
+    std::string error;
+    if (!buildAutomatiaCharacterTransferPayload(
+            clientnum,
+            clientServerCharacterSaveMode,
+            payload,
+            error))
+    {
+        printlog(
+            "[Character Save] Client capture failed (%s): %s.",
+            reason ? reason : "request", error.c_str());
+        return false;
+    }
+    if (!sendCharacterTransferToServer(clientnum, payload))
+    {
+        printlog(
+            "[Character Save] Client transfer failed (%s).",
+            reason ? reason : "request");
+        return false;
+    }
+    printlog(
+        "[Character Save] Client queued %zu bytes (%s).",
+        payload.size(), reason ? reason : "request");
+    return true;
+}
+
+void serverRequestAutomatiaCharacterSave(int player, const char* reason)
+{
+    if (multiplayer != SERVER
+        || characterSaveMode == CharacterSaveMode::NONE
+        || player <= 0 || player >= MAXPLAYERS
+        || client_disconnected[player]
+        || !players[player] || players[player]->isLocalPlayer()
+        || !g_lateJoinTransactions[player].mayReceiveLiveSimulation())
+    {
+        return;
+    }
+    memcpy(net_packet->data, "CSRQ", 4);
+    net_packet->data[4] = static_cast<Uint8>(player);
+    net_packet->data[5] = 0;
+    net_packet->len = 6;
+    net_packet->address.host = net_clients[player - 1].host;
+    net_packet->address.port = net_clients[player - 1].port;
+    const int queued =
+        sendPacketSafe(net_sock, -1, net_packet, player - 1);
+    if (queued == 0)
+    {
+        printlog(
+            "[Character Save] Failed to queue player %d snapshot request (%s).",
+            player, reason ? reason : "periodic");
+        return;
+    }
+    printlog(
+        "[Character Save] Requested player %d snapshot (%s).",
+        player, reason ? reason : "periodic");
+}
+
+void serverRequestAllAutomatiaCharacterSaves(const char* reason)
+{
+    if (multiplayer != SERVER
+        || characterSaveMode == CharacterSaveMode::NONE)
+    {
+        return;
+    }
+    for (int player = 1; player < MAXPLAYERS; ++player)
+    {
+        serverRequestAutomatiaCharacterSave(player, reason);
+    }
+}
+
+static bool stageAutomatiaLateJoinCharacterRestore(
+    int player,
+    const char* trigger)
+{
+    if (player <= 0 || player >= MAXPLAYERS
+        || !stats[player] || !players[player])
+    {
+        printlog(
+            "[Character Save] Cannot look up a character for invalid player %d.",
+            player);
+        return false;
+    }
+
+    g_lateJoinCharacterRestorePayload[player].clear();
+    g_lateJoinReturningPlayer[player] = false;
+
+    if (characterSaveMode == CharacterSaveMode::NONE)
+    {
+        return false;
+    }
+
+    const std::string requestedName = stats[player]->name;
+    const char* modeName =
+        characterSaveMode == CharacterSaveMode::LOCAL
+            ? "local-name"
+            : characterSaveMode == CharacterSaveMode::STEAM
+                ? "steam-id"
+                : "disabled";
+
+    printlog(
+        "[Character Save] Looking up player %d ('%s') at %s (%s).",
+        player,
+        requestedName.c_str(),
+        trigger ? trigger : "Ready",
+        modeName);
+
+    if (restoreAutomatiaCharacterFromSave(
+            player,
+            &g_lateJoinCharacterRestorePayload[player]) != 0)
+    {
+        g_lateJoinCharacterRestorePayload[player].clear();
+        printlog(
+            "[Character Save] Player %d ('%s') will join as a fresh character.",
+            player,
+            requestedName.c_str());
+        return false;
+    }
+
+    if (g_lateJoinCharacterRestorePayload[player].empty())
+    {
+        printlog(
+            "[Character Save] Player %d was restored on the server, but no "
+            "client restore payload was produced.",
+            player);
+        return false;
+    }
+
+    g_lateJoinReturningPlayer[player] = true;
+    printlog(
+        "[Character Save] Staged %zu bytes for player %d ('%s').",
+        g_lateJoinCharacterRestorePayload[player].size(),
+        player,
+        stats[player]->name);
+    return true;
+}
+
+static bool finalizeServerCharacterSaveTransfer(int player)
+{
+    if (player <= 0 || player >= MAXPLAYERS)
+    {
+        return false;
+    }
+    CharacterSaveAssembler& assembler =
+        g_serverCharacterSaveAssemblers[player];
+    if (!assembler.ready())
+    {
+        return false;
+    }
+
+    std::string payload;
+    const Uint32 transferId = assembler.transferId;
+    if (!assembler.complete(transferId, payload))
+    {
+        printlog(
+            "[Character Save] Server rejected corrupt completed transfer for player %d.",
+            player);
+        assembler.reset();
+        return false;
+    }
+
+    std::string error;
+    const bool stored = storeAutomatiaCharacterTransferPayload(
+        player, payload, error);
+    if (!stored)
+    {
+        printlog(
+            "[Character Save] Server could not store player %d: %s.",
+            player, error.c_str());
+    }
+    assembler.reset();
+    return stored;
+}
+
+static bool finalizeClientCharacterRestoreTransfer()
+{
+    if (!g_clientCharacterRestoreAssembler.ready())
+    {
+        return false;
+    }
+
+    std::string payload;
+    const Uint32 transferId =
+        g_clientCharacterRestoreAssembler.transferId;
+    if (!g_clientCharacterRestoreAssembler.complete(
+            transferId, payload))
+    {
+        printlog("[Character Save] Client rejected corrupt completed restore data.");
+        g_clientCharacterRestoreAssembler.reset();
+        return false;
+    }
+
+    std::string error;
+    const bool restored = restoreAutomatiaCharacterFromPayload(
+        clientnum,
+        clientServerCharacterSaveMode,
+        payload,
+        error) == 0;
+    if (!restored)
+    {
+        printlog(
+            "[Character Save] Client restore failed: %s.",
+            error.c_str());
+    }
+    else
+    {
+		g_clientCharacterRestoreApplied = true;
+		g_clientPendingCharacterRestorePayload = payload;
+        printlog(
+            "[Character Save] Client restored '%s' (%zu bytes).",
+            stats[clientnum]->name, payload.size());
+    }
+    g_clientCharacterRestoreAssembler.reset();
+    return restored;
+}
+
+bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit()
+{
+	if (g_clientPendingCharacterRestorePayload.empty())
+	{
+		return true;
+	}
+	if (multiplayer != CLIENT
+		|| clientServerCharacterSaveMode == CharacterSaveMode::NONE
+		|| clientnum <= 0 || clientnum >= MAXPLAYERS)
+	{
+		return false;
+	}
+
+	std::string error;
+	if (restoreAutomatiaCharacterFromPayload(
+			clientnum,
+			clientServerCharacterSaveMode,
+			g_clientPendingCharacterRestorePayload,
+			error) != 0)
+	{
+		printlog(
+			"[Character Save] Client could not reapply the restored character after player initialization: %s.",
+			error.c_str());
+		return false;
+	}
+	if (players[clientnum])
+	{
+		players[clientnum]->paperDoll.updateSlots();
+		players[clientnum]->hud.resetBars();
+	}
+	printlog(
+		"[Character Save] Client finalized restored character state after player initialization.");
+	g_clientPendingCharacterRestorePayload.clear();
+	return true;
+}
+
+void disconnectAutomatiaRemotePlayer(
+    int player,
+    const char* reason,
+    bool notifyOtherClients)
+{
+    if (multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS)
+    {
+        return;
+    }
+    char shortname[32] = {};
+    if (stats[player])
+    {
+        stringCopy(
+            shortname, stats[player]->name,
+            sizeof(shortname), sizeof(Stat::name));
+    }
+
+    if (characterSaveMode != CharacterSaveMode::NONE)
+    {
+        (void)captureAutomatiaCharacterSaveRuntimeState(player);
+    }
+
+    client_disconnected[player] = true;
+    losingConnection[player] = false;
+    resetServerLateJoinPlayer(player);
+
+    if (notifyOtherClients && net_packet && net_sock)
+    {
+        for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+        {
+            if (recipient == player || client_disconnected[recipient])
+            {
+                continue;
+            }
+            memcpy(net_packet->data, "DISC", 4);
+            net_packet->data[4] = static_cast<Uint8>(player);
+            net_packet->len = 5;
+            net_packet->address.host = net_clients[recipient - 1].host;
+            net_packet->address.port = net_clients[recipient - 1].port;
+            sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
+            if (shortname[0] != '\0')
+            {
+                messagePlayer(
+                    recipient, MESSAGE_MISC,
+                    Language::get(1120), shortname);
+            }
+        }
+    }
+
+    const WorldInstanceIdentity* foreground = worldState.activeIdentity();
+    const std::string foregroundKey =
+        foreground ? foreground->key() : std::string{};
+    const std::string playerKey = players[player]
+        ? players[player]->worldInstance.key() : std::string{};
+    if (!playerKey.empty() && playerKey != foregroundKey)
+    {
+        (void)worldState.activate(playerKey);
+    }
+
+    Entity* playerEntity = players[player]
+        ? players[player]->entity : nullptr;
+    worldState.removePlayer(player);
+    if (playerEntity && playerEntity->mynode)
+    {
+        list_RemoveNode(playerEntity->mynode);
+    }
+    if (players[player])
+    {
+        players[player]->entity = nullptr;
+        players[player]->was_connected_to_game = false;
+    }
+
+    if (!foregroundKey.empty() && foregroundKey != playerKey)
+    {
+        (void)worldState.activate(foregroundKey);
+    }
+    printlog(
+        "[Roster] Removed disconnected player %d ('%s') body (%s).",
+        player, shortname,
+        reason ? reason : "disconnect");
+    logServerRosterState(reason ? reason : "disconnect");
+}
+
 static void tryReplayClientLateJoinPackets();
+
+static bool clientApplyLateJoinCharacterRestoreBeforeMapLoad()
+{
+	if (!net_packet || !net_packet->data)
+	{
+		return false;
+	}
+
+	std::vector<std::vector<std::uint8_t>> deferredPackets;
+	deferredPackets.reserve(g_clientLateJoinCatchupPackets.size());
+	bool sawCharacterRestore = false;
+	const int savedLength = net_packet->len;
+	const IPaddress savedAddress = net_packet->address;
+	std::vector<Uint8> savedPacket(
+		net_packet->data,
+		net_packet->data + std::max(0, savedLength));
+	const bool wasReplaying = g_clientLateJoinReplayingPackets;
+	bool restorePacketsValid = true;
+	g_clientLateJoinReplayingPackets = true;
+	g_clientCharacterRestoreApplied = false;
+	g_clientCharacterRestoreAssembler.reset();
+
+	for (const auto& packet : g_clientLateJoinCatchupPackets)
+	{
+		const bool characterRestorePacket = packet.size() >= 4
+			&& (memcmp(packet.data(), "CSBG", 4) == 0
+				|| memcmp(packet.data(), "CSCH", 4) == 0
+				|| memcmp(packet.data(), "CSED", 4) == 0);
+		if (!characterRestorePacket)
+		{
+			deferredPackets.push_back(packet);
+			continue;
+		}
+		sawCharacterRestore = true;
+		if (packet.size() > NET_PACKET_SIZE)
+		{
+			printlog(
+				"[Character Save] Client rejected oversized pre-map restore packet.");
+			g_clientCharacterRestoreAssembler.reset();
+			restorePacketsValid = false;
+			break;
+		}
+		memcpy(net_packet->data, packet.data(), packet.size());
+		net_packet->len = static_cast<int>(packet.size());
+		clientHandlePacket();
+	}
+
+	if (!savedPacket.empty())
+	{
+		memcpy(net_packet->data, savedPacket.data(), savedPacket.size());
+	}
+	net_packet->len = savedLength;
+	net_packet->address = savedAddress;
+	g_clientLateJoinReplayingPackets = wasReplaying;
+
+	if (!restorePacketsValid
+		|| (sawCharacterRestore && !g_clientCharacterRestoreApplied))
+	{
+		printlog(
+			"[Character Save] Client could not apply the saved character before map creation.");
+		g_clientCharacterRestoreAssembler.reset();
+		g_clientLateJoinSpawnAuthorized = false;
+		return false;
+	}
+	g_clientLateJoinCatchupPackets.swap(deferredPackets);
+	return true;
+}
 
 void clientResetLateJoinPacketDeferral()
 {
@@ -674,6 +1374,7 @@ void clientResetLateJoinPacketDeferral()
 	g_clientLateJoinLivePackets.reset();
 	g_clientLateJoinCatchupPackets.clear();
 	g_clientLateJoinLastProgressTick = 0;
+	g_clientPendingCharacterRestorePayload.clear();
 }
 
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
@@ -738,6 +1439,10 @@ bool clientAcceptLateJoinCatchupComplete(const Uint8* data, std::size_t size)
 		|| !LateJoinPacketCatchupBuffer::deserialize(
 			g_clientLateJoinCatchupAssembler.snapshot(),
 			g_clientLateJoinCatchupPackets))
+	{
+		return false;
+	}
+	if (!clientApplyLateJoinCharacterRestoreBeforeMapLoad())
 	{
 		return false;
 	}
@@ -1490,6 +2195,7 @@ void resetServerLateJoinPlayer(int playerIndex)
 		g_lateJoinLastProgressTick[playerIndex] = 0;
 		g_lateJoinReturningPlayer[playerIndex] = false;
 		g_lateJoinClientHandshake[playerIndex] = false;
+        g_lateJoinCharacterRestorePayload[playerIndex].clear();
     }
 }
 
@@ -1593,6 +2299,51 @@ static bool startServerLateJoinSnapshotTransfer(int playerIndex)
             static_cast<Uint32>(snapshot.size())))
     {
         return false;
+    }
+
+    if (!g_lateJoinCharacterRestorePayload[playerIndex].empty())
+    {
+        if (!appendCharacterTransferToLateJoinCatchup(
+                playerIndex,
+                g_lateJoinCharacterRestorePayload[playerIndex]))
+        {
+            printlog(
+                "[Character Save] Could not queue restored character for player %d.",
+                playerIndex);
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
+        printlog(
+            "[Character Save] Queued %zu restored bytes in player %d's "
+            "late-join catch-up stream.",
+            g_lateJoinCharacterRestorePayload[playerIndex].size(),
+            playerIndex);
+    }
+    else if (g_lateJoinReturningPlayer[playerIndex]
+        && characterSaveMode != CharacterSaveMode::NONE)
+    {
+        printlog(
+            "[Character Save] Refusing player %d restore: the saved-character "
+            "flag has no payload.",
+            playerIndex);
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    if (characterSaveMode != CharacterSaveMode::NONE)
+    {
+        const std::uint8_t request[] = {
+            'C', 'S', 'R', 'Q',
+            static_cast<std::uint8_t>(playerIndex), 0
+        };
+        if (!g_lateJoinCatchupBuffers[playerIndex].append(
+                request, sizeof(request)))
+        {
+            printlog(
+                "[Character Save] Could not queue initial save request for player %d.",
+                playerIndex);
+            resetServerLateJoinPlayer(playerIndex);
+            return false;
+        }
     }
 
 	// Light sources normally synchronize skill[10] only when their powered
@@ -3109,13 +3860,14 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 			// client will enter any player spot
 			for ( result = 1; result < MAXPLAYERS; result++ )
 			{
-				if ( client_disconnected[result] == true
-					&& !lockedSlots[result]
-					&& (!runtimeNewPlayer
-						|| !automatiaHasSavedPlayerPlacement(result)) )
-				{
-					break;    // no more player slots
-				}
+			if ( client_disconnected[result] == true
+				&& !lockedSlots[result]
+				&& (!runtimeNewPlayer
+					|| characterSaveMode != CharacterSaveMode::NONE
+					|| !automatiaHasSavedPlayerPlacement(result)) )
+			{
+				break;    // no more player slots
+			}
 			}
 		}
 		else
@@ -3227,6 +3979,7 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 
 		// on success, client gets legit player number
 		resetServerLateJoinPlayer(c);
+		g_serverCharacterSaveAssemblers[c].reset();
 		client_disconnected[c] = false;
 		if (!g_processingRuntimeJoin)
 		{
@@ -3346,9 +4099,25 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
 
-		if (g_processingRuntimeJoin && net_packet->len < NET_PACKET_SIZE)
+		// Advertise the Automatia HELO extension to both normal lobby joins
+		// and runtime late joins. Byte 0 is the runtime-join flag and byte 1
+		// is the server's character-save identity mode. Previously this was
+		// sent only for runtime joins, so clients that joined before game
+		// start kept CharacterSaveMode::NONE and ignored every CSRQ request.
+		if ((g_processingRuntimeJoin
+				|| characterSaveMode != CharacterSaveMode::NONE)
+			&& net_packet->len + 2 <= NET_PACKET_SIZE)
 		{
-			net_packet->data[net_packet->len++] = 1;
+			net_packet->data[net_packet->len++] =
+				g_processingRuntimeJoin ? 1 : 0;
+			net_packet->data[net_packet->len++] =
+				static_cast<Uint8>(characterSaveMode);
+		}
+		else if (characterSaveMode != CharacterSaveMode::NONE
+			&& net_packet->len + 2 > NET_PACKET_SIZE)
+		{
+			printlog(
+				"[Character Save] HELO payload had no room for the character-save mode extension.");
 		}
 
 		const bool shouldChunkHelo =
@@ -4527,6 +5296,85 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+    {'CSRQ', [](){
+        if (!net_packet || net_packet->len != 6
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Character Save] Client rejected malformed save request.");
+            return;
+        }
+        if (!clientSendAutomatiaCharacterSaveNow("server request"))
+        {
+            const bool connectedToGame =
+                clientnum > 0
+                && clientnum < MAXPLAYERS
+                && players[clientnum]
+                && players[clientnum]->was_connected_to_game;
+            printlog(
+                "[Character Save] Client could not answer CSRQ "
+                "(mode=%d client=%d intro=%d connected=%d).",
+                static_cast<int>(clientServerCharacterSaveMode),
+                clientnum,
+                intro ? 1 : 0,
+                connectedToGame ? 1 : 0);
+        }
+    }},
+    {'CSBG', [](){
+        if (!net_packet || net_packet->len != 21
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Character Save] Client rejected malformed restore begin.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 chunkCount = SDLNet_Read32(&net_packet->data[9]);
+        const Uint32 totalBytes = SDLNet_Read32(&net_packet->data[13]);
+        const Uint32 checksum = SDLNet_Read32(&net_packet->data[17]);
+        if (!g_clientCharacterRestoreAssembler.begin(
+                transferId, chunkCount, totalBytes, checksum))
+        {
+            printlog("[Character Save] Client rejected restore metadata.");
+        }
+    }},
+    {'CSCH', [](){
+        if (!net_packet || net_packet->len < 16
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Character Save] Client rejected malformed restore chunk.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 sequence = SDLNet_Read32(&net_packet->data[9]);
+        const std::size_t bytes =
+            (static_cast<std::size_t>(net_packet->data[13]) << 8U)
+            | net_packet->data[14];
+        if (bytes == 0 || 15 + bytes != static_cast<std::size_t>(net_packet->len)
+            || !g_clientCharacterRestoreAssembler.accept(
+                transferId, sequence, &net_packet->data[15], bytes))
+        {
+            printlog("[Character Save] Client rejected corrupt restore chunk.");
+        }
+        else
+        {
+            (void)finalizeClientCharacterRestoreTransfer();
+        }
+    }},
+    {'CSED', [](){
+        if (!net_packet || net_packet->len != 9
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Character Save] Client rejected malformed restore completion.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        if (!g_clientCharacterRestoreAssembler.markEnd(transferId))
+        {
+            printlog("[Character Save] Client rejected invalid restore completion.");
+            g_clientCharacterRestoreAssembler.reset();
+            return;
+        }
+        (void)finalizeClientCharacterRestoreTransfer();
+    }},
 	{'JOIN', [](){
 		if (!net_packet || net_packet->len != 41)
 		{
@@ -4538,6 +5386,18 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		{
 			printlog("[Roster] Client rejected invalid in-game JOIN slot %d.", player);
 			return;
+		}
+		if (client_disconnected[player]
+			&& players[player]
+			&& players[player]->entity)
+		{
+			Entity* staleEntity = players[player]->entity;
+			worldState.removePlayer(player);
+			if (staleEntity->mynode)
+			{
+				list_RemoveNode(staleEntity->mynode);
+			}
+			players[player]->entity = nullptr;
 		}
 		client_disconnected[player] = false;
 		client_classes[player] = net_packet->data[5];
@@ -6359,6 +7219,25 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 				printlog("The remote server has shut down.\n");
 				MainMenu::disconnectedFromServer("The host player\nhas ended the game.");
 			}
+		}
+		else
+		{
+			Entity* disconnectedEntity = players[player]
+				? players[player]->entity
+				: nullptr;
+			worldState.removePlayer(player);
+			if (disconnectedEntity && disconnectedEntity->mynode)
+			{
+				list_RemoveNode(disconnectedEntity->mynode);
+			}
+			if (players[player])
+			{
+				players[player]->entity = nullptr;
+				players[player]->was_connected_to_game = false;
+			}
+			printlog(
+				"[Roster] Client removed disconnected player %d body.",
+				player);
 		}
 	}},
 
@@ -10841,8 +11720,13 @@ static void tryReplayClientLateJoinPackets()
 	const IPaddress savedAddress = net_packet->address;
 	std::vector<Uint8> savedPacket(
 		net_packet->data, net_packet->data + std::max(0, savedLength));
+	std::vector<std::vector<std::uint8_t>>
+		delayedCharacterSaveRequests;
 	g_clientLateJoinReplayingPackets = true;
-	const auto replay = [](const std::vector<std::vector<std::uint8_t>>& packets)
+	const auto replay =
+		[&delayedCharacterSaveRequests](
+			const std::vector<std::vector<std::uint8_t>>& packets,
+			const bool delayCharacterSaveRequests)
 	{
 		for (const auto& packet : packets)
 		{
@@ -10850,13 +11734,40 @@ static void tryReplayClientLateJoinPackets()
 			{
 				continue;
 			}
+			if (delayCharacterSaveRequests
+				&& packet.size() >= 4
+				&& memcmp(packet.data(), "CSRQ", 4) == 0)
+			{
+				delayedCharacterSaveRequests.push_back(packet);
+				continue;
+			}
 			memcpy(net_packet->data, packet.data(), packet.size());
 			net_packet->len = static_cast<int>(packet.size());
 			clientHandlePacket();
 		}
 	};
-	replay(g_clientLateJoinCatchupPackets);
-	replay(livePackets);
+	replay(g_clientLateJoinCatchupPackets, true);
+	replay(livePackets, true);
+
+	// Catch-up contains normal player/entity synchronization that can
+	// overwrite a restored character. Apply the saved character only after
+	// all of that initialization has completed. Do not answer the initial
+	// CSRQ until this succeeds, or the fresh client state can overwrite the
+	// valid character file on the server.
+	const bool characterRestoreFinalized =
+		clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
+	if (characterRestoreFinalized)
+	{
+		replay(delayedCharacterSaveRequests, false);
+	}
+	else
+	{
+		printlog(
+			"[Character Save] Client skipped %zu save request(s) because "
+			"the restored character could not be finalized.",
+			delayedCharacterSaveRequests.size());
+	}
+
 	std::size_t resetStaticFixtures = 0;
 	std::size_t rebuiltEditorLightSources = 0;
 	std::size_t failedEditorLightSources = 0;
@@ -11029,6 +11940,86 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+    {'CSBG', [](){
+        if (!net_packet || net_packet->len != 21)
+        {
+            printlog("[Character Save] Server rejected malformed transfer begin.");
+            return;
+        }
+        const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+        if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+            || characterSaveMode == CharacterSaveMode::NONE)
+        {
+            printlog("[Character Save] Server rejected unauthenticated transfer begin.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 chunkCount = SDLNet_Read32(&net_packet->data[9]);
+        const Uint32 totalBytes = SDLNet_Read32(&net_packet->data[13]);
+        const Uint32 checksum = SDLNet_Read32(&net_packet->data[17]);
+        if (!g_serverCharacterSaveAssemblers[player].begin(
+                transferId, chunkCount, totalBytes, checksum))
+        {
+            printlog(
+                "[Character Save] Server rejected transfer metadata for player %d.",
+                player);
+        }
+    }},
+    {'CSCH', [](){
+        if (!net_packet || net_packet->len < 16)
+        {
+            printlog("[Character Save] Server rejected malformed transfer chunk.");
+            return;
+        }
+        const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+        if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+            || characterSaveMode == CharacterSaveMode::NONE)
+        {
+            printlog("[Character Save] Server rejected unauthenticated transfer chunk.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 sequence = SDLNet_Read32(&net_packet->data[9]);
+        const std::size_t bytes =
+            (static_cast<std::size_t>(net_packet->data[13]) << 8U)
+            | net_packet->data[14];
+        if (bytes == 0 || 15 + bytes != static_cast<std::size_t>(net_packet->len)
+            || !g_serverCharacterSaveAssemblers[player].accept(
+                transferId, sequence, &net_packet->data[15], bytes))
+        {
+            printlog(
+                "[Character Save] Server rejected corrupt transfer chunk for player %d.",
+                player);
+        }
+        else
+        {
+            (void)finalizeServerCharacterSaveTransfer(player);
+        }
+    }},
+    {'CSED', [](){
+        if (!net_packet || net_packet->len != 9)
+        {
+            printlog("[Character Save] Server rejected malformed transfer completion.");
+            return;
+        }
+        const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+        if (player <= 0 || !currentPacketSenderMatchesPlayer(player)
+            || characterSaveMode == CharacterSaveMode::NONE)
+        {
+            printlog("[Character Save] Server rejected unauthenticated transfer completion.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        if (!g_serverCharacterSaveAssemblers[player].markEnd(transferId))
+        {
+            printlog(
+                "[Character Save] Server rejected invalid transfer completion for player %d.",
+                player);
+            g_serverCharacterSaveAssemblers[player].reset();
+            return;
+        }
+        (void)finalizeServerCharacterSaveTransfer(player);
+    }},
 	{'JOIN', [](){
 		if (!headlessLateJoinRequested || !directConnect)
 		{
@@ -11135,9 +12126,19 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			SDLNet_Read32(&net_packet->data[45]);
 		stats[player]->stat_appearance = (raceAndAppearance & 0xFF00) >> 8;
 		stats[player]->playerRace = raceAndAppearance & 0xFF;
+		g_lateJoinCharacterRestorePayload[player].clear();
+		g_lateJoinReturningPlayer[player] = false;
 		if (!loadingsavegame)
 		{
 			initClass(player);
+		}
+		if (characterSaveMode != CharacterSaveMode::NONE)
+		{
+			printlog(
+				"[Character Save] Received character identity for player %d "
+				"('%s'); restore lookup is deferred until Ready.",
+				player,
+				stats[player]->name);
 		}
 		for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
 		{
@@ -11186,6 +12187,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			g_lateJoinLastProgressTick[player] = ticks;
 			return;
 		}
+
+		if (headless && multiplayer == SERVER
+			&& characterSaveMode != CharacterSaveMode::NONE)
+		{
+			(void)stageAutomatiaLateJoinCharacterRestore(
+				player,
+				"Ready");
+		}
+
 		std::string placementError;
 		if (!prepareAutomatiaLateJoinPlayer(
 				player, g_lateJoinReturningPlayer[player], placementError)
@@ -12396,7 +13406,6 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// disconnect
 	{'DISC', [](){
-		char shortname[32];
 		const int playerDisconnected =
 			decodeGameplayPacketPlayerIndex(
 				net_packet->data[4]
@@ -12416,25 +13425,8 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 				playerDisconnected);
 			return;
 		}
-		stringCopy(shortname, stats[playerDisconnected]->name, sizeof(shortname), sizeof(Stat::name));
-		client_disconnected[playerDisconnected] = true;
-		resetServerLateJoinPlayer(playerDisconnected);
-		for ( int c = 1; c < MAXPLAYERS; c++ )
-		{
-			if ( client_disconnected[c] == true )
-			{
-				continue;
-			}
-			memcpy((char*)net_packet->data, "DISC", 4);
-			net_packet->data[4] = playerDisconnected;
-			net_packet->address.host = net_clients[c - 1].host;
-			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 5;
-			sendPacketSafe(net_sock, -1, net_packet, c - 1);
-			messagePlayer(c, MESSAGE_MISC, Language::get(1120), shortname);
-		}
-		messagePlayer(clientnum, MESSAGE_MISC, Language::get(1120), shortname);
-		logServerRosterState("disconnect");
+		disconnectAutomatiaRemotePlayer(
+			playerDisconnected, "client disconnect", true);
 	}},
 
 	// client callout
@@ -15558,9 +16550,15 @@ void closeNetworkInterfaces()
 	g_clientLateJoinAssembler.reset();
 	g_clientLateJoinBegin = LateJoinProtocol::Begin{};
 	g_clientLateJoinSpawnAuthorized = false;
+	g_clientCharacterRestoreAssembler.reset();
+	g_clientCharacterRestoreApplied = false;
+	g_clientPendingCharacterRestorePayload.clear();
+	clientConnectedToDedicatedServer = false;
+	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
 	for (int c = 1; c < MAXPLAYERS; ++c)
 	{
 		resetServerLateJoinPlayer(c);
+		g_serverCharacterSaveAssemblers[c].reset();
 		g_lateJoinReturningPlayer[c] = false;
 	}
 

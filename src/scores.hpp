@@ -489,6 +489,7 @@ struct SaveGameInfo {
 
 	struct Player {
 		std::string reconnect_token;
+		std::string steam_id;
 		Uint32 char_class = 0;
 		Uint32 race = 0;
 		std::vector<int> kills;
@@ -721,6 +722,7 @@ struct SaveGameInfo {
 		
 		bool serialize(FileInterface* fp) {
 			fp->property("reconnect_token", reconnect_token);
+			fp->property("steam_id", steam_id);
 			fp->property("char_class", char_class);
 			fp->property("race", race);
 			fp->property("kills", kills);
@@ -814,6 +816,52 @@ extern std::string automatiaReconnectTokens[MAXPLAYERS];
 int saveGame(int saveIndex = savegameCurrentFileIndex);
 int loadGame(int player, const SaveGameInfo& info);
 list_t* loadGameFollowers(const SaveGameInfo& info);
+
+/*
+ * Character-save modes: restore a single player's character state
+ * (stats, inventory, spells, hotbar, etc.) from a saved SaveGameInfo
+ * without mutating global session state the way loadGame() does.
+ * savedPlayerIndex selects which entry in info.players to restore from.
+ */
+int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPlayerIndex);
+
+/*
+ * Character-save transfer helpers. The client captures its authoritative
+ * local inventory into a bounded payload; the dedicated server validates
+ * the joined identity and stores it in a separate per-character file.
+ */
+bool buildAutomatiaCharacterTransferPayload(
+    int player,
+    CharacterSaveMode mode,
+    std::string& payload,
+    std::string& error);
+bool storeAutomatiaCharacterTransferPayload(
+    int player,
+    const std::string& payload,
+    std::string& error);
+
+/*
+ * Captures the server-authoritative map instance, position, rotation, and
+ * transient transformation targets for a connected character. This cache is
+ * used when a final character transfer arrives after the player entity has
+ * already been removed.
+ */
+bool captureAutomatiaCharacterSaveRuntimeState(int player);
+
+int restoreAutomatiaCharacterFromPayload(
+    int player,
+    CharacterSaveMode mode,
+    const std::string& payload,
+    std::string& error);
+
+/*
+ * Load a dedicated per-character file for the joining player and restore
+ * the server-side copy. When requested, serializedPayload receives the same
+ * validated save so the late-join client can restore its local inventory.
+ */
+int restoreAutomatiaCharacterFromSave(
+    int player,
+    std::string* serializedPayload = nullptr);
 
 score_t* scoreConstructor(int player, SaveGameInfo& info);
 SaveGameInfo getSaveGameInfo(bool singleplayer, int saveIndex = savegameCurrentFileIndex);

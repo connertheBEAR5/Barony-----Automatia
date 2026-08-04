@@ -2242,7 +2242,8 @@ void hydratePreservedAutomatiaWorldDocument()
                 std::move(dialogue);
         }
     }
-    if (preservedAutomatiaWorldDocument.contains("players")
+    if (characterSaveMode == CharacterSaveMode::NONE
+        && preservedAutomatiaWorldDocument.contains("players")
         && preservedAutomatiaWorldDocument["players"].is_array()
         && preservedAutomatiaWorldDocument["players"].size() <= MAXPLAYERS)
     {
@@ -2393,6 +2394,50 @@ void consumeAutomatiaSavedPlayerPlacement(int playerIndex)
     automatiaSavedPlayerPlacements[playerIndex].pending = false;
 }
 
+bool stageAutomatiaCharacterSavedPlacement(
+    int playerIndex,
+    const std::string& mapFile,
+    const std::string& instanceId,
+    Uint64 revision,
+    real_t x,
+    real_t y,
+    real_t z,
+    real_t yaw,
+    real_t pitch,
+    real_t roll)
+{
+    if (playerIndex <= 0 || playerIndex >= MAXPLAYERS
+        || !std::isfinite(static_cast<double>(x))
+        || !std::isfinite(static_cast<double>(y))
+        || !std::isfinite(static_cast<double>(z))
+        || !std::isfinite(static_cast<double>(yaw))
+        || !std::isfinite(static_cast<double>(pitch))
+        || !std::isfinite(static_cast<double>(roll)))
+    {
+        return false;
+    }
+
+    WorldInstanceIdentity identity;
+    if (!identity.set(mapFile, instanceId))
+    {
+        return false;
+    }
+    identity.revision = revision;
+
+    AutomatiaSavedPlayerPlacement& placement =
+        automatiaSavedPlayerPlacements[playerIndex];
+    placement.identity = identity;
+    placement.x = x;
+    placement.y = y;
+    placement.z = z;
+    placement.yaw = yaw;
+    placement.pitch = pitch;
+    placement.roll = roll;
+    placement.hasPosition = true;
+    placement.pending = true;
+    return true;
+}
+
 bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS])
 {
     if (!playerSpawnMask)
@@ -2409,11 +2454,11 @@ bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS])
     bool hasSavedPlacements = false;
     for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
     {
-		if (headless && multiplayer == SERVER && playerIndex == 0)
-		{
-			playerSpawnMask[playerIndex] = false;
-			continue;
-		}
+        if (headless && multiplayer == SERVER && playerIndex == 0)
+        {
+            playerSpawnMask[playerIndex] = false;
+            continue;
+        }
         AutomatiaSavedPlayerPlacement& placement =
             automatiaSavedPlayerPlacements[playerIndex];
         if (!placement.pending || !placement.identity.isValid())
@@ -2606,15 +2651,18 @@ bool prepareAutomatiaLateJoinPlayer(
 
     AutomatiaSavedPlayerPlacement& placement =
         automatiaSavedPlayerPlacements[playerIndex];
-    if (returningPlayer
-        && (!placement.pending || !placement.identity.isValid()))
+    const bool hasSavedPlacement =
+        placement.pending && placement.identity.isValid();
+    const bool characterFileReturn =
+        returningPlayer
+        && characterSaveMode != CharacterSaveMode::NONE;
+    if (returningPlayer && !hasSavedPlacement && !characterFileReturn)
     {
         error = "returning player has no valid saved placement";
         return false;
     }
     WorldInstanceIdentity destinationIdentity;
-    if (returningPlayer && placement.pending
-        && placement.identity.isValid())
+    if (returningPlayer && hasSavedPlacement)
     {
         destinationIdentity = placement.identity;
     }
@@ -2719,7 +2767,7 @@ bool prepareAutomatiaLateJoinPlayer(
             }
         }
     }
-    if (returningPlayer && placement.pending)
+    if (returningPlayer && hasSavedPlacement)
     {
         const AutomatiaSavedPlayerPlacement savedPlacement = placement;
         applyAutomatiaSavedPlayerPlacements();
@@ -3162,6 +3210,12 @@ static bool captureAutomatiaPersistentWorldDocument(
     document["players"] = Json::array();
     for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
     {
+        if (characterSaveMode != CharacterSaveMode::NONE)
+        {
+            // Per-character files own remote character persistence. Do not
+            // reserve network slots in the shared world companion document.
+            continue;
+        }
 		if (headless && multiplayer == SERVER && playerIndex == 0)
 		{
 			continue;
@@ -3724,6 +3778,42 @@ static std::string makePersistentPlayerQuestKey(const int player, const std::str
     const std::string normalizedQuestID = normalizePersistentStoryID(questID);
     if ( normalizedQuestID.empty() ) return "";
     return "player_" + std::to_string(player) + ":" + normalizedQuestID;
+}
+
+/*
+ * Scope-aware quest registry keys.
+ *
+ * player_<slot>:<quest>  - per-player quest state (existing)
+ * world:<quest>          - shared by every player on the server
+ * party:<quest>          - shared by the player's party (default: all connected)
+ */
+static std::string makePersistentScopedQuestKey(
+    const std::string& scope,
+    const int player,
+    const std::string& questID
+)
+{
+    const std::string normalizedQuestID = normalizePersistentStoryID(questID);
+    if ( normalizedQuestID.empty() ) return "";
+    if ( scope == "world" )
+    {
+        return "world:" + normalizedQuestID;
+    }
+    if ( scope == "party" )
+    {
+        if ( player < 0 || player >= MAXPLAYERS ) return "";
+        return "party:" + normalizedQuestID;
+    }
+    return makePersistentPlayerQuestKey(player, questID);
+}
+
+static std::string makePersistentQuestKeyForDefinition(
+    const std::string& scope,
+    const int player,
+    const std::string& questID
+)
+{
+    return makePersistentScopedQuestKey(scope, player, questID);
 }
 
 
@@ -16783,7 +16873,8 @@ void gameLogic(void)
 							net_packet->address.port = net_clients[c - 1].port;
 							net_packet->len = 4;
 							sendPacketSafe(net_sock, -1, net_packet, c - 1);
-							client_disconnected[c] = true;
+							disconnectAutomatiaRemotePlayer(
+								c, "connection timeout", true);
 						}
 					}
 					PingNetworkStatus_t::update();
@@ -21270,6 +21361,68 @@ int main(int argc, char** argv)
                         headlessServerPassword[sizeof(headlessServerPassword) - 1] = '\0';
                         headlessPasswordRequested = headlessServerPassword[0] != '\0';
                     }
+                    else if ( !strcmp(argv[c], "--charactersave_local")
+                        || !strcmp(argv[c], "--character-save=local")
+                        || !strcmp(argv[c], "--character_save=local")
+                        || !strcmp(argv[c], "--charactersave=local") )
+                    {
+                        characterSaveMode = CharacterSaveMode::LOCAL;
+                        printlog("Character save mode: LOCAL (normalized character name is the durable identity).");
+                    }
+                    else if ( !strcmp(argv[c], "--charactersave_steam")
+                        || !strcmp(argv[c], "--character-save=steam")
+                        || !strcmp(argv[c], "--character_save=steam")
+                        || !strcmp(argv[c], "--charactersave=steam") )
+                    {
+                        characterSaveMode = CharacterSaveMode::STEAM;
+                        printlog("Character save mode: STEAM (Steam ID is the durable identity).");
+                    }
+                    else if ( !strcmp(argv[c], "--character-save")
+                        || !strcmp(argv[c], "--character_save")
+                        || !strcmp(argv[c], "--charactersave") )
+                    {
+                        if ( c + 1 < argc && argv[c + 1] )
+                        {
+                            const char* mode = argv[++c];
+                            if ( !strcmp(mode, "local") )
+                            {
+                                characterSaveMode = CharacterSaveMode::LOCAL;
+                                printlog("Character save mode: LOCAL (normalized character name is the durable identity).");
+                            }
+                            else if ( !strcmp(mode, "steam") )
+                            {
+                                characterSaveMode = CharacterSaveMode::STEAM;
+                                printlog("Character save mode: STEAM (Steam ID is the durable identity).");
+                            }
+                            else if ( !strcmp(mode, "none") )
+                            {
+                                characterSaveMode = CharacterSaveMode::NONE;
+                                printlog("Character save mode: disabled.");
+                            }
+                            else
+                            {
+                                printlog("Headless option error: character save mode must be local, steam, or none.");
+                            }
+                        }
+                        else
+                        {
+                            printlog("Headless option error: --character-save requires local, steam, or none.");
+                        }
+                    }
+                    else if ( !strncmp(argv[c], "--character-save-interval=", 26) )
+                    {
+                        char* end = nullptr;
+                        const unsigned long interval = strtoul(argv[c] + 26, &end, 10);
+                        const unsigned long maximum = 7UL * 24UL * 60UL * 60UL;
+                        if ( end != argv[c] + 26 && *end == '\0' && interval <= maximum )
+                        {
+                            headlessCharacterSaveIntervalSeconds = static_cast<Uint32>(interval);
+                        }
+                        else
+                        {
+                            printlog("Headless option error: --character-save-interval requires seconds from 0 through %lu.", maximum);
+                        }
+                    }
 					else if ( !strcmp(argv[c], "-windowed") )
 					{
 						fullscreen = 0;
@@ -21344,6 +21497,9 @@ int main(int argc, char** argv)
             printlog("Password requested: %s", headlessPasswordRequested ? "yes" : "no");
             printlog("Late joining requested: %s", headlessLateJoinRequested ? "yes" : "no");
             printlog("Autosave interval: %u seconds", headlessAutosaveIntervalSeconds);
+            printlog("Character save mode: %s", characterSaveMode == CharacterSaveMode::LOCAL
+                ? "local-name" : characterSaveMode == CharacterSaveMode::STEAM ? "steam-id" : "disabled");
+            printlog("Character save request interval: %u seconds", headlessCharacterSaveIntervalSeconds);
             printlog("Save slot: %d", headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex);
             printlog("SECURITY STATUS: plain --headless opens no socket; explicit hosting mode is required.");
             printlog("SECURITY STATUS: --LAN opens the existing direct-connect UDP lobby. Public/password modes fail closed until implemented safely.");
@@ -21362,6 +21518,9 @@ int main(int argc, char** argv)
                 fprintf(statusFile, "Password requested: %s\n", headlessPasswordRequested ? "yes" : "no");
                 fprintf(statusFile, "Late joining requested: %s\n", headlessLateJoinRequested ? "yes" : "no");
                 fprintf(statusFile, "Autosave interval: %u seconds\n", headlessAutosaveIntervalSeconds);
+                fprintf(statusFile, "Character save mode: %s\n", characterSaveMode == CharacterSaveMode::LOCAL
+                    ? "local-name" : characterSaveMode == CharacterSaveMode::STEAM ? "steam-id" : "disabled");
+                fprintf(statusFile, "Character save request interval: %u seconds\n", headlessCharacterSaveIntervalSeconds);
                 fprintf(statusFile, "Save slot: %d\n", headlessSaveSlot >= 0 ? headlessSaveSlot : savegameCurrentFileIndex);
                 fprintf(statusFile, "Important: --LAN opens the direct-connect UDP listener; plain --headless stays idle.\n");
                 fclose(statusFile);

@@ -936,6 +936,21 @@ extern bool headlessAutoStart;
 extern Uint32 headlessAutoStartDelaySeconds;
 extern Uint32 headlessAutosaveIntervalSeconds;
 extern int headlessSaveSlot;
+
+// Character save identity modes for the dedicated server.
+// NONE (default): session-slot based identity (legacy behavior).
+// LOCAL: character name chosen at creation is the durable identity.
+// STEAM: the player's Steam ID is the durable identity.
+enum class CharacterSaveMode : int
+{
+    NONE = 0,
+    LOCAL,
+    STEAM
+};
+extern CharacterSaveMode characterSaveMode;
+extern CharacterSaveMode clientServerCharacterSaveMode;
+extern Uint32 headlessCharacterSaveIntervalSeconds;
+extern bool clientConnectedToDedicatedServer;
 extern bool initialized; //So that messagePlayer doesn't explode before the game is initialized. //TODO: Does the editor need this set too and stuff?
 
 void GO_SwapBuffers(SDL_Window* screen);

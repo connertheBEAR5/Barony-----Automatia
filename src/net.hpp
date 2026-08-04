@@ -91,6 +91,16 @@ void clientCheckLateJoinTimeout();
 void clientNoteLateJoinProgress();
 bool clientLateJoinPacketDeferralActive();
 
+// Dedicated-server character persistence and roster cleanup.
+bool clientSendAutomatiaCharacterSaveNow(const char* reason = nullptr);
+bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
+void serverRequestAutomatiaCharacterSave(int player, const char* reason = nullptr);
+void serverRequestAllAutomatiaCharacterSaves(const char* reason = nullptr);
+void disconnectAutomatiaRemotePlayer(
+    int player,
+    const char* reason,
+    bool notifyOtherClients = true);
+
 // server/game flags
 extern Uint32 svFlags;
 extern Uint32 settings_svFlags;

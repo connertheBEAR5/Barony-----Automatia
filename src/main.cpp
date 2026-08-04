@@ -539,6 +539,10 @@ bool headlessAutoStart = false;
 Uint32 headlessAutoStartDelaySeconds = 0;
 Uint32 headlessAutosaveIntervalSeconds = 0;
 int headlessSaveSlot = -1;
+CharacterSaveMode characterSaveMode = CharacterSaveMode::NONE;
+CharacterSaveMode clientServerCharacterSaveMode = CharacterSaveMode::NONE;
+Uint32 headlessCharacterSaveIntervalSeconds = 60;
+bool clientConnectedToDedicatedServer = false;
 
 //Entity *players[4];
 
