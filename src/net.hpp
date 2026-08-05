@@ -102,11 +102,14 @@ bool clientSendAutomatiaCharacterSaveBeforeDisconnect(
     Uint32 timeoutMilliseconds = 1500);
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
 /*
- * Runtime STRT v3 carries the server-authoritative spawn position plus the
- * exact polymorph/shapeshift targets. The lobby stages them before map
- * loading; net.cpp applies them only after the local player and all catch-up
- * packets have finished initializing.
+ * Runtime STRT v4 carries the server-authoritative spawn position, exact
+ * polymorph/shapeshift targets, and a visible-player mask. The mask separates
+ * live actors from the dedicated endpoint and reconnect-reserved identities.
  */
+bool clientStageAutomatiaLateJoinVisiblePlayerMask(
+    const Uint8* data,
+    std::size_t size);
+bool clientAutomatiaPlayerSlotShouldHaveActor(int playerIndex);
 bool clientStageAutomatiaLateJoinPosition(
     const Uint8* data,
     std::size_t size);

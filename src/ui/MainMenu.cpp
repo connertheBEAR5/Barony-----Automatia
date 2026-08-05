@@ -12890,9 +12890,11 @@ bind_failed:
 				const std::size_t positionOffset = metadataOffset + 9;
 				const std::size_t transformationOffset =
 					positionOffset + (runtimeVersion >= 2 ? 24 : 0);
-				const std::size_t expectedSize = transformationOffset
-					+ (runtimeVersion >= 3 ? 8 : 0);
-				if (runtimeVersion > 3 || mapNameLength == 0
+				const std::size_t visiblePlayerMaskOffset =
+					transformationOffset + (runtimeVersion >= 3 ? 8 : 0);
+				const std::size_t expectedSize = visiblePlayerMaskOffset
+					+ (runtimeVersion >= 4 ? 4 : 0);
+				if (runtimeVersion > 4 || mapNameLength == 0
 					|| mapNameLength >= sizeof(maptoload)
 					|| static_cast<std::size_t>(net_packet->len) != expectedSize)
 				{
@@ -12915,6 +12917,15 @@ bind_failed:
 					printlog(
 						"[Character Save] Rejected malformed authoritative "
 						"late-join transformation.");
+					return;
+				}
+				if (runtimeVersion >= 4
+					&& !clientStageAutomatiaLateJoinVisiblePlayerMask(
+						&net_packet->data[visiblePlayerMaskOffset], 4))
+				{
+					printlog(
+						"[Roster] Rejected malformed authoritative "
+						"visible-player mask.");
 					return;
 				}
 				memcpy(maptoload, &net_packet->data[19], mapNameLength);

@@ -7195,20 +7195,23 @@ void assignActions(
 				}
 				if ( numplayers >= 0 && numplayers < MAXPLAYERS )
 				{
-                    if ( multiplayer == CLIENT
-                        && clientConnectedToDedicatedServer
-                        && numplayers == 0 )
-                    {
-                        // Slot zero is the dedicated network endpoint, not a
-                        // playable actor. Keep the numbered marker inert while
-                        // preserving client_disconnected[0] for protocol logic.
-                        players[0]->entity = nullptr;
-                        entity->skill[2] = 0;
-                        entity->flags[INVISIBLE] = true;
-                        entity->flags[NOUPDATE] = true;
-                        ++numplayers;
-                        break;
-                    }
+					if ( multiplayer == CLIENT
+						&& !clientAutomatiaPlayerSlotShouldHaveActor(
+							numplayers) )
+					{
+						// Dedicated slot zero and reconnect-reserved slots are
+						// network identities, not actors. Remove the authored
+						// Player Start marker entirely before it can become a
+						// voxel body.
+						if ( players[numplayers] )
+						{
+							players[numplayers]->entity = nullptr;
+						}
+						++numplayers;
+						list_RemoveNode(entity->mynode);
+						entity = nullptr;
+						break;
+					}
 					if ( headless && multiplayer == SERVER && numplayers == 0 )
 					{
 						// Networking slot zero identifies the dedicated server, but

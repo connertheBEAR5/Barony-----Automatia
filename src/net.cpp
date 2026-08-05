@@ -257,6 +257,12 @@ namespace
 	static ClientLateJoinTransformation
 		g_clientPendingLateJoinTransformation;
 
+	static_assert(
+		MAXPLAYERS <= 32,
+		"late-join visible-player mask requires MAXPLAYERS <= 32");
+	static Uint32 g_clientAuthoritativeVisiblePlayerMask = 0;
+	static bool g_clientAuthoritativeVisiblePlayerMaskValid = false;
+
 	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
 	static Uint32 g_characterSaveTransferId = 0;
 
@@ -322,6 +328,96 @@ namespace
 			&& players[playerIndex]
 			&& !players[playerIndex]->isLocalPlayer()
 			&& worldState.playerSharesActiveInstance(playerIndex);
+	}
+
+	static bool clientPlayerSlotMayOwnVisibleActor(int playerIndex)
+	{
+		if (multiplayer != CLIENT)
+		{
+			return true;
+		}
+		if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+		{
+			return false;
+		}
+		if (playerIndex == clientnum)
+		{
+			return true;
+		}
+		if (g_clientAuthoritativeVisiblePlayerMaskValid)
+		{
+			return (g_clientAuthoritativeVisiblePlayerMask
+				& (static_cast<Uint32>(1) << playerIndex)) != 0;
+		}
+		if (playerIndex == 0
+			&& (clientConnectedToDedicatedServer
+				|| clientServerCharacterSaveMode
+					!= CharacterSaveMode::NONE))
+		{
+			return false;
+		}
+		return !client_disconnected[playerIndex];
+	}
+
+	static std::size_t clientRemoveNonRosterPlayerActors(
+		const char* reason)
+	{
+		if (multiplayer != CLIENT || !map.entities)
+		{
+			return 0;
+		}
+
+		std::size_t removed = 0;
+		node_t* nextNode = nullptr;
+		for (node_t* node = map.entities->first;
+			node; node = nextNode)
+		{
+			nextNode = node->next;
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (!entity || entity->behavior != &actPlayer)
+			{
+				continue;
+			}
+			const int playerIndex = entity->skill[2];
+			if (clientPlayerSlotMayOwnVisibleActor(playerIndex))
+			{
+				continue;
+			}
+
+			if (playerIndex >= 0 && playerIndex < MAXPLAYERS)
+			{
+				worldState.removePlayer(playerIndex);
+				if (players[playerIndex]
+					&& players[playerIndex]->entity == entity)
+				{
+					players[playerIndex]->entity = nullptr;
+				}
+			}
+			if (entity->mynode)
+			{
+				list_RemoveNode(entity->mynode);
+				++removed;
+			}
+		}
+
+		for (int playerIndex = 0;
+			playerIndex < MAXPLAYERS; ++playerIndex)
+		{
+			if (!clientPlayerSlotMayOwnVisibleActor(playerIndex)
+				&& players[playerIndex])
+			{
+				players[playerIndex]->entity = nullptr;
+			}
+		}
+
+		if (removed > 0)
+		{
+			printlog(
+				"[Roster] Client removed %zu non-roster player actor(s) (%s).",
+				removed,
+				reason ? reason : "roster reconciliation");
+		}
+		return removed;
 	}
 
 	static Uint8 networkEntityArchetype(const Entity* entity)
@@ -822,6 +918,11 @@ namespace
 	}
 }
 
+bool clientAutomatiaPlayerSlotShouldHaveActor(int playerIndex)
+{
+	return clientPlayerSlotMayOwnVisibleActor(playerIndex);
+}
+
 static std::vector<std::uint8_t> makeCharacterSaveBeginRecord(
     int player,
     Uint32 transferId,
@@ -1309,6 +1410,25 @@ static bool finalizeClientCharacterRestoreTransfer()
     return restored;
 }
 
+bool clientStageAutomatiaLateJoinVisiblePlayerMask(
+	const Uint8* data,
+	std::size_t size)
+{
+	if (!data || size != 4 || clientnum < 0 || clientnum >= MAXPLAYERS)
+	{
+		return false;
+	}
+	g_clientAuthoritativeVisiblePlayerMask =
+		LateJoinProtocol::read32(data, 0);
+	g_clientAuthoritativeVisiblePlayerMask
+		|= static_cast<Uint32>(1) << clientnum;
+	g_clientAuthoritativeVisiblePlayerMaskValid = true;
+	printlog(
+		"[Roster] Client staged authoritative visible-player mask 0x%08x.",
+		g_clientAuthoritativeVisiblePlayerMask);
+	return true;
+}
+
 bool clientStageAutomatiaLateJoinPosition(
     const Uint8* data,
     std::size_t size)
@@ -1780,6 +1900,8 @@ void clientResetLateJoinPacketDeferral()
 	g_clientPendingCharacterRestorePayload.clear();
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 	g_clientPendingLateJoinTransformation = ClientLateJoinTransformation{};
+	g_clientAuthoritativeVisiblePlayerMask = 0;
+	g_clientAuthoritativeVisiblePlayerMaskValid = false;
 }
 
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
@@ -2901,16 +3023,17 @@ static bool sendServerLateJoinStart(int playerIndex)
     const std::size_t positionOffset = metadataOffset + 9;
     const std::size_t transformationOffset =
         positionOffset + kAutomatiaLateJoinPositionWireBytes;
+    const std::size_t visiblePlayerMaskOffset =
+        transformationOffset + kAutomatiaLateJoinTransformationWireBytes;
     std::vector<std::uint8_t> record(
-        transformationOffset
-            + kAutomatiaLateJoinTransformationWireBytes,
+        visiblePlayerMaskOffset + 4,
         0);
     memcpy(record.data(), "STRT", 4);
     LateJoinProtocol::write32(record, 4, svFlags);
     LateJoinProtocol::write32(record, 8, uniqueGameKey);
     record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
     LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
-    record[17] = 3; // Runtime STRT v3: map, position, transformation targets.
+    record[17] = 4; // Runtime STRT v4: map, position, transformations, visible-player mask.
     record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
     memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
     LateJoinProtocol::write32(
@@ -2950,16 +3073,36 @@ static bool sendServerLateJoinStart(int playerIndex)
         transformationOffset + 4,
         static_cast<Uint32>(shapeshiftTarget));
 
+    Uint32 visiblePlayerMask = 0;
+    for (int visiblePlayer = 1;
+        visiblePlayer < MAXPLAYERS; ++visiblePlayer)
+    {
+        if (client_disconnected[visiblePlayer]
+            || !players[visiblePlayer]
+            || !players[visiblePlayer]->entity
+            || !players[visiblePlayer]->worldInstance.matches(identity))
+        {
+            continue;
+        }
+        visiblePlayerMask
+            |= static_cast<Uint32>(1) << visiblePlayer;
+    }
+    LateJoinProtocol::write32(
+        record,
+        visiblePlayerMaskOffset,
+        visiblePlayerMask);
+
     printlog(
         "[Character Save] Sending player %d authoritative late-join "
-        "position %.2f, %.2f, %.2f and transformation targets "
-        "polymorph=%d shapeshift=%d.",
+        "position %.2f, %.2f, %.2f, transformation targets "
+        "polymorph=%d shapeshift=%d, visible-player mask 0x%08x.",
         playerIndex,
         authoritativePlayer->x,
         authoritativePlayer->y,
         authoritativePlayer->z,
         static_cast<int>(polymorphTarget),
-        static_cast<int>(shapeshiftTarget));
+        static_cast<int>(shapeshiftTarget),
+        visiblePlayerMask);
     return queueLateJoinRecordForPlayer(playerIndex, record);
 }
 
@@ -5898,6 +6041,11 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			players[player]->entity = nullptr;
 		}
 		client_disconnected[player] = false;
+		if (g_clientAuthoritativeVisiblePlayerMaskValid)
+		{
+			g_clientAuthoritativeVisiblePlayerMask
+				|= static_cast<Uint32>(1) << player;
+		}
 		client_classes[player] = net_packet->data[5];
 		stats[player]->sex = static_cast<sex_t>(net_packet->data[6]);
 		stats[player]->stat_appearance = net_packet->data[7];
@@ -6091,6 +6239,33 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		const int incomingPlayer = static_cast<Sint32>(
 			SDLNet_Read32(&net_packet->data[30]));
 		Entity *entity = uidToEntity(static_cast<Sint32>(authoritativeUid));
+
+		if (Entity::isPlayerHeadSprite(incomingSprite)
+			&& !clientPlayerSlotMayOwnVisibleActor(incomingPlayer))
+		{
+			if (incomingPlayer >= 0 && incomingPlayer < MAXPLAYERS
+				&& players[incomingPlayer]
+				&& players[incomingPlayer]->entity)
+			{
+				Entity* staleHead = players[incomingPlayer]->entity;
+				worldState.removePlayer(incomingPlayer);
+				players[incomingPlayer]->entity = nullptr;
+				if (staleHead->mynode)
+				{
+					list_RemoveNode(staleHead->mynode);
+				}
+				printlog(
+					"[Roster] Client suppressed non-roster player %d "
+					"from an authoritative entity update.",
+					incomingPlayer);
+			}
+			else if (entity && entity->behavior == &actPlayer
+				&& entity->mynode)
+			{
+				list_RemoveNode(entity->mynode);
+			}
+			return;
+		}
 		if (entity && authoritativePlayerUpdateConflicts(
 				Entity::isPlayerHeadSprite(incomingSprite),
 				incomingPlayer,
@@ -7709,6 +7884,12 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	    	return;
 	    }
 		client_disconnected[player] = true;
+		if (g_clientAuthoritativeVisiblePlayerMaskValid
+			&& player >= 0 && player < MAXPLAYERS)
+		{
+			g_clientAuthoritativeVisiblePlayerMask
+				&= ~(static_cast<Uint32>(1) << player);
+		}
 		if (player == 0)
 		{
 			// server shutdown
@@ -7733,6 +7914,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 				players[player]->entity = nullptr;
 				players[player]->was_connected_to_game = false;
 			}
+			(void)clientRemoveNonRosterPlayerActors(
+				"disconnect notification");
 			printlog(
 				"[Roster] Client removed disconnected player %d body.",
 				player);
@@ -12246,6 +12429,8 @@ static void tryReplayClientLateJoinPackets()
 	};
 	replay(g_clientLateJoinCatchupPackets, true);
 	replay(livePackets, true);
+	const std::size_t removedNonRosterActors =
+		clientRemoveNonRosterPlayerActors("late-join catch-up");
 
 	// Catch-up contains normal player/entity synchronization that can
 	// overwrite a restored character. Apply the saved character only after
@@ -12329,9 +12514,13 @@ static void tryReplayClientLateJoinPackets()
 	const std::size_t liveCount = livePackets.size();
 	clientResetLateJoinPacketDeferral();
 	printlog(
-		"[Late Join] Client applied %zu catch-up and %zu deferred live packet(s); reset %zu static fixture light(s), rebuilt %zu editor light source(s), %zu rebuild failure(s).",
-		catchupCount, liveCount, resetStaticFixtures,
-		rebuiltEditorLightSources, failedEditorLightSources);
+		"[Late Join] Client applied %zu catch-up and %zu deferred live "
+		"packet(s); removed %zu non-roster player actor(s), reset %zu "
+		"static fixture light(s), rebuilt %zu editor light source(s), "
+		"%zu rebuild failure(s).",
+		catchupCount, liveCount, removedNonRosterActors,
+		resetStaticFixtures, rebuiltEditorLightSources,
+		failedEditorLightSources);
 }
 
 /*-------------------------------------------------------------------------------
@@ -17061,6 +17250,8 @@ void closeNetworkInterfaces()
 	g_clientPendingCharacterRestorePayload.clear();
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 	g_clientPendingLateJoinTransformation = ClientLateJoinTransformation{};
+	g_clientAuthoritativeVisiblePlayerMask = 0;
+	g_clientAuthoritativeVisiblePlayerMaskValid = false;
 	clientConnectedToDedicatedServer = false;
 	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
 	for (int c = 1; c < MAXPLAYERS; ++c)
