@@ -559,6 +559,7 @@ bool writeAutomatiaPersistentWorldSave(
 );
 bool serializeAutomatiaPersistentWorldSnapshot(
     const std::string& sessionId,
+    int playerIndex,
     std::string& snapshot,
     std::string& error
 );
@@ -568,6 +569,24 @@ bool stageAutomatiaPersistentWorldSnapshot(
     std::string& error
 );
 void discardAutomatiaPersistentWorldSnapshot();
+bool exportAutomatiaPersistentMinimapSnapshot(
+    int playerIndex,
+    std::string& mapKey,
+    Sint32& width,
+    Sint32& height,
+    std::vector<Sint8>& tiles
+);
+bool importAutomatiaPersistentMinimapSnapshot(
+    int playerIndex,
+    const std::string& mapKey,
+    Sint32 width,
+    Sint32 height,
+    const std::vector<Sint8>& tiles,
+    bool allowResize
+);
+void syncClientPersistentMinimap(bool force);
+void resetClientPersistentMinimapSync();
+void restoreAutomatiaPersistentMinimapForLocalPlayer();
 bool loadAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,

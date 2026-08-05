@@ -9,6 +9,7 @@
 #include "GameUI.hpp"
 
 #include "../init.hpp"
+#include "../game.hpp"
 #include "../net.hpp"
 #include "../late_join_protocol.hpp"
 #include "../lan_discovery.hpp"
@@ -11570,6 +11571,7 @@ bind_failed:
 				}
 			} else if (multiplayer == CLIENT) {
 				// send disconnect message to server
+				syncClientPersistentMinimap(true);
 				(void)clientSendAutomatiaCharacterSaveNow("leave lobby");
 				strcpy((char*)net_packet->data, "DISC");
 				net_packet->data[4] = clientnum;
@@ -12872,6 +12874,7 @@ bind_failed:
 				return;
 			}
 			automatiaReconnectTokens[clientnum] = std::move(token);
+			restoreAutomatiaPersistentMinimapForLocalPlayer();
 			printlog("[Late Join] Lobby client stored reconnect identity for slot %d.",
 				clientnum);
 		}},

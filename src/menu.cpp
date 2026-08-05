@@ -9117,6 +9117,7 @@ void doNewGame(bool makeHighscore) {
 			*/
 		}
 		applyPersistentMapRemovals();
+		restoreAutomatiaPersistentMinimapForLocalPlayer();
 
 		bool savedPlayerSpawnMask[MAXPLAYERS] = {};
 		const bool useSavedPlayerSpawnMask =
@@ -9607,6 +9608,7 @@ void doNewGame(bool makeHighscore) {
 				generateDungeon(maptoload, local_rng.rand());
 			}
 		}
+		restoreAutomatiaPersistentMinimapForLocalPlayer();
 		assignActions(&map);
 		generatePathMaps();
         clearChunks();
@@ -10076,6 +10078,7 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 		// send disconnect messages
 		if (multiplayer == CLIENT)
 		{
+			syncClientPersistentMinimap(true);
 			if (!saveHighscore && !onServerDisconnect)
 			{
 				(void)clientSendAutomatiaCharacterSaveBeforeDisconnect(1500);

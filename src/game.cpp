@@ -79,7 +79,8 @@
 void persistentSignalControllerBroadcastOutput(
     Entity* controller
 );
-static void capturePersistentMinimap();
+static std::string normalizePersistentMapKey(std::string key);
+static void capturePersistentMinimap(bool requirePlayerOnActiveMap = true);
 static void capturePersistentMechanismStates();
 static void capturePersistentMapRemovals();
 
@@ -987,12 +988,59 @@ struct AutomatiaSavedPlayerPlacement
 static AutomatiaSavedPlayerPlacement
     automatiaSavedPlayerPlacements[MAXPLAYERS];
 /*
- * Explored minimap tiles retained for each visited map during the
- * current game session. This must be declared before the session reset
- * function, which clears it.
+ * Per-character explored minimap state.
+ *
+ * The first key is the stable reconnect/character identity. The second key
+ * is the canonical map-instance identity (for example start.lmp#world).
+ * Remote clients report their own minimap progress to the authoritative
+ * server; a headless server must never treat its process-local minimap array
+ * as a remote player's discovery state.
  */
-static std::unordered_map<std::string, std::vector<Sint8>>
-    persistentMinimapRegistry;
+struct PersistentMinimapState
+{
+    Sint32 width = 0;
+    Sint32 height = 0;
+    std::vector<Sint8> tiles;
+};
+using PersistentMinimapMapRegistry =
+    std::unordered_map<std::string, PersistentMinimapState>;
+static std::unordered_map<std::string, PersistentMinimapMapRegistry>
+    persistentPlayerMinimapRegistry;
+/*
+ * Compatibility storage for the original map-wide "minimap" field. It is
+ * read once and offered as a fallback, then migrated into the player's
+ * identity-scoped registry by the next capture/save.
+ */
+static std::unordered_map<std::string, PersistentMinimapState>
+    persistentLegacyMinimapRegistry;
+static Uint32 persistentMinimapServerTransferId = 0;
+constexpr std::size_t PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD = 1600;
+static_assert(
+    28U + 255U + PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD
+        <= NET_PACKET_SIZE - 9U,
+    "Persistent minimap destination chunks exceed the safe-packet payload");
+
+static std::vector<Uint8> packPersistentMinimapTilesForServer(
+    const std::vector<Sint8>& tiles
+)
+{
+    std::vector<Uint8> packed((tiles.size() * 3U + 7U) / 8U, 0);
+    for (std::size_t index = 0; index < tiles.size(); ++index)
+    {
+        const Uint8 value = static_cast<Uint8>(
+            std::max<Sint8>(0, std::min<Sint8>(4, tiles[index])));
+        const std::size_t bit = index * 3U;
+        const std::size_t byte = bit / 8U;
+        const unsigned shift = static_cast<unsigned>(bit % 8U);
+        packed[byte] |= static_cast<Uint8>(value << shift);
+        if (shift > 5U && byte + 1U < packed.size())
+        {
+            packed[byte + 1U] |=
+                static_cast<Uint8>(value >> (8U - shift));
+        }
+    }
+    return packed;
+}
 /*
  * Original map entities use positive persistent IDs.
  * Explicitly persistent runtime monsters use negative IDs.
@@ -1007,6 +1055,176 @@ static Sint32 nextDynamicMonsterPersistentID = -1;
 static std::string clientPersistentSnapshotMapKey;
 static bool clientPersistentSnapshotReceiving = false;
 static bool clientPersistentSnapshotComplete = false;
+
+static std::string persistentMinimapCharacterNameIdentity(
+    const int playerIndex
+)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !stats[playerIndex] || stats[playerIndex]->name[0] == '\0')
+    {
+        return "";
+    }
+    const std::string name = stats[playerIndex]->name;
+    std::string normalized;
+    normalized.reserve(name.size());
+    for (const unsigned char character : name)
+    {
+        if (std::isalnum(character) || character == '_' || character == '-')
+        {
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+        }
+        else if (!normalized.empty() && normalized.back() != '_')
+        {
+            normalized.push_back('_');
+        }
+    }
+    while (!normalized.empty() && normalized.back() == '_')
+    {
+        normalized.pop_back();
+    }
+    return normalized.empty() ? "" : "character_name:" + normalized;
+}
+
+static std::string persistentMinimapPlayerIdentity(const int playerIndex)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+    {
+        return "";
+    }
+
+    /*
+     * A single-player world save already isolates one local character, so a
+     * fixed identity is safer than depending on when the Stat name is loaded.
+     * This lets minimap discovery restore during initial map construction.
+     */
+    if (multiplayer != CLIENT && multiplayer != SERVER)
+    {
+        return "singleplayer:local";
+    }
+
+    /*
+     * Character-save LOCAL mode uses the normalized character name as its
+     * durable identity. Prefer that same key for minimap persistence so a
+     * newly generated reconnect token cannot orphan the saved discovery.
+     */
+    const std::string characterIdentity =
+        persistentMinimapCharacterNameIdentity(playerIndex);
+    if (!characterIdentity.empty())
+    {
+        return characterIdentity;
+    }
+    if (ReconnectToken::isValid(automatiaReconnectTokens[playerIndex]))
+    {
+        return "reconnect:" + automatiaReconnectTokens[playerIndex];
+    }
+    return "";
+}
+
+static void mergePersistentMinimapIdentity(
+    const std::string& sourceIdentity,
+    const std::string& destinationIdentity
+)
+{
+    if (sourceIdentity.empty() || destinationIdentity.empty()
+        || sourceIdentity == destinationIdentity)
+    {
+        return;
+    }
+    auto sourcePlayer =
+        persistentPlayerMinimapRegistry.find(sourceIdentity);
+    if (sourcePlayer == persistentPlayerMinimapRegistry.end())
+    {
+        return;
+    }
+    PersistentMinimapMapRegistry sourceMaps =
+        std::move(sourcePlayer->second);
+    persistentPlayerMinimapRegistry.erase(sourcePlayer);
+    PersistentMinimapMapRegistry& destination =
+        persistentPlayerMinimapRegistry[destinationIdentity];
+    for (auto& savedMap : sourceMaps)
+    {
+        auto inserted = destination.emplace(savedMap.first, savedMap.second);
+        if (inserted.second)
+        {
+            continue;
+        }
+        PersistentMinimapState& target = inserted.first->second;
+        const PersistentMinimapState& source = savedMap.second;
+        if (target.width != source.width || target.height != source.height
+            || target.tiles.size() != source.tiles.size())
+        {
+            continue;
+        }
+        for (std::size_t index = 0; index < target.tiles.size(); ++index)
+        {
+            if (target.tiles[index] == 0 && source.tiles[index] != 0)
+            {
+                target.tiles[index] = source.tiles[index];
+            }
+        }
+    }
+}
+
+static void migratePersistentMinimapFallbackIdentity(const int playerIndex)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+    {
+        return;
+    }
+    const std::string preferredIdentity =
+        persistentMinimapPlayerIdentity(playerIndex);
+    if (preferredIdentity.empty())
+    {
+        return;
+    }
+
+    const std::string characterIdentity =
+        persistentMinimapCharacterNameIdentity(playerIndex);
+    mergePersistentMinimapIdentity(
+        characterIdentity, preferredIdentity);
+
+    if (ReconnectToken::isValid(automatiaReconnectTokens[playerIndex]))
+    {
+        mergePersistentMinimapIdentity(
+            "reconnect:" + automatiaReconnectTokens[playerIndex],
+            preferredIdentity);
+    }
+}
+
+static int persistentMinimapLocalPlayerIndex()
+{
+    if (multiplayer == CLIENT)
+    {
+        return clientnum >= 0 && clientnum < MAXPLAYERS ? clientnum : -1;
+    }
+    if (multiplayer == SERVER && headless)
+    {
+        return -1;
+    }
+    return clientnum >= 0 && clientnum < MAXPLAYERS ? clientnum : 0;
+}
+
+static PersistentMinimapState* persistentMinimapStateForPlayer(
+    const int playerIndex,
+    const std::string& mapKey
+)
+{
+    migratePersistentMinimapFallbackIdentity(playerIndex);
+    const std::string identity =
+        persistentMinimapPlayerIdentity(playerIndex);
+    if (identity.empty())
+    {
+        return nullptr;
+    }
+    auto player = persistentPlayerMinimapRegistry.find(identity);
+    if (player == persistentPlayerMinimapRegistry.end())
+    {
+        return nullptr;
+    }
+    auto state = player->second.find(mapKey);
+    return state != player->second.end() ? &state->second : nullptr;
+}
 
 namespace
 {
@@ -2149,25 +2367,118 @@ void hydratePreservedAutomatiaWorldDocument()
                 && persistent["minimap"].size()
                     <= MINIMAP_MAX_DIMENSION * MINIMAP_MAX_DIMENSION)
             {
-                std::vector<Sint8> minimapState;
-                minimapState.reserve(persistent["minimap"].size());
-                bool valid = true;
+                Sint32 savedWidth = 0;
+                Sint32 savedHeight = 0;
+                savedJsonInt(savedMap, "width", savedWidth);
+                savedJsonInt(savedMap, "height", savedHeight);
+                const std::size_t expected =
+                    savedWidth > 0 && savedHeight > 0
+                    ? static_cast<std::size_t>(savedWidth)
+                        * static_cast<std::size_t>(savedHeight)
+                    : 0;
+                PersistentMinimapState legacy;
+                legacy.width = savedWidth;
+                legacy.height = savedHeight;
+                legacy.tiles.reserve(persistent["minimap"].size());
+                bool valid = expected == persistent["minimap"].size()
+                    && savedWidth <= MINIMAP_MAX_DIMENSION
+                    && savedHeight <= MINIMAP_MAX_DIMENSION;
                 for (const Json& member : persistent["minimap"])
                 {
                     const Json wrapper = {{"value", member}};
                     Sint32 value = 0;
-                    if (!savedJsonInt(wrapper, "value", value)
-                        || value < std::numeric_limits<Sint8>::min()
-                        || value > std::numeric_limits<Sint8>::max())
+                    if (!valid || !savedJsonInt(wrapper, "value", value)
+                        || value < 0 || value > 4)
                     {
                         valid = false;
                         break;
                     }
-                    minimapState.push_back(static_cast<Sint8>(value));
+                    legacy.tiles.push_back(static_cast<Sint8>(value));
                 }
                 if (valid)
                 {
-                    persistentMinimapRegistry[identity.key()] = std::move(minimapState);
+                    persistentLegacyMinimapRegistry[identity.key()] =
+                        std::move(legacy);
+                }
+            }
+            if (persistent.contains("player_minimaps")
+                && persistent["player_minimaps"].is_object()
+                && persistent["player_minimaps"].size() <= 4096)
+            {
+                const Json& savedPlayers = persistent["player_minimaps"];
+                for (auto player = savedPlayers.begin();
+                    player != savedPlayers.end(); ++player)
+                {
+                    if (player.key().empty() || player.key().size() > 256
+                        || !player.value().is_object())
+                    {
+                        continue;
+                    }
+                    Sint32 width = 0;
+                    Sint32 height = 0;
+                    if (!savedJsonInt(player.value(), "width", width)
+                        || !savedJsonInt(player.value(), "height", height)
+                        || width <= 0 || height <= 0
+                        || width > MINIMAP_MAX_DIMENSION
+                        || height > MINIMAP_MAX_DIMENSION
+                        || !player.value().contains("runs")
+                        || !player.value()["runs"].is_array()
+                        || player.value()["runs"].size()
+                            > static_cast<std::size_t>(width)
+                                * static_cast<std::size_t>(height))
+                    {
+                        continue;
+                    }
+                    const std::size_t tileCount =
+                        static_cast<std::size_t>(width)
+                        * static_cast<std::size_t>(height);
+                    PersistentMinimapState minimapState;
+                    minimapState.width = width;
+                    minimapState.height = height;
+                    minimapState.tiles.assign(tileCount, 0);
+                    bool valid = true;
+                    std::size_t previousRunEnd = 0;
+                    for (const Json& run : player.value()["runs"])
+                    {
+                        if (!run.is_array() || run.size() != 3)
+                        {
+                            valid = false;
+                            break;
+                        }
+                        const Json startWrapper = {{"value", run[0]}};
+                        const Json lengthWrapper = {{"value", run[1]}};
+                        const Json valueWrapper = {{"value", run[2]}};
+                        Sint32 startIndex = 0;
+                        Sint32 length = 0;
+                        Sint32 value = 0;
+                        if (!savedJsonInt(startWrapper, "value", startIndex)
+                            || !savedJsonInt(lengthWrapper, "value", length)
+                            || !savedJsonInt(valueWrapper, "value", value)
+                            || startIndex < 0 || length <= 0
+                            || value <= 0 || value > 4
+                            || static_cast<std::size_t>(startIndex) >= tileCount
+                            || static_cast<std::size_t>(startIndex)
+                                < previousRunEnd
+                            || static_cast<std::size_t>(length)
+                                > tileCount
+                                    - static_cast<std::size_t>(startIndex))
+                        {
+                            valid = false;
+                            break;
+                        }
+                        std::fill(
+                            minimapState.tiles.begin() + startIndex,
+                            minimapState.tiles.begin() + startIndex + length,
+                            static_cast<Sint8>(value));
+                        previousRunEnd =
+                            static_cast<std::size_t>(startIndex)
+                            + static_cast<std::size_t>(length);
+                    }
+                    if (valid)
+                    {
+                        persistentPlayerMinimapRegistry[player.key()]
+                            [identity.key()] = std::move(minimapState);
+                    }
                 }
             }
             ++restoredMaps;
@@ -2848,8 +3159,11 @@ void resetPersistentWorldSession()
     }
 
 
-    persistentMinimapRegistry.clear();
-        persistentWorldStoryState =
+    persistentPlayerMinimapRegistry.clear();
+    persistentLegacyMinimapRegistry.clear();
+    persistentMinimapServerTransferId = 0;
+    resetClientPersistentMinimapSync();
+    persistentWorldStoryState =
         PersistentWorldStoryState{};
 
     nextDynamicMonsterPersistentID = -1;
@@ -3029,18 +3343,33 @@ static bool captureAutomatiaPersistentWorldDocument(
         return sorted;
     };
 
-    std::vector<std::string> mapKeys;
-    mapKeys.reserve(persistentMapRemovalRegistry.size());
+    std::unordered_set<std::string> minimapAwareMapKeys;
+    minimapAwareMapKeys.reserve(
+        persistentMapRemovalRegistry.size()
+        + persistentLegacyMinimapRegistry.size());
     for (const auto& entry : persistentMapRemovalRegistry)
     {
-        mapKeys.push_back(entry.first);
+        minimapAwareMapKeys.insert(entry.first);
     }
+    for (const auto& entry : persistentLegacyMinimapRegistry)
+    {
+        minimapAwareMapKeys.insert(entry.first);
+    }
+    for (const auto& player : persistentPlayerMinimapRegistry)
+    {
+        for (const auto& entry : player.second)
+        {
+            minimapAwareMapKeys.insert(entry.first);
+        }
+    }
+    std::vector<std::string> mapKeys(
+        minimapAwareMapKeys.begin(), minimapAwareMapKeys.end());
     std::sort(mapKeys.begin(), mapKeys.end());
 
     for (const std::string& mapKey : mapKeys)
     {
         const PersistentMapRemovalState& state =
-            persistentMapRemovalRegistry.at(mapKey);
+            persistentMapRemovalRegistry[mapKey];
         Json* mapDocument = nullptr;
         for (Json& candidate : document["map_instances"])
         {
@@ -3186,10 +3515,90 @@ static bool captureAutomatiaPersistentWorldDocument(
             );
         }
 
-        const auto minimap = persistentMinimapRegistry.find(mapKey);
-        if (minimap != persistentMinimapRegistry.end())
+        // New minimap discovery is stored per character inside each map's
+        // already-versioned persistent_state object. Preserve an unmigrated
+        // legacy shared field until a real local character adopts it.
+        const auto legacyMinimap = persistentLegacyMinimapRegistry.find(mapKey);
+        if (legacyMinimap != persistentLegacyMinimapRegistry.end())
         {
-            persistent["minimap"] = minimap->second;
+            persistent["minimap"] = legacyMinimap->second.tiles;
+        }
+        else
+        {
+            persistent.erase("minimap");
+        }
+        Json savedPlayerMinimaps =
+            persistent.contains("player_minimaps")
+                && persistent["player_minimaps"].is_object()
+            ? persistent["player_minimaps"]
+            : Json::object();
+        std::vector<std::string> minimapPlayerIdentities;
+        minimapPlayerIdentities.reserve(persistentPlayerMinimapRegistry.size());
+        for (const auto& player : persistentPlayerMinimapRegistry)
+        {
+            if (player.second.find(mapKey) != player.second.end())
+            {
+                minimapPlayerIdentities.push_back(player.first);
+            }
+        }
+        std::sort(minimapPlayerIdentities.begin(), minimapPlayerIdentities.end());
+        for (const std::string& playerIdentity : minimapPlayerIdentities)
+        {
+            const PersistentMinimapState& state =
+                persistentPlayerMinimapRegistry.at(playerIdentity).at(mapKey);
+            const std::size_t expected =
+                state.width > 0 && state.height > 0
+                ? static_cast<std::size_t>(state.width)
+                    * static_cast<std::size_t>(state.height)
+                : 0;
+            if (state.width <= 0 || state.height <= 0
+                || state.width > MINIMAP_MAX_DIMENSION
+                || state.height > MINIMAP_MAX_DIMENSION
+                || state.tiles.size() != expected)
+            {
+                continue;
+            }
+            Json runs = Json::array();
+            std::size_t index = 0;
+            while (index < state.tiles.size())
+            {
+                const Sint8 value = state.tiles[index];
+                if (value <= 0 || value > 4)
+                {
+                    ++index;
+                    continue;
+                }
+                const std::size_t start = index;
+                while (index < state.tiles.size()
+                    && state.tiles[index] == value
+                    && index - start < static_cast<std::size_t>(INT32_MAX))
+                {
+                    ++index;
+                }
+                runs.push_back(Json::array({
+                    static_cast<Sint32>(start),
+                    static_cast<Sint32>(index - start),
+                    static_cast<Sint32>(value)
+                }));
+            }
+            Json savedPlayer =
+                savedPlayerMinimaps.contains(playerIdentity)
+                    && savedPlayerMinimaps[playerIdentity].is_object()
+                ? savedPlayerMinimaps[playerIdentity]
+                : Json::object();
+            savedPlayer["width"] = state.width;
+            savedPlayer["height"] = state.height;
+            savedPlayer["runs"] = std::move(runs);
+            savedPlayerMinimaps[playerIdentity] = std::move(savedPlayer);
+        }
+        if (savedPlayerMinimaps.empty())
+        {
+            persistent.erase("player_minimaps");
+        }
+        else
+        {
+            persistent["player_minimaps"] =
+                std::move(savedPlayerMinimaps);
         }
         (*mapDocument)["persistent_state"] = std::move(persistent);
     }
@@ -3308,6 +3717,7 @@ static bool captureAutomatiaPersistentWorldDocument(
 
 bool serializeAutomatiaPersistentWorldSnapshot(
     const std::string& sessionId,
+    const int playerIndex,
     std::string& snapshot,
     std::string& error
 )
@@ -3359,7 +3769,6 @@ bool serializeAutomatiaPersistentWorldSnapshot(
         error = "active map instance is missing or duplicated in snapshot";
         return false;
     }
-    document["map_instances"] = std::move(scopedMaps);
     AutomatiaSave::Json scopedPlayers = AutomatiaSave::Json::array();
     for (const AutomatiaSave::Json& savedPlayer : document["players"])
     {
@@ -3370,6 +3779,26 @@ bool serializeAutomatiaPersistentWorldSnapshot(
         }
     }
     document["players"] = std::move(scopedPlayers);
+    const std::string minimapIdentity =
+        persistentMinimapPlayerIdentity(playerIndex);
+    AutomatiaSave::Json& scopedPersistent =
+        scopedMaps[0]["persistent_state"];
+    if (scopedPersistent.is_object()
+        && scopedPersistent.contains("player_minimaps")
+        && scopedPersistent["player_minimaps"].is_object())
+    {
+        AutomatiaSave::Json scopedPlayerMinimaps =
+            AutomatiaSave::Json::object();
+        if (!minimapIdentity.empty()
+            && scopedPersistent["player_minimaps"].contains(minimapIdentity))
+        {
+            scopedPlayerMinimaps[minimapIdentity] =
+                scopedPersistent["player_minimaps"][minimapIdentity];
+        }
+        scopedPersistent["player_minimaps"] =
+            std::move(scopedPlayerMinimaps);
+    }
+    document["map_instances"] = std::move(scopedMaps);
     document["snapshot_scope"] = "map_instance";
 #ifdef SAM_FRAMEWORK_ENABLED
     document["sam_fingerprint"] = SAMSync::generateFingerprint();
@@ -3527,54 +3956,239 @@ static std::string getPersistentMapKey()
     return "";
 }
 
-static void capturePersistentMinimap()
+static void capturePersistentMinimap(
+    const bool requirePlayerOnActiveMap
+)
 {
+    const int playerIndex = persistentMinimapLocalPlayerIndex();
     const std::string mapKey = getPersistentMapKey();
-    if ( mapKey.empty() || map.width <= 0 || map.height <= 0
+    migratePersistentMinimapFallbackIdentity(playerIndex);
+    const std::string playerIdentity =
+        persistentMinimapPlayerIdentity(playerIndex);
+    if (playerIndex < 0 || mapKey.empty() || playerIdentity.empty()
+        || map.width <= 0 || map.height <= 0
         || map.width > MINIMAP_MAX_DIMENSION
-        || map.height > MINIMAP_MAX_DIMENSION )
+        || map.height > MINIMAP_MAX_DIMENSION)
     {
         return;
     }
-    std::vector<Sint8>& saved = persistentMinimapRegistry[mapKey];
-    saved.assign(static_cast<size_t>(map.width * map.height), 0);
-    for ( Sint32 y = 0; y < map.height; ++y )
+    if (requirePlayerOnActiveMap
+        && players[playerIndex]
+        && players[playerIndex]->worldInstance.isValid()
+        && players[playerIndex]->worldInstance.key() != mapKey)
     {
-        for ( Sint32 x = 0; x < map.width; ++x )
+        return;
+    }
+    PersistentMinimapState& saved =
+        persistentPlayerMinimapRegistry[playerIdentity][mapKey];
+    const std::size_t tileCount =
+        static_cast<std::size_t>(map.width)
+        * static_cast<std::size_t>(map.height);
+    std::size_t changed = 0;
+    if (saved.width != map.width || saved.height != map.height
+        || saved.tiles.size() != tileCount)
+    {
+        saved.width = map.width;
+        saved.height = map.height;
+        saved.tiles.assign(tileCount, 0);
+    }
+    auto legacy = persistentLegacyMinimapRegistry.find(mapKey);
+    if (legacy != persistentLegacyMinimapRegistry.end()
+        && legacy->second.width == map.width
+        && legacy->second.height == map.height
+        && legacy->second.tiles.size() == tileCount)
+    {
+        for (std::size_t index = 0; index < tileCount; ++index)
         {
-            saved[static_cast<size_t>(x + y * map.width)] = minimap[y][x];
+            if (saved.tiles[index] == 0 && legacy->second.tiles[index] != 0)
+            {
+                saved.tiles[index] = legacy->second.tiles[index];
+                ++changed;
+            }
+        }
+        persistentLegacyMinimapRegistry.erase(legacy);
+    }
+    std::size_t discovered = 0;
+    for (Sint32 y = 0; y < map.height; ++y)
+    {
+        for (Sint32 x = 0; x < map.width; ++x)
+        {
+            const std::size_t index =
+                static_cast<std::size_t>(x + y * map.width);
+            const Sint8 value = minimap[y][x];
+            if (value > 0 && value <= 4
+                && saved.tiles[index] != value)
+            {
+                saved.tiles[index] = value;
+                ++changed;
+            }
+            if (saved.tiles[index] != 0)
+            {
+                ++discovered;
+            }
         }
     }
-    printlog("[Persistent Minimap] Captured %zu tile(s) for '%s'.",
-        saved.size(), mapKey.c_str());
+    if (changed > 0)
+    {
+        printlog(
+            "[Persistent Minimap] Captured %zu new/updated tile(s), %zu total for player %d in '%s'.",
+            changed, discovered, playerIndex, mapKey.c_str());
+    }
 }
 
 static void restorePersistentMinimap()
 {
+    const int playerIndex = persistentMinimapLocalPlayerIndex();
     const std::string mapKey = getPersistentMapKey();
-    if ( mapKey.empty() || map.width <= 0 || map.height <= 0
+    if (playerIndex < 0 || mapKey.empty() || map.width <= 0 || map.height <= 0
         || map.width > MINIMAP_MAX_DIMENSION
-        || map.height > MINIMAP_MAX_DIMENSION )
+        || map.height > MINIMAP_MAX_DIMENSION)
     {
         return;
     }
-    const auto found = persistentMinimapRegistry.find(mapKey);
-    if ( found == persistentMinimapRegistry.end()
-        || found->second.size() != static_cast<size_t>(map.width * map.height) )
+    PersistentMinimapState* found =
+        persistentMinimapStateForPlayer(playerIndex, mapKey);
+    auto legacy = persistentLegacyMinimapRegistry.find(mapKey);
+    if (!found && legacy != persistentLegacyMinimapRegistry.end())
+    {
+        found = &legacy->second;
+    }
+    const std::size_t tileCount =
+        static_cast<std::size_t>(map.width)
+        * static_cast<std::size_t>(map.height);
+    if (!found || found->width != map.width || found->height != map.height
+        || found->tiles.size() != tileCount)
     {
         return;
     }
-    for ( Sint32 y = 0; y < map.height; ++y )
+    std::size_t restored = 0;
+    for (Sint32 y = 0; y < map.height; ++y)
     {
-        for ( Sint32 x = 0; x < map.width; ++x )
+        for (Sint32 x = 0; x < map.width; ++x)
         {
-            minimap[y][x] =
-                found->second[static_cast<size_t>(x + y * map.width)];
+            const Sint8 value =
+                found->tiles[static_cast<std::size_t>(x + y * map.width)];
+            if (value != 0 && minimap[y][x] == 0)
+            {
+                minimap[y][x] = value;
+                ++restored;
+            }
         }
     }
-    printlog("[Persistent Minimap] Restored %zu tile(s) for '%s'.",
-        found->second.size(), mapKey.c_str());
+    printlog(
+        "[Persistent Minimap] Restored %zu discovered tile(s) for player %d in '%s'.",
+        restored, playerIndex, mapKey.c_str());
 }
+
+void restoreAutomatiaPersistentMinimapForLocalPlayer()
+{
+    restorePersistentMinimap();
+}
+
+bool exportAutomatiaPersistentMinimapSnapshot(
+    const int playerIndex,
+    std::string& mapKey,
+    Sint32& width,
+    Sint32& height,
+    std::vector<Sint8>& tiles
+)
+{
+    mapKey.clear();
+    width = 0;
+    height = 0;
+    tiles.clear();
+    if (playerIndex != persistentMinimapLocalPlayerIndex())
+    {
+        return false;
+    }
+    capturePersistentMinimap();
+    mapKey = getPersistentMapKey();
+    PersistentMinimapState* state =
+        persistentMinimapStateForPlayer(playerIndex, mapKey);
+    if (!state)
+    {
+        return false;
+    }
+    width = state->width;
+    height = state->height;
+    tiles = state->tiles;
+    return true;
+}
+
+bool importAutomatiaPersistentMinimapSnapshot(
+    const int playerIndex,
+    const std::string& requestedMapKey,
+    const Sint32 width,
+    const Sint32 height,
+    const std::vector<Sint8>& tiles,
+    const bool allowResize
+)
+{
+    migratePersistentMinimapFallbackIdentity(playerIndex);
+    const std::string playerIdentity =
+        persistentMinimapPlayerIdentity(playerIndex);
+    const std::string mapKey =
+        normalizePersistentMapKey(requestedMapKey);
+    const std::size_t tileCount =
+        width > 0 && height > 0
+        ? static_cast<std::size_t>(width)
+            * static_cast<std::size_t>(height)
+        : 0;
+    if (playerIdentity.empty() || mapKey.empty()
+        || width <= 0 || height <= 0
+        || width > MINIMAP_MAX_DIMENSION
+        || height > MINIMAP_MAX_DIMENSION
+        || tiles.size() != tileCount)
+    {
+        return false;
+    }
+    PersistentMinimapMapRegistry& playerMaps =
+        persistentPlayerMinimapRegistry[playerIdentity];
+    auto found = playerMaps.find(mapKey);
+    if (found == playerMaps.end())
+    {
+        if (!allowResize || playerMaps.size() >= 4096)
+        {
+            return false;
+        }
+        PersistentMinimapState initial;
+        initial.width = width;
+        initial.height = height;
+        initial.tiles.assign(tileCount, 0);
+        found = playerMaps.emplace(mapKey, std::move(initial)).first;
+    }
+    PersistentMinimapState& saved = found->second;
+    if (saved.width != width || saved.height != height
+        || saved.tiles.size() != tileCount)
+    {
+        if (!allowResize)
+        {
+            return false;
+        }
+        saved.width = width;
+        saved.height = height;
+        saved.tiles.assign(tileCount, 0);
+    }
+    persistentMapRemovalRegistry[mapKey];
+    std::size_t discovered = 0;
+    for (std::size_t index = 0; index < tileCount; ++index)
+    {
+        const Sint8 value = tiles[index];
+        if (value > 0 && value <= 4)
+        {
+            saved.tiles[index] = value;
+        }
+        if (saved.tiles[index] != 0)
+        {
+            ++discovered;
+        }
+    }
+    printlog(
+        "[Persistent Minimap] Server stored %zu discovered tile(s) for player %d in '%s'.",
+        discovered, playerIndex, mapKey.c_str());
+    return true;
+}
+
 
 /*
  * Normalize a creator-defined dialogue, quest, flag, variable, choice,
@@ -8178,6 +8792,99 @@ void sendPersistentWorldSnapshotToClient(
                 ++boulderTrapsSent;
             }
         }
+    }
+
+    const PersistentMinimapState* minimapState =
+        persistentMinimapStateForPlayer(player, mapKey);
+    if (minimapState)
+    {
+        const std::size_t tileCount =
+            minimapState->width > 0 && minimapState->height > 0
+            ? static_cast<std::size_t>(minimapState->width)
+                * static_cast<std::size_t>(minimapState->height)
+            : 0;
+        if (minimapState->width <= MINIMAP_MAX_DIMENSION
+            && minimapState->height <= MINIMAP_MAX_DIMENSION
+            && tileCount > 0
+            && minimapState->tiles.size() == tileCount
+            && mapKey.size() <= 255)
+        {
+            const std::vector<Uint8> packed =
+                packPersistentMinimapTilesForServer(minimapState->tiles);
+            const Uint16 chunkCount = static_cast<Uint16>(
+                (packed.size() + PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD - 1U)
+                / PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD);
+            Uint32 transferId = ++persistentMinimapServerTransferId;
+            if (transferId == 0)
+            {
+                transferId = ++persistentMinimapServerTransferId;
+            }
+            bool sentAllChunks = chunkCount > 0;
+            for (Uint16 sequence = 0;
+                sentAllChunks && sequence < chunkCount; ++sequence)
+            {
+                const std::size_t payloadOffset =
+                    static_cast<std::size_t>(sequence)
+                    * PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD;
+                const std::size_t payloadBytes = std::min(
+                    PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD,
+                    packed.size() - payloadOffset);
+                std::memcpy(net_packet->data, "MMSV", 4);
+                net_packet->data[4] = static_cast<Uint8>(player);
+                SDLNet_Write32(transferId, &net_packet->data[5]);
+                SDLNet_Write16(
+                    static_cast<Uint16>(minimapState->width),
+                    &net_packet->data[9]);
+                SDLNet_Write16(
+                    static_cast<Uint16>(minimapState->height),
+                    &net_packet->data[11]);
+                net_packet->data[13] =
+                    static_cast<Uint8>(mapKey.size());
+                SDLNet_Write16(sequence, &net_packet->data[14]);
+                SDLNet_Write16(chunkCount, &net_packet->data[16]);
+                SDLNet_Write32(
+                    static_cast<Uint32>(packed.size()),
+                    &net_packet->data[18]);
+                SDLNet_Write32(
+                    static_cast<Uint32>(payloadOffset),
+                    &net_packet->data[22]);
+                SDLNet_Write16(
+                    static_cast<Uint16>(payloadBytes),
+                    &net_packet->data[26]);
+                std::memcpy(
+                    &net_packet->data[28], mapKey.data(), mapKey.size());
+                std::memcpy(
+                    &net_packet->data[28 + mapKey.size()],
+                    packed.data() + payloadOffset,
+                    payloadBytes);
+                net_packet->len = static_cast<int>(
+                    28 + mapKey.size() + payloadBytes);
+                prepareClientAddress();
+                sentAllChunks = sendPacketSafe(
+                    net_sock, -1, net_packet, player - 1) != 0;
+            }
+            if (sentAllChunks)
+            {
+                printlog(
+                    "[Persistent Minimap] Sent player %d map '%s' in %u destination snapshot chunk(s).",
+                    player, mapKey.c_str(),
+                    static_cast<unsigned>(chunkCount));
+            }
+            else
+            {
+                printlog(
+                    "[Persistent Minimap] Failed to queue the destination snapshot for player %d map '%s'.",
+                    player, mapKey.c_str());
+            }
+        }
+    }
+    else
+    {
+        printlog(
+            "[Persistent Minimap] No saved discovery was available for player %d identity '%s' in '%s'.",
+            player,
+            persistentMinimapPlayerIdentity(player).c_str(),
+            mapKey.c_str());
     }
 
     strcpy(
@@ -14129,7 +14836,7 @@ static bool processAutomatiaTransition(
 		removeEntityTree(transfer.source);
 	}
 	removeEntityTree(sourceEntity);
-	capturePersistentMinimap();
+	capturePersistentMinimap(false);
 	capturePersistentMechanismStates();
 	capturePersistentMapRemovals();
 	source->dirty = true;
@@ -16153,7 +16860,11 @@ void gameLogic(void)
 					* Capture surviving mechanism properties before checking which
 					* original entities disappeared.
 					*/
-					capturePersistentMinimap();
+					capturePersistentMinimap(false);
+					if (multiplayer == CLIENT)
+					{
+						syncClientPersistentMinimap(true);
+					}
 					capturePersistentMechanismStates();
 					capturePersistentMapRemovals();
 					int totalFloorGold = 0;
@@ -16643,6 +17354,7 @@ void gameLogic(void)
                     createChunks();
 		            loading = false;
 	                int result = loading_task.get();
+					restoreAutomatiaPersistentMinimapForLocalPlayer();
 					loadCustomNextTunnelID = 0;
                     for (int c = 0; c < MAXPLAYERS; ++c) {
                         auto& camera = players[c]->camera();
@@ -21232,6 +21944,10 @@ void drawAllPlayerCameras() {
 	}
 	DebugStats.drawWorldT6 = std::chrono::high_resolution_clock::now();
 	::fov = oldFov;
+	if (!intro && multiplayer == CLIENT)
+	{
+		syncClientPersistentMinimap(false);
+	}
 }
 
 /*-------------------------------------------------------------------------------

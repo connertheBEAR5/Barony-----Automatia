@@ -286,6 +286,116 @@ namespace
 	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
 	static Uint32 g_characterSaveTransferId = 0;
 	static Uint32 g_playerStoryTransferId = 0;
+	constexpr std::size_t kPersistentMinimapChunkPayload = 1800;
+	constexpr Uint32 kPersistentMinimapSyncInterval =
+		3 * TICKS_PER_SECOND;
+	constexpr Uint32 kPersistentMinimapTransferTimeout =
+		15 * TICKS_PER_SECOND;
+	constexpr std::size_t kPersistentMinimapServerChunkPayload = 1600;
+	static_assert(
+		13U + kPersistentMinimapChunkPayload <= NET_PACKET_SIZE - 9U,
+		"Persistent minimap upload chunks exceed the safe-packet payload");
+	static_assert(
+		28U + 255U + kPersistentMinimapServerChunkPayload
+			<= NET_PACKET_SIZE - 9U,
+		"Persistent minimap restore chunks exceed the safe-packet payload");
+
+	struct PersistentMinimapIncomingTransfer
+	{
+		bool active = false;
+		Uint32 transferId = 0;
+		Sint32 width = 0;
+		Sint32 height = 0;
+		Uint32 packedBytes = 0;
+		Uint32 checksum = 0;
+		Uint16 chunkCount = 0;
+		std::string mapKey;
+		std::vector<Uint8> packed;
+		std::vector<bool> received;
+		Uint32 startedTick = 0;
+
+		void reset()
+		{
+			*this = PersistentMinimapIncomingTransfer{};
+		}
+	};
+	static PersistentMinimapIncomingTransfer
+		g_persistentMinimapIncoming[MAXPLAYERS];
+	static PersistentMinimapIncomingTransfer
+		g_clientPersistentMinimapRestore;
+	static Uint32 g_clientPersistentMinimapLastServerTransferId = 0;
+	static Uint32 g_persistentMinimapTransferId = 0;
+	static Uint32 g_persistentMinimapPendingTransferId = 0;
+	static Uint32 g_persistentMinimapLastAcceptedTransferId[MAXPLAYERS] = { 0 };
+	static Uint32 g_persistentMinimapLastSyncTick = 0;
+	static std::string g_persistentMinimapLastMapKey;
+	static Sint32 g_persistentMinimapLastWidth = 0;
+	static Sint32 g_persistentMinimapLastHeight = 0;
+	static std::vector<Sint8> g_persistentMinimapLastTiles;
+	static bool g_persistentMinimapFullAcknowledged = false;
+
+	static std::vector<Uint8> packPersistentMinimapTiles(
+		const std::vector<Sint8>& tiles)
+	{
+		std::vector<Uint8> packed((tiles.size() * 3U + 7U) / 8U, 0);
+		for (std::size_t index = 0; index < tiles.size(); ++index)
+		{
+			const Uint8 value = static_cast<Uint8>(
+				std::max<Sint8>(0, std::min<Sint8>(4, tiles[index])));
+			const std::size_t bit = index * 3U;
+			const std::size_t byte = bit / 8U;
+			const unsigned shift = static_cast<unsigned>(bit % 8U);
+			packed[byte] |= static_cast<Uint8>(value << shift);
+			if (shift > 5U && byte + 1U < packed.size())
+			{
+				packed[byte + 1U] |= static_cast<Uint8>(value >> (8U - shift));
+			}
+		}
+		return packed;
+	}
+
+	static bool unpackPersistentMinimapTiles(
+		const std::vector<Uint8>& packed,
+		const std::size_t tileCount,
+		std::vector<Sint8>& tiles)
+	{
+		if (packed.size() != (tileCount * 3U + 7U) / 8U)
+		{
+			return false;
+		}
+		tiles.assign(tileCount, 0);
+		for (std::size_t index = 0; index < tileCount; ++index)
+		{
+			const std::size_t bit = index * 3U;
+			const std::size_t byte = bit / 8U;
+			const unsigned shift = static_cast<unsigned>(bit % 8U);
+			Uint8 value = static_cast<Uint8>(packed[byte] >> shift);
+			if (shift > 5U && byte + 1U < packed.size())
+			{
+				value |= static_cast<Uint8>(packed[byte + 1U] << (8U - shift));
+			}
+			value &= 0x07U;
+			if (value > 4U)
+			{
+				return false;
+			}
+			tiles[index] = static_cast<Sint8>(value);
+		}
+		return true;
+	}
+
+	static bool sendPersistentMinimapPacket(const int length)
+	{
+		if (multiplayer != CLIENT || !net_packet || !net_sock
+			|| length < 4 || length > NET_PACKET_SIZE - 9)
+		{
+			return false;
+		}
+		net_packet->len = length;
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		return sendPacketSafe(net_sock, -1, net_packet, 0) != 0;
+	}
 
 	static std::string generateReconnectToken()
 	{
@@ -2203,6 +2313,8 @@ void disconnectAutomatiaRemotePlayer(
 
     client_disconnected[player] = true;
     losingConnection[player] = false;
+    g_persistentMinimapIncoming[player].reset();
+    g_persistentMinimapLastAcceptedTransferId[player] = 0;
     resetServerLateJoinPlayer(player);
 
     if (notifyOtherClients && net_packet && net_sock)
@@ -2337,6 +2449,175 @@ static bool clientApplyLateJoinCharacterRestoreBeforeMapLoad()
 	g_clientLateJoinCatchupPackets.swap(deferredPackets);
 	return true;
 }
+
+void resetClientPersistentMinimapSync()
+{
+	g_persistentMinimapLastSyncTick = 0;
+	g_persistentMinimapLastMapKey.clear();
+	g_persistentMinimapLastWidth = 0;
+	g_persistentMinimapLastHeight = 0;
+	g_persistentMinimapLastTiles.clear();
+	g_persistentMinimapFullAcknowledged = false;
+	g_persistentMinimapPendingTransferId = 0;
+	g_clientPersistentMinimapRestore.reset();
+	g_clientPersistentMinimapLastServerTransferId = 0;
+	for (int player = 0; player < MAXPLAYERS; ++player)
+	{
+		g_persistentMinimapIncoming[player].reset();
+		g_persistentMinimapLastAcceptedTransferId[player] = 0;
+	}
+}
+
+void syncClientPersistentMinimap(const bool force)
+{
+	if (multiplayer != CLIENT || intro || clientnum <= 0
+		|| clientnum >= MAXPLAYERS || client_disconnected[clientnum]
+		|| !players[clientnum]
+		|| (!force && ticks - g_persistentMinimapLastSyncTick
+			< kPersistentMinimapSyncInterval))
+	{
+		return;
+	}
+	g_persistentMinimapLastSyncTick = ticks;
+	std::string mapKey;
+	Sint32 width = 0;
+	Sint32 height = 0;
+	std::vector<Sint8> tiles;
+	if (!exportAutomatiaPersistentMinimapSnapshot(
+			clientnum, mapKey, width, height, tiles)
+		|| mapKey.empty() || mapKey.size() > 255
+		|| width <= 0 || height <= 0
+		|| tiles.size() != static_cast<std::size_t>(width)
+			* static_cast<std::size_t>(height))
+	{
+		return;
+	}
+	const bool requireFull =
+		!g_persistentMinimapFullAcknowledged
+		|| g_persistentMinimapLastMapKey != mapKey
+		|| g_persistentMinimapLastWidth != width
+		|| g_persistentMinimapLastHeight != height
+		|| g_persistentMinimapLastTiles.size() != tiles.size();
+	if (requireFull)
+	{
+		g_persistentMinimapFullAcknowledged = false;
+		const std::vector<Uint8> packed =
+			packPersistentMinimapTiles(tiles);
+		const Uint16 chunkCount = static_cast<Uint16>(
+			(packed.size() + kPersistentMinimapChunkPayload - 1U)
+			/ kPersistentMinimapChunkPayload);
+		if (packed.empty() || chunkCount == 0)
+		{
+			return;
+		}
+		Uint32 transferId = ++g_persistentMinimapTransferId;
+		if (transferId == 0)
+		{
+			transferId = ++g_persistentMinimapTransferId;
+		}
+		g_persistentMinimapPendingTransferId = transferId;
+		memcpy(net_packet->data, "MMBG", 4);
+		net_packet->data[4] = static_cast<Uint8>(clientnum);
+		SDLNet_Write32(transferId, &net_packet->data[5]);
+		SDLNet_Write16(static_cast<Uint16>(width), &net_packet->data[9]);
+		SDLNet_Write16(static_cast<Uint16>(height), &net_packet->data[11]);
+		net_packet->data[13] = static_cast<Uint8>(mapKey.size());
+		SDLNet_Write32(static_cast<Uint32>(packed.size()),
+			&net_packet->data[14]);
+		const Uint32 checksum = LateJoinProtocol::crc32(
+			packed.data(), packed.size());
+		SDLNet_Write32(checksum, &net_packet->data[18]);
+		SDLNet_Write16(chunkCount, &net_packet->data[22]);
+		memcpy(&net_packet->data[24], mapKey.data(), mapKey.size());
+		if (!sendPersistentMinimapPacket(
+				24 + static_cast<int>(mapKey.size())))
+		{
+			return;
+		}
+		for (Uint16 sequence = 0; sequence < chunkCount; ++sequence)
+		{
+			const std::size_t offset =
+				static_cast<std::size_t>(sequence)
+				* kPersistentMinimapChunkPayload;
+			const std::size_t payload = std::min(
+				kPersistentMinimapChunkPayload, packed.size() - offset);
+			memcpy(net_packet->data, "MMCH", 4);
+			net_packet->data[4] = static_cast<Uint8>(clientnum);
+			SDLNet_Write32(transferId, &net_packet->data[5]);
+			SDLNet_Write16(sequence, &net_packet->data[9]);
+			SDLNet_Write16(static_cast<Uint16>(payload),
+				&net_packet->data[11]);
+			memcpy(&net_packet->data[13], packed.data() + offset, payload);
+			if (!sendPersistentMinimapPacket(13 + static_cast<int>(payload)))
+			{
+				return;
+			}
+		}
+		printlog(
+			"[Persistent Minimap] Client queued full sync for '%s' (%zu packed bytes, %u chunks).",
+			mapKey.c_str(), packed.size(), static_cast<unsigned>(chunkCount));
+	}
+	else
+	{
+		std::vector<std::pair<Uint32, Uint8>> changes;
+		for (std::size_t index = 0; index < tiles.size(); ++index)
+		{
+			if (tiles[index] > 0 && tiles[index] <= 4
+				&& tiles[index] != g_persistentMinimapLastTiles[index])
+			{
+				changes.emplace_back(
+					static_cast<Uint32>(index),
+					static_cast<Uint8>(tiles[index]));
+			}
+		}
+		if (changes.empty())
+		{
+			return;
+		}
+		const std::size_t headerBytes = 12U + mapKey.size();
+		const std::size_t maxEntries =
+			(NET_PACKET_SIZE - 9U - headerBytes) / 5U;
+		if (maxEntries == 0)
+		{
+			return;
+		}
+		for (std::size_t first = 0; first < changes.size();
+			first += maxEntries)
+		{
+			const std::size_t count =
+				std::min(maxEntries, changes.size() - first);
+			memcpy(net_packet->data, "MMDL", 4);
+			net_packet->data[4] = static_cast<Uint8>(clientnum);
+			SDLNet_Write16(static_cast<Uint16>(width), &net_packet->data[5]);
+			SDLNet_Write16(static_cast<Uint16>(height), &net_packet->data[7]);
+			net_packet->data[9] = static_cast<Uint8>(mapKey.size());
+			SDLNet_Write16(static_cast<Uint16>(count), &net_packet->data[10]);
+			memcpy(&net_packet->data[12], mapKey.data(), mapKey.size());
+			std::size_t offset = headerBytes;
+			for (std::size_t index = 0; index < count; ++index)
+			{
+				SDLNet_Write32(changes[first + index].first,
+					&net_packet->data[offset]);
+				net_packet->data[offset + 4U] =
+					changes[first + index].second;
+				offset += 5U;
+			}
+			if (!sendPersistentMinimapPacket(static_cast<int>(offset)))
+			{
+				return;
+			}
+		}
+		printlog(
+			"[Persistent Minimap] Client queued %zu newly discovered tile(s) for '%s'.",
+			changes.size(), mapKey.c_str());
+	}
+	g_persistentMinimapLastMapKey = mapKey;
+	g_persistentMinimapLastWidth = width;
+	g_persistentMinimapLastHeight = height;
+	g_persistentMinimapLastTiles = std::move(tiles);
+}
+
+static void tryReplayClientLateJoinPackets();
 
 void clientResetLateJoinPacketDeferral()
 {
@@ -3246,7 +3527,7 @@ static bool startServerLateJoinSnapshotTransfer(int playerIndex)
     std::string snapshot;
     std::string snapshotError;
     const bool captured = serializeAutomatiaPersistentWorldSnapshot(
-        std::to_string(uniqueGameKey), snapshot, snapshotError);
+        std::to_string(uniqueGameKey), playerIndex, snapshot, snapshotError);
     if (!foregroundKey.empty() && foregroundKey != destinationKey
         && !worldState.activate(foregroundKey))
     {
@@ -6252,6 +6533,7 @@ static void changeLevel()
 		* assignActions() creates runtime entities.
 		*/
 		applyPersistentMapRemovals();
+		restoreAutomatiaPersistentMinimapForLocalPlayer();
 
 		if ( !verifyMapHash(
 			map.filename,
@@ -6310,6 +6592,7 @@ static void changeLevel()
     destroyLoadingScreen();
 	loading = false;
     int result = loading_task.get();
+    restoreAutomatiaPersistentMinimapForLocalPlayer();
     if ( pendingIndependentLevelChange )
     {
         for ( int player = 0; player < MAXPLAYERS; ++player )
@@ -6845,6 +7128,154 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		printlog("[Late Join] Server aborted transfer (reason %u).",
 			static_cast<unsigned>(abort.reason));
 	}},
+	{'MMSV', [](){
+		if (!net_packet || net_packet->len < 30
+			|| clientnum <= 0 || clientnum >= MAXPLAYERS
+			|| net_packet->data[4] != clientnum)
+		{
+			return;
+		}
+		const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+		const Sint32 width = SDLNet_Read16(&net_packet->data[9]);
+		const Sint32 height = SDLNet_Read16(&net_packet->data[11]);
+		const std::size_t keyLength = net_packet->data[13];
+		const Uint16 sequence = SDLNet_Read16(&net_packet->data[14]);
+		const Uint16 chunkCount = SDLNet_Read16(&net_packet->data[16]);
+		const Uint32 packedBytes = SDLNet_Read32(&net_packet->data[18]);
+		const Uint32 payloadOffset = SDLNet_Read32(&net_packet->data[22]);
+		const std::size_t payloadBytes =
+			SDLNet_Read16(&net_packet->data[26]);
+		const std::size_t payloadStart = 28U + keyLength;
+		const std::size_t tileCount =
+			width > 0 && height > 0
+			? static_cast<std::size_t>(width)
+				* static_cast<std::size_t>(height)
+			: 0;
+		const std::size_t expectedPacked =
+			(tileCount * 3U + 7U) / 8U;
+		const std::size_t expectedChunks =
+			(expectedPacked + kPersistentMinimapServerChunkPayload - 1U)
+			/ kPersistentMinimapServerChunkPayload;
+		const std::size_t expectedOffset =
+			static_cast<std::size_t>(sequence)
+			* kPersistentMinimapServerChunkPayload;
+		const std::size_t expectedPayload =
+			expectedOffset < expectedPacked
+			? std::min(
+				kPersistentMinimapServerChunkPayload,
+				expectedPacked - expectedOffset)
+			: 0;
+		if (transferId == 0
+			|| transferId <= g_clientPersistentMinimapLastServerTransferId
+			|| width <= 0 || height <= 0
+			|| width > MINIMAP_MAX_DIMENSION
+			|| height > MINIMAP_MAX_DIMENSION
+			|| keyLength == 0 || keyLength > 255
+			|| sequence >= chunkCount
+			|| chunkCount == 0 || chunkCount != expectedChunks
+			|| packedBytes != expectedPacked
+			|| payloadOffset != expectedOffset
+			|| payloadBytes != expectedPayload
+			|| payloadStart + payloadBytes
+				!= static_cast<std::size_t>(net_packet->len))
+		{
+			return;
+		}
+		const std::string mapKey(
+			reinterpret_cast<const char*>(&net_packet->data[28]),
+			keyLength);
+		PersistentMinimapIncomingTransfer& transfer =
+			g_clientPersistentMinimapRestore;
+		if (!transfer.active || transfer.transferId != transferId)
+		{
+			if (transfer.active && transferId < transfer.transferId)
+			{
+				return;
+			}
+			transfer.reset();
+			transfer.active = true;
+			transfer.transferId = transferId;
+			transfer.width = width;
+			transfer.height = height;
+			transfer.packedBytes = packedBytes;
+			transfer.chunkCount = chunkCount;
+			transfer.mapKey = mapKey;
+			transfer.packed.assign(packedBytes, 0);
+			transfer.received.assign(chunkCount, false);
+			transfer.startedTick = ticks;
+		}
+		else if (transfer.width != width || transfer.height != height
+			|| transfer.packedBytes != packedBytes
+			|| transfer.chunkCount != chunkCount
+			|| transfer.mapKey != mapKey)
+		{
+			transfer.reset();
+			return;
+		}
+		if (ticks - transfer.startedTick > kPersistentMinimapTransferTimeout)
+		{
+			transfer.reset();
+			return;
+		}
+		if (!transfer.received[sequence])
+		{
+			memcpy(
+				transfer.packed.data() + payloadOffset,
+				&net_packet->data[payloadStart], payloadBytes);
+			transfer.received[sequence] = true;
+		}
+		if (std::find(transfer.received.begin(), transfer.received.end(), false)
+			!= transfer.received.end())
+		{
+			return;
+		}
+		std::vector<Sint8> tiles;
+		if (!unpackPersistentMinimapTiles(
+				transfer.packed, tileCount, tiles)
+			|| !importAutomatiaPersistentMinimapSnapshot(
+				clientnum, transfer.mapKey, transfer.width,
+				transfer.height, tiles, true))
+		{
+			printlog(
+				"[Persistent Minimap] Client rejected a corrupt destination snapshot.");
+			transfer.reset();
+			return;
+		}
+		g_clientPersistentMinimapLastServerTransferId = transfer.transferId;
+		printlog(
+			"[Persistent Minimap] Client stored destination snapshot %u for '%s'.",
+			transfer.transferId, transfer.mapKey.c_str());
+		transfer.reset();
+		restoreAutomatiaPersistentMinimapForLocalPlayer();
+	}},
+	{'MMAK', [](){
+		if (!net_packet || net_packet->len < 11
+			|| net_packet->data[4] != clientnum)
+		{
+			return;
+		}
+		const std::size_t keyLength = net_packet->data[9];
+		if (keyLength == 0
+			|| net_packet->len != 10 + static_cast<int>(keyLength))
+		{
+			return;
+		}
+		const std::string mapKey(
+			reinterpret_cast<const char*>(&net_packet->data[10]),
+			keyLength);
+		const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+		if (mapKey != g_persistentMinimapLastMapKey
+			|| transferId == 0
+			|| transferId != g_persistentMinimapPendingTransferId)
+		{
+			return;
+		}
+		g_persistentMinimapFullAcknowledged = true;
+		g_persistentMinimapPendingTransferId = 0;
+		printlog(
+			"[Persistent Minimap] Server acknowledged full sync %u for '%s'.",
+			transferId, mapKey.c_str());
+	}},
 	{'RJTK', [](){
 		if (net_packet->len != 5 + static_cast<int>(kReconnectTokenLength)
 			|| net_packet->data[4] != clientnum)
@@ -6861,6 +7292,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			return;
 		}
 		automatiaReconnectTokens[clientnum] = token;
+		restoreAutomatiaPersistentMinimapForLocalPlayer();
 		printlog("[Late Join] Client stored reconnect identity for slot %d.",
 			clientnum);
 	}},
@@ -13182,6 +13614,7 @@ static void tryReplayClientLateJoinPackets()
 		clientApplyAutomatiaLateJoinTransformationAfterPlayerInit();
 	const bool positionRestoreFinalized =
 		clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
+	restoreAutomatiaPersistentMinimapForLocalPlayer();
 	// Rebuild the follower roster only after character restoration has finished,
 	// so HUD UIDs and client follower stats cannot be replaced by restore data.
 	const std::size_t restoredFollowerOwnership =
@@ -13386,6 +13819,241 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+	{'MMBG', [](){
+		if (!net_packet || net_packet->len < 25)
+		{
+			printlog("[Persistent Minimap] Rejected truncated sync begin.");
+			return;
+		}
+		const int player = static_cast<int>(net_packet->data[4]);
+		if (player <= 0 || player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[Persistent Minimap] Rejected sync begin from invalid player %d.", player);
+			return;
+		}
+		const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+		const Sint32 width = SDLNet_Read16(&net_packet->data[9]);
+		const Sint32 height = SDLNet_Read16(&net_packet->data[11]);
+		const std::size_t keyLength = net_packet->data[13];
+		const Uint32 packedBytes = SDLNet_Read32(&net_packet->data[14]);
+		const Uint32 checksum = SDLNet_Read32(&net_packet->data[18]);
+		const Uint16 chunkCount = SDLNet_Read16(&net_packet->data[22]);
+		const std::size_t tileCount =
+			width > 0 && height > 0
+			? static_cast<std::size_t>(width)
+				* static_cast<std::size_t>(height)
+			: 0;
+		const std::size_t expectedPacked = (tileCount * 3U + 7U) / 8U;
+		const std::size_t expectedChunks =
+			(expectedPacked + kPersistentMinimapChunkPayload - 1U)
+			/ kPersistentMinimapChunkPayload;
+		if (transferId == 0 || width <= 0 || height <= 0
+			|| width > MINIMAP_MAX_DIMENSION
+			|| height > MINIMAP_MAX_DIMENSION
+			|| keyLength == 0 || keyLength > 255
+			|| net_packet->len != 24 + static_cast<int>(keyLength)
+			|| packedBytes != expectedPacked
+			|| chunkCount == 0 || chunkCount != expectedChunks)
+		{
+			printlog("[Persistent Minimap] Rejected malformed sync begin from player %d.", player);
+			return;
+		}
+		if (transferId <= g_persistentMinimapLastAcceptedTransferId[player])
+		{
+			return;
+		}
+		PersistentMinimapIncomingTransfer& transfer =
+			g_persistentMinimapIncoming[player];
+		if (transfer.active)
+		{
+			if (transferId < transfer.transferId)
+			{
+				return;
+			}
+			if (transferId == transfer.transferId)
+			{
+				const std::string duplicateMapKey(
+					reinterpret_cast<const char*>(&net_packet->data[24]),
+					keyLength);
+				if (transfer.width != width || transfer.height != height
+					|| transfer.packedBytes != packedBytes
+					|| transfer.checksum != checksum
+					|| transfer.chunkCount != chunkCount
+					|| transfer.mapKey != duplicateMapKey)
+				{
+					printlog(
+						"[Persistent Minimap] Rejected conflicting duplicate sync begin from player %d.",
+						player);
+				}
+				return;
+			}
+		}
+		transfer.reset();
+		transfer.active = true;
+		transfer.transferId = transferId;
+		transfer.width = width;
+		transfer.height = height;
+		transfer.packedBytes = packedBytes;
+		transfer.checksum = checksum;
+		transfer.chunkCount = chunkCount;
+		transfer.mapKey.assign(
+			reinterpret_cast<const char*>(&net_packet->data[24]),
+			keyLength);
+		transfer.packed.assign(packedBytes, 0);
+		transfer.received.assign(chunkCount, false);
+		transfer.startedTick = ticks;
+	}},
+	{'MMCH', [](){
+		if (!net_packet || net_packet->len < 14)
+		{
+			return;
+		}
+		const int player = static_cast<int>(net_packet->data[4]);
+		if (player <= 0 || player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| !currentPacketSenderMatchesPlayer(player))
+		{
+			return;
+		}
+		PersistentMinimapIncomingTransfer& transfer =
+			g_persistentMinimapIncoming[player];
+		const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+		const Uint16 sequence = SDLNet_Read16(&net_packet->data[9]);
+		const std::size_t payload = SDLNet_Read16(&net_packet->data[11]);
+		if (transfer.active
+			&& ticks - transfer.startedTick
+				> kPersistentMinimapTransferTimeout)
+		{
+			printlog(
+				"[Persistent Minimap] Expired incomplete sync from player %d.",
+				player);
+			transfer.reset();
+			return;
+		}
+		if (!transfer.active || transfer.transferId != transferId
+			|| sequence >= transfer.chunkCount
+			|| payload == 0 || payload > kPersistentMinimapChunkPayload
+			|| net_packet->len != 13 + static_cast<int>(payload))
+		{
+			return;
+		}
+		const std::size_t offset =
+			static_cast<std::size_t>(sequence)
+			* kPersistentMinimapChunkPayload;
+		if (offset >= transfer.packed.size()
+			|| payload > transfer.packed.size() - offset)
+		{
+			transfer.reset();
+			return;
+		}
+		if (!transfer.received[sequence])
+		{
+			memcpy(transfer.packed.data() + offset,
+				&net_packet->data[13], payload);
+			transfer.received[sequence] = true;
+		}
+		if (std::find(transfer.received.begin(), transfer.received.end(), false)
+			!= transfer.received.end())
+		{
+			return;
+		}
+		const Uint32 checksum = LateJoinProtocol::crc32(
+			transfer.packed.data(), transfer.packed.size());
+		std::vector<Sint8> tiles;
+		const std::size_t tileCount =
+			static_cast<std::size_t>(transfer.width)
+			* static_cast<std::size_t>(transfer.height);
+		if (checksum != transfer.checksum
+			|| !unpackPersistentMinimapTiles(
+				transfer.packed, tileCount, tiles)
+			|| !importAutomatiaPersistentMinimapSnapshot(
+				player, transfer.mapKey, transfer.width,
+				transfer.height, tiles, true))
+		{
+			printlog("[Persistent Minimap] Rejected corrupt completed sync from player %d.", player);
+			transfer.reset();
+			return;
+		}
+		printlog(
+			"[Persistent Minimap] Completed full sync %u from player %d for '%s'.",
+			transfer.transferId, player, transfer.mapKey.c_str());
+		g_persistentMinimapLastAcceptedTransferId[player] =
+			transfer.transferId;
+		if (transfer.mapKey.size() <= 255)
+		{
+			memcpy(net_packet->data, "MMAK", 4);
+			net_packet->data[4] = static_cast<Uint8>(player);
+			SDLNet_Write32(transfer.transferId, &net_packet->data[5]);
+			net_packet->data[9] =
+				static_cast<Uint8>(transfer.mapKey.size());
+			memcpy(&net_packet->data[10], transfer.mapKey.data(),
+				transfer.mapKey.size());
+			net_packet->len =
+				10 + static_cast<int>(transfer.mapKey.size());
+			net_packet->address.host = net_clients[player - 1].host;
+			net_packet->address.port = net_clients[player - 1].port;
+			sendPacketSafe(net_sock, -1, net_packet, player - 1);
+		}
+		transfer.reset();
+	}},
+	{'MMDL', [](){
+		if (!net_packet || net_packet->len < 18)
+		{
+			return;
+		}
+		const int player = static_cast<int>(net_packet->data[4]);
+		if (player <= 0 || player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| !currentPacketSenderMatchesPlayer(player))
+		{
+			return;
+		}
+		const Sint32 width = SDLNet_Read16(&net_packet->data[5]);
+		const Sint32 height = SDLNet_Read16(&net_packet->data[7]);
+		const std::size_t keyLength = net_packet->data[9];
+		const std::size_t count = SDLNet_Read16(&net_packet->data[10]);
+		const std::size_t entriesOffset = 12U + keyLength;
+		const std::size_t tileCount =
+			width > 0 && height > 0
+			? static_cast<std::size_t>(width)
+				* static_cast<std::size_t>(height)
+			: 0;
+		if (width <= 0 || height <= 0
+			|| width > MINIMAP_MAX_DIMENSION
+			|| height > MINIMAP_MAX_DIMENSION
+			|| keyLength == 0 || keyLength > 255
+			|| count == 0
+			|| entriesOffset + count * 5U
+				!= static_cast<std::size_t>(net_packet->len))
+		{
+			return;
+		}
+		const std::string mapKey(
+			reinterpret_cast<const char*>(&net_packet->data[12]),
+			keyLength);
+		std::vector<Sint8> tiles(tileCount, 0);
+		std::size_t offset = entriesOffset;
+		for (std::size_t entry = 0; entry < count; ++entry)
+		{
+			const Uint32 index = SDLNet_Read32(&net_packet->data[offset]);
+			const Uint8 value = net_packet->data[offset + 4U];
+			if (index >= tileCount || value == 0 || value > 4)
+			{
+				return;
+			}
+			tiles[index] = static_cast<Sint8>(value);
+			offset += 5U;
+		}
+		if (!importAutomatiaPersistentMinimapSnapshot(
+			player, mapKey, width, height, tiles, false))
+		{
+			printlog(
+				"[Persistent Minimap] Rejected delta without a matching full sync from player %d.",
+				player);
+		}
+	}},
     {'CSBG', [](){
         if (!net_packet || net_packet->len != 21)
         {
@@ -18032,6 +18700,7 @@ void closeNetworkInterfaces()
 	g_clientAuthoritativeVisiblePlayerMaskValid = false;
 	clientConnectedToDedicatedServer = false;
 	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
+	resetClientPersistentMinimapSync();
 	for (int c = 1; c < MAXPLAYERS; ++c)
 	{
 		resetServerLateJoinPlayer(c);
