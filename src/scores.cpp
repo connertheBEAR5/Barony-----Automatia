@@ -151,6 +151,8 @@ namespace
         "automatia_character_effect_polymorph";
     constexpr const char* AUTOMATIA_CHARACTER_SHAPESHIFT_KEY =
         "automatia_character_effect_shapeshift";
+    constexpr const char* AUTOMATIA_CHARACTER_STORY_STATE_KEY =
+        "automatia_character_player_story_state";
 
     struct AutomatiaCharacterRuntimeState
     {
@@ -362,7 +364,8 @@ namespace
             || key == AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY
             || key == AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY
             || key == AUTOMATIA_CHARACTER_POLYMORPH_KEY
-            || key == AUTOMATIA_CHARACTER_SHAPESHIFT_KEY;
+            || key == AUTOMATIA_CHARACTER_SHAPESHIFT_KEY
+            || key == AUTOMATIA_CHARACTER_STORY_STATE_KEY;
     }
 
     void eraseCharacterRuntimeMetadata(SaveGameInfo& info)
@@ -484,71 +487,87 @@ namespace
 
         const AutomatiaCharacterRuntimeState& runtime =
             automatiaCharacterRuntimeState[player];
-        if (!runtime.valid || runtime.identity != identity
-            || !runtime.worldIdentity.isValid())
+        if (runtime.valid && runtime.identity == identity
+            && runtime.worldIdentity.isValid())
         {
-            return;
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_MAP_FILE_KEY,
+                runtime.worldIdentity.mapFile);
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_INSTANCE_ID_KEY,
+                runtime.worldIdentity.instanceId);
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY,
+                std::to_string(runtime.worldIdentity.revision));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_POSITION_X_KEY,
+                characterRealMetadata(runtime.x));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_POSITION_Y_KEY,
+                characterRealMetadata(runtime.y));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_POSITION_Z_KEY,
+                characterRealMetadata(runtime.z));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_ROTATION_YAW_KEY,
+                characterRealMetadata(runtime.yaw));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY,
+                characterRealMetadata(runtime.pitch));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY,
+                characterRealMetadata(runtime.roll));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_POLYMORPH_KEY,
+                std::to_string(runtime.effectPolymorph));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_SHAPESHIFT_KEY,
+                std::to_string(runtime.effectShapeshift));
+
+            SaveGameInfo::Player::stat_t& savedStats =
+                info.players[0].stats;
+            if (stats[player])
+            {
+                savedStats.type = stats[player]->type;
+            }
+            constexpr std::size_t miscFlagCount =
+                sizeof(Stat::MISC_FLAGS) / sizeof(Stat::MISC_FLAGS[0]);
+            if (savedStats.MISC_FLAGS.size() < miscFlagCount)
+            {
+                savedStats.MISC_FLAGS.resize(miscFlagCount, 0);
+            }
+            savedStats.MISC_FLAGS[5] = runtime.effectPolymorph;
+            savedStats.MISC_FLAGS[13] = runtime.effectShapeshift;
         }
 
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_MAP_FILE_KEY,
-            runtime.worldIdentity.mapFile);
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_INSTANCE_ID_KEY,
-            runtime.worldIdentity.instanceId);
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY,
-            std::to_string(runtime.worldIdentity.revision));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_POSITION_X_KEY,
-            characterRealMetadata(runtime.x));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_POSITION_Y_KEY,
-            characterRealMetadata(runtime.y));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_POSITION_Z_KEY,
-            characterRealMetadata(runtime.z));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_ROTATION_YAW_KEY,
-            characterRealMetadata(runtime.yaw));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_ROTATION_PITCH_KEY,
-            characterRealMetadata(runtime.pitch));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_ROTATION_ROLL_KEY,
-            characterRealMetadata(runtime.roll));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_POLYMORPH_KEY,
-            std::to_string(runtime.effectPolymorph));
-        setCharacterMetadata(
-            info,
-            AUTOMATIA_CHARACTER_SHAPESHIFT_KEY,
-            std::to_string(runtime.effectShapeshift));
-
-        SaveGameInfo::Player::stat_t& savedStats =
-            info.players[0].stats;
-        if (stats[player])
+        std::string storyPayload;
+        std::string storyError;
+        if (exportAutomatiaPlayerStoryState(
+                player, storyPayload, storyError))
         {
-            savedStats.type = stats[player]->type;
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_STORY_STATE_KEY,
+                storyPayload);
         }
-        constexpr std::size_t miscFlagCount =
-            sizeof(Stat::MISC_FLAGS) / sizeof(Stat::MISC_FLAGS[0]);
-        if (savedStats.MISC_FLAGS.size() < miscFlagCount)
+        else
         {
-            savedStats.MISC_FLAGS.resize(miscFlagCount, 0);
+            printlog(
+                "[Character Save] Could not capture player %d story state: %s.",
+                player,
+                storyError.c_str());
         }
-        savedStats.MISC_FLAGS[5] = runtime.effectPolymorph;
-        savedStats.MISC_FLAGS[13] = runtime.effectShapeshift;
     }
 
     Sint32 savedCharacterPolymorphTarget(
@@ -8170,7 +8189,17 @@ int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPla
 	Uint32 spellIndex = 0;
 	for (auto& s : info.players[savedPlayerIndex].spells)
 	{
-		spell_t* spell = copySpell(getSpellFromID(s));
+		spell_t* sourceSpell = getSpellFromID(s);
+		if (!sourceSpell)
+		{
+			printlog(
+				"[Character Save] Skipped unavailable spell ID %u for player %d.",
+				static_cast<unsigned>(s),
+				player);
+			++spellIndex;
+			continue;
+		}
+		spell_t* spell = copySpell(sourceSpell);
 		node_t* node = list_AddNodeLast(&players[statsPlayer]->magic.spellList);
 		node->element = spell;
 		node->deconstructor = &spellDeconstructor;
@@ -8447,8 +8476,13 @@ int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPla
 		}
 	}
 
-	// reset certain variables
-	list_FreeAll(&stats[statsPlayer]->FOLLOWERS);
+	// reset certain variables. On a remote client the authoritative LEAD
+	// records are replayed before the final character reapply, so do not erase
+	// the newly rebuilt follower roster here.
+	if (multiplayer != CLIENT)
+	{
+		list_FreeAll(&stats[statsPlayer]->FOLLOWERS);
+	}
 	stats[statsPlayer]->monster_sound = nullptr;
 	stats[statsPlayer]->monster_idlevar = 0;
 	stats[statsPlayer]->leader_uid = 0;
@@ -8555,6 +8589,23 @@ int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPla
 		mechanics.baseSpellMPUsedThaumaturgy = info.players[savedPlayerIndex].baseSpellMPUsedThaumaturgy;
 	}
 
+	std::size_t restoredHotbarItems = 0;
+	for (int slot = 0; slot < NUM_HOTBAR_SLOTS; ++slot)
+	{
+		if (players[statsPlayer]->hotbar.slots()[slot].item != 0)
+		{
+			++restoredHotbarItems;
+		}
+	}
+	printlog(
+		"[Character Save] Restored player %d core data: %zu inventory item(s), "
+		"%zu spell(s), %zu hotbar item(s), %zu saved follower(s), %zu proficiency value(s).",
+		player,
+		static_cast<std::size_t>(list_Size(&stats[statsPlayer]->inventory)),
+		info.players[savedPlayerIndex].spells.size(),
+		restoredHotbarItems,
+		info.players[savedPlayerIndex].followers.size(),
+		p.PROFICIENCIES.size());
 	return 0;
 }
 
@@ -8644,6 +8695,55 @@ bool storeAutomatiaCharacterTransferPayload(
     }
 
     (void)captureAutomatiaCharacterSaveRuntimeState(player);
+
+    // Followers are server-owned actors. Never trust the remote client's
+    // follower array: replace it with a fresh capture from the authoritative
+    // destination map before writing the character file.
+    info.players[0].followers.clear();
+    const WorldInstanceIdentity* followerForeground =
+        worldState.activeIdentity();
+    const std::string followerForegroundKey =
+        followerForeground ? followerForeground->key() : std::string{};
+    const std::string playerWorldKey = players[player]
+        ? players[player]->worldInstance.key() : std::string{};
+    bool capturedFollowers = false;
+    if (!playerWorldKey.empty() && worldState.activate(playerWorldKey))
+    {
+        SaveGameInfo authoritativeInfo;
+        if (authoritativeInfo.populateFromSession(player) == 0
+            && player < static_cast<int>(authoritativeInfo.players.size()))
+        {
+            constexpr std::size_t maxCharacterFollowers = 128;
+            auto& authoritativeFollowers =
+                authoritativeInfo.players[player].followers;
+            if (authoritativeFollowers.size() > maxCharacterFollowers)
+            {
+                printlog(
+                    "[Character Save] Player %d has %zu followers; "
+                    "only the first %zu fit the character-save safety limit.",
+                    player,
+                    authoritativeFollowers.size(),
+                    maxCharacterFollowers);
+                authoritativeFollowers.resize(maxCharacterFollowers);
+            }
+            info.players[0].followers =
+                std::move(authoritativeFollowers);
+            capturedFollowers = true;
+        }
+    }
+    if (!followerForegroundKey.empty()
+        && followerForegroundKey != playerWorldKey)
+    {
+        (void)worldState.activate(followerForegroundKey);
+    }
+    if (!capturedFollowers)
+    {
+        printlog(
+            "[Character Save] Could not capture authoritative followers for "
+            "player %d; no follower data was stored.",
+            player);
+    }
+
     stampCharacterRuntimeMetadata(info, player, identity);
 
     info.players_connected.assign(1, 1);
@@ -8738,6 +8838,22 @@ int restoreAutomatiaCharacterFromSave(
             "[Character Save] Rejected '%s': %s.",
             path.string().c_str(), error.c_str());
         return 1;
+    }
+    std::string storyPayload;
+    if (findCharacterMetadata(
+            info,
+            AUTOMATIA_CHARACTER_STORY_STATE_KEY,
+            storyPayload))
+    {
+        std::string storyError;
+        if (!importAutomatiaPlayerStoryState(
+                player, storyPayload, storyError))
+        {
+            printlog(
+                "[Character Save] Could not restore player %d story state: %s.",
+                player,
+                storyError.c_str());
+        }
     }
     if (restoreAutomatiaCharacter(player, info, 0) != 0)
     {
@@ -8940,6 +9056,345 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 
 	return followers;
 } 
+
+int removeAutomatiaCharacterFollowerEntities(
+    int player,
+    const char* reason)
+{
+    if (multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+        || !players[player] || !stats[player])
+    {
+        return 0;
+    }
+
+    const WorldInstanceIdentity* foreground = worldState.activeIdentity();
+    const std::string foregroundKey =
+        foreground ? foreground->key() : std::string{};
+    const std::string playerKey = players[player]->worldInstance.key();
+    if (!playerKey.empty() && playerKey != foregroundKey
+        && !worldState.activate(playerKey))
+    {
+        return 0;
+    }
+
+    const Uint32 leaderUID = players[player]->entity
+        ? players[player]->entity->getUID()
+        : 0;
+    std::vector<Uint32> followerUIDs;
+    if (map.entities)
+    {
+        for (node_t* node = map.entities->first; node; node = node->next)
+        {
+            Entity* entity = static_cast<Entity*>(node->element);
+            Stat* followerStats = entity ? entity->getStats() : nullptr;
+            if (entity && entity->behavior == &actMonster
+                && (entity->monsterAllyIndex == player
+                    || (leaderUID != 0 && followerStats
+                        && followerStats->leader_uid == leaderUID)))
+            {
+                followerUIDs.push_back(entity->getUID());
+            }
+        }
+    }
+
+    int removed = 0;
+    for (const Uint32 uid : followerUIDs)
+    {
+        Entity* follower = uidToEntity(uid);
+        if (follower && follower->mynode)
+        {
+            list_RemoveNode(follower->mynode);
+            ++removed;
+        }
+    }
+    list_FreeAll(&stats[player]->FOLLOWERS);
+    FollowerMenu[player].recentEntity = nullptr;
+    FollowerMenu[player].followerToCommand = nullptr;
+
+    if (!foregroundKey.empty() && foregroundKey != playerKey)
+    {
+        (void)worldState.activate(foregroundKey);
+    }
+    if (removed > 0)
+    {
+        printlog(
+            "[Character Save] Removed %d follower actor(s) for player %d (%s).",
+            removed,
+            player,
+            reason ? reason : "cleanup");
+    }
+    return removed;
+}
+
+int restoreAutomatiaCharacterFollowers(
+    int player,
+    const SaveGameInfo& info,
+    int savedPlayerIndex,
+    std::string& error)
+{
+    error.clear();
+    if (multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+        || !players[player] || !players[player]->entity || !stats[player]
+        || savedPlayerIndex < 0
+        || savedPlayerIndex >= static_cast<int>(info.players.size()))
+    {
+        error = "follower restore requires an initialized server player";
+        return 1;
+    }
+
+    constexpr std::size_t maxCharacterFollowers = 128;
+    if (info.players[savedPlayerIndex].followers.size()
+        > maxCharacterFollowers)
+    {
+        error = "saved character exceeds the 128-follower safety limit";
+        return 1;
+    }
+
+    const WorldInstanceIdentity* foreground = worldState.activeIdentity();
+    const std::string foregroundKey =
+        foreground ? foreground->key() : std::string{};
+    const std::string playerKey = players[player]->worldInstance.key();
+    if (playerKey.empty() || !worldState.activate(playerKey))
+    {
+        error = "could not activate the returning player's map for followers";
+        return 1;
+    }
+
+    (void)removeAutomatiaCharacterFollowerEntities(
+        player, "pre-restore cleanup");
+    if (!worldState.activate(playerKey))
+    {
+        error = "returning player map was lost during follower cleanup";
+        return 1;
+    }
+
+    list_t* allFollowers = loadGameFollowers(info);
+    if (!allFollowers)
+    {
+        error = "saved follower data could not be decoded";
+        if (!foregroundKey.empty() && foregroundKey != playerKey)
+        {
+            (void)worldState.activate(foregroundKey);
+        }
+        return 1;
+    }
+
+    int restored = 0;
+    node_t* playerFollowersNode =
+        list_Node(allFollowers, savedPlayerIndex);
+    list_t* savedFollowers = playerFollowersNode
+        ? static_cast<list_t*>(playerFollowersNode->element)
+        : nullptr;
+    node_t* gyrobotNode = nullptr;
+    Entity* gyrobotEntity = nullptr;
+    std::vector<node_t*> carriedRobotNodes;
+    if (savedFollowers)
+    {
+        for (node_t* node = savedFollowers->first; node; node = node->next)
+        {
+            Stat* savedStats = static_cast<Stat*>(node->element);
+            if (savedStats && savedStats->type == GYROBOT)
+            {
+                gyrobotNode = node;
+                break;
+            }
+        }
+
+        for (node_t* node = savedFollowers->first; node; node = node->next)
+        {
+            Stat* savedStats = static_cast<Stat*>(node->element);
+            if (!savedStats
+                || savedStats->type <= NOTHING
+                || savedStats->type >= NUMMONSTERS)
+            {
+                continue;
+            }
+            if (savedStats->type == DUMMYBOT
+                || savedStats->type == SENTRYBOT
+                || savedStats->type == SPELLBOT)
+            {
+                if (gyrobotNode)
+                {
+                    carriedRobotNodes.push_back(node);
+                    continue;
+                }
+            }
+
+            Entity* monster = summonMonster(
+                savedStats->type,
+                players[player]->entity->x,
+                players[player]->entity->y);
+            if (!monster)
+            {
+                continue;
+            }
+            if (node == gyrobotNode)
+            {
+                gyrobotEntity = monster;
+            }
+            monster->skill[3] = 1;
+            if (monster->children.last)
+            {
+                list_RemoveNode(monster->children.last);
+            }
+            node_t* child = list_AddNodeLast(&monster->children);
+            child->element = savedStats->copyStats();
+            child->deconstructor = &statDeconstructor;
+            child->size = sizeof(Stat);
+
+            Stat* monsterStats = static_cast<Stat*>(child->element);
+            monster->monsterState = 0;
+            monster->monsterTarget = 0;
+            monster->monsterTargetX = players[player]->entity->x;
+            monster->monsterTargetY = players[player]->entity->y;
+            monsterStats->leader_uid = players[player]->entity->getUID();
+            if ( monsterStats->monsterForceAllegiance
+                == Stat::MONSTER_FORCE_PLAYER_ENEMY )
+            {
+                monsterStats->monsterForceAllegiance =
+                    Stat::MONSTER_FORCE_ALLEGIANCE_NONE;
+            }
+            // A restored recruit must remain a follower rather than returning
+            // to its authored quest-NPC interaction path.
+            monsterStats->customDialogueID[0] = '\0';
+            monster->flags[USERFLAG2] = true;
+            monster->monsterAllyIndex = player;
+            monster->monsterAllyClass = monsterStats->allyClass;
+            monster->monsterAllyPickupItems = monsterStats->allyItemPickup;
+            if (stats[player]->playerSummonPERCHR != 0
+                && MonsterData_t::nameMatchesSpecialNPCName(
+                    *monsterStats, "skeleton knight"))
+            {
+                monster->monsterAllySummonRank =
+                    (stats[player]->playerSummonPERCHR & 0x0000FF00) >> 8;
+            }
+            else if (stats[player]->playerSummon2PERCHR != 0
+                && MonsterData_t::nameMatchesSpecialNPCName(
+                    *monsterStats, "skeleton sentinel"))
+            {
+                monster->monsterAllySummonRank =
+                    (stats[player]->playerSummon2PERCHR & 0x0000FF00) >> 8;
+            }
+            else if (!monsterStats->getAttribute("SUMMONED_CREATURE").empty())
+            {
+                try
+                {
+                    monster->monsterAllySummonRank = std::stoi(
+                        monsterStats->getAttribute("SUMMONED_CREATURE"));
+                }
+                catch (const std::exception&)
+                {
+                    monster->monsterAllySummonRank = 0;
+                }
+            }
+
+            if ( monsterChangesColorWhenAlly(monsterStats) )
+            {
+                int bodypart = 0;
+                for ( node_t* limbNode = monster->children.first; limbNode;
+                    limbNode = limbNode->next, ++bodypart )
+                {
+                    if ( bodypart < LIMB_HUMANOID_TORSO )
+                    {
+                        continue;
+                    }
+                    Entity* limb = static_cast<Entity*>(limbNode->element);
+                    if ( limb )
+                    {
+                        limb->flags[USERFLAG2] = true;
+                        serverUpdateEntityFlag(limb, USERFLAG2);
+                    }
+                }
+            }
+            serverUpdateEntitySkill(monster, 42);
+            serverUpdateEntityFlag(monster, USERFLAG2);
+
+            node_t* followerNode =
+                list_AddNodeLast(&stats[player]->FOLLOWERS);
+            followerNode->deconstructor = &defaultDeconstructor;
+            followerNode->size = sizeof(Uint32);
+            Uint32* uid = static_cast<Uint32*>(malloc(sizeof(Uint32)));
+            followerNode->element = uid;
+            *uid = monster->getUID();
+            ++restored;
+        }
+    }
+
+    if (gyrobotEntity && !carriedRobotNodes.empty())
+    {
+        Stat* gyrobotStats = gyrobotEntity->getStats();
+        for (node_t* robotNode : carriedRobotNodes)
+        {
+            Stat* robotStats = robotNode
+                ? static_cast<Stat*>(robotNode->element)
+                : nullptr;
+            if (!gyrobotStats || !robotStats)
+            {
+                continue;
+            }
+            ItemType itemType = WOODEN_SHIELD;
+            if (robotStats->type == SENTRYBOT)
+            {
+                itemType = TOOL_SENTRYBOT;
+            }
+            else if (robotStats->type == SPELLBOT)
+            {
+                itemType = TOOL_SPELLBOT;
+            }
+            else if (robotStats->type == DUMMYBOT)
+            {
+                itemType = TOOL_DUMMYBOT;
+            }
+            if (itemType != WOODEN_SHIELD)
+            {
+                const int appearance =
+                    monsterTinkeringConvertHPToAppearance(robotStats);
+                (void)newItem(
+                    itemType,
+                    static_cast<Status>(robotStats->monsterTinkeringStatus),
+                    0,
+                    1,
+                    appearance,
+                    true,
+                    &gyrobotStats->inventory);
+            }
+        }
+    }
+
+    list_FreeAll(allFollowers);
+    free(allFollowers);
+    if (!foregroundKey.empty() && foregroundKey != playerKey)
+    {
+        (void)worldState.activate(foregroundKey);
+    }
+
+    printlog(
+        "[Character Save] Restored %d follower actor(s) for player %d.",
+        restored,
+        player);
+    return 0;
+}
+
+int restoreAutomatiaCharacterFollowersFromPayload(
+    int player,
+    CharacterSaveMode mode,
+    const std::string& payload,
+    std::string& error)
+{
+    error.clear();
+    std::string identity;
+    if (!characterIdentityForPlayer(player, mode, identity, error))
+    {
+        return 1;
+    }
+    SaveGameInfo info;
+    if (!loadInfoFromBytes(payload, player, info, error)
+        || !validateCharacterSaveInfo(info, mode, identity, error))
+    {
+        return 1;
+    }
+    return restoreAutomatiaCharacterFollowers(player, info, 0, error);
+}
 
 int SaveGameInfo::Player::isCharacterValidFromDLC()
 {

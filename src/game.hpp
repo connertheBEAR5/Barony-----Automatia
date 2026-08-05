@@ -37,6 +37,7 @@ void customDialogueCreditAuthoredDefeat(
 
 // Clears session-only custom dialogue state when restarting or starting a new game.
 void customDialogueResetRuntimeState();
+void customDialogueResetPlayerRuntimeState(int player);
 
 bool persistentStorySetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 nodeID);
 Sint32 persistentStoryGetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 fallbackNode);
@@ -66,6 +67,21 @@ extern Uint32 joyimpulses[NUM_JOY_IMPULSES]; //Joystick/gamepad only impulses.
 bool handleEvents(void);
 void startMessages();
 void resetPersistentWorldSession();
+
+/*
+ * Export/import only the player-scoped quest and NPC dialogue memory used by
+ * dedicated per-character saves. World- and party-scoped story state remains
+ * owned by the shared persistent-world document.
+ */
+bool exportAutomatiaPlayerStoryState(
+    int player,
+    std::string& payload,
+    std::string& error);
+bool importAutomatiaPlayerStoryState(
+    int player,
+    const std::string& payload,
+    std::string& error);
+void resetAutomatiaPlayerStoryState(int player);
 /*
  * Custom dialogue and quest persistence.
  *

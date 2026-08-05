@@ -67,6 +67,7 @@ namespace
 	constexpr Uint8 kEntityArchetypeNone = 0;
 	constexpr Uint8 kEntityArchetypeCustomPortal = 1;
 	constexpr Uint8 kEntityArchetypeEditorLight = 2;
+	constexpr Uint8 kEntityArchetypePlayer = 3;
 	constexpr std::size_t kEntityArchetypeOffset = 47;
 	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
 	constexpr int kHeloChunkHeaderSize = 12;
@@ -228,6 +229,7 @@ namespace
 
 	static CharacterSaveAssembler g_serverCharacterSaveAssemblers[MAXPLAYERS];
 	static CharacterSaveAssembler g_clientCharacterRestoreAssembler;
+	static CharacterSaveAssembler g_clientPlayerStoryAssembler;
 	static bool g_clientCharacterRestoreApplied = false;
 	static std::string g_clientPendingCharacterRestorePayload;
 	static Uint32 g_clientLastCharacterSaveAckTransferId = 0;
@@ -262,9 +264,28 @@ namespace
 		"late-join visible-player mask requires MAXPLAYERS <= 32");
 	static Uint32 g_clientAuthoritativeVisiblePlayerMask = 0;
 	static bool g_clientAuthoritativeVisiblePlayerMaskValid = false;
+	// LEAD/ENTS ownership packets can arrive before the matching monster entity
+	// has adopted its authoritative UID, and character restoration can replace
+	// stats[clientnum]->FOLLOWERS after those packets were handled. Keep the
+	// authoritative follower UIDs separately and retry ownership/HUD binding for
+	// a short period after late join.
+	static std::vector<Uint32>
+		g_clientAutomatiaFollowerRosterUIDs;
+	struct ClientAutomatiaFollowerHUDState
+	{
+		Sint32 level = 0;
+		Sint32 hp = 0;
+		Sint32 maxHp = 0;
+		Monster type = NOTHING;
+	};
+	static std::unordered_map<Uint32, ClientAutomatiaFollowerHUDState>
+		g_clientAutomatiaFollowerHUDStates;
+	static Uint32 g_clientAutomatiaFollowerRosterRetryTicks = 0;
+	static Uint32 g_clientAutomatiaFollowerRosterLastAttempt = 0;
 
 	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
 	static Uint32 g_characterSaveTransferId = 0;
+	static Uint32 g_playerStoryTransferId = 0;
 
 	static std::string generateReconnectToken()
 	{
@@ -433,6 +454,10 @@ namespace
 		if (entity->behavior == &actLightSource)
 		{
 			return kEntityArchetypeEditorLight;
+		}
+		if (entity->behavior == &actPlayer)
+		{
+			return kEntityArchetypePlayer;
 		}
 		return kEntityArchetypeNone;
 	}
@@ -1022,6 +1047,198 @@ static bool appendCharacterTransferToLateJoinCatchup(
         complete.data(), complete.size());
 }
 
+static std::vector<std::uint8_t> makePlayerStoryBeginRecord(
+    int player,
+    Uint32 transferId,
+    Uint32 chunkCount,
+    Uint32 totalBytes,
+    Uint32 checksum)
+{
+    std::vector<std::uint8_t> record(21, 0);
+    memcpy(record.data(), "QSBG", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    LateJoinProtocol::write32(record, 9, chunkCount);
+    LateJoinProtocol::write32(record, 13, totalBytes);
+    LateJoinProtocol::write32(record, 17, checksum);
+    return record;
+}
+
+static std::vector<std::uint8_t> makePlayerStoryChunkRecord(
+    int player,
+    Uint32 transferId,
+    Uint32 sequence,
+    const std::uint8_t* data,
+    std::size_t size)
+{
+    std::vector<std::uint8_t> record(15 + size, 0);
+    memcpy(record.data(), "QSCH", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    LateJoinProtocol::write32(record, 9, sequence);
+    record[13] = static_cast<std::uint8_t>(size >> 8U);
+    record[14] = static_cast<std::uint8_t>(size);
+    if ( size > 0 )
+    {
+        memcpy(record.data() + 15, data, size);
+    }
+    return record;
+}
+
+static std::vector<std::uint8_t> makePlayerStoryEndRecord(
+    int player,
+    Uint32 transferId)
+{
+    std::vector<std::uint8_t> record(9, 0);
+    memcpy(record.data(), "QSED", 4);
+    record[4] = static_cast<std::uint8_t>(player);
+    LateJoinProtocol::write32(record, 5, transferId);
+    return record;
+}
+
+static Uint32 nextPlayerStoryTransferId()
+{
+    Uint32 transferId = ++g_playerStoryTransferId;
+    if ( transferId == 0 )
+    {
+        transferId = ++g_playerStoryTransferId;
+    }
+    return transferId;
+}
+
+static bool appendPlayerStoryTransferToLateJoinCatchup(
+    int player,
+    const std::string& payload)
+{
+    if ( player <= 0 || player >= MAXPLAYERS
+        || payload.empty() || payload.size() > kCharacterSaveMaxBytes )
+    {
+        return false;
+    }
+    const Uint32 transferId = nextPlayerStoryTransferId();
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (payload.size() + kCharacterSaveChunkPayload - 1)
+        / kCharacterSaveChunkPayload);
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(payload.data()),
+        payload.size());
+    const auto begin = makePlayerStoryBeginRecord(
+        player, transferId, chunkCount,
+        static_cast<Uint32>(payload.size()), checksum);
+    if ( !g_lateJoinCatchupBuffers[player].append(
+            begin.data(), begin.size()) )
+    {
+        return false;
+    }
+    for ( Uint32 sequence = 0; sequence < chunkCount; ++sequence )
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence) * kCharacterSaveChunkPayload;
+        const std::size_t bytes = std::min(
+            kCharacterSaveChunkPayload, payload.size() - offset);
+        const auto chunk = makePlayerStoryChunkRecord(
+            player, transferId, sequence,
+            reinterpret_cast<const std::uint8_t*>(payload.data() + offset),
+            bytes);
+        if ( !g_lateJoinCatchupBuffers[player].append(
+                chunk.data(), chunk.size()) )
+        {
+            return false;
+        }
+    }
+    const auto end = makePlayerStoryEndRecord(player, transferId);
+    return g_lateJoinCatchupBuffers[player].append(end.data(), end.size());
+}
+
+static bool sendPlayerStoryRecordToClient(
+    int player,
+    const std::vector<std::uint8_t>& record)
+{
+    if ( !net_packet || !net_sock || record.empty()
+        || record.size() > NET_PACKET_SIZE )
+    {
+        return false;
+    }
+    memcpy(net_packet->data, record.data(), record.size());
+    net_packet->len = static_cast<int>(record.size());
+    net_packet->address.host = net_clients[player - 1].host;
+    net_packet->address.port = net_clients[player - 1].port;
+    return sendPacketSafe(net_sock, -1, net_packet, player - 1) != 0;
+}
+
+bool serverSyncAutomatiaPlayerStoryState(
+    int player,
+    const char* reason)
+{
+    if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+        || client_disconnected[player] || !players[player]
+        || players[player]->isLocalPlayer() )
+    {
+        return false;
+    }
+
+    std::string payload;
+    std::string error;
+    if ( !exportAutomatiaPlayerStoryState(player, payload, error) )
+    {
+        printlog(
+            "[Custom Dialogue] Could not export player %d story state for sync: %s.",
+            player,
+            error.c_str());
+        return false;
+    }
+    if ( payload.empty() || payload.size() > kCharacterSaveMaxBytes )
+    {
+        return false;
+    }
+
+    const Uint32 transferId = nextPlayerStoryTransferId();
+    const Uint32 chunkCount = static_cast<Uint32>(
+        (payload.size() + kCharacterSaveChunkPayload - 1)
+        / kCharacterSaveChunkPayload);
+    const Uint32 checksum = LateJoinProtocol::crc32(
+        reinterpret_cast<const std::uint8_t*>(payload.data()),
+        payload.size());
+    if ( !sendPlayerStoryRecordToClient(
+            player,
+            makePlayerStoryBeginRecord(
+                player, transferId, chunkCount,
+                static_cast<Uint32>(payload.size()), checksum)) )
+    {
+        return false;
+    }
+    for ( Uint32 sequence = 0; sequence < chunkCount; ++sequence )
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(sequence) * kCharacterSaveChunkPayload;
+        const std::size_t bytes = std::min(
+            kCharacterSaveChunkPayload, payload.size() - offset);
+        if ( !sendPlayerStoryRecordToClient(
+                player,
+                makePlayerStoryChunkRecord(
+                    player, transferId, sequence,
+                    reinterpret_cast<const std::uint8_t*>(
+                        payload.data() + offset),
+                    bytes)) )
+        {
+            return false;
+        }
+    }
+    if ( !sendPlayerStoryRecordToClient(
+            player,
+            makePlayerStoryEndRecord(player, transferId)) )
+    {
+        return false;
+    }
+
+    printlog(
+        "[Custom Dialogue] Synchronized %zu bytes of player %d story state (%s).",
+        payload.size(),
+        player,
+        reason ? reason : "update");
+    return true;
+}
+
 static bool sendCharacterTransferToServer(
     int player,
     const std::string& payload,
@@ -1264,6 +1481,11 @@ static bool stageAutomatiaLateJoinCharacterRestore(
         return false;
     }
 
+    // Slots are reusable network containers, not durable story identities.
+    // Clear any prior occupant's player-scoped progress before importing the
+    // character file selected by the current name/Steam identity.
+    resetAutomatiaPlayerStoryState(player);
+
     const std::string requestedName = stats[player]->name;
     const char* modeName =
         characterSaveMode == CharacterSaveMode::LOCAL
@@ -1408,6 +1630,228 @@ static bool finalizeClientCharacterRestoreTransfer()
     }
     g_clientCharacterRestoreAssembler.reset();
     return restored;
+}
+
+static bool finalizeClientPlayerStoryTransfer()
+{
+    if ( !g_clientPlayerStoryAssembler.ready() )
+    {
+        return false;
+    }
+    std::string payload;
+    const Uint32 transferId = g_clientPlayerStoryAssembler.transferId;
+    if ( !g_clientPlayerStoryAssembler.complete(transferId, payload) )
+    {
+        printlog(
+            "[Custom Dialogue] Client rejected corrupt completed story-state sync.");
+        g_clientPlayerStoryAssembler.reset();
+        return false;
+    }
+
+    std::string error;
+    const bool imported = importAutomatiaPlayerStoryState(
+        clientnum, payload, error);
+    if ( !imported )
+    {
+        printlog(
+            "[Custom Dialogue] Client could not apply story-state sync: %s.",
+            error.c_str());
+    }
+    else
+    {
+        printlog(
+            "[Custom Dialogue] Client applied %zu bytes of synchronized quest/NPC state.",
+            payload.size());
+    }
+    g_clientPlayerStoryAssembler.reset();
+    return imported;
+}
+
+static std::size_t clientReassertAutomatiaFollowerOwnership()
+{
+	if ( multiplayer != CLIENT || clientnum <= 0 || clientnum >= MAXPLAYERS
+		|| !stats[clientnum] || !players[clientnum]
+		|| !players[clientnum]->entity || !map.entities )
+	{
+		return 0;
+	}
+
+	const Uint32 leaderUID = players[clientnum]->entity->getUID();
+	std::vector<Entity*> followers;
+	std::unordered_set<Uint32> resolvedUIDs;
+	std::size_t unresolvedAuthoritativeUIDs = 0;
+
+	auto rememberFollower = [&](Entity* follower)
+	{
+		if ( !follower || follower->behavior != &actMonster
+			|| follower->getUID() == 0
+			|| !resolvedUIDs.insert(follower->getUID()).second )
+		{
+			return;
+		}
+		followers.push_back(follower);
+	};
+
+	// LEAD and skill[42] are authoritative, but either packet can be replayed
+	// before the matching ENTU has finished creating/adopting the monster UID.
+	// Resolve every remembered UID again instead of trusting the character
+	// payload's saved FOLLOWERS list, whose UIDs belong to the previous session.
+	for ( const Uint32 uid : g_clientAutomatiaFollowerRosterUIDs )
+	{
+		Entity* follower = uidToEntity(uid);
+		if ( follower && follower->behavior == &actMonster )
+		{
+			rememberFollower(follower);
+		}
+		else
+		{
+			++unresolvedAuthoritativeUIDs;
+		}
+	}
+
+	// Also recover from a missed LEAD packet when the synchronized actor itself
+	// already contains the correct ally index or leader UID.
+	for ( node_t* node = map.entities->first; node; node = node->next )
+	{
+		Entity* candidate = static_cast<Entity*>(node->element);
+		if ( !candidate || candidate->behavior != &actMonster )
+		{
+			continue;
+		}
+
+		Stat* candidateStats = candidate->clientStats
+			? candidate->clientStats
+			: candidate->getStats();
+		const bool ownedByPlayer = candidate->monsterAllyIndex == clientnum
+			|| (candidateStats && leaderUID != 0
+				&& candidateStats->leader_uid == leaderUID);
+		if ( ownedByPlayer )
+		{
+			rememberFollower(candidate);
+			if ( std::find(
+					g_clientAutomatiaFollowerRosterUIDs.begin(),
+					g_clientAutomatiaFollowerRosterUIDs.end(),
+					candidate->getUID())
+				== g_clientAutomatiaFollowerRosterUIDs.end() )
+			{
+				g_clientAutomatiaFollowerRosterUIDs.push_back(
+					candidate->getUID());
+			}
+		}
+	}
+
+	std::vector<Uint32> desiredRoster;
+	desiredRoster.reserve(followers.size());
+	Entity* firstFollower = nullptr;
+	for ( Entity* follower : followers )
+	{
+		follower->monsterAllyIndex = clientnum;
+		follower->monsterState = 0;
+		follower->monsterTarget = 0;
+		follower->flags[USERFLAG2] = true;
+		if ( !follower->clientsHaveItsStats )
+		{
+			follower->giveClientStats();
+		}
+		Stat* followerStats = follower->clientStats
+			? follower->clientStats
+			: follower->getStats();
+		if ( followerStats )
+		{
+			followerStats->leader_uid = leaderUID;
+			followerStats->customDialogueID[0] = '\0';
+			auto hudState = g_clientAutomatiaFollowerHUDStates.find(
+				follower->getUID());
+			if ( hudState != g_clientAutomatiaFollowerHUDStates.end() )
+			{
+				followerStats->LVL = hudState->second.level;
+				followerStats->HP = hudState->second.hp;
+				followerStats->MAXHP = hudState->second.maxHp;
+				followerStats->type = hudState->second.type;
+			}
+			if ( monsterChangesColorWhenAlly(followerStats) )
+			{
+				int bodypart = 0;
+				for ( node_t* limbNode = follower->children.first; limbNode;
+					limbNode = limbNode->next, ++bodypart )
+				{
+					if ( bodypart < LIMB_HUMANOID_TORSO )
+					{
+						continue;
+					}
+					Entity* limb = static_cast<Entity*>(limbNode->element);
+					if ( limb )
+					{
+						limb->flags[USERFLAG2] = true;
+					}
+				}
+			}
+		}
+
+		desiredRoster.push_back(follower->getUID());
+		if ( !firstFollower )
+		{
+			firstFollower = follower;
+		}
+	}
+
+	std::vector<Uint32> currentRoster;
+	for ( node_t* node = stats[clientnum]->FOLLOWERS.first;
+		node; node = node->next )
+	{
+		Uint32* uid = static_cast<Uint32*>(node->element);
+		if ( uid )
+		{
+			currentRoster.push_back(*uid);
+		}
+	}
+
+	const bool rosterChanged = currentRoster != desiredRoster;
+	if ( rosterChanged )
+	{
+		list_FreeAll(&stats[clientnum]->FOLLOWERS);
+		for ( const Uint32 uidValue : desiredRoster )
+		{
+			Uint32* uid = static_cast<Uint32*>(malloc(sizeof(Uint32)));
+			if ( !uid )
+			{
+				continue;
+			}
+			*uid = uidValue;
+			node_t* followerNode =
+				list_AddNodeLast(&stats[clientnum]->FOLLOWERS);
+			followerNode->element = uid;
+			followerNode->deconstructor = &defaultDeconstructor;
+			followerNode->size = sizeof(Uint32);
+		}
+
+		// The bars are a cache derived from FOLLOWERS. Clear them only when the
+		// authoritative roster actually changes; the normal HUD update will then
+		// recreate the portraits and HP bars on the next frame.
+		players[clientnum]->hud.followerBars.clear();
+	}
+
+	const Uint32 recentUID = FollowerMenu[clientnum].recentEntity
+		? FollowerMenu[clientnum].recentEntity->getUID()
+		: 0;
+	if ( !FollowerMenu[clientnum].recentEntity
+		|| resolvedUIDs.find(recentUID) == resolvedUIDs.end() )
+	{
+		FollowerMenu[clientnum].recentEntity = firstFollower;
+	}
+	if ( !firstFollower && unresolvedAuthoritativeUIDs == 0 )
+	{
+		FollowerMenu[clientnum].closeFollowerMenuGUI(true);
+	}
+
+	if ( rosterChanged )
+	{
+		printlog(
+			"[Character Save] Client rebuilt follower roster/HUD with %zu actor(s) (%zu pending UID(s)).",
+			followers.size(),
+			unresolvedAuthoritativeUIDs);
+	}
+	return followers.size();
 }
 
 bool clientStageAutomatiaLateJoinVisiblePlayerMask(
@@ -1796,6 +2240,13 @@ void disconnectAutomatiaRemotePlayer(
 
     Entity* playerEntity = players[player]
         ? players[player]->entity : nullptr;
+    if (characterSaveMode != CharacterSaveMode::NONE)
+    {
+        (void)removeAutomatiaCharacterFollowerEntities(
+            player, "character disconnect");
+        resetAutomatiaPlayerStoryState(player);
+        customDialogueResetPlayerRuntimeState(player);
+    }
     worldState.removePlayer(player);
     if (playerEntity && playerEntity->mynode)
     {
@@ -1897,6 +2348,7 @@ void clientResetLateJoinPacketDeferral()
 	g_clientLateJoinLivePackets.reset();
 	g_clientLateJoinCatchupPackets.clear();
 	g_clientLateJoinLastProgressTick = 0;
+	g_clientPlayerStoryAssembler.reset();
 	g_clientPendingCharacterRestorePayload.clear();
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 	g_clientPendingLateJoinTransformation = ClientLateJoinTransformation{};
@@ -1907,6 +2359,10 @@ void clientResetLateJoinPacketDeferral()
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
 {
 	clientResetLateJoinPacketDeferral();
+	g_clientAutomatiaFollowerRosterUIDs.clear();
+	g_clientAutomatiaFollowerHUDStates.clear();
+	g_clientAutomatiaFollowerRosterRetryTicks = 0;
+	g_clientAutomatiaFollowerRosterLastAttempt = 0;
 	if (transferId == 0)
 	{
 		return;
@@ -2856,6 +3312,129 @@ static bool startServerLateJoinSnapshotTransfer(int playerIndex)
         resetServerLateJoinPlayer(playerIndex);
         return false;
     }
+
+    std::string playerStoryPayload;
+    std::string playerStoryError;
+    if (!exportAutomatiaPlayerStoryState(
+            playerIndex, playerStoryPayload, playerStoryError)
+        || !appendPlayerStoryTransferToLateJoinCatchup(
+            playerIndex, playerStoryPayload))
+    {
+        printlog(
+            "[Custom Dialogue] Could not queue player %d story state for late join: %s.",
+            playerIndex,
+            playerStoryError.empty() ? "transfer assembly failed"
+                : playerStoryError.c_str());
+        resetServerLateJoinPlayer(playerIndex);
+        return false;
+    }
+    printlog(
+        "[Custom Dialogue] Queued %zu bytes of player %d story state for late join.",
+        playerStoryPayload.size(),
+        playerIndex);
+
+    std::size_t restoredFollowerRecords = 0;
+    if (stats[playerIndex])
+    {
+        for (node_t* node = stats[playerIndex]->FOLLOWERS.first;
+            node; node = node->next)
+        {
+            Uint32* uid = static_cast<Uint32*>(node->element);
+            Entity* follower = uid ? uidToEntity(*uid) : nullptr;
+            Stat* followerStats = follower ? follower->getStats() : nullptr;
+            if (!uid || !follower || !followerStats)
+            {
+                continue;
+            }
+            std::string name = followerStats->name;
+            if (!name.empty()
+                && name == MonsterData_t::getSpecialNPCName(*followerStats))
+            {
+                name = "$" + followerStats->getAttribute("special_npc");
+            }
+            if (name.size() > 127)
+            {
+                name.resize(127);
+            }
+            std::vector<std::uint8_t> lead(13 + name.size(), 0);
+            memcpy(lead.data(), "LEAD", 4);
+            LateJoinProtocol::write32(lead, 4, *uid);
+            LateJoinProtocol::write32(
+                lead, 8, static_cast<Uint32>(followerStats->type));
+            memcpy(lead.data() + 12, name.c_str(), name.size());
+            lead[12 + name.size()] = 0;
+            if (!g_lateJoinCatchupBuffers[playerIndex].append(
+                    lead.data(), lead.size()))
+            {
+                printlog(
+                    "[Character Save] Could not queue follower roster for player %d.",
+                    playerIndex);
+                resetServerLateJoinPlayer(playerIndex);
+                return false;
+            }
+
+            std::vector<std::uint8_t> allyIndex(13, 0);
+            memcpy(allyIndex.data(), "ENTS", 4);
+            LateJoinProtocol::write32(allyIndex, 4, *uid);
+            allyIndex[8] = 42;
+            LateJoinProtocol::write32(
+                allyIndex, 9, static_cast<Uint32>(playerIndex));
+            if (!g_lateJoinCatchupBuffers[playerIndex].append(
+                    allyIndex.data(), allyIndex.size()))
+            {
+                printlog(
+                    "[Character Save] Could not queue follower ownership for player %d.",
+                    playerIndex);
+                resetServerLateJoinPlayer(playerIndex);
+                return false;
+            }
+
+            std::vector<std::uint8_t> allyFlag(10, 0);
+            memcpy(allyFlag.data(), "ENTF", 4);
+            LateJoinProtocol::write32(allyFlag, 4, *uid);
+            allyFlag[8] = USERFLAG2;
+            allyFlag[9] = 1;
+            if (!g_lateJoinCatchupBuffers[playerIndex].append(
+                    allyFlag.data(), allyFlag.size()))
+            {
+                printlog(
+                    "[Character Save] Could not queue follower ally flag for player %d.",
+                    playerIndex);
+                resetServerLateJoinPlayer(playerIndex);
+                return false;
+            }
+
+            std::vector<std::uint8_t> allyStats(14, 0);
+            memcpy(allyStats.data(), "NPCI", 4);
+            LateJoinProtocol::write32(allyStats, 4, *uid);
+            allyStats[8] = static_cast<std::uint8_t>(followerStats->LVL);
+            allyStats[9] = static_cast<std::uint8_t>(
+                static_cast<Uint16>(followerStats->HP) >> 8U);
+            allyStats[10] = static_cast<std::uint8_t>(followerStats->HP);
+            allyStats[11] = static_cast<std::uint8_t>(
+                static_cast<Uint16>(followerStats->MAXHP) >> 8U);
+            allyStats[12] = static_cast<std::uint8_t>(followerStats->MAXHP);
+            allyStats[13] = static_cast<std::uint8_t>(followerStats->type);
+            if (!g_lateJoinCatchupBuffers[playerIndex].append(
+                    allyStats.data(), allyStats.size()))
+            {
+                printlog(
+                    "[Character Save] Could not queue follower HUD stats for player %d.",
+                    playerIndex);
+                resetServerLateJoinPlayer(playerIndex);
+                return false;
+            }
+            ++restoredFollowerRecords;
+        }
+    }
+    if (restoredFollowerRecords > 0)
+    {
+        printlog(
+            "[Character Save] Queued %zu restored follower roster record(s) for player %d.",
+            restoredFollowerRecords,
+            playerIndex);
+    }
+
     if (characterSaveMode != CharacterSaveMode::NONE)
     {
         const std::uint8_t request[] = {
@@ -4603,6 +5182,8 @@ NetworkingLobbyJoinRequestResult lobbyPlayerJoinRequest(
 		// on success, client gets legit player number
 		resetServerLateJoinPlayer(c);
 		g_serverCharacterSaveAssemblers[c].reset();
+		customDialogueResetPlayerRuntimeState(c);
+		resetAutomatiaPlayerStoryState(c);
 		client_disconnected[c] = false;
 		if (!g_processingRuntimeJoin)
 		{
@@ -5223,9 +5804,12 @@ void clientActions(Entity* entity)
 			}
 			break;
 		default:
-			if ( entity->isPlayerHeadSprite() )
+			if ( receivedEntityArchetype() == kEntityArchetypePlayer
+				|| entity->isPlayerHeadSprite() )
 			{
-				// these are all player heads
+				// Explicit player archetypes are authoritative. The sprite fallback
+				// remains for older packets, but only a valid player slot can become
+				// actPlayer; human NPCs continue into the -4 monster path below.
 				playernum = SDLNet_Read32(&net_packet->data[30]);
 				if ( playernum >= 0 && playernum < MAXPLAYERS )
 				{
@@ -5960,6 +6544,62 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
                 connectedToGame ? 1 : 0);
         }
     }},
+    {'QSBG', [](){
+        if (!net_packet || net_packet->len != 21
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Custom Dialogue] Client rejected malformed story sync begin.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 chunkCount = SDLNet_Read32(&net_packet->data[9]);
+        const Uint32 totalBytes = SDLNet_Read32(&net_packet->data[13]);
+        const Uint32 checksum = SDLNet_Read32(&net_packet->data[17]);
+        if (!g_clientPlayerStoryAssembler.begin(
+                transferId, chunkCount, totalBytes, checksum))
+        {
+            printlog("[Custom Dialogue] Client rejected story sync metadata.");
+        }
+    }},
+    {'QSCH', [](){
+        if (!net_packet || net_packet->len < 16
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Custom Dialogue] Client rejected malformed story sync chunk.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        const Uint32 sequence = SDLNet_Read32(&net_packet->data[9]);
+        const std::size_t bytes =
+            (static_cast<std::size_t>(net_packet->data[13]) << 8U)
+            | net_packet->data[14];
+        if (bytes == 0 || 15 + bytes != static_cast<std::size_t>(net_packet->len)
+            || !g_clientPlayerStoryAssembler.accept(
+                transferId, sequence, &net_packet->data[15], bytes))
+        {
+            printlog("[Custom Dialogue] Client rejected corrupt story sync chunk.");
+        }
+        else
+        {
+            (void)finalizeClientPlayerStoryTransfer();
+        }
+    }},
+    {'QSED', [](){
+        if (!net_packet || net_packet->len != 9
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Custom Dialogue] Client rejected malformed story sync completion.");
+            return;
+        }
+        const Uint32 transferId = SDLNet_Read32(&net_packet->data[5]);
+        if (!g_clientPlayerStoryAssembler.markEnd(transferId))
+        {
+            printlog("[Custom Dialogue] Client rejected invalid story sync completion.");
+            g_clientPlayerStoryAssembler.reset();
+            return;
+        }
+        (void)finalizeClientPlayerStoryTransfer();
+    }},
     {'CSBG', [](){
         if (!net_packet || net_packet->len != 21
             || static_cast<int>(net_packet->data[4]) != clientnum)
@@ -6240,7 +6880,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			SDLNet_Read32(&net_packet->data[30]));
 		Entity *entity = uidToEntity(static_cast<Sint32>(authoritativeUid));
 
-		if (Entity::isPlayerHeadSprite(incomingSprite)
+		const bool incomingIsPlayerActor =
+			archetype == kEntityArchetypePlayer
+			|| (archetype == kEntityArchetypeNone
+				&& Entity::isPlayerHeadSprite(incomingSprite)
+				&& incomingPlayer >= 0
+				&& incomingPlayer < MAXPLAYERS);
+
+		if (incomingIsPlayerActor
 			&& !clientPlayerSlotMayOwnVisibleActor(incomingPlayer))
 		{
 			if (incomingPlayer >= 0 && incomingPlayer < MAXPLAYERS
@@ -6267,7 +6914,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			return;
 		}
 		if (entity && authoritativePlayerUpdateConflicts(
-				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingIsPlayerActor,
 				incomingPlayer,
 				MAXPLAYERS,
 				entity->behavior == &actPlayer,
@@ -6302,7 +6949,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		{
 			Entity* slotHead = players[incomingPlayer]->entity;
 			if (authoritativePlayerCanAdoptSlotHead(
-				Entity::isPlayerHeadSprite(incomingSprite),
+				incomingIsPlayerActor,
 				incomingPlayer,
 				MAXPLAYERS,
 				slotHead != nullptr,
@@ -6619,10 +7266,28 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// update entity skill
 	{'ENTS', [](){
-		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
+		const Uint32 entityUID =
+			static_cast<Uint32>(SDLNet_Read32(&net_packet->data[4]));
+		const Uint8 skillIndex = net_packet->data[8];
+		const Sint32 skillValue =
+			static_cast<Sint32>(SDLNet_Read32(&net_packet->data[9]));
+		if ( skillIndex == 42 && skillValue == clientnum )
+		{
+			if ( std::find(
+					g_clientAutomatiaFollowerRosterUIDs.begin(),
+					g_clientAutomatiaFollowerRosterUIDs.end(),
+					entityUID)
+				== g_clientAutomatiaFollowerRosterUIDs.end() )
+			{
+				g_clientAutomatiaFollowerRosterUIDs.push_back(entityUID);
+			}
+			g_clientAutomatiaFollowerRosterRetryTicks =
+				15 * TICKS_PER_SECOND;
+		}
+		Entity *entity = uidToEntity(static_cast<int>(entityUID));
 		if ( entity )
 		{
-			entity->skill[net_packet->data[8]] = SDLNet_Read32(&net_packet->data[9]);
+			entity->skill[skillIndex] = skillValue;
 		}
 	}},
 
@@ -10629,22 +11294,63 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// lead a monster
 	{'LEAD', [](){
-		Uint32* uidnum = (Uint32*) malloc(sizeof(Uint32));
-		*uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
-		node_t* node = list_AddNodeLast(&stats[clientnum]->FOLLOWERS);
-		node->element = uidnum;
-		node->deconstructor = &defaultDeconstructor;
-		node->size = sizeof(Uint32);
+		const Uint32 followerUID =
+			static_cast<Uint32>(SDLNet_Read32(&net_packet->data[4]));
+		if ( std::find(
+				g_clientAutomatiaFollowerRosterUIDs.begin(),
+				g_clientAutomatiaFollowerRosterUIDs.end(),
+				followerUID)
+			== g_clientAutomatiaFollowerRosterUIDs.end() )
+		{
+			g_clientAutomatiaFollowerRosterUIDs.push_back(followerUID);
+		}
+		g_clientAutomatiaFollowerRosterRetryTicks =
+			15 * TICKS_PER_SECOND;
+		bool alreadyListed = false;
+		for ( node_t* followerNode = stats[clientnum]->FOLLOWERS.first;
+			followerNode; followerNode = followerNode->next )
+		{
+			Uint32* listedUID =
+				static_cast<Uint32*>(followerNode->element);
+			if ( listedUID && *listedUID == followerUID )
+			{
+				alreadyListed = true;
+				break;
+			}
+		}
+		if ( !alreadyListed )
+		{
+			Uint32* uidnum =
+				static_cast<Uint32*>(malloc(sizeof(Uint32)));
+			if ( !uidnum )
+			{
+				return;
+			}
+			*uidnum = followerUID;
+			node_t* node = list_AddNodeLast(&stats[clientnum]->FOLLOWERS);
+			node->element = uidnum;
+			node->deconstructor = &defaultDeconstructor;
+			node->size = sizeof(Uint32);
+		}
 
-		Entity* monster = uidToEntity(*uidnum);
+		Entity* monster = uidToEntity(followerUID);
 		if ( monster )
 		{
+			monster->monsterAllyIndex = clientnum;
+			monster->monsterState = 0;
+			monster->monsterTarget = 0;
+			monster->flags[USERFLAG2] = true;
 			if ( !monster->clientsHaveItsStats )
 			{
 				monster->giveClientStats();
 			}
 			if ( monster->clientStats )
 			{
+				monster->clientStats->leader_uid =
+					players[clientnum] && players[clientnum]->entity
+						? players[clientnum]->entity->getUID()
+						: 0;
+				monster->clientStats->customDialogueID[0] = '\0';
                 monster->clientStats->type = (Monster)SDLNet_Read32(&net_packet->data[8]);
 				if ( (Sint8)net_packet->data[12] == '$' )
 				{
@@ -10702,6 +11408,15 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// remove a monster from followers list
 	{'LDEL', [](){
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
+		g_clientAutomatiaFollowerRosterUIDs.erase(
+			std::remove(
+				g_clientAutomatiaFollowerRosterUIDs.begin(),
+				g_clientAutomatiaFollowerRosterUIDs.end(),
+				uidnum),
+			g_clientAutomatiaFollowerRosterUIDs.end());
+		g_clientAutomatiaFollowerHUDStates.erase(uidnum);
+		g_clientAutomatiaFollowerRosterRetryTicks =
+			15 * TICKS_PER_SECOND;
 		if ( stats[clientnum] )
 		{
 			for ( node_t* allyNode = stats[clientnum]->FOLLOWERS.first; allyNode != nullptr; allyNode = allyNode->next )
@@ -10727,6 +11442,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// update client's follower data on level up or initial follow.
 	{'NPCI', [](){
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
+		ClientAutomatiaFollowerHUDState state;
+		state.level = net_packet->data[8];
+		state.hp = SDLNet_Read16(&net_packet->data[9]);
+		state.maxHp = SDLNet_Read16(&net_packet->data[11]);
+		state.type = static_cast<Monster>(net_packet->data[13]);
+		g_clientAutomatiaFollowerHUDStates[uidnum] = state;
+		if ( std::find(
+				g_clientAutomatiaFollowerRosterUIDs.begin(),
+				g_clientAutomatiaFollowerRosterUIDs.end(),
+				uidnum)
+			== g_clientAutomatiaFollowerRosterUIDs.end() )
+		{
+			g_clientAutomatiaFollowerRosterUIDs.push_back(uidnum);
+		}
+		g_clientAutomatiaFollowerRosterRetryTicks =
+			15 * TICKS_PER_SECOND;
 		Entity* monster = uidToEntity(uidnum);
 		if ( monster )
 		{
@@ -10736,10 +11467,10 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			}
 			if ( monster->clientStats )
 			{
-				monster->clientStats->LVL = net_packet->data[8];
-				monster->clientStats->HP = SDLNet_Read16(&net_packet->data[9]);
-				monster->clientStats->MAXHP = SDLNet_Read16(&net_packet->data[11]);
-				monster->clientStats->type = static_cast<Monster>(net_packet->data[13]);
+				monster->clientStats->LVL = state.level;
+				monster->clientStats->HP = state.hp;
+				monster->clientStats->MAXHP = state.maxHp;
+				monster->clientStats->type = state.type;
 			}
 		}
 	}},
@@ -10747,6 +11478,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// update client's follower hp/maxhp data at intervals
 	{'NPCU', [](){
 		Uint32 uidnum = (Uint32)SDLNet_Read32(&net_packet->data[4]);
+		auto storedState =
+			g_clientAutomatiaFollowerHUDStates.find(uidnum);
+		if ( storedState != g_clientAutomatiaFollowerHUDStates.end() )
+		{
+			storedState->second.hp = SDLNet_Read16(&net_packet->data[8]);
+			storedState->second.maxHp =
+				SDLNet_Read16(&net_packet->data[10]);
+		}
 		Entity* monster = uidToEntity(uidnum);
 		if ( monster )
 		{
@@ -12443,6 +13182,10 @@ static void tryReplayClientLateJoinPackets()
 		clientApplyAutomatiaLateJoinTransformationAfterPlayerInit();
 	const bool positionRestoreFinalized =
 		clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
+	// Rebuild the follower roster only after character restoration has finished,
+	// so HUD UIDs and client follower stats cannot be replaced by restore data.
+	const std::size_t restoredFollowerOwnership =
+		clientReassertAutomatiaFollowerOwnership();
 	if (characterRestoreFinalized
 		&& transformationRestoreFinalized
 		&& positionRestoreFinalized)
@@ -12515,12 +13258,12 @@ static void tryReplayClientLateJoinPackets()
 	clientResetLateJoinPacketDeferral();
 	printlog(
 		"[Late Join] Client applied %zu catch-up and %zu deferred live "
-		"packet(s); removed %zu non-roster player actor(s), reset %zu "
-		"static fixture light(s), rebuilt %zu editor light source(s), "
-		"%zu rebuild failure(s).",
-		catchupCount, liveCount, removedNonRosterActors,
-		resetStaticFixtures, rebuiltEditorLightSources,
-		failedEditorLightSources);
+		"packet(s); rebound %zu follower actor(s), removed %zu non-roster "
+		"player actor(s), reset %zu static fixture light(s), rebuilt %zu "
+		"editor light source(s), %zu rebuild failure(s).",
+		catchupCount, liveCount, restoredFollowerOwnership,
+		removedNonRosterActors, resetStaticFixtures,
+		rebuiltEditorLightSources, failedEditorLightSources);
 }
 
 /*-------------------------------------------------------------------------------
@@ -12534,6 +13277,16 @@ static void tryReplayClientLateJoinPackets()
 void clientHandleMessages(Uint32 framerateBreakInterval)
 {
 	clientCheckLateJoinTimeout();
+	if ( multiplayer == CLIENT
+		&& g_clientAutomatiaFollowerRosterRetryTicks > 0 )
+	{
+		--g_clientAutomatiaFollowerRosterRetryTicks;
+		if ( ticks - g_clientAutomatiaFollowerRosterLastAttempt >= 5 )
+		{
+			g_clientAutomatiaFollowerRosterLastAttempt = ticks;
+			(void)clientReassertAutomatiaFollowerOwnership();
+		}
+	}
 #ifdef STEAMWORKS
 	if (!directConnect && !net_handler)
 	{
@@ -12891,15 +13644,39 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 		std::string placementError;
 		if (!prepareAutomatiaLateJoinPlayer(
-				player, g_lateJoinReturningPlayer[player], placementError)
-			|| !startServerLateJoinSnapshotTransfer(player))
+				player, g_lateJoinReturningPlayer[player], placementError))
 		{
 			printlog(
 				"[Late Join] Failed to prepare Ready player %d: %s",
 				player,
-				placementError.empty()
-					? "snapshot transfer could not start"
-					: placementError.c_str());
+				placementError.c_str());
+			abortServerLateJoinPlayer(player, 4);
+			return;
+		}
+
+		if (g_lateJoinReturningPlayer[player]
+			&& characterSaveMode != CharacterSaveMode::NONE
+			&& !g_lateJoinCharacterRestorePayload[player].empty())
+		{
+			std::string followerError;
+			if (restoreAutomatiaCharacterFollowersFromPayload(
+					player,
+					characterSaveMode,
+					g_lateJoinCharacterRestorePayload[player],
+					followerError) != 0)
+			{
+				printlog(
+					"[Character Save] Player %d follower restore was skipped: %s.",
+					player,
+					followerError.c_str());
+			}
+		}
+
+		if (!startServerLateJoinSnapshotTransfer(player))
+		{
+			printlog(
+				"[Late Join] Failed to start snapshot transfer for Ready player %d.",
+				player);
 			abortServerLateJoinPlayer(player, 4);
 			return;
 		}
@@ -17244,6 +18021,7 @@ void closeNetworkInterfaces()
 	g_clientLateJoinBegin = LateJoinProtocol::Begin{};
 	g_clientLateJoinSpawnAuthorized = false;
 	g_clientCharacterRestoreAssembler.reset();
+	g_clientPlayerStoryAssembler.reset();
 	g_clientCharacterRestoreApplied = false;
 	g_clientLastCharacterSaveAckTransferId = 0;
 	g_clientLastCharacterSaveAckStored = false;

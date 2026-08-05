@@ -3456,6 +3456,76 @@ static bool preloadCustomDialogueQuestManifest()
     return true;
 }
 
+bool preloadCustomDialogueQuestDefinition(
+    const std::string& dialogueID
+)
+{
+    return getCustomDialogueDefinition(dialogueID) != nullptr;
+}
+
+void collectCustomDialogueQuestDefinitionIDsForPlayer(
+    const int player,
+    std::vector<std::string>& dialogueIDs
+)
+{
+    dialogueIDs.clear();
+    if ( player < 0 || player >= MAXPLAYERS )
+    {
+        return;
+    }
+
+    /*
+     * The optional quest manifest remains the fastest way to warm the cache,
+     * but custom maps are not required to maintain one. Also inspect the live
+     * NPCs in the active map so a quest giver's authored dialogue is known as
+     * soon as that map is loaded on a headless server.
+     */
+    preloadCustomDialogueQuestManifest();
+    if ( map.creatures )
+    {
+        for ( node_t* node = map.creatures->first; node; node = node->next )
+        {
+            Entity* entity = static_cast<Entity*>(node->element);
+            Stat* entityStats = entity ? entity->getStats() : nullptr;
+            if ( !entity || entity->behavior != &actMonster || !entityStats
+                || entityStats->customDialogueID[0] == '\0' )
+            {
+                continue;
+            }
+            const CustomDialogueDefinition* liveDefinition =
+                getCustomDialogueDefinition(entityStats->customDialogueID);
+            if ( liveDefinition && !liveDefinition->questID.empty() )
+            {
+                dialogueIDs.push_back(liveDefinition->dialogueID);
+            }
+        }
+    }
+
+    for ( const auto& cachedDefinition : customDialogueDefinitionCache )
+    {
+        const CustomDialogueDefinition& definition =
+            cachedDefinition.second;
+        if ( !definition.valid || definition.questID.empty() )
+        {
+            continue;
+        }
+        if ( !persistentStoryQuestIsStarted(player, definition.questID)
+            && !persistentStoryQuestIsAccepted(player, definition.questID)
+            && !persistentStoryQuestIsCompleted(player, definition.questID)
+            && !persistentStoryQuestIsFailed(player, definition.questID) )
+        {
+            continue;
+        }
+        dialogueIDs.push_back(definition.dialogueID);
+    }
+
+    std::sort(dialogueIDs.begin(), dialogueIDs.end());
+    dialogueIDs.erase(
+        std::unique(dialogueIDs.begin(), dialogueIDs.end()),
+        dialogueIDs.end()
+    );
+}
+
 static std::unordered_map<int, std::unordered_set<Uint32>>
     customDialogueCreditedDefeatUIDs;
 
@@ -3468,15 +3538,24 @@ static std::unordered_map<int, std::unordered_set<Uint32>>
 static std::unordered_map<int, Sint32>
     customDialoguePendingDefeatCounts[MAXPLAYERS];
 
+void customDialogueResetPlayerRuntimeState(const int player)
+{
+    if ( player < 0 || player >= MAXPLAYERS )
+    {
+        return;
+    }
+    customDialoguePendingDefeatCounts[player].clear();
+    pendingCustomDialogueChoices[player] =
+        PendingCustomDialogueChoiceState{};
+}
+
 void customDialogueResetRuntimeState()
 {
     customDialogueCreditedDefeatUIDs.clear();
 
     for ( int player = 0; player < MAXPLAYERS; ++player )
     {
-        customDialoguePendingDefeatCounts[player].clear();
-        pendingCustomDialogueChoices[player] =
-            PendingCustomDialogueChoiceState{};
+        customDialogueResetPlayerRuntimeState(player);
     }
 }
 
@@ -3674,6 +3753,13 @@ void customDialogueCreditAuthoredDefeat(
                     current,
                     target
                 );
+                if ( multiplayer == SERVER )
+                {
+                    (void)serverSyncAutomatiaPlayerStoryState(
+                        player,
+                        "quest objective update"
+                    );
+                }
             }
         }
     }
@@ -17279,6 +17365,7 @@ bool handleCustomMonsterDialogue(
 				&& my->persistentID > 0 )
 			{
 				persistentStorySetNPCNodeSeen(
+					monsterclicked,
 					sourceMap,
 					my->persistentID,
 					"node_"
@@ -17329,6 +17416,7 @@ bool handleCustomMonsterDialogue(
             + node.actionID;
 
         if ( !persistentStoryGetNPCFlag(
+                monsterclicked,
                 sourceMap,
                 my->persistentID,
                 actionFlag
@@ -17546,6 +17634,7 @@ bool handleCustomMonsterDialogue(
             }
 
             persistentStorySetNPCFlag(
+                monsterclicked,
                 sourceMap,
                 my->persistentID,
                 actionFlag,
@@ -17579,6 +17668,7 @@ bool handleCustomMonsterDialogue(
         );
 
         persistentStorySetNPCNodeSeen(
+            monsterclicked,
             sourceMap,
             my->persistentID,
             "node_"
@@ -17591,9 +17681,18 @@ bool handleCustomMonsterDialogue(
          * points to itself and therefore repeats.
          */
         persistentStorySetNPCNode(
+            monsterclicked,
             sourceMap,
             my->persistentID,
             node.nextNode
+        );
+    }
+
+    if ( multiplayer == SERVER )
+    {
+        (void)serverSyncAutomatiaPlayerStoryState(
+            monsterclicked,
+            "custom dialogue node"
         );
     }
 
@@ -18425,6 +18524,17 @@ bool handleCustomMonsterDialogueChoice(
 		npc->persistentID,
 		choice.nextNode
 	);
+
+	// The host owns quest and per-NPC progress. Mirror the complete
+	// player-scoped registry to a remote client after every accepted choice
+	// so its quest journal and local dialogue state match the server.
+	if ( multiplayer == SERVER )
+	{
+		(void)serverSyncAutomatiaPlayerStoryState(
+			player,
+			"custom dialogue choice"
+		);
+	}
 
 	printlog(
 		"[Custom Dialogue] Player %d selected choice '%s' on NPC persistent ID %d; next=%d, rewardGold=%d, removeGold=%d, rewardItem='%s' x%d, removeItem='%s' x%d.",

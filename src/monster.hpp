@@ -1287,6 +1287,25 @@ bool getCustomDialogueQuestMetadata(
     std::string& failedText
 );
 
+/*
+ * Ensures that a dialogue definition required by synchronized quest state is
+ * present in the local definition cache. The definition is still loaded from
+ * the client's installed JSON, so mismatched or missing files fail safely.
+ */
+bool preloadCustomDialogueQuestDefinition(
+    const std::string& dialogueID
+);
+
+/*
+ * Collects dialogue definition IDs for every discovered quest owned by the
+ * specified player. This lets character/story synchronization carry the
+ * authored quest metadata needed by a remote client's journal.
+ */
+void collectCustomDialogueQuestDefinitionIDsForPlayer(
+    const int player,
+    std::vector<std::string>& dialogueIDs
+);
+
 bool handleCustomMonsterDialogueChoice(
 	int player,
 	Uint32 npcUID,

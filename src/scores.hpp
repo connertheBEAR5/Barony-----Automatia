@@ -826,6 +826,25 @@ list_t* loadGameFollowers(const SaveGameInfo& info);
 int restoreAutomatiaCharacter(int player, const SaveGameInfo& info, int savedPlayerIndex);
 
 /*
+ * Followers are server-owned actors. Character restoration stages their
+ * serialized stats, then recreates them only after the returning player's
+ * destination map and leader entity exist.
+ */
+int removeAutomatiaCharacterFollowerEntities(
+    int player,
+    const char* reason = nullptr);
+int restoreAutomatiaCharacterFollowers(
+    int player,
+    const SaveGameInfo& info,
+    int savedPlayerIndex,
+    std::string& error);
+int restoreAutomatiaCharacterFollowersFromPayload(
+    int player,
+    CharacterSaveMode mode,
+    const std::string& payload,
+    std::string& error);
+
+/*
  * Character-save transfer helpers. The client captures its authoritative
  * local inventory into a bounded payload; the dedicated server validates
  * the joined identity and stores it in a separate per-character file.

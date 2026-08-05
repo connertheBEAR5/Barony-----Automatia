@@ -4662,7 +4662,363 @@ static std::string makePersistentPlayerNPCMapNamespace(
         return "";
     }
 
-    return "player_" + std::to_string(player) + "/" + mapName;
+    const std::string normalizedMap =
+        normalizePersistentMapKey(mapName);
+    if ( normalizedMap.empty() )
+    {
+        return "";
+    }
+
+    /*
+     * Do not use a slash here. WorldInstanceIdentity::canonicalMapFile()
+     * intentionally strips directory prefixes, which previously collapsed
+     * every player-scoped NPC key back onto the shared map key. The encoded
+     * prefix survives the existing map-key normalizer and keeps each
+     * character's dialogue memory independent.
+     */
+    return "player_" + std::to_string(player) + "__" + normalizedMap;
+}
+
+static std::unordered_set<std::string>
+    automatiaPlayerQuestDialogueIDs[MAXPLAYERS];
+
+static std::string automatiaPlayerQuestStoryPrefix(const int player)
+{
+    return "player_" + std::to_string(player) + ":";
+}
+
+static std::string automatiaPlayerNPCStoryPrefix(const int player)
+{
+    return "player_" + std::to_string(player) + "__";
+}
+
+static bool automatiaStringHasPrefix(
+    const std::string& value,
+    const std::string& prefix)
+{
+    return value.size() >= prefix.size()
+        && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+static void clearAutomatiaPlayerStoryState(const int player)
+{
+    automatiaPlayerQuestDialogueIDs[player].clear();
+
+    const std::string questPrefix =
+        automatiaPlayerQuestStoryPrefix(player);
+    for (auto iterator = persistentWorldStoryState.quests.begin();
+        iterator != persistentWorldStoryState.quests.end(); )
+    {
+        if (automatiaStringHasPrefix(iterator->first, questPrefix))
+        {
+            iterator = persistentWorldStoryState.quests.erase(iterator);
+        }
+        else
+        {
+            ++iterator;
+        }
+    }
+
+    const std::string npcPrefix =
+        automatiaPlayerNPCStoryPrefix(player);
+    for (auto iterator = persistentWorldStoryState.npcDialogueStates.begin();
+        iterator != persistentWorldStoryState.npcDialogueStates.end(); )
+    {
+        if (automatiaStringHasPrefix(iterator->first, npcPrefix))
+        {
+            iterator =
+                persistentWorldStoryState.npcDialogueStates.erase(iterator);
+        }
+        else
+        {
+            ++iterator;
+        }
+    }
+}
+
+void resetAutomatiaPlayerStoryState(int player)
+{
+    if (multiplayer == CLIENT || player < 0 || player >= MAXPLAYERS)
+    {
+        return;
+    }
+    clearAutomatiaPlayerStoryState(player);
+}
+
+bool exportAutomatiaPlayerStoryState(
+    int player,
+    std::string& payload,
+    std::string& error)
+{
+    payload.clear();
+    error.clear();
+    if (multiplayer == CLIENT || player < 0 || player >= MAXPLAYERS)
+    {
+        error = "player story export requires an authoritative server slot";
+        return false;
+    }
+
+    using AutomatiaSave::Json;
+    const auto sortedStringSet = [](const auto& values)
+    {
+        std::vector<std::string> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    };
+    Json document = {
+        {"version", 1},
+        {"quests", Json::object()},
+        {"dialogue", Json::object()},
+        {"quest_dialogue_ids", Json::array()}
+    };
+
+    std::vector<std::string> liveQuestDialogueIDs;
+    collectCustomDialogueQuestDefinitionIDsForPlayer(
+        player,
+        liveQuestDialogueIDs
+    );
+    for ( const std::string& dialogueID : liveQuestDialogueIDs )
+    {
+        if ( safeSavedStoryId(dialogueID) )
+        {
+            automatiaPlayerQuestDialogueIDs[player].insert(dialogueID);
+        }
+    }
+    document["quest_dialogue_ids"] =
+        sortedStringSet(automatiaPlayerQuestDialogueIDs[player]);
+
+    const std::string questPrefix =
+        automatiaPlayerQuestStoryPrefix(player);
+    std::size_t questCount = 0;
+    for (const auto& entry : persistentWorldStoryState.quests)
+    {
+        if (!automatiaStringHasPrefix(entry.first, questPrefix))
+        {
+            continue;
+        }
+        const std::string stableKey = entry.first.substr(questPrefix.size());
+        if (!safeSavedStoryId(stableKey))
+        {
+            continue;
+        }
+        const PersistentQuestState& quest = entry.second;
+        document["quests"][stableKey] = Json{
+            {"started", quest.started},
+            {"accepted", quest.accepted},
+            {"completed", quest.completed},
+            {"failed", quest.failed},
+            {"stage", quest.stage},
+            {"variables", quest.variables},
+            {"flags", sortedStringSet(quest.flags)},
+            {"completed_objectives", sortedStringSet(quest.completedObjectives)},
+            {"used_choices", sortedStringSet(quest.usedChoices)}
+        };
+        ++questCount;
+    }
+
+    const std::string npcPrefix =
+        automatiaPlayerNPCStoryPrefix(player);
+    std::size_t dialogueCount = 0;
+    for (const auto& entry : persistentWorldStoryState.npcDialogueStates)
+    {
+        if (!automatiaStringHasPrefix(entry.first, npcPrefix))
+        {
+            continue;
+        }
+        const std::string stableKey = entry.first.substr(npcPrefix.size());
+        if (!safeSavedStoryId(stableKey))
+        {
+            continue;
+        }
+        const PersistentNPCDialogueState& dialogue = entry.second;
+        document["dialogue"][stableKey] = Json{
+            {"dialogue_id", dialogue.dialogueID},
+            {"current_node", dialogue.currentNode},
+            {"conversation_started", dialogue.conversationStarted},
+            {"reward_given", dialogue.rewardGiven},
+            {"variables", dialogue.variables},
+            {"flags", sortedStringSet(dialogue.flags)},
+            {"used_choices", sortedStringSet(dialogue.usedChoices)},
+            {"seen_nodes", sortedStringSet(dialogue.seenNodes)}
+        };
+        ++dialogueCount;
+    }
+
+    try
+    {
+        payload = document.dump();
+    }
+    catch (const std::exception& exception)
+    {
+        error = "could not serialize player story state: "
+            + std::string(exception.what());
+        return false;
+    }
+    constexpr std::size_t maxPlayerStoryBytes = 1024U * 1024U;
+    if (payload.size() > maxPlayerStoryBytes)
+    {
+        payload.clear();
+        error = "player story state exceeds the 1 MiB character-save limit";
+        return false;
+    }
+
+    printlog(
+        "[Character Save] Captured %zu quest(s) and %zu NPC memory record(s) for player %d.",
+        questCount,
+        dialogueCount,
+        player);
+    return true;
+}
+
+bool importAutomatiaPlayerStoryState(
+    int player,
+    const std::string& payload,
+    std::string& error)
+{
+    error.clear();
+    if (player < 0 || player >= MAXPLAYERS
+        || (multiplayer == CLIENT && player != clientnum))
+    {
+        error = "player story import requires the authoritative server or the owning client slot";
+        return false;
+    }
+    constexpr std::size_t maxPlayerStoryBytes = 1024U * 1024U;
+    if (payload.empty() || payload.size() > maxPlayerStoryBytes)
+    {
+        error = "player story payload is empty or exceeds 1 MiB";
+        return false;
+    }
+
+    using AutomatiaSave::Json;
+    Json document;
+    try
+    {
+        document = Json::parse(payload);
+    }
+    catch (const std::exception& exception)
+    {
+        error = "could not parse player story state: "
+            + std::string(exception.what());
+        return false;
+    }
+    if (!document.is_object()
+        || !document.contains("version")
+        || !document["version"].is_number_integer()
+        || document["version"].get<int>() != 1
+        || !document.contains("quests")
+        || !document["quests"].is_object()
+        || !document.contains("dialogue")
+        || !document["dialogue"].is_object()
+        || (document.contains("quest_dialogue_ids")
+            && (!document["quest_dialogue_ids"].is_array()
+                || document["quest_dialogue_ids"].size() > 65536))
+        || document["quests"].size() > 65536
+        || document["dialogue"].size() > 65536)
+    {
+        error = "player story payload has an invalid structure";
+        return false;
+    }
+
+    clearAutomatiaPlayerStoryState(player);
+
+    std::size_t questDefinitionCount = 0;
+    if ( document.contains("quest_dialogue_ids") )
+    {
+        for ( const Json& dialogueIDValue : document["quest_dialogue_ids"] )
+        {
+            if ( !dialogueIDValue.is_string() )
+            {
+                continue;
+            }
+            const std::string dialogueID =
+                dialogueIDValue.get<std::string>();
+            if ( !safeSavedStoryId(dialogueID) )
+            {
+                continue;
+            }
+            automatiaPlayerQuestDialogueIDs[player].insert(dialogueID);
+            if ( preloadCustomDialogueQuestDefinition(dialogueID) )
+            {
+                ++questDefinitionCount;
+            }
+            else
+            {
+                printlog(
+                    "[Custom Dialogue] Player %d story state references unavailable dialogue definition '%s'.",
+                    player,
+                    dialogueID.c_str()
+                );
+            }
+        }
+    }
+
+    const std::string questPrefix =
+        automatiaPlayerQuestStoryPrefix(player);
+    std::size_t questCount = 0;
+    for (auto member = document["quests"].begin();
+        member != document["quests"].end(); ++member)
+    {
+        if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+        {
+            continue;
+        }
+        PersistentQuestState quest;
+        savedJsonBool(member.value(), "started", quest.started);
+        savedJsonBool(member.value(), "accepted", quest.accepted);
+        savedJsonBool(member.value(), "completed", quest.completed);
+        savedJsonBool(member.value(), "failed", quest.failed);
+        savedJsonInt(member.value(), "stage", quest.stage);
+        restoreSavedVariables(member.value(), "variables", quest.variables);
+        restoreSavedStringSet(member.value(), "flags", quest.flags);
+        restoreSavedStringSet(
+            member.value(), "completed_objectives", quest.completedObjectives);
+        restoreSavedStringSet(
+            member.value(), "used_choices", quest.usedChoices);
+        persistentWorldStoryState.quests[questPrefix + member.key()] =
+            std::move(quest);
+        ++questCount;
+    }
+
+    const std::string npcPrefix =
+        automatiaPlayerNPCStoryPrefix(player);
+    std::size_t dialogueCount = 0;
+    for (auto member = document["dialogue"].begin();
+        member != document["dialogue"].end(); ++member)
+    {
+        if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+        {
+            continue;
+        }
+        PersistentNPCDialogueState dialogue;
+        if (member.value().contains("dialogue_id")
+            && member.value()["dialogue_id"].is_string()
+            && member.value()["dialogue_id"].get<std::string>().size() <= 255)
+        {
+            dialogue.dialogueID =
+                member.value()["dialogue_id"].get<std::string>();
+        }
+        savedJsonInt(member.value(), "current_node", dialogue.currentNode);
+        savedJsonBool(
+            member.value(), "conversation_started", dialogue.conversationStarted);
+        savedJsonBool(member.value(), "reward_given", dialogue.rewardGiven);
+        restoreSavedVariables(member.value(), "variables", dialogue.variables);
+        restoreSavedStringSet(member.value(), "flags", dialogue.flags);
+        restoreSavedStringSet(
+            member.value(), "used_choices", dialogue.usedChoices);
+        restoreSavedStringSet(
+            member.value(), "seen_nodes", dialogue.seenNodes);
+        persistentWorldStoryState.npcDialogueStates[npcPrefix + member.key()] =
+            std::move(dialogue);
+        ++dialogueCount;
+    }
+
+    printlog(
+        "[Character Save] Restored %zu quest(s), %zu NPC memory record(s), and %zu quest definition(s) for player %d.",
+        questCount,
+        dialogueCount,
+        questDefinitionCount,
+        player);
+    return true;
 }
 
 bool persistentStorySetNPCNode(const int player, const std::string& mapName, const Sint32 persistentID, const Sint32 nodeID)

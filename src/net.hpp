@@ -80,6 +80,7 @@ bool handleSafePacket();
 bool applyPendingTunnelSpawn();
 void pollNetworkForShutdown();
 void closeNetworkInterfaces();
+bool serverSyncAutomatiaPlayerStoryState(int player, const char* reason);
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision);
 bool clientAcceptLateJoinCatchupBegin(const Uint8* data, std::size_t size);
 bool clientAcceptLateJoinCatchupChunk(const Uint8* data, std::size_t size);
