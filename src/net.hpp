@@ -93,17 +93,28 @@ bool clientLateJoinPacketDeferralActive();
 
 // Dedicated-server character persistence and roster cleanup.
 bool clientSendAutomatiaCharacterSaveNow(const char* reason = nullptr);
+/*
+ * Sends a final character snapshot and briefly waits for the server to
+ * confirm that it reached durable storage. This is used by the in-game
+ * Return/Open Main Menu path immediately before DISC is sent.
+ */
+bool clientSendAutomatiaCharacterSaveBeforeDisconnect(
+    Uint32 timeoutMilliseconds = 1500);
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
 /*
- * Runtime STRT v2 carries the server-authoritative spawn position in six
- * signed fixed-point 32-bit values. The lobby stages it before map loading;
- * net.cpp applies it only after the local player and all catch-up packets
- * have finished initializing.
+ * Runtime STRT v3 carries the server-authoritative spawn position plus the
+ * exact polymorph/shapeshift targets. The lobby stages them before map
+ * loading; net.cpp applies them only after the local player and all catch-up
+ * packets have finished initializing.
  */
 bool clientStageAutomatiaLateJoinPosition(
     const Uint8* data,
     std::size_t size);
 bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
+bool clientStageAutomatiaLateJoinTransformation(
+    const Uint8* data,
+    std::size_t size);
+bool clientApplyAutomatiaLateJoinTransformationAfterPlayerInit();
 void serverRequestAutomatiaCharacterSave(int player, const char* reason = nullptr);
 void serverRequestAllAutomatiaCharacterSaves(const char* reason = nullptr);
 void disconnectAutomatiaRemotePlayer(

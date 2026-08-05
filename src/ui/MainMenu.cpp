@@ -12888,9 +12888,11 @@ bind_failed:
 				const std::size_t mapNameLength = net_packet->data[18];
 				const std::size_t metadataOffset = 19 + mapNameLength;
 				const std::size_t positionOffset = metadataOffset + 9;
-				const std::size_t expectedSize = positionOffset
-					+ (runtimeVersion >= 2 ? 24 : 0);
-				if (runtimeVersion > 2 || mapNameLength == 0
+				const std::size_t transformationOffset =
+					positionOffset + (runtimeVersion >= 2 ? 24 : 0);
+				const std::size_t expectedSize = transformationOffset
+					+ (runtimeVersion >= 3 ? 8 : 0);
+				if (runtimeVersion > 3 || mapNameLength == 0
 					|| mapNameLength >= sizeof(maptoload)
 					|| static_cast<std::size_t>(net_packet->len) != expectedSize)
 				{
@@ -12904,6 +12906,15 @@ bind_failed:
 					printlog(
 						"[Character Save] Rejected malformed authoritative "
 						"late-join position.");
+					return;
+				}
+				if (runtimeVersion >= 3
+					&& !clientStageAutomatiaLateJoinTransformation(
+						&net_packet->data[transformationOffset], 8))
+				{
+					printlog(
+						"[Character Save] Rejected malformed authoritative "
+						"late-join transformation.");
 					return;
 				}
 				memcpy(maptoload, &net_packet->data[19], mapNameLength);

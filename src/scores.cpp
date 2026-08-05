@@ -664,19 +664,67 @@ namespace
             stats[player]->getEffectActive(EFF_SHAPESHIFT)
                 ? stats[player]->playerShapeshiftStorage
                 : NOTHING;
+
+        Monster effectiveRace = stats[player]->type;
+        int effectiveAppearance = stats[player]->stat_appearance;
+        if (entity->effectShapeshift != NOTHING)
+        {
+            effectiveRace =
+                static_cast<Monster>(entity->effectShapeshift);
+        }
+        else if (entity->effectPolymorph != NOTHING)
+        {
+            if (entity->effectPolymorph > NUMMONSTERS)
+            {
+                effectiveRace = HUMAN;
+                effectiveAppearance = std::max(
+                    0,
+                    std::min(
+                        static_cast<int>(NUMAPPEARANCES) - 1,
+                        static_cast<int>(
+                            entity->effectPolymorph - 100)));
+            }
+            else if (entity->effectPolymorph > NOTHING
+                && entity->effectPolymorph < NUMMONSTERS)
+            {
+                effectiveRace =
+                    static_cast<Monster>(entity->effectPolymorph);
+            }
+        }
+        stats[player]->type = effectiveRace;
+        entity->sprite = playerHeadSprite(
+            effectiveRace,
+            stats[player]->sex,
+            effectiveAppearance,
+            0,
+            player);
+
         entity->bNeedsRenderPositionInit = true;
         for (Entity* bodypart : entity->bodyparts)
         {
             if (bodypart)
             {
                 bodypart->bNeedsRenderPositionInit = true;
+                // actPlayer caches the last synchronized bodypart sprite in
+                // skill[10]. Invalidate it so the authoritative server sends
+                // freshly rebuilt polymorph/shapeshift limbs to the client.
+                bodypart->skill[10] = std::numeric_limits<Sint32>::min();
             }
         }
+
+        printlog(
+            "[Character Save] Applied transient transformation for player %d "
+            "(polymorph=%d shapeshift=%d effectiveRace=%d).",
+            player,
+            static_cast<int>(entity->effectPolymorph),
+            static_cast<int>(entity->effectShapeshift),
+            static_cast<int>(effectiveRace));
 
         if (multiplayer == SERVER)
         {
             serverUpdateEntitySkill(entity, 50);
             serverUpdateEntitySkill(entity, 53);
+            serverUpdateEntitySprite(entity);
             serverUpdateEffects(player);
         }
     }

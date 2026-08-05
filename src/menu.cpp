@@ -10076,7 +10076,10 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 		// send disconnect messages
 		if (multiplayer == CLIENT)
 		{
-			(void)clientSendAutomatiaCharacterSaveNow("client menu exit");
+			if (!saveHighscore && !onServerDisconnect)
+			{
+				(void)clientSendAutomatiaCharacterSaveBeforeDisconnect(1500);
+			}
 			strcpy((char*)net_packet->data, "DISC");
 			net_packet->data[4] = clientnum;
 			net_packet->address.host = net_server.host;

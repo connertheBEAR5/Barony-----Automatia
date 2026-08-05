@@ -29,6 +29,7 @@
 #include "menu.hpp"
 #include "scores.hpp"
 #include "collision.hpp"
+#include "classdescriptions.hpp"
 #include "paths.hpp"
 #ifdef STEAMWORKS
 #include <steam/steam_api.h>
@@ -229,6 +230,8 @@ namespace
 	static CharacterSaveAssembler g_clientCharacterRestoreAssembler;
 	static bool g_clientCharacterRestoreApplied = false;
 	static std::string g_clientPendingCharacterRestorePayload;
+	static Uint32 g_clientLastCharacterSaveAckTransferId = 0;
+	static bool g_clientLastCharacterSaveAckStored = false;
 
 	constexpr real_t kAutomatiaLateJoinPositionWireScale = 1024.0;
 	constexpr std::size_t kAutomatiaLateJoinPositionWireBytes = 24;
@@ -243,6 +246,16 @@ namespace
 		bool pending = false;
 	};
 	static ClientLateJoinPosition g_clientPendingLateJoinPosition;
+
+	constexpr std::size_t kAutomatiaLateJoinTransformationWireBytes = 8;
+	struct ClientLateJoinTransformation
+	{
+		Sint32 polymorphTarget = NOTHING;
+		Sint32 shapeshiftTarget = NOTHING;
+		bool pending = false;
+	};
+	static ClientLateJoinTransformation
+		g_clientPendingLateJoinTransformation;
 
 	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
 	static Uint32 g_characterSaveTransferId = 0;
@@ -910,7 +923,8 @@ static bool appendCharacterTransferToLateJoinCatchup(
 
 static bool sendCharacterTransferToServer(
     int player,
-    const std::string& payload)
+    const std::string& payload,
+    Uint32* sentTransferId = nullptr)
 {
     if (multiplayer != CLIENT || !net_packet || !net_sock
         || player <= 0 || player >= MAXPLAYERS
@@ -922,6 +936,10 @@ static bool sendCharacterTransferToServer(
     if (transferId == 0)
     {
         transferId = ++g_characterSaveTransferId;
+    }
+    if (sentTransferId)
+    {
+        *sentTransferId = transferId;
     }
     const Uint32 chunkCount = static_cast<Uint32>(
         (payload.size() + kCharacterSaveChunkPayload - 1)
@@ -991,7 +1009,7 @@ bool clientSendAutomatiaCharacterSaveNow(const char* reason)
             reason ? reason : "request", error.c_str());
         return false;
     }
-    if (!sendCharacterTransferToServer(clientnum, payload))
+    if (!sendCharacterTransferToServer(clientnum, payload, nullptr))
     {
         printlog(
             "[Character Save] Client transfer failed (%s).",
@@ -1002,6 +1020,82 @@ bool clientSendAutomatiaCharacterSaveNow(const char* reason)
         "[Character Save] Client queued %zu bytes (%s).",
         payload.size(), reason ? reason : "request");
     return true;
+}
+
+bool clientSendAutomatiaCharacterSaveBeforeDisconnect(
+    Uint32 timeoutMilliseconds)
+{
+    if (multiplayer != CLIENT
+        || clientServerCharacterSaveMode == CharacterSaveMode::NONE
+        || clientnum <= 0 || clientnum >= MAXPLAYERS
+        || intro
+        || !players[clientnum] || !stats[clientnum]
+        || !players[clientnum]->was_connected_to_game)
+    {
+        return false;
+    }
+
+    std::string payload;
+    std::string error;
+    if (!buildAutomatiaCharacterTransferPayload(
+            clientnum,
+            clientServerCharacterSaveMode,
+            payload,
+            error))
+    {
+        printlog(
+            "[Character Save] Final client capture failed before disconnect: %s.",
+            error.c_str());
+        return false;
+    }
+
+    Uint32 transferId = 0;
+    g_clientLastCharacterSaveAckTransferId = 0;
+    g_clientLastCharacterSaveAckStored = false;
+    if (!sendCharacterTransferToServer(
+            clientnum, payload, &transferId)
+        || transferId == 0)
+    {
+        printlog(
+            "[Character Save] Final client transfer could not be queued before disconnect.");
+        return false;
+    }
+
+    printlog(
+        "[Character Save] Client queued final %zu-byte snapshot before disconnect "
+        "(transfer %u).",
+        payload.size(),
+        static_cast<unsigned>(transferId));
+
+    const Uint32 started = SDL_GetTicks();
+    const Uint32 timeout = std::max<Uint32>(timeoutMilliseconds, 1U);
+    while (multiplayer == CLIENT
+        && SDL_GetTicks() - started < timeout
+        && g_clientLastCharacterSaveAckTransferId != transferId)
+    {
+        clientHandleMessages(fpsLimit);
+        pollNetworkForShutdown();
+        SDL_Delay(5);
+    }
+
+    const bool confirmed =
+        g_clientLastCharacterSaveAckTransferId == transferId
+        && g_clientLastCharacterSaveAckStored;
+    if (confirmed)
+    {
+        printlog(
+            "[Character Save] Server confirmed the final character snapshot "
+            "before disconnect (transfer %u).",
+            static_cast<unsigned>(transferId));
+    }
+    else
+    {
+        printlog(
+            "[Character Save] Final character snapshot confirmation timed out "
+            "after %u ms; disconnecting after the reliable packets were queued.",
+            static_cast<unsigned>(timeout));
+    }
+    return confirmed;
 }
 
 void serverRequestAutomatiaCharacterSave(int player, const char* reason)
@@ -1114,6 +1208,27 @@ static bool stageAutomatiaLateJoinCharacterRestore(
     return true;
 }
 
+static void sendCharacterSaveStoredAck(
+    int player,
+    Uint32 transferId,
+    bool stored)
+{
+    if (multiplayer != SERVER || !net_packet || !net_sock
+        || player <= 0 || player >= MAXPLAYERS
+        || client_disconnected[player])
+    {
+        return;
+    }
+    memcpy(net_packet->data, "CSAK", 4);
+    net_packet->data[4] = static_cast<Uint8>(player);
+    SDLNet_Write32(transferId, &net_packet->data[5]);
+    net_packet->data[9] = stored ? 1 : 0;
+    net_packet->len = 10;
+    net_packet->address.host = net_clients[player - 1].host;
+    net_packet->address.port = net_clients[player - 1].port;
+    (void)sendPacketSafe(net_sock, -1, net_packet, player - 1);
+}
+
 static bool finalizeServerCharacterSaveTransfer(int player)
 {
     if (player <= 0 || player >= MAXPLAYERS)
@@ -1147,6 +1262,7 @@ static bool finalizeServerCharacterSaveTransfer(int player)
             "[Character Save] Server could not store player %d: %s.",
             player, error.c_str());
     }
+    sendCharacterSaveStoredAck(player, transferId, stored);
     assembler.reset();
     return stored;
 }
@@ -1240,6 +1356,38 @@ bool clientStageAutomatiaLateJoinPosition(
 	return true;
 }
 
+bool clientStageAutomatiaLateJoinTransformation(
+    const Uint8* data,
+    std::size_t size)
+{
+    if (!data || size != kAutomatiaLateJoinTransformationWireBytes)
+    {
+        return false;
+    }
+
+    const auto decodeSint32 = [data](std::size_t offset) -> Sint32
+    {
+        const Uint32 raw = LateJoinProtocol::read32(data, offset);
+        Sint32 value = 0;
+        static_assert(sizeof(raw) == sizeof(value),
+            "late-join transformation fields must be 32-bit");
+        memcpy(&value, &raw, sizeof(value));
+        return value;
+    };
+
+    ClientLateJoinTransformation staged;
+    staged.polymorphTarget = decodeSint32(0);
+    staged.shapeshiftTarget = decodeSint32(4);
+    staged.pending = true;
+    g_clientPendingLateJoinTransformation = staged;
+    printlog(
+        "[Character Save] Client staged authoritative transformation "
+        "targets polymorph=%d shapeshift=%d.",
+        static_cast<int>(staged.polymorphTarget),
+        static_cast<int>(staged.shapeshiftTarget));
+    return true;
+}
+
 bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
 {
 	if (!g_clientPendingLateJoinPosition.pending)
@@ -1305,6 +1453,130 @@ bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
 		placement.x, placement.y, placement.z);
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 	return true;
+}
+
+bool clientApplyAutomatiaLateJoinTransformationAfterPlayerInit()
+{
+    if (!g_clientPendingLateJoinTransformation.pending)
+    {
+        return true;
+    }
+    if (multiplayer != CLIENT || clientnum <= 0 || clientnum >= MAXPLAYERS
+        || !stats[clientnum] || !players[clientnum]
+        || !players[clientnum]->entity)
+    {
+        return false;
+    }
+
+    Stat* playerStats = stats[clientnum];
+    Entity* entity = players[clientnum]->entity;
+    const ClientLateJoinTransformation staged =
+        g_clientPendingLateJoinTransformation;
+
+    const bool polymorphed =
+        playerStats->getEffectActive(EFF_POLYMORPH);
+    const bool shapeshifted =
+        playerStats->getEffectActive(EFF_SHAPESHIFT);
+    playerStats->playerPolymorphStorage = polymorphed
+        ? staged.polymorphTarget
+        : NOTHING;
+    playerStats->playerShapeshiftStorage = shapeshifted
+        ? staged.shapeshiftTarget
+        : NOTHING;
+    entity->effectPolymorph = playerStats->playerPolymorphStorage;
+    entity->effectShapeshift = playerStats->playerShapeshiftStorage;
+
+    Monster visualRace = playerStats->type;
+    int visualAppearance = playerStats->stat_appearance;
+    if (shapeshifted && entity->effectShapeshift != NOTHING)
+    {
+        visualRace = static_cast<Monster>(entity->effectShapeshift);
+    }
+    else if (polymorphed && entity->effectPolymorph != NOTHING)
+    {
+        if (entity->effectPolymorph > NUMMONSTERS)
+        {
+            visualRace = HUMAN;
+            visualAppearance = std::max(
+                0,
+                std::min(
+                    static_cast<int>(NUMAPPEARANCES) - 1,
+                    static_cast<int>(entity->effectPolymorph - 100)));
+        }
+        else if (entity->effectPolymorph > NOTHING
+            && entity->effectPolymorph < NUMMONSTERS)
+        {
+            visualRace = static_cast<Monster>(entity->effectPolymorph);
+        }
+    }
+    playerStats->type = visualRace;
+    entity->sprite = playerHeadSprite(
+        visualRace,
+        playerStats->sex,
+        visualAppearance,
+        0,
+        clientnum);
+
+    const auto refreshDefaultLimb = [entity, visualRace](
+        int player,
+        int limbType,
+        bool equipped)
+    {
+        node_t* node = list_Node(&entity->children, limbType);
+        Entity* limb = node
+            ? static_cast<Entity*>(node->element)
+            : nullptr;
+        if (!limb)
+        {
+            return;
+        }
+        if (!equipped)
+        {
+            limb->setDefaultPlayerModel(
+                player, visualRace, limbType, entity->sprite);
+        }
+        entity->setHumanoidLimbOffset(limb, visualRace, limbType);
+        limb->bNeedsRenderPositionInit = true;
+    };
+    if (visualRace != RAT && visualRace != SPIDER)
+    {
+        refreshDefaultLimb(
+            clientnum, LIMB_HUMANOID_TORSO,
+            playerStats->breastplate != nullptr);
+        refreshDefaultLimb(
+            clientnum, LIMB_HUMANOID_RIGHTLEG,
+            playerStats->shoes != nullptr);
+        refreshDefaultLimb(
+            clientnum, LIMB_HUMANOID_LEFTLEG,
+            playerStats->shoes != nullptr);
+        refreshDefaultLimb(
+            clientnum, LIMB_HUMANOID_RIGHTARM,
+            playerStats->gloves != nullptr);
+        refreshDefaultLimb(
+            clientnum, LIMB_HUMANOID_LEFTARM,
+            playerStats->gloves != nullptr);
+    }
+
+    entity->bNeedsRenderPositionInit = true;
+    for (Entity* bodypart : entity->bodyparts)
+    {
+        if (bodypart)
+        {
+            bodypart->bNeedsRenderPositionInit = true;
+        }
+    }
+    players[clientnum]->paperDoll.updateSlots();
+    players[clientnum]->hud.resetBars();
+
+    printlog(
+        "[Character Save] Client applied restored transformation "
+        "polymorph=%d shapeshift=%d effectiveRace=%d.",
+        static_cast<int>(entity->effectPolymorph),
+        static_cast<int>(entity->effectShapeshift),
+        static_cast<int>(visualRace));
+    g_clientPendingLateJoinTransformation =
+        ClientLateJoinTransformation{};
+    return true;
 }
 
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit()
@@ -1507,6 +1779,7 @@ void clientResetLateJoinPacketDeferral()
 	g_clientLateJoinLastProgressTick = 0;
 	g_clientPendingCharacterRestorePayload.clear();
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
+	g_clientPendingLateJoinTransformation = ClientLateJoinTransformation{};
 }
 
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
@@ -2626,14 +2899,18 @@ static bool sendServerLateJoinStart(int playerIndex)
 
     const std::size_t metadataOffset = 19 + identity.mapFile.size();
     const std::size_t positionOffset = metadataOffset + 9;
+    const std::size_t transformationOffset =
+        positionOffset + kAutomatiaLateJoinPositionWireBytes;
     std::vector<std::uint8_t> record(
-        positionOffset + kAutomatiaLateJoinPositionWireBytes, 0);
+        transformationOffset
+            + kAutomatiaLateJoinTransformationWireBytes,
+        0);
     memcpy(record.data(), "STRT", 4);
     LateJoinProtocol::write32(record, 4, svFlags);
     LateJoinProtocol::write32(record, 8, uniqueGameKey);
     record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
     LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
-    record[17] = 2; // Runtime STRT v2: map metadata + authoritative position.
+    record[17] = 3; // Runtime STRT v3: map, position, transformation targets.
     record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
     memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
     LateJoinProtocol::write32(
@@ -2647,13 +2924,42 @@ static bool sendServerLateJoinStart(int playerIndex)
     writeFixed(record, positionOffset + 16, authoritativePlayer->pitch);
     writeFixed(record, positionOffset + 20, authoritativePlayer->roll);
 
+    Sint32 polymorphTarget = NOTHING;
+    Sint32 shapeshiftTarget = NOTHING;
+    if (stats[playerIndex])
+    {
+        if (stats[playerIndex]->getEffectActive(EFF_POLYMORPH))
+        {
+            polymorphTarget = authoritativePlayer->effectPolymorph != NOTHING
+                ? authoritativePlayer->effectPolymorph
+                : stats[playerIndex]->playerPolymorphStorage;
+        }
+        if (stats[playerIndex]->getEffectActive(EFF_SHAPESHIFT))
+        {
+            shapeshiftTarget = authoritativePlayer->effectShapeshift != NOTHING
+                ? authoritativePlayer->effectShapeshift
+                : stats[playerIndex]->playerShapeshiftStorage;
+        }
+    }
+    LateJoinProtocol::write32(
+        record,
+        transformationOffset,
+        static_cast<Uint32>(polymorphTarget));
+    LateJoinProtocol::write32(
+        record,
+        transformationOffset + 4,
+        static_cast<Uint32>(shapeshiftTarget));
+
     printlog(
         "[Character Save] Sending player %d authoritative late-join "
-        "position %.2f, %.2f, %.2f.",
+        "position %.2f, %.2f, %.2f and transformation targets "
+        "polymorph=%d shapeshift=%d.",
         playerIndex,
         authoritativePlayer->x,
         authoritativePlayer->y,
-        authoritativePlayer->z);
+        authoritativePlayer->z,
+        static_cast<int>(polymorphTarget),
+        static_cast<int>(shapeshiftTarget));
     return queueLateJoinRecordForPlayer(playerIndex, record);
 }
 
@@ -5470,6 +5776,24 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+    {'CSAK', [](){
+        if (!net_packet || net_packet->len != 10
+            || static_cast<int>(net_packet->data[4]) != clientnum)
+        {
+            printlog("[Character Save] Client rejected malformed save acknowledgement.");
+            return;
+        }
+        g_clientLastCharacterSaveAckTransferId =
+            SDLNet_Read32(&net_packet->data[5]);
+        g_clientLastCharacterSaveAckStored =
+            net_packet->data[9] != 0;
+        printlog(
+            "[Character Save] Client received server storage acknowledgement "
+            "for transfer %u (%s).",
+            static_cast<unsigned>(
+                g_clientLastCharacterSaveAckTransferId),
+            g_clientLastCharacterSaveAckStored ? "stored" : "failed");
+    }},
     {'CSRQ', [](){
         if (!net_packet || net_packet->len != 6
             || static_cast<int>(net_packet->data[4]) != clientnum)
@@ -11930,9 +12254,13 @@ static void tryReplayClientLateJoinPackets()
 	// valid character file on the server.
 	const bool characterRestoreFinalized =
 		clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
+	const bool transformationRestoreFinalized =
+		clientApplyAutomatiaLateJoinTransformationAfterPlayerInit();
 	const bool positionRestoreFinalized =
 		clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
-	if (characterRestoreFinalized && positionRestoreFinalized)
+	if (characterRestoreFinalized
+		&& transformationRestoreFinalized
+		&& positionRestoreFinalized)
 	{
 		replay(delayedCharacterSaveRequests, false);
 	}
@@ -11940,7 +12268,7 @@ static void tryReplayClientLateJoinPackets()
 	{
 		printlog(
 			"[Character Save] Client skipped %zu save request(s) because "
-			"the restored character or position could not be finalized.",
+			"the restored character, transformation, or position could not be finalized.",
 			delayedCharacterSaveRequests.size());
 	}
 
@@ -16728,8 +17056,11 @@ void closeNetworkInterfaces()
 	g_clientLateJoinSpawnAuthorized = false;
 	g_clientCharacterRestoreAssembler.reset();
 	g_clientCharacterRestoreApplied = false;
+	g_clientLastCharacterSaveAckTransferId = 0;
+	g_clientLastCharacterSaveAckStored = false;
 	g_clientPendingCharacterRestorePayload.clear();
 	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
+	g_clientPendingLateJoinTransformation = ClientLateJoinTransformation{};
 	clientConnectedToDedicatedServer = false;
 	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
 	for (int c = 1; c < MAXPLAYERS; ++c)
