@@ -970,8 +970,16 @@ bool captureAutomatiaCharacterSaveRuntimeState(int player)
         automatiaCharacterRuntimeState[player];
     runtime.identity = identity;
     runtime.worldIdentity = identityState;
-    runtime.x = entity->x;
-    runtime.y = entity->y;
+
+    // PMOV collision-checks remote clients against new_x/new_y, then restores
+    // entity->x/entity->y until actPlayer runs. A periodic save can arrive in
+    // that window, so use the latest server-accepted network coordinates for
+    // remote players instead of an older rendered/simulated position.
+    const bool remoteServerPlayer = multiplayer == SERVER
+        && player > 0
+        && !players[player]->isLocalPlayer();
+    runtime.x = remoteServerPlayer ? entity->new_x : entity->x;
+    runtime.y = remoteServerPlayer ? entity->new_y : entity->y;
     runtime.z = entity->z;
     runtime.yaw = entity->yaw;
     runtime.pitch = entity->pitch;

@@ -2357,9 +2357,13 @@ void applyAutomatiaSavedPlayerPlacements()
             entity.new_y = entity.y;
             entity.new_z = entity.z;
             entity.new_yaw = entity.yaw;
+            entity.new_pitch = entity.pitch;
+            entity.new_roll = entity.roll;
             entity.vel_x = 0.0;
             entity.vel_y = 0.0;
             entity.vel_z = 0.0;
+            entity.lerp_ox = entity.x;
+            entity.lerp_oy = entity.y;
             entity.bNeedsRenderPositionInit = true;
             for (Entity* bodypart : entity.bodyparts)
             {
@@ -2368,6 +2372,24 @@ void applyAutomatiaSavedPlayerPlacements()
                     bodypart->bNeedsRenderPositionInit = true;
                 }
             }
+            players[playerIndex]->player_last_x = entity.x;
+            players[playerIndex]->player_last_y = entity.y;
+            printlog(
+                "[Character Save] Server applied saved position for player %d "
+                "at %.2f, %.2f, %.2f in '%s'.",
+                playerIndex,
+                entity.x,
+                entity.y,
+                entity.z,
+                activeIdentity->key().c_str());
+        }
+        else if (placement.hasPosition)
+        {
+            printlog(
+                "[Character Save] Saved position for player %d was blocked or "
+                "out of bounds in '%s'; using the safe Player Start fallback.",
+                playerIndex,
+                activeIdentity->key().c_str());
         }
         worldState.placePlayer(playerIndex, map);
         placement.pending = false;

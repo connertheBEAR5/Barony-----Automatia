@@ -12877,19 +12877,33 @@ bind_failed:
 		}},
 	    // game start
 	    {'STRT', [](){
-			if (net_packet->len >= 18 && net_packet->data[17] == 1)
+			if (net_packet->len >= 18 && net_packet->data[17] >= 1)
 			{
 				if (!g_lateJoinSpawnAuthorized || net_packet->len < 28)
 				{
 					printlog("[Late Join] Ignored runtime STRT before authorization.");
 					return;
 				}
+				const Uint8 runtimeVersion = net_packet->data[17];
 				const std::size_t mapNameLength = net_packet->data[18];
 				const std::size_t metadataOffset = 19 + mapNameLength;
-				if (mapNameLength == 0 || mapNameLength >= sizeof(maptoload)
-					|| net_packet->len != metadataOffset + 9)
+				const std::size_t positionOffset = metadataOffset + 9;
+				const std::size_t expectedSize = positionOffset
+					+ (runtimeVersion >= 2 ? 24 : 0);
+				if (runtimeVersion > 2 || mapNameLength == 0
+					|| mapNameLength >= sizeof(maptoload)
+					|| static_cast<std::size_t>(net_packet->len) != expectedSize)
 				{
 					printlog("[Late Join] Rejected malformed runtime STRT metadata.");
+					return;
+				}
+				if (runtimeVersion >= 2
+					&& !clientStageAutomatiaLateJoinPosition(
+						&net_packet->data[positionOffset], 24))
+				{
+					printlog(
+						"[Character Save] Rejected malformed authoritative "
+						"late-join position.");
 					return;
 				}
 				memcpy(maptoload, &net_packet->data[19], mapNameLength);

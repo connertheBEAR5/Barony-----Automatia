@@ -52,7 +52,9 @@
 #endif
 
 #include <atomic>
+#include <cmath>
 #include <future>
+#include <limits>
 #include <random>
 #include <thread>
 
@@ -227,6 +229,21 @@ namespace
 	static CharacterSaveAssembler g_clientCharacterRestoreAssembler;
 	static bool g_clientCharacterRestoreApplied = false;
 	static std::string g_clientPendingCharacterRestorePayload;
+
+	constexpr real_t kAutomatiaLateJoinPositionWireScale = 1024.0;
+	constexpr std::size_t kAutomatiaLateJoinPositionWireBytes = 24;
+	struct ClientLateJoinPosition
+	{
+		real_t x = 0.0;
+		real_t y = 0.0;
+		real_t z = 0.0;
+		real_t yaw = 0.0;
+		real_t pitch = 0.0;
+		real_t roll = 0.0;
+		bool pending = false;
+	};
+	static ClientLateJoinPosition g_clientPendingLateJoinPosition;
+
 	static std::string g_lateJoinCharacterRestorePayload[MAXPLAYERS];
 	static Uint32 g_characterSaveTransferId = 0;
 
@@ -1176,6 +1193,120 @@ static bool finalizeClientCharacterRestoreTransfer()
     return restored;
 }
 
+bool clientStageAutomatiaLateJoinPosition(
+    const Uint8* data,
+    std::size_t size)
+{
+	if (!data || size != kAutomatiaLateJoinPositionWireBytes)
+	{
+		return false;
+	}
+
+	const auto decode = [data](std::size_t offset) -> real_t
+	{
+		const Uint32 raw = LateJoinProtocol::read32(data, offset);
+		Sint32 fixed = 0;
+		static_assert(sizeof(raw) == sizeof(fixed),
+			"late-join fixed-point fields must be 32-bit");
+		memcpy(&fixed, &raw, sizeof(fixed));
+		return static_cast<real_t>(fixed)
+			/ kAutomatiaLateJoinPositionWireScale;
+	};
+
+	ClientLateJoinPosition staged;
+	staged.x = decode(0);
+	staged.y = decode(4);
+	staged.z = decode(8);
+	staged.yaw = decode(12);
+	staged.pitch = decode(16);
+	staged.roll = decode(20);
+	staged.pending =
+		std::isfinite(static_cast<double>(staged.x))
+		&& std::isfinite(static_cast<double>(staged.y))
+		&& std::isfinite(static_cast<double>(staged.z))
+		&& std::isfinite(static_cast<double>(staged.yaw))
+		&& std::isfinite(static_cast<double>(staged.pitch))
+		&& std::isfinite(static_cast<double>(staged.roll));
+	if (!staged.pending)
+	{
+		return false;
+	}
+
+	g_clientPendingLateJoinPosition = staged;
+	printlog(
+		"[Character Save] Client staged authoritative late-join position "
+		"%.2f, %.2f, %.2f.",
+		staged.x, staged.y, staged.z);
+	return true;
+}
+
+bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
+{
+	if (!g_clientPendingLateJoinPosition.pending)
+	{
+		return true;
+	}
+	if (multiplayer != CLIENT || clientnum <= 0 || clientnum >= MAXPLAYERS
+		|| !players[clientnum] || !players[clientnum]->entity)
+	{
+		return false;
+	}
+
+	const ClientLateJoinPosition& placement =
+		g_clientPendingLateJoinPosition;
+	if (placement.x < 0.0 || placement.y < 0.0
+		|| placement.x >= map.width * 16.0
+		|| placement.y >= map.height * 16.0)
+	{
+		printlog(
+			"[Character Save] Client rejected an out-of-bounds restored "
+			"position %.2f, %.2f.",
+			placement.x, placement.y);
+		return false;
+	}
+
+	Entity* entity = players[clientnum]->entity;
+	entity->x = placement.x;
+	entity->y = placement.y;
+	entity->z = placement.z;
+	entity->yaw = placement.yaw;
+	entity->pitch = placement.pitch;
+	entity->roll = placement.roll;
+	entity->new_x = placement.x;
+	entity->new_y = placement.y;
+	entity->new_z = placement.z;
+	entity->new_yaw = placement.yaw;
+	entity->new_pitch = placement.pitch;
+	entity->new_roll = placement.roll;
+	entity->vel_x = 0.0;
+	entity->vel_y = 0.0;
+	entity->vel_z = 0.0;
+	entity->lerp_ox = placement.x;
+	entity->lerp_oy = placement.y;
+	entity->bNeedsRenderPositionInit = true;
+	for (Entity* bodypart : entity->bodyparts)
+	{
+		if (bodypart)
+		{
+			bodypart->bNeedsRenderPositionInit = true;
+		}
+	}
+
+	players[clientnum]->player_last_x = placement.x;
+	players[clientnum]->player_last_y = placement.y;
+	cameras[clientnum].x = placement.x / 16.0;
+	cameras[clientnum].y = placement.y / 16.0;
+	cameras[clientnum].ang = placement.yaw;
+	cameras[clientnum].vang = placement.pitch;
+
+	printlog(
+		"[Character Save] Client applied authoritative restored position "
+		"%.2f, %.2f, %.2f after player initialization.",
+		placement.x, placement.y, placement.z);
+	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
+	return true;
+}
+
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit()
 {
 	if (g_clientPendingCharacterRestorePayload.empty())
@@ -1375,6 +1506,7 @@ void clientResetLateJoinPacketDeferral()
 	g_clientLateJoinCatchupPackets.clear();
 	g_clientLateJoinLastProgressTick = 0;
 	g_clientPendingCharacterRestorePayload.clear();
+	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 }
 
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
@@ -2461,25 +2593,67 @@ static bool sendServerLateJoinStart(int playerIndex)
     const WorldInstanceIdentity& identity =
         players[playerIndex]->worldInstance;
     const MapInstance* instance = worldState.find(identity.key());
-    if (!instance || !instance->loadedMap
+    Entity* authoritativePlayer = players[playerIndex]->entity;
+    if (!instance || !instance->loadedMap || !authoritativePlayer
         || identity.mapFile.empty() || identity.mapFile.size() > 255)
     {
         return false;
     }
+
+    const auto encodeFixed = [](real_t value) -> Sint32
+    {
+        const double scaled = std::round(
+            static_cast<double>(value)
+            * static_cast<double>(kAutomatiaLateJoinPositionWireScale));
+        return static_cast<Sint32>(std::max(
+            static_cast<double>(std::numeric_limits<Sint32>::min()),
+            std::min(
+                static_cast<double>(std::numeric_limits<Sint32>::max()),
+                scaled)));
+    };
+    const auto writeFixed = [&encodeFixed](
+        std::vector<std::uint8_t>& destination,
+        std::size_t offset,
+        real_t value)
+    {
+        const Sint32 fixed = encodeFixed(value);
+        Uint32 raw = 0;
+        static_assert(sizeof(raw) == sizeof(fixed),
+            "late-join fixed-point fields must be 32-bit");
+        memcpy(&raw, &fixed, sizeof(raw));
+        LateJoinProtocol::write32(destination, offset, raw);
+    };
+
     const std::size_t metadataOffset = 19 + identity.mapFile.size();
-    std::vector<std::uint8_t> record(metadataOffset + 9, 0);
+    const std::size_t positionOffset = metadataOffset + 9;
+    std::vector<std::uint8_t> record(
+        positionOffset + kAutomatiaLateJoinPositionWireBytes, 0);
     memcpy(record.data(), "STRT", 4);
     LateJoinProtocol::write32(record, 4, svFlags);
     LateJoinProtocol::write32(record, 8, uniqueGameKey);
     record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
     LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
-    record[17] = 1;
+    record[17] = 2; // Runtime STRT v2: map metadata + authoritative position.
     record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
     memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
     LateJoinProtocol::write32(
         record, metadataOffset, static_cast<Uint32>(instance->dungeonLevel));
     LateJoinProtocol::write32(record, metadataOffset + 4, instance->mapSeed);
     record[metadataOffset + 8] = instance->secretLevel ? 1 : 0;
+    writeFixed(record, positionOffset, authoritativePlayer->x);
+    writeFixed(record, positionOffset + 4, authoritativePlayer->y);
+    writeFixed(record, positionOffset + 8, authoritativePlayer->z);
+    writeFixed(record, positionOffset + 12, authoritativePlayer->yaw);
+    writeFixed(record, positionOffset + 16, authoritativePlayer->pitch);
+    writeFixed(record, positionOffset + 20, authoritativePlayer->roll);
+
+    printlog(
+        "[Character Save] Sending player %d authoritative late-join "
+        "position %.2f, %.2f, %.2f.",
+        playerIndex,
+        authoritativePlayer->x,
+        authoritativePlayer->y,
+        authoritativePlayer->z);
     return queueLateJoinRecordForPlayer(playerIndex, record);
 }
 
@@ -11756,7 +11930,9 @@ static void tryReplayClientLateJoinPackets()
 	// valid character file on the server.
 	const bool characterRestoreFinalized =
 		clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
-	if (characterRestoreFinalized)
+	const bool positionRestoreFinalized =
+		clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
+	if (characterRestoreFinalized && positionRestoreFinalized)
 	{
 		replay(delayedCharacterSaveRequests, false);
 	}
@@ -11764,7 +11940,7 @@ static void tryReplayClientLateJoinPackets()
 	{
 		printlog(
 			"[Character Save] Client skipped %zu save request(s) because "
-			"the restored character could not be finalized.",
+			"the restored character or position could not be finalized.",
 			delayedCharacterSaveRequests.size());
 	}
 
@@ -16553,6 +16729,7 @@ void closeNetworkInterfaces()
 	g_clientCharacterRestoreAssembler.reset();
 	g_clientCharacterRestoreApplied = false;
 	g_clientPendingCharacterRestorePayload.clear();
+	g_clientPendingLateJoinPosition = ClientLateJoinPosition{};
 	clientConnectedToDedicatedServer = false;
 	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
 	for (int c = 1; c < MAXPLAYERS; ++c)

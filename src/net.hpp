@@ -94,6 +94,16 @@ bool clientLateJoinPacketDeferralActive();
 // Dedicated-server character persistence and roster cleanup.
 bool clientSendAutomatiaCharacterSaveNow(const char* reason = nullptr);
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
+/*
+ * Runtime STRT v2 carries the server-authoritative spawn position in six
+ * signed fixed-point 32-bit values. The lobby stages it before map loading;
+ * net.cpp applies it only after the local player and all catch-up packets
+ * have finished initializing.
+ */
+bool clientStageAutomatiaLateJoinPosition(
+    const Uint8* data,
+    std::size_t size);
+bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit();
 void serverRequestAutomatiaCharacterSave(int player, const char* reason = nullptr);
 void serverRequestAllAutomatiaCharacterSaves(const char* reason = nullptr);
 void disconnectAutomatiaRemotePlayer(
