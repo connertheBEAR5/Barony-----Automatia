@@ -352,6 +352,12 @@ void putPixel(SDL_Surface* surface, int x, int y, Uint32 pixel);
 void getColor(Uint32 color, uint8_t* r, uint8_t* g, uint8_t* b, uint8_t* a);
 bool behindCamera(const view_t& camera, real_t x, real_t y);
 void occlusionCulling(map_t& map, view_t& camera);
+/*
+ * WorldState can swap a detached map into the legacy global `map` object
+ * without passing through loadMap(). Rebuild the raw camera visibility
+ * buffers and invalidate the layered renderer cache whenever that happens.
+ */
+bool resetMapVisibilityState(const map_t& loadedMap);
 void bindRendererVisibilityMap(
 	const view_t& camera,
 	const map_t& map

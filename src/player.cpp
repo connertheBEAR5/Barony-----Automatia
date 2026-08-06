@@ -3975,6 +3975,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 							{
 								if ( parent->behavior == &actItem || parent->behavior == &actGoldBag
 									|| parent->behavior == &actLadder
+									|| parent->behavior == &actLadderReverse
 									|| parent->behavior == &actBeartrap
 									|| parent->behavior == &actBomb
 									|| parent->behavior == &actSwitch || parent->behavior == &actSwitchWithTimer )
@@ -3992,6 +3993,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 						}
 						else if ( parent && ((parent->behavior == &actItem && parent->z > 4) || parent->behavior == &actGoldBag
 							|| parent->behavior == &actLadder
+							|| parent->behavior == &actLadderReverse
 							|| parent->behavior == &actBeartrap
 							|| parent->behavior == &actBomb
 							|| parent->behavior == &actSwitch || parent->behavior == &actSwitchWithTimer) )
@@ -4293,6 +4295,10 @@ void Player::WorldUI_t::setTooltipActive(Entity& tooltip)
 		else if ( parent->behavior == &actBeartrap )
 		{
 			interactText = Language::get(4026); // "Disarm beartrap" 
+		}
+		else if ( parent->behavior == &actLadderReverse )
+		{
+			interactText = Language::get(4038); // "Climb ladder"
 		}
 		else if ( parent->behavior == &actLadderUp )
 		{

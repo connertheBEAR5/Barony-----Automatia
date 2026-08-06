@@ -89,7 +89,9 @@ bool boulderCheckIfBlockedExit(Entity* my)
 	for ( node_t* node = map.entities->first; node != nullptr; node = node->next )
 	{
 		Entity* ladder = (Entity*)node->element;
-		if ( ladder && (ladder->behavior == &actLadder || ladder->behavior == &actPortal) )
+		if ( ladder && (ladder->behavior == &actLadder
+			|| ladder->behavior == &actLadderReverse
+			|| ladder->behavior == &actPortal) )
 		{
 			//if ( ladder->behavior == &actPortal && (ladder->portalNotSecret == 0) )
 			//{

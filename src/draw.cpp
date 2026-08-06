@@ -29,6 +29,8 @@
 #include <cmath>
 #include <cassert>
 #include <algorithm>
+#include <cstdlib>
+#include <limits>
 #ifdef EDITOR
 static int entityZToEditorLayer(real_t z)
 {
@@ -101,6 +103,129 @@ static std::unordered_map<
 	const view_t*,
 	RendererVisibilityState
 > rendererVisibilityStates;
+
+namespace
+{
+bool resetViewVisibilityBuffer(
+	view_t& camera,
+	const size_t tileCount
+)
+{
+	std::free(camera.vismap);
+	camera.vismap = nullptr;
+
+	if ( tileCount > 0 )
+	{
+		camera.vismap = static_cast<bool*>(
+			std::calloc(
+				tileCount,
+				sizeof(bool)
+			)
+		);
+	}
+
+	auto stateIterator =
+		rendererVisibilityStates.find(
+			&camera
+		);
+
+	if ( stateIterator
+		!= rendererVisibilityStates.end() )
+	{
+		/*
+		 * Keep the OpenGL texture object itself so this reset is safe and
+		 * inexpensive during ordinary level travel. Mark its storage stale;
+		 * bindRendererVisibilityMap() will upload the destination dimensions
+		 * with glTexImage2D() on the next rendered frame.
+		 */
+		/*
+		 * Keep a conservative all-visible CPU map until occlusionCulling()
+		 * produces the first destination-frame result. Several draw helpers
+		 * treat an existing cache entry as indexable immediately.
+		 */
+		stateIterator->second.visibleLayers.assign(
+			tileCount,
+			0xffffffffu
+		);
+		stateIterator->second.texturePixels.clear();
+		stateIterator->second.width = 0;
+		stateIterator->second.height = 0;
+		stateIterator->second.textureAllocated = false;
+	}
+
+	return tileCount == 0 || camera.vismap != nullptr;
+}
+}
+
+bool resetMapVisibilityState(
+	const map_t& loadedMap
+)
+{
+	if ( loadedMap.width == 0
+		|| loadedMap.height == 0 )
+	{
+		return false;
+	}
+
+	const size_t width =
+		static_cast<size_t>(loadedMap.width);
+
+	const size_t height =
+		static_cast<size_t>(loadedMap.height);
+
+	if ( width
+		> std::numeric_limits<size_t>::max()
+			/ height )
+	{
+		printlog(
+			"[Renderer] Refusing invalid visibility dimensions %u x %u.",
+			loadedMap.width,
+			loadedMap.height
+		);
+		return false;
+	}
+
+	const size_t tileCount =
+		width * height;
+
+	bool success =
+		resetViewVisibilityBuffer(
+			menucam,
+			tileCount
+		);
+
+	for ( int player = 0;
+		player < MAXPLAYERS;
+		++player )
+	{
+		success =
+			resetViewVisibilityBuffer(
+				cameras[player],
+				tileCount
+			)
+			&& success;
+	}
+
+#ifdef EDITOR
+	success =
+		resetViewVisibilityBuffer(
+			camera,
+			tileCount
+		)
+		&& success;
+#endif
+
+	if ( !success )
+	{
+		printlog(
+			"[Renderer] Warning: unable to allocate every visibility buffer for %u x %u map.",
+			loadedMap.width,
+			loadedMap.height
+		);
+	}
+
+	return success;
+}
 static Shader gearShader;
 static Shader lineShader;
 static Mesh lineMesh = {
@@ -506,7 +631,90 @@ void createCommonDrawResources() {
 "+ VisibilityLayer * uMapDims.y"
 ") / (uMapDims.y * 32.0);"
 
-"if (texture(uVisibilityMap, VisibilityCoord).r < 0.5) {"
+"float VisibilityValue = texture("
+"uVisibilityMap,"
+"VisibilityCoord"
+").r;"
+
+/*
+ * A vertical wall face lies exactly on the boundary between two map columns.
+ * floor(WorldPos / 32) therefore assigns the whole face to only one side,
+ * which can be the hidden side of the wall. Sample the visibility column on
+ * both sides of the boundary and keep the face when either side is visible.
+ * Horizontal floors and ceilings keep their exact column visibility.
+ */
+"float VisibilityVerticalChange ="
+"abs(dFdx(WorldPos.y))"
+"+ abs(dFdy(WorldPos.y));"
+
+"if (VisibilityVerticalChange > 0.0001) {"
+"float VisibilityXChange ="
+"abs(dFdx(WorldPos.x))"
+"+ abs(dFdy(WorldPos.x));"
+"float VisibilityZChange ="
+"abs(dFdx(WorldPos.z))"
+"+ abs(dFdy(WorldPos.z));"
+
+"if (VisibilityXChange < VisibilityZChange) {"
+"float VisibilityTileXMinus = clamp("
+"floor((WorldPos.x - 0.25) / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
+"float VisibilityTileXPlus = clamp("
+"floor((WorldPos.x + 0.25) / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
+"vec2 VisibilityCoordMinus = vec2("
+"(VisibilityTileXMinus + 0.5) / uMapDims.x,"
+"VisibilityCoord.y"
+");"
+"vec2 VisibilityCoordPlus = vec2("
+"(VisibilityTileXPlus + 0.5) / uMapDims.x,"
+"VisibilityCoord.y"
+");"
+"VisibilityValue = max("
+"VisibilityValue,"
+"max("
+"texture(uVisibilityMap, VisibilityCoordMinus).r,"
+"texture(uVisibilityMap, VisibilityCoordPlus).r"
+")"
+");"
+"} else {"
+"float VisibilityTileYMinus = clamp("
+"floor((WorldPos.z - 0.25) / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+"float VisibilityTileYPlus = clamp("
+"floor((WorldPos.z + 0.25) / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+"vec2 VisibilityCoordMinus = vec2("
+"VisibilityCoord.x,"
+"(VisibilityTileYMinus + 0.5"
+"+ VisibilityLayer * uMapDims.y)"
+"/ (uMapDims.y * 32.0)"
+");"
+"vec2 VisibilityCoordPlus = vec2("
+"VisibilityCoord.x,"
+"(VisibilityTileYPlus + 0.5"
+"+ VisibilityLayer * uMapDims.y)"
+"/ (uMapDims.y * 32.0)"
+");"
+"VisibilityValue = max("
+"VisibilityValue,"
+"max("
+"texture(uVisibilityMap, VisibilityCoordMinus).r,"
+"texture(uVisibilityMap, VisibilityCoordPlus).r"
+")"
+");"
+"}"
+"}"
+
+"if (VisibilityValue < 0.5) {"
 "discard;"
 "}"
 // Horizontal surfaces keep their exact structural layer.
@@ -638,7 +846,90 @@ void createCommonDrawResources() {
 "+ VisibilityLayer * uMapDims.y"
 ") / (uMapDims.y * 32.0);"
 
-"if (texture(uVisibilityMap, VisibilityCoord).r < 0.5) {"
+"float VisibilityValue = texture("
+"uVisibilityMap,"
+"VisibilityCoord"
+").r;"
+
+/*
+ * A vertical wall face lies exactly on the boundary between two map columns.
+ * floor(WorldPos / 32) therefore assigns the whole face to only one side,
+ * which can be the hidden side of the wall. Sample the visibility column on
+ * both sides of the boundary and keep the face when either side is visible.
+ * Horizontal floors and ceilings keep their exact column visibility.
+ */
+"float VisibilityVerticalChange ="
+"abs(dFdx(WorldPos.y))"
+"+ abs(dFdy(WorldPos.y));"
+
+"if (VisibilityVerticalChange > 0.0001) {"
+"float VisibilityXChange ="
+"abs(dFdx(WorldPos.x))"
+"+ abs(dFdy(WorldPos.x));"
+"float VisibilityZChange ="
+"abs(dFdx(WorldPos.z))"
+"+ abs(dFdy(WorldPos.z));"
+
+"if (VisibilityXChange < VisibilityZChange) {"
+"float VisibilityTileXMinus = clamp("
+"floor((WorldPos.x - 0.25) / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
+"float VisibilityTileXPlus = clamp("
+"floor((WorldPos.x + 0.25) / 32.0),"
+"0.0,"
+"uMapDims.x - 1.0"
+");"
+"vec2 VisibilityCoordMinus = vec2("
+"(VisibilityTileXMinus + 0.5) / uMapDims.x,"
+"VisibilityCoord.y"
+");"
+"vec2 VisibilityCoordPlus = vec2("
+"(VisibilityTileXPlus + 0.5) / uMapDims.x,"
+"VisibilityCoord.y"
+");"
+"VisibilityValue = max("
+"VisibilityValue,"
+"max("
+"texture(uVisibilityMap, VisibilityCoordMinus).r,"
+"texture(uVisibilityMap, VisibilityCoordPlus).r"
+")"
+");"
+"} else {"
+"float VisibilityTileYMinus = clamp("
+"floor((WorldPos.z - 0.25) / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+"float VisibilityTileYPlus = clamp("
+"floor((WorldPos.z + 0.25) / 32.0),"
+"0.0,"
+"uMapDims.y - 1.0"
+");"
+"vec2 VisibilityCoordMinus = vec2("
+"VisibilityCoord.x,"
+"(VisibilityTileYMinus + 0.5"
+"+ VisibilityLayer * uMapDims.y)"
+"/ (uMapDims.y * 32.0)"
+");"
+"vec2 VisibilityCoordPlus = vec2("
+"VisibilityCoord.x,"
+"(VisibilityTileYPlus + 0.5"
+"+ VisibilityLayer * uMapDims.y)"
+"/ (uMapDims.y * 32.0)"
+");"
+"VisibilityValue = max("
+"VisibilityValue,"
+"max("
+"texture(uVisibilityMap, VisibilityCoordMinus).r,"
+"texture(uVisibilityMap, VisibilityCoordPlus).r"
+")"
+");"
+"}"
+"}"
+
+"if (VisibilityValue < 0.5) {"
 "discard;"
 "}"
 // Horizontal surfaces keep their exact structural layer.
@@ -1945,6 +2236,27 @@ void drawClearBuffers()
 #include "net.hpp"
 #endif
 
+static int cameraStructuralLayer(const view_t& camera)
+{
+    /*
+     * Player camera Z is approximately entity.z * 2 - 2.5. Entity Z advances
+     * one structural light/map layer per -16 units, so invert both transforms.
+     * Race-height and bob adjustments are small enough that rounding keeps the
+     * camera on the player's actual floor.
+     */
+    return std::max(
+        0,
+        std::min(
+            MAPLAYERS - 1,
+            static_cast<int>(
+                std::lround(
+                    -(camera.z + 2.5) / 32.0
+                )
+            )
+        )
+    );
+}
+
 void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool fillWithColor)
 {
     // originally we cast a ray for every column of pixels in the
@@ -2006,6 +2318,7 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
         
         const int posx = (int)camera.x;
         const int posy = (int)camera.y; // integer coordinates
+        const int cameraLayer = cameraStructuralLayer(camera);
 		if ( posx == 0 && posy == 0 ) { return result; } // camera not initialized
         const real_t fracx = camera.x - posx;
         const real_t fracy = camera.y - posy; // fraction coordinates
@@ -2075,12 +2388,10 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
                 }
                 
                 // check against tiles in each map layer
-                bool zhit[MAPLAYERS] = { false };
                 for (int z = 0; z < MAPLAYERS; z++) {
                     if (tiles[z + iny * MAPLAYERS + inx * MAPLAYERS * mh]
 						&& !(z > 0 && tiles[z + iny * MAPLAYERS + inx * MAPLAYERS * mh] == TRANSPARENT_TILE)
 						&& d > dstart) { // hit something solid
-                        zhit[z] = true;
                         
                         // collect light information
                         if (tiles[z + iny2 * MAPLAYERS + inx2 * MAPLAYERS * mh]
@@ -2176,14 +2487,43 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
                     }
                 }
                 
-                // if a wall was hit (full column of map layers) stop the ray
-                bool wallhit = true;
-                for (int z = 0; z < MAPLAYERS; z++) {
-                    if (zhit[z] == false) {
-                        wallhit = false;
-                    }
-                }
-                if (wallhit == true) {
+                /*
+                 * Stop at the closed room column used by ordinary dungeon
+                 * geometry. The original three-layer game tested floor,
+                 * obstacle and ceiling. Requiring every one of the later 32
+                 * layers to be occupied made a normal wall transparent to the
+                 * minimap ray, allowing a full 360-degree scan through rooms.
+                 */
+                const int wallIndex =
+                    iny * MAPLAYERS
+                    + inx * MAPLAYERS * mh;
+                const Sint32 floorTile = tiles[wallIndex];
+                const Sint32 obstacleTile =
+                    tiles[wallIndex + OBSTACLELAYER];
+                const Sint32 ceilingTile =
+                    tiles[wallIndex + OBSTACLELAYER + 1];
+                const bool closedBaseColumn =
+                    floorTile != 0
+                    && obstacleTile != 0
+                    && ceilingTile != 0
+                    && floorTile != TRANSPARENT_TILE
+                    && obstacleTile != TRANSPARENT_TILE
+                    && ceilingTile != TRANSPARENT_TILE;
+                const int activeObstacleLayer =
+                    std::min(
+                        MAPLAYERS - 1,
+                        cameraLayer + OBSTACLELAYER
+                    );
+                const Sint32 activeLayerTile =
+                    tiles[wallIndex + activeObstacleLayer];
+                const bool closedActiveLayer =
+                    cameraLayer > 0
+                    && activeLayerTile != 0
+                    && activeLayerTile != TRANSPARENT_TILE;
+                const bool wallhit =
+                    closedBaseColumn || closedActiveLayer;
+                if ( wallhit )
+                {
                     break;
                 }
             }
@@ -4104,6 +4444,12 @@ static inline bool testTileOccludes(const map_t& map, int index) {
 		&& ((t0 & 0x00000000ffffffff) != TRANSPARENT_TILE)  // is obstacle layer != TRANSPARENT_TILE
 		&& (t1 != TRANSPARENT_TILE); // is ceiling != TRANSPARENT_TILE
 }
+static constexpr int LEGACY_OCCLUSION_LAYER_COUNT = 3;
+static constexpr Uint32 LEGACY_OCCLUSION_LAYER_MASK =
+	(static_cast<Uint32>(1u) << LEGACY_OCCLUSION_LAYER_COUNT) - 1u;
+static constexpr Uint32 LAYERED_OCCLUSION_LAYER_MASK =
+	~LEGACY_OCCLUSION_LAYER_MASK;
+
 static Uint32 rendererColumnOcclusionMask(
 	const map_t& map,
 	int x,
@@ -4115,41 +4461,53 @@ static Uint32 rendererColumnOcclusionMask(
 		|| x >= map.width
 		|| y >= map.height )
 	{
-		return 0xffffffffu;
+		return LAYERED_OCCLUSION_LAYER_MASK;
 	}
-
-	Uint32 mask = 0;
 
 	const int baseIndex =
 		y * MAPLAYERS
 		+ x * MAPLAYERS * map.height;
 
-	// Preserve the legacy floor/obstacle/ceiling test for layer 0.
-	if ( testTileOccludes(map, baseIndex) )
-	{
-		mask |= 1u;
-	}
+	Uint32 mask = 0;
 
-	for ( int layer = 1;
+	/*
+	 * Layers 0, 1 and 2 are deliberately excluded here. They use Barony's
+	 * original expanded 2D camera.vismap, which is stable in long corridors and
+	 * one-tile-high rooms. The layered ray is only responsible for layers 3+.
+	 *
+	 * A solid tile in upper layer L occupies the vertical band from L - 1 to L.
+	 * Mark only that physical band as blocked. Do not hide every layer above it:
+	 * a short lower wall must not erase a taller tower or upper room behind it.
+	 */
+	for ( int layer = LEGACY_OCCLUSION_LAYER_COUNT;
 		layer < MAPLAYERS;
 		++layer )
 	{
 		const Sint32 tile =
-			map.tiles[
-				baseIndex + layer
-			];
+			map.tiles[baseIndex + layer];
 
-		if ( tile != 0
-			&& tile != TRANSPARENT_TILE )
+		if ( tile == 0
+			|| tile == TRANSPARENT_TILE )
+		{
+			continue;
+		}
+
+		mask |=
+			static_cast<Uint32>(1u)
+				<< layer;
+
+		const int lowerBand = layer - 1;
+		if ( lowerBand >= LEGACY_OCCLUSION_LAYER_COUNT )
 		{
 			mask |=
 				static_cast<Uint32>(1u)
-					<< layer;
+					<< lowerBand;
 		}
 	}
 
 	return mask;
 }
+
 static Uint32 rendererVisibilityRay(
 	const map_t& map,
 	int startX,
@@ -4288,89 +4646,45 @@ static void updateRendererVisibilityMap(
 				continue;
 			}
 
-			state.visibleLayers[index] =
+			/*
+			 * Hybrid visibility:
+			 * - layers 0..2 use the proven legacy 2D occlusion map, including its
+			 *   conservative one-tile expansion;
+			 * - layers 3..31 use the exact per-height ray mask.
+			 *
+			 * This restores long-hallway floor/wall/ceiling rendering without
+			 * allowing a ground-floor wall to cull a tower above it.
+			 */
+			const Uint32 legacyVisibility =
+				camera.vismap[index]
+					? LEGACY_OCCLUSION_LAYER_MASK
+					: 0u;
+
+			const Uint32 layeredVisibility =
 				rendererVisibilityRay(
 					map,
 					cameraX,
 					cameraY,
 					x,
 					y
-				);
+				)
+				& LAYERED_OCCLUSION_LAYER_MASK;
+
+			state.visibleLayers[index] =
+				legacyVisibility
+				| layeredVisibility;
 		}
 	}
 
-	// Conservative one-tile expansion, matching the spirit of
-	// the old 2D visibility expansion.
-	static std::vector<Uint32>
-		expandedVisibility;
-
-	expandedVisibility =
-		state.visibleLayers;
-
-	for ( int x = 0;
-		x < map.width;
-		++x )
-	{
-		for ( int y = 0;
-			y < map.height;
-			++y )
-		{
-			const size_t destinationIndex =
-				static_cast<size_t>(y)
-				+ static_cast<size_t>(x)
-					* map.height;
-
-			Uint32 visibleMask =
-				state.visibleLayers[
-					destinationIndex
-				];
-
-			for ( int offsetX = -1;
-				offsetX <= 1;
-				++offsetX )
-			{
-				for ( int offsetY = -1;
-					offsetY <= 1;
-					++offsetY )
-				{
-					const int neighbourX =
-						x + offsetX;
-
-					const int neighbourY =
-						y + offsetY;
-
-					if ( neighbourX < 0
-						|| neighbourY < 0
-						|| neighbourX >= map.width
-						|| neighbourY >= map.height )
-					{
-						continue;
-					}
-
-					const size_t neighbourIndex =
-						static_cast<size_t>(
-							neighbourY
-						)
-						+ static_cast<size_t>(
-							neighbourX
-						) * map.height;
-
-					visibleMask |=
-						state.visibleLayers[
-							neighbourIndex
-						];
-				}
-			}
-
-			expandedVisibility[
-				destinationIndex
-			] = visibleMask;
-		}
-	}
-
-	state.visibleLayers.swap(
-		expandedVisibility
-	);
+	/*
+	 * Do not expand the per-layer visibility map into neighbouring columns.
+	 * The destination wall itself is already visible because the ray test
+	 * excludes destination geometry from the blocker set. Expanding masks by
+	 * one tile caused high layers from the far side of a closed wall to become
+	 * drawable and produced the cyan/teal geometry leaks seen while turning.
+	 * The legacy 2D camera.vismap retains its own conservative expansion for
+	 * chunk fade-in; the shader-level layer mask remains exact.
+	 */
 }
 void bindRendererVisibilityMap(
 	const view_t& camera,

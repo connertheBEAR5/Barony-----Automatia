@@ -171,6 +171,10 @@ void clickDescription(int player, Entity* entity)
 				{
 					messagePlayer(player, MESSAGE_INSPECTION, Language::get(264));
 				}
+				else if ( entity->behavior == &actLadderReverse )
+				{
+					messagePlayer(player, MESSAGE_INSPECTION, Language::get(264));
+				}
 				else if ( entity->behavior == &actLadderUp)
 				{
 					messagePlayer(player, MESSAGE_INSPECTION, Language::get(265));

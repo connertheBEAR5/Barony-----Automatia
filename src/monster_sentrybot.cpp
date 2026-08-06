@@ -1116,7 +1116,9 @@ void gyroBotAnimate(Entity* my, Stat* myStats, double dist)
 				}
 				else if ( my->monsterAllyPickupItems == ALLY_GYRO_DETECT_EXITS )
 				{
-					if ( ent->behavior == &actLadder || ent->behavior == &actPortal )
+					if ( ent->behavior == &actLadder
+						|| ent->behavior == &actLadderReverse
+						|| ent->behavior == &actPortal )
 					{
 						if ( entityDist(my, ent) < TOUCHRANGE * 5 )
 						{

@@ -9,6 +9,7 @@
 #include "world_state.hpp"
 
 #include "entity.hpp"
+#include "draw.hpp"
 #include "files.hpp"
 #include "game.hpp"
 #include "light.hpp"
@@ -292,10 +293,13 @@ bool WorldState::bindMap(
         const auto oldInstance = instances.find(previous->second);
         if (oldInstance != instances.end())
         {
-            if (oldInstance->second.key() == key)
-            {
-                occupants = oldInstance->second.playersPresent;
-            }
+            /*
+             * Rebinding the same map object to a more specific identity (for
+             * example mine.lmp#world -> mine.lmp#level_1_regular) is an
+             * identity refinement, not a player departure. Preserve all
+             * occupants across that rebind.
+             */
+            occupants = oldInstance->second.playersPresent;
             oldInstance->second.loadedMap = nullptr;
             oldInstance->second.tiles = nullptr;
             oldInstance->second.entities = nullptr;
@@ -334,6 +338,7 @@ bool WorldState::bindMap(
     if (&loadedMap == &map)
     {
         captureLegacySimulationContext(instance);
+        activeKey = key;
     }
 
     for (const int playerIndex : instance.playersPresent)
@@ -371,20 +376,26 @@ bool WorldState::bindLegacyMap(map_t& loadedMap, const std::string& mapFile)
 	instance->runtimeEntityUidStart = entity_uids;
 
     // Compatibility stage: legacy transitions still move the connected party
-    // together. Independent transitions replace this synchronization in 1E.
-    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    // together. A detached generated-floor reload is only reconstructing an
+    // inactive destination for one divergent player, so it must not claim or
+    // retag every connected player while the generator temporarily uses the
+    // process-wide map object.
+    if (!detachedGeneratedLoadInProgress)
     {
-        if (!players[playerIndex] || client_disconnected[playerIndex]
-			|| (headless && multiplayer == SERVER && playerIndex == 0)
-			|| (multiplayer == CLIENT
-				&& !players[playerIndex]->isLocalPlayer()))
+        for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
         {
-            continue;
+            if (!players[playerIndex] || client_disconnected[playerIndex]
+				|| (headless && multiplayer == SERVER && playerIndex == 0)
+				|| (multiplayer == CLIENT
+					&& !players[playerIndex]->isLocalPlayer()))
+            {
+                continue;
+            }
+            players[playerIndex]->worldInstance = instance->identity;
+            instance->playersPresent.insert(playerIndex);
+            instance->playerEntities[playerIndex] =
+                players[playerIndex]->entity;
         }
-        players[playerIndex]->worldInstance = instance->identity;
-        instance->playersPresent.insert(playerIndex);
-        instance->playerEntities[playerIndex] =
-            players[playerIndex]->entity;
     }
     instance->simulationActive = !instance->playersPresent.empty();
     activeKey = instance->key();
@@ -613,6 +624,265 @@ bool WorldState::loadDetachedMap(
     return true;
 }
 
+bool WorldState::loadDetachedGeneratedLevel(
+    const WorldInstanceIdentity& identity,
+    const std::int32_t dungeonLevel,
+    const std::uint32_t seed,
+    const bool secretTrack,
+    std::string& error
+)
+{
+    error.clear();
+    if (!identity.isValid())
+    {
+        error = "invalid generated map-instance identity";
+        return false;
+    }
+    const std::string expectedInstanceId =
+        "level_" + std::to_string(std::max<std::int32_t>(0, dungeonLevel))
+        + (secretTrack ? "_secret" : "_regular");
+    if (identity.instanceId != expectedInstanceId)
+    {
+        error = "generated instance ID does not match its level and track";
+        return false;
+    }
+
+    MapInstance* existingDestination = find(identity.key());
+    if (existingDestination && existingDestination->loadedMap)
+    {
+        if (existingDestination->dungeonLevel != dungeonLevel
+            || existingDestination->secretLevel != secretTrack
+            || existingDestination->mapSeed != seed)
+        {
+            error = "loaded generated instance metadata does not match the requested route history";
+            return false;
+        }
+        return true;
+    }
+    if (entitiesdeleted.first)
+    {
+        error = "entity deletion is pending";
+        return false;
+    }
+
+    MapInstance* source = activeInstance();
+    if (!source || source->loadedMap != &map)
+    {
+        error = "no foreground map instance is available for detached generation";
+        return false;
+    }
+    const std::string sourceKey = source->key();
+    if (sourceKey == identity.key())
+    {
+        error = "generated destination is already the foreground instance";
+        return false;
+    }
+    if (!ensureVisualState(*source))
+    {
+        error = "unable to preserve foreground visual state";
+        return false;
+    }
+
+    /*
+     * Register a blank detached map before touching the foreground source.
+     * Once registered, the ownership swap below gives this allocation the
+     * source map while the process-wide map becomes the generator workspace.
+     * This is the activation core without path-map/chunk work on a 0x0 map.
+     */
+    map_t* storage = new (std::nothrow) map_t{};
+    if (!storage)
+    {
+        error = "unable to allocate generated map storage";
+        return false;
+    }
+    storage->entities = static_cast<list_t*>(std::calloc(1, sizeof(list_t)));
+    storage->creatures = new (std::nothrow) list_t{};
+    storage->worldUI = new (std::nothrow) list_t{};
+    if (!storage->entities || !storage->creatures || !storage->worldUI)
+    {
+        destroyOwnedMapStorage(storage);
+        error = "unable to allocate generated map lists";
+        return false;
+    }
+
+    const bool restoringUnloadedDestination =
+        existingDestination && !existingDestination->loadedMap;
+    if (restoringUnloadedDestination)
+    {
+        if (!ensureVisualState(*existingDestination))
+        {
+            destroyOwnedMapStorage(storage);
+            error = "unable to allocate restored generated visual state";
+            return false;
+        }
+        existingDestination->loadedMap = storage;
+        existingDestination->runtimeInitialized = false;
+        refreshRuntimeReferences(*existingDestination);
+        loadedMaps[storage] = identity.key();
+    }
+    else if (!bindMap(*storage, identity.mapFile, identity.instanceId))
+    {
+        destroyOwnedMapStorage(storage);
+        error = "unable to register generated map storage";
+        return false;
+    }
+
+    MapInstance* destination = find(identity.key());
+    if (!destination || !destination->loadedMap
+        || !ensureVisualState(*destination))
+    {
+        loadedMaps.erase(storage);
+        if (restoringUnloadedDestination && existingDestination)
+        {
+            existingDestination->loadedMap = nullptr;
+            refreshRuntimeReferences(*existingDestination);
+        }
+        else
+        {
+            instances.erase(identity.key());
+        }
+        destroyOwnedMapStorage(storage);
+        error = "registered generated destination is unavailable";
+        return false;
+    }
+    ownedMapStorage.insert(storage);
+
+    captureLegacySimulationContext(*source);
+    for (const int playerIndex : source->playersPresent)
+    {
+        if (playerIndex >= 0 && playerIndex < MAXPLAYERS && players[playerIndex])
+        {
+            source->playerEntities[playerIndex] = players[playerIndex]->entity;
+        }
+    }
+    clearEntityTileIndex(map);
+    swapActiveVisualState(*source->visualState);
+    swapLoadedMapState(map, *storage);
+    swapActiveVisualState(*destination->visualState);
+
+    loadedMaps.erase(&map);
+    loadedMaps.erase(storage);
+    source->loadedMap = storage;
+    refreshRuntimeReferences(*source);
+    loadedMaps[storage] = sourceKey;
+    destination->loadedMap = &map;
+    refreshRuntimeReferences(*destination);
+    loadedMaps[&map] = identity.key();
+    activeKey = identity.key();
+
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+        if (!players[playerIndex])
+        {
+            continue;
+        }
+        const auto destinationPlayer =
+            destination->playerEntities.find(playerIndex);
+        players[playerIndex]->entity =
+            destinationPlayer == destination->playerEntities.end()
+                ? nullptr
+                : destinationPlayer->second;
+    }
+
+    currentlevel = dungeonLevel;
+    secretlevel = secretTrack;
+    mapseed = seed;
+    darkmap = false;
+    pathMapGrounded = nullptr;
+    pathMapFlying = nullptr;
+    ::pathMapZone = 1;
+    shoparea = nullptr;
+    nummonsters = 0;
+    minotaurlevel = 0;
+    entity_uids = std::max<std::uint32_t>(1, destination->nextEntityUid);
+    lastEntityUIDs = entity_uids;
+    const std::uint32_t mapLoadUidStart = entity_uids;
+    destination->dungeonLevel = dungeonLevel;
+    destination->mapSeed = seed;
+    destination->secretLevel = secretTrack;
+    destination->darkMap = false;
+    destination->mapLoadEntityUidStart = mapLoadUidStart;
+
+    const std::string previousCustomMap = loadCustomNextMap;
+    const bool previousLoading = loading;
+    const bool previousDetachedGeneratedLoad =
+        detachedGeneratedLoadInProgress;
+    loadCustomNextMap.clear();
+    loading = true;
+    detachedGeneratedLoadInProgress = true;
+    int checkMapHash = -1;
+    const int result = physfsLoadMapFile(
+        dungeonLevel,
+        seed,
+        false,
+        &checkMapHash
+    );
+    detachedGeneratedLoadInProgress = previousDetachedGeneratedLoad;
+    loading = previousLoading;
+    loadCustomNextMap = previousCustomMap;
+
+    const std::string loadedKey =
+        activeIdentity() ? activeIdentity()->key() : std::string{};
+    const bool loadedExpectedDestination =
+        result != -1 && loadedKey == identity.key();
+
+    destination = find(identity.key());
+    if (loadedExpectedDestination && destination)
+    {
+        destination->dungeonLevel = dungeonLevel;
+        destination->mapSeed = seed;
+        destination->secretLevel = secretTrack;
+        destination->darkMap = darkmap;
+        destination->mapLoadEntityUidStart = mapLoadUidStart;
+        destination->runtimeEntityUidStart = entity_uids;
+        destination->nextEntityUid = entity_uids;
+        destination->runtimeInitialized = false;
+    }
+
+    /*
+     * Always restore the source before reporting success or failure. The map
+     * generated above then remains in the owned detached storage and can be
+     * activated for only the player who requested the reverse transition.
+     */
+    const std::string generatedForegroundKey = loadedKey;
+    if (!activate(sourceKey))
+    {
+        error = "foreground instance could not be restored after generation";
+        return false;
+    }
+
+    if (!loadedExpectedDestination || !destination)
+    {
+        if (!generatedForegroundKey.empty()
+            && generatedForegroundKey != sourceKey)
+        {
+            unloadEmptyInstance(generatedForegroundKey);
+        }
+        if (!restoringUnloadedDestination)
+        {
+            MapInstance* failedRequested = find(identity.key());
+            if (failedRequested && !failedRequested->loadedMap
+                && failedRequested->playersPresent.empty())
+            {
+                instances.erase(identity.key());
+            }
+        }
+        error = result == -1
+            ? "generated destination failed to load"
+            : "generated destination resolved to an unexpected map instance";
+        return false;
+    }
+
+    printlog(
+        "[World State] Regenerated detached instance '%s' at level %d (%s track, seed %u).",
+        identity.key().c_str(),
+        dungeonLevel,
+        secretTrack ? "secret" : "regular",
+        seed
+    );
+    return true;
+}
+
 bool WorldState::activate(const std::string& canonicalKey)
 {
     MapInstance* destination = find(canonicalKey);
@@ -708,6 +978,22 @@ bool WorldState::activate(const std::string& canonicalKey)
             : entity->second;
     }
     ensureActiveLightmapDimensions(map);
+
+	/*
+	 * activate() swaps map storage directly and therefore bypasses loadMap()'s
+	 * camera-vismap allocation and the normal post-load chunk rebuild. Keeping
+	 * buffers or chunks from the previous floor is unsafe even when two
+	 * procedural maps have identical dimensions: occlusionCulling() writes
+	 * width * height entries and the chunk meshes still contain the previous
+	 * floor's geometry.
+	 */
+	resetMapVisibilityState(map);
+	if ( !headless )
+	{
+		clearChunks();
+		createChunks();
+	}
+
     rebuildEntityTileIndex(map);
     if (!pathMapGrounded || !pathMapFlying)
     {
@@ -1007,4 +1293,5 @@ void WorldState::clear()
     loadedMaps.clear();
     revisionCounters.clear();
     activeKey.clear();
+    detachedGeneratedLoadInProgress = false;
 }

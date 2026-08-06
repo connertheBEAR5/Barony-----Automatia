@@ -27808,6 +27808,7 @@ failed:
 				auto loadNextLevel = [](){
 					if (multiplayer != CLIENT) 
 					{
+						recordAutomatiaPartyLevelVisit();
 						loadnextlevel = true; 
 						Compendium_t::Events_t::previousCurrentLevel = currentlevel;
 						Compendium_t::Events_t::previousSecretlevel = secretlevel;
@@ -27818,6 +27819,7 @@ failed:
 				auto skipHellLevels = [](){
 					if (multiplayer != CLIENT) 
 					{
+						recordAutomatiaPartyLevelVisit();
 						loadnextlevel = true; 
 						Compendium_t::Events_t::previousCurrentLevel = currentlevel;
 						Compendium_t::Events_t::previousSecretlevel = secretlevel;

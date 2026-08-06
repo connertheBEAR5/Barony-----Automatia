@@ -100,6 +100,13 @@ public:
         const std::string& instanceId,
         std::string& error
     );
+    bool loadDetachedGeneratedLevel(
+        const WorldInstanceIdentity& identity,
+        std::int32_t dungeonLevel,
+        std::uint32_t seed,
+        bool secretTrack,
+        std::string& error
+    );
     bool activate(const std::string& canonicalKey);
     const MapInstance* activeInstance() const;
     MapInstance* activeInstance();
@@ -128,6 +135,7 @@ private:
     std::unordered_map<std::string, std::uint64_t> revisionCounters;
     std::unordered_set<map_t*> ownedMapStorage;
     std::string activeKey;
+    bool detachedGeneratedLoadInProgress = false;
 };
 
 extern WorldState worldState;

@@ -8581,6 +8581,16 @@ void doNewGame(bool makeHighscore) {
 	// credit and pending-choice caches before any new-game state is created.
 	customDialogueResetRuntimeState();
 
+	/*
+	 * Restart used to leave detached map instances alive until after Player::init
+	 * and other runtime resets. Their entity/light destructors can still refer
+	 * to the old session, causing an abort while Restart is constructing the new
+	 * game. Release detached world-instance storage first, while all old-session
+	 * dependencies are still valid. resetPersistentWorldSession() later remains
+	 * responsible for registry clearing and pending-save hydration.
+	 */
+	worldState.clear();
+
 	bool bWasOnMainMenu = intro;
 	introstage = 1;
 	fadefinished = false;

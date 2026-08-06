@@ -29264,6 +29264,10 @@ CalloutRadialMenu::CalloutType CalloutRadialMenu::getCalloutTypeForEntity(const 
 	{
 		type = CALLOUT_TYPE_BOULDER;
 	}
+	else if ( parent->behavior == &actLadderReverse )
+	{
+		type = CALLOUT_TYPE_EXIT;
+	}
 	else if ( parent->behavior == &actLadder )
 	{
 		if ( secretlevel && parent->skill[3] == 1 ) // secret ladder
@@ -31609,6 +31613,13 @@ bool CalloutRadialMenu::allowedInteractEntity(Entity& selectedEntity, bool updat
 		if ( updateInteractText )
 		{
 			strcat(interactText, Language::get(6270)); // "bell"
+		}
+	}
+	else if ( selectedEntity.behavior == &actLadderReverse )
+	{
+		if ( updateInteractText )
+		{
+			strcat(interactText, Language::get(4310)); // "ladder"
 		}
 	}
 	else if ( selectedEntity.behavior == &actLadder )

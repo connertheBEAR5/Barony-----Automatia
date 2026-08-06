@@ -14722,6 +14722,25 @@ int main(int argc, char** argv)
 	loadTilePalettes();
 	EditorEntityData_t::readFromFile();
 
+	/*
+	 * Sprite 42 is the reverse-ladder editor object, but it should use the
+	 * same 2D editor image as the normal ladder (sprite 11). Keep a separate
+	 * SDL surface so normal sprite cleanup remains safe.
+	 */
+	if ( numsprites > 42 && sprites[11] != nullptr )
+	{
+		SDL_Surface* ladderReverseEditorImage =
+			SDL_ConvertSurface(sprites[11], sprites[11]->format, 0);
+		if ( ladderReverseEditorImage != nullptr )
+		{
+			if ( sprites[42] != nullptr )
+			{
+				SDL_FreeSurface(sprites[42]);
+			}
+			sprites[42] = ladderReverseEditorImage;
+		}
+	}
+
 	bool achievementCartographer = false;
 
 	// main loop

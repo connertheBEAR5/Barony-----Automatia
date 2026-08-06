@@ -2714,7 +2714,9 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 	}
 	if ( my )
 	{
-		if ( my->behavior != &actPlayer && my->behavior != &actMonster && my->behavior != &actLadder && my->behavior != &actPortal )
+		if ( my->behavior != &actPlayer && my->behavior != &actMonster
+			&& my->behavior != &actLadder && my->behavior != &actLadderReverse
+			&& my->behavior != &actPortal )
 		{
 			levitating = true;
 		}

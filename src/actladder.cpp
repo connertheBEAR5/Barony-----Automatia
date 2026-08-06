@@ -25,6 +25,7 @@
 #include "mod_tools.hpp"
 #include "ui/MainMenu.hpp"
 #include "colors.hpp"
+#include "world_state.hpp"
 
 /*-------------------------------------------------------------------------------
 
@@ -122,6 +123,7 @@ void actLadder(Entity* my)
 					{
 						messagePlayer(i, MESSAGE_INTERACTION, Language::get(507));
 					}
+					recordAutomatiaPartyLevelVisit(my);
 					loadnextlevel = true;
 					Compendium_t::Events_t::previousCurrentLevel = currentlevel;
 					Compendium_t::Events_t::previousSecretlevel = secretlevel;
@@ -156,6 +158,143 @@ void actLadder(Entity* my)
 				}
 			}
 		}
+	}
+}
+
+void actLadderReverse(Entity* my)
+{
+	int i;
+
+	if ( my->ticks == 1 )
+	{
+		my->createWorldUITooltip();
+		memset(mpPokeCooldown, 0, sizeof(mpPokeCooldown));
+	}
+
+#ifdef USE_FMOD
+	if ( LADDER_AMBIENCE == 0 )
+	{
+		LADDER_AMBIENCE--;
+		my->stopEntitySound();
+		my->entity_sound = playSoundEntityLocal(my, 149, 64);
+	}
+	if ( my->entity_sound )
+	{
+		bool playing = false;
+		my->entity_sound->isPlaying(&playing);
+		if ( !playing )
+		{
+			my->entity_sound = nullptr;
+		}
+	}
+#else
+	LADDER_AMBIENCE--;
+	if ( LADDER_AMBIENCE <= 0 )
+	{
+		LADDER_AMBIENCE = TICKS_PER_SECOND * 30;
+		playSoundEntityLocal(my, 149, 64);
+	}
+#endif
+
+	if ( multiplayer == CLIENT )
+	{
+		return;
+	}
+
+	for ( i = 0; i < MAXPLAYERS; ++i )
+	{
+		if ( selectedEntity[i] != my && client_selected[i] != my )
+		{
+			continue;
+		}
+		if ( !inrange[i]
+			|| client_disconnected[i]
+			|| !players[i]
+			|| !players[i]->entity )
+		{
+			continue;
+		}
+
+		AutomatiaPlayerLevelVisit destination;
+		std::string historyError;
+		if ( !consumeAutomatiaPreviousPlayerLevel(
+			i,
+			destination,
+			historyError
+		) )
+		{
+			messagePlayer(i, MESSAGE_INTERACTION,
+				"You have no previously visited level to return to.");
+			printlog(
+				"[Ladder Reverse] Player %d could not travel backward independently: %s.",
+				i,
+				historyError.c_str()
+			);
+			return;
+		}
+
+		messagePlayer(i, MESSAGE_INTERACTION,
+			"You climb the ladder toward your previous level.");
+
+		if ( multiplayer == SERVER )
+		{
+			if ( !queueAutomatiaReverseTransition(i, destination) )
+			{
+				restoreAutomatiaPreviousPlayerLevel(i, destination);
+				messagePlayer(i, MESSAGE_INTERACTION,
+					"The previous level could not be prepared yet.");
+				printlog(
+					"[Ladder Reverse] Player %d could not queue an independent return to '%s'.",
+					i,
+					destination.mapInstanceKey.c_str()
+				);
+			}
+			return;
+		}
+
+		prepareAutomatiaReverseReturnSpawn(i, destination);
+		const int sourceLevel = currentlevel;
+		const bool sourceSecretLevel = secretlevel;
+		if ( destination.mapSeed > 0 )
+		{
+			forceMapSeed = destination.mapSeed;
+		}
+
+		loadCustomNextMap.clear();
+		const std::size_t instanceSeparator =
+			destination.mapInstanceKey.find('#');
+		if ( instanceSeparator != std::string::npos
+			&& destination.mapInstanceKey.substr(instanceSeparator + 1) == "world" )
+		{
+			loadCustomNextMap =
+				destination.mapInstanceKey.substr(0, instanceSeparator);
+		}
+		loadCustomNextTunnelID = 0;
+		loadnextlevel = true;
+		Compendium_t::Events_t::previousCurrentLevel = sourceLevel;
+		Compendium_t::Events_t::previousSecretlevel = sourceSecretLevel;
+		secretlevel = destination.secretLevel;
+
+		/*
+		 * The legacy single-player loader applies skipLevelsOnLoad, then
+		 * increments once. Server multiplayer uses the independent WorldState
+		 * transition path above and never changes the other players' globals.
+		 */
+		const int levelDelta = destination.dungeonLevel - sourceLevel;
+		skipLevelsOnLoad = levelDelta > 0
+			? levelDelta
+			: levelDelta - 1;
+		printlog(
+			"[Ladder Reverse] Local player %d requested personal previous level %d (%s) -> %d (%s), seed %u, instance '%s'.",
+			i,
+			sourceLevel,
+			sourceSecretLevel ? "secret" : "regular",
+			destination.dungeonLevel,
+			destination.secretLevel ? "secret" : "regular",
+			destination.mapSeed,
+			destination.mapInstanceKey.c_str()
+		);
+		return;
 	}
 }
 
@@ -351,6 +490,7 @@ void actPortal(Entity* my)
 				{
 					messagePlayer(i, MESSAGE_INTERACTION, Language::get(511));
 				}
+				recordAutomatiaPartyLevelVisit(my);
 				loadnextlevel = true;
 				Compendium_t::Events_t::previousCurrentLevel = currentlevel;
 				Compendium_t::Events_t::previousSecretlevel = secretlevel;

@@ -6953,6 +6953,44 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 	list_FreeAll(&mapList);
 	list_FreeAll(&doorList);
 
+#ifndef EDITOR
+	/*
+	 * Every generated floor is assembled from a reusable template map such as
+	 * mine.lmp or caves.lmp. The template filename alone is therefore not a
+	 * stable floor identity: four consecutive mine floors would otherwise all
+	 * collide as mine.lmp#world. Rebind the finished generated map to its
+	 * actual level/track identity before persistence or minimap restoration.
+	 */
+	const std::string generatedInstanceId =
+		"level_" + std::to_string(std::max(0, currentlevel))
+		+ (secretlevel ? "_secret" : "_regular");
+	if ( worldState.bindMap(map, map.filename, generatedInstanceId) )
+	{
+		if ( MapInstance* generatedInstance = worldState.activeInstance() )
+		{
+			generatedInstance->dungeonLevel = currentlevel;
+			generatedInstance->mapSeed = seed;
+			generatedInstance->secretLevel = secretlevel;
+			generatedInstance->darkMap = darkmap;
+		}
+		printlog(
+			"[World State] Generated floor identity is '%s' (level %d, %s track, seed %u).",
+			worldState.activeIdentity()
+				? worldState.activeIdentity()->key().c_str()
+				: "unknown",
+			currentlevel,
+			secretlevel ? "secret" : "regular",
+			seed);
+	}
+	else
+	{
+		printlog(
+			"[World State] Warning: failed to assign a unique identity to generated level %d (%s track).",
+			currentlevel,
+			secretlevel ? "secret" : "regular");
+	}
+#endif
+
 	printlog("successfully generated a dungeon with %d rooms, %d monsters, %d gold, %d items, %d decorations.\n", roomcount, nummonsters, numGenGold, numGenItems, numGenDecorations);
 	//messagePlayer(0, "successfully generated a dungeon with %d rooms, %d monsters, %d gold, %d items, %d decorations.", roomcount, nummonsters, numGenGold, numGenItems, numGenDecorations);
 	return secretlevelexit;
@@ -8751,6 +8789,33 @@ void assignActions(
 				entity->flags[INVISIBLE] = true;
 				entity->skill[2] = -9; // so clients know it's a liquid
 				break;
+			// reverse ladder: ladder-hole model that moves to the previous level.
+			case 42:
+			{
+				entity->sizex = 4;
+				entity->sizey = 4;
+				entity->x += 8;
+				entity->y += 8;
+				entity->sprite = 253; // same world model as the ladder hole
+				entity->flags[PASSABLE] = true;
+				entity->behavior = &actLadderReverse;
+
+				// Match the ladder hole's ceiling-relative model placement.
+				const int x = entity->x / 16;
+				const int y = entity->y / 16;
+				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
+				{
+					if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					{
+						entity->z = -6.25 - 16.0;
+					}
+					else
+					{
+						entity->z = -6.25;
+					}
+				}
+				break;
+			}
 			// ladder hole
 			case 43:
             {

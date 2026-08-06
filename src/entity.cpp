@@ -31435,6 +31435,7 @@ void Entity::createWorldUITooltip()
 bool Entity::bEntityTooltipRequiresButtonHeld() const
 {
 	if ( behavior == &actPortal || behavior == &actLadder
+		|| behavior == &actLadderReverse
 		|| behavior == &::actMidGamePortal || behavior == &::actExpansionEndGamePortal
 		|| behavior == &actWinningPortal || behavior == &actCustomPortal )
 	{

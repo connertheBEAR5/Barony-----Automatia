@@ -68,6 +68,61 @@ bool handleEvents(void);
 void startMessages();
 void resetPersistentWorldSession();
 
+struct AutomatiaPlayerReturnPlacement
+{
+	bool valid = false;
+	double x = 0.0;
+	double y = 0.0;
+	double z = 0.0;
+	double yaw = 0.0;
+	double pitch = 0.0;
+	double roll = 0.0;
+};
+
+struct AutomatiaPlayerLevelVisit
+{
+	Sint32 dungeonLevel = 0;
+	bool secretLevel = false;
+	Uint32 mapSeed = 0;
+	std::string mapInstanceKey;
+	bool hasReturnAnchor = false;
+	Sint32 returnAnchorPersistentID = 0;
+	double returnAnchorX = 0.0;
+	double returnAnchorY = 0.0;
+	double returnAnchorZ = 0.0;
+	AutomatiaPlayerReturnPlacement returnPlacement;
+};
+
+/*
+ * Whole-party transitions record one independent history entry for every
+ * player on the active map. Divergent transitions record only the player who
+ * actually leaves. A reverse ladder consumes only that player's back stack.
+ */
+void recordAutomatiaPartyLevelVisit(
+	const Entity* departureEntity = nullptr
+);
+void recordAutomatiaPlayerLevelVisit(
+	int playerIndex,
+	const Entity* departureEntity = nullptr
+);
+bool consumeAutomatiaPreviousPlayerLevel(
+	int playerIndex,
+	AutomatiaPlayerLevelVisit& destination,
+	std::string& error
+);
+void restoreAutomatiaPreviousPlayerLevel(
+	int playerIndex,
+	const AutomatiaPlayerLevelVisit& destination
+);
+bool queueAutomatiaReverseTransition(
+	int playerIndex,
+	const AutomatiaPlayerLevelVisit& destination
+);
+void prepareAutomatiaReverseReturnSpawn(
+	int playerIndex,
+	const AutomatiaPlayerLevelVisit& destination
+);
+
 /*
  * Export/import only the player-scoped quest and NPC dialogue memory used by
  * dedicated per-character saves. World- and party-scoped story state remains
@@ -852,6 +907,7 @@ Entity* spawnGibClient(Sint16 x, Sint16 y, Sint16 z, Sint16 sprite);
 Entity* spawnMiscPuddle(Entity* parentent, real_t x, real_t y, int sprite, bool updateClients = false);
 void serverSpawnGibForClient(Entity* gib);
 void actLadder(Entity* my);
+void actLadderReverse(Entity* my);
 void actLadderUp(Entity* my);
 void actPortal(Entity* my);
 void actWinningPortal(Entity* my);

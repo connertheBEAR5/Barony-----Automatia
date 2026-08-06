@@ -63,8 +63,10 @@
 #include <string>
 #include <atomic>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -72,6 +74,7 @@
 #include <cmath>
 #include <ctime>
 #include <filesystem>
+#include <cstring>
 /*
  * Implemented in mechanisms.cpp.
  * Reapplies the restored output of a signal timer or AND gate.
@@ -84,13 +87,36 @@ static void capturePersistentMinimap(bool requirePlayerOnActiveMap = true);
 static void capturePersistentMechanismStates();
 static void capturePersistentMapRemovals();
 
+static bool parseAutomatiaMapInstanceKey(
+	const std::string& key,
+	WorldInstanceIdentity& identity
+)
+{
+	const std::size_t separator = key.find('#');
+	if ( separator == std::string::npos
+		|| key.find('#', separator + 1) != std::string::npos )
+	{
+		return false;
+	}
+	return identity.set(
+		key.substr(0, separator),
+		key.substr(separator + 1)
+	);
+}
+
 struct PendingAutomatiaTransition
 {
 	int playerIndex = -1;
 	std::string destinationMap;
+	std::string destinationInstanceKey;
 	Sint32 destinationTunnelID = 0;
 	int destinationLevel = 0;
 	bool destinationSecret = false;
+	Uint32 destinationMapSeed = 0;
+	bool destinationGenerated = false;
+	bool recordSourceVisit = true;
+	bool hasReturnPlacement = false;
+	AutomatiaPlayerLevelVisit reverseVisit;
 };
 
 static std::vector<PendingAutomatiaTransition> pendingAutomatiaTransitions;
@@ -119,13 +145,61 @@ bool queueAutomatiaCustomTransition(
 			return true;
 		}
 	}
-	pendingAutomatiaTransitions.push_back(PendingAutomatiaTransition{
-		playerIndex,
-		destinationMap,
-		destinationTunnelID,
-		destinationLevel,
-		destinationSecret
-	});
+	PendingAutomatiaTransition transition;
+	transition.playerIndex = playerIndex;
+	transition.destinationMap = destinationMap;
+	transition.destinationTunnelID = destinationTunnelID;
+	transition.destinationLevel = destinationLevel;
+	transition.destinationSecret = destinationSecret;
+	transition.recordSourceVisit = true;
+	pendingAutomatiaTransitions.push_back(std::move(transition));
+	return true;
+}
+
+bool queueAutomatiaReverseTransition(
+	const int playerIndex,
+	const AutomatiaPlayerLevelVisit& destination
+)
+{
+	if ( multiplayer != SERVER
+		|| playerIndex < 0
+		|| playerIndex >= MAXPLAYERS
+		|| client_disconnected[playerIndex]
+		|| !players[playerIndex]
+		|| !players[playerIndex]->entity
+		|| destination.mapInstanceKey.empty() )
+	{
+		return false;
+	}
+	WorldInstanceIdentity identity;
+	if ( !parseAutomatiaMapInstanceKey(
+		destination.mapInstanceKey,
+		identity
+	) )
+	{
+		return false;
+	}
+	for ( const PendingAutomatiaTransition& pending : pendingAutomatiaTransitions )
+	{
+		if ( pending.playerIndex == playerIndex )
+		{
+			return false;
+		}
+	}
+	PendingAutomatiaTransition transition;
+	transition.playerIndex = playerIndex;
+	transition.destinationMap = identity.instanceId == "world"
+		? identity.mapFile
+		: std::string{};
+	transition.destinationInstanceKey = identity.key();
+	transition.destinationLevel = destination.dungeonLevel;
+	transition.destinationSecret = destination.secretLevel;
+	transition.destinationMapSeed = destination.mapSeed;
+	transition.destinationGenerated = identity.instanceId != "world";
+	transition.recordSourceVisit = false;
+	transition.hasReturnPlacement = destination.returnPlacement.valid;
+	transition.reverseVisit = destination;
+	pendingAutomatiaTransitions.push_back(std::move(transition));
 	return true;
 }
 
@@ -963,6 +1037,23 @@ static std::unordered_map<
     std::string,
     PersistentMapRemovalState
 > persistentMapRemovalRegistry;
+
+/*
+ * Reserved positive-ID range for raw entities created by deterministic map
+ * generation. Authored editor IDs remain untouched. These IDs are assigned
+ * before assignActions(), then registered only after assignActions() confirms
+ * that the raw marker survived or transferred its identity to a real runtime
+ * entity.
+ */
+static constexpr Sint32 GENERATED_MAP_ENTITY_PERSISTENT_ID_BASE =
+    0x40000000;
+static constexpr Sint32 GENERATED_RUNTIME_ENTITY_PERSISTENT_ID_BASE =
+    0x50000000;
+
+static bool isGeneratedMapEntityPersistentID(const Sint32 persistentID)
+{
+    return persistentID >= GENERATED_MAP_ENTITY_PERSISTENT_ID_BASE;
+}
 /*
  * Session-only custom dialogue, quest, and world-story memory.
  *
@@ -973,6 +1064,30 @@ static PersistentWorldStoryState
     persistentWorldStoryState;
 static AutomatiaSave::Json preservedAutomatiaWorldDocument;
 static AutomatiaSave::Json pendingAutomatiaWorldDocument;
+
+/*
+ * Per-character level back stacks.
+ *
+ * Divergent paths require each player to own an independent route history.
+ * Whole-party transitions append the same source level to every player who is
+ * actually present on that map, while independent transitions append only the
+ * player who leaves. The stable identity matches character-save/minimap
+ * identity so reconnecting players recover their own route.
+ */
+using AutomatiaPlayerLevelHistory =
+	std::vector<AutomatiaPlayerLevelVisit>;
+static std::unordered_map<std::string, AutomatiaPlayerLevelHistory>
+	automatiaPlayerLevelHistories;
+static AutomatiaPlayerLevelHistory automatiaLegacyPartyLevelHistory;
+constexpr std::size_t AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT = 4096;
+struct PendingAutomatiaSinglePlayerReverseReturn
+{
+	int playerIndex = -1;
+	AutomatiaPlayerLevelVisit visit;
+	bool pending = false;
+};
+static PendingAutomatiaSinglePlayerReverseReturn
+	pendingAutomatiaSinglePlayerReverseReturn;
 struct AutomatiaSavedPlayerPlacement
 {
     WorldInstanceIdentity identity;
@@ -1014,6 +1129,13 @@ static std::unordered_map<std::string, PersistentMinimapMapRegistry>
 static std::unordered_map<std::string, PersistentMinimapState>
     persistentLegacyMinimapRegistry;
 static Uint32 persistentMinimapServerTransferId = 0;
+/*
+ * The process-global minimap array survives map loads. Track the exact bound
+ * map revision so stale cells are cleared once for each newly loaded map,
+ * before any saved discovery is merged back into it.
+ */
+static std::string persistentMinimapClearedMapKey;
+static std::uint64_t persistentMinimapClearedMapRevision = 0;
 constexpr std::size_t PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD = 1600;
 static_assert(
     28U + 255U + PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD
@@ -2081,6 +2203,210 @@ void hydratePreservedAutomatiaWorldDocument()
         return;
     }
 
+    auto restoreLevelVisit = [](
+        const Json& savedVisit,
+        AutomatiaPlayerLevelVisit& visit
+    )
+    {
+        if (!savedVisit.is_object()
+            || !savedVisit.contains("dungeon_level")
+            || !savedVisit["dungeon_level"].is_number_integer()
+            || !savedVisit.contains("secret_level")
+            || !savedVisit["secret_level"].is_boolean()
+            || !savedVisit.contains("map_seed")
+            || !savedVisit["map_seed"].is_number_integer())
+        {
+            return false;
+        }
+        const std::int64_t savedLevel =
+            savedVisit["dungeon_level"].get<std::int64_t>();
+        const std::int64_t savedSeed =
+            savedVisit["map_seed"].get<std::int64_t>();
+        if (savedLevel < 0 || savedLevel > INT32_MAX
+            || savedSeed < 0 || savedSeed > UINT32_MAX)
+        {
+            return false;
+        }
+        visit = AutomatiaPlayerLevelVisit{};
+        visit.dungeonLevel = static_cast<Sint32>(savedLevel);
+        visit.secretLevel = savedVisit["secret_level"].get<bool>();
+        visit.mapSeed = static_cast<Uint32>(savedSeed);
+        if (savedVisit.contains("map_instance")
+            && savedVisit["map_instance"].is_string())
+        {
+            const std::string key =
+                savedVisit["map_instance"].get<std::string>();
+            WorldInstanceIdentity identity;
+            if (key.size() <= 512
+                && parseAutomatiaMapInstanceKey(key, identity))
+            {
+                visit.mapInstanceKey = identity.key();
+            }
+        }
+        auto restoreFinite = [](
+            const Json& object,
+            const char* key,
+            double& output
+        )
+        {
+            if (!object.is_object() || !object.contains(key)
+                || !object[key].is_number())
+            {
+                return false;
+            }
+            const double value = object[key].get<double>();
+            if (!std::isfinite(value) || std::abs(value) > 1000000000.0)
+            {
+                return false;
+            }
+            output = value;
+            return true;
+        };
+        if (savedVisit.contains("return_anchor")
+            && savedVisit["return_anchor"].is_object())
+        {
+            const Json& anchor = savedVisit["return_anchor"];
+            if (restoreFinite(anchor, "x", visit.returnAnchorX)
+                && restoreFinite(anchor, "y", visit.returnAnchorY)
+                && restoreFinite(anchor, "z", visit.returnAnchorZ))
+            {
+                visit.hasReturnAnchor = true;
+                if (anchor.contains("persistent_id")
+                    && anchor["persistent_id"].is_number_integer())
+                {
+                    const std::int64_t persistentID =
+                        anchor["persistent_id"].get<std::int64_t>();
+                    if (persistentID >= 0 && persistentID <= INT32_MAX)
+                    {
+                        visit.returnAnchorPersistentID =
+                            static_cast<Sint32>(persistentID);
+                    }
+                }
+            }
+        }
+        if (savedVisit.contains("return_position")
+            && savedVisit["return_position"].is_object())
+        {
+            const Json& position = savedVisit["return_position"];
+            AutomatiaPlayerReturnPlacement placement;
+            if (restoreFinite(position, "x", placement.x)
+                && restoreFinite(position, "y", placement.y)
+                && restoreFinite(position, "z", placement.z)
+                && restoreFinite(position, "yaw", placement.yaw))
+            {
+                restoreFinite(position, "pitch", placement.pitch);
+                restoreFinite(position, "roll", placement.roll);
+                placement.valid = true;
+                visit.returnPlacement = placement;
+            }
+        }
+        return !visit.mapInstanceKey.empty();
+    };
+
+    std::size_t restoredPlayerHistoryEntries = 0;
+    if (preservedAutomatiaWorldDocument.contains("player_level_histories")
+        && preservedAutomatiaWorldDocument["player_level_histories"].is_object()
+        && preservedAutomatiaWorldDocument["player_level_histories"].size()
+            <= 4096)
+    {
+        const Json& savedHistories =
+            preservedAutomatiaWorldDocument["player_level_histories"];
+        for (auto savedPlayer = savedHistories.begin();
+            savedPlayer != savedHistories.end(); ++savedPlayer)
+        {
+            if (savedPlayer.key().empty() || savedPlayer.key().size() > 256
+                || !savedPlayer.value().is_array()
+                || savedPlayer.value().size()
+                    > AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+            {
+                continue;
+            }
+            AutomatiaPlayerLevelHistory history;
+            history.reserve(savedPlayer.value().size());
+            for (const Json& savedVisit : savedPlayer.value())
+            {
+                AutomatiaPlayerLevelVisit visit;
+                if (restoreLevelVisit(savedVisit, visit))
+                {
+                    history.push_back(std::move(visit));
+                }
+            }
+            if (!history.empty())
+            {
+                restoredPlayerHistoryEntries += history.size();
+                automatiaPlayerLevelHistories[savedPlayer.key()] =
+                    std::move(history);
+            }
+        }
+    }
+
+    /*
+     * Compatibility with saves written before divergent route histories.
+     * Every player begins with a copy of this formerly shared route when their
+     * stable identity first requests a history stack.
+     */
+    if (preservedAutomatiaWorldDocument.contains("party_level_history")
+        && preservedAutomatiaWorldDocument["party_level_history"].is_array()
+        && preservedAutomatiaWorldDocument["party_level_history"].size()
+            <= AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+    {
+        for (const Json& savedVisit
+            : preservedAutomatiaWorldDocument["party_level_history"])
+        {
+            AutomatiaPlayerLevelVisit visit;
+            if (restoreLevelVisit(savedVisit, visit))
+            {
+                automatiaLegacyPartyLevelHistory.push_back(std::move(visit));
+            }
+        }
+    }
+    std::size_t migratedLegacyPlayers = 0;
+    const std::size_t restoredLegacyEntries =
+        automatiaLegacyPartyLevelHistory.size();
+    if (!automatiaLegacyPartyLevelHistory.empty())
+    {
+        /*
+         * Convert the old shared stack only for players already connected
+         * while this save is hydrated. A later late-joiner must not inherit
+         * another character's pre-divergence route merely because the save
+         * originated before player-scoped histories existed.
+         */
+        for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+        {
+            if (!players[playerIndex] || client_disconnected[playerIndex]
+                || (headless && multiplayer == SERVER && playerIndex == 0))
+            {
+                continue;
+            }
+            std::string identity =
+                persistentMinimapPlayerIdentity(playerIndex);
+            if (identity.empty())
+            {
+                identity = "slot:" + std::to_string(playerIndex);
+            }
+            auto inserted = automatiaPlayerLevelHistories.emplace(
+                identity,
+                AutomatiaPlayerLevelHistory{}
+            );
+            if (inserted.second || inserted.first->second.empty())
+            {
+                inserted.first->second =
+                    automatiaLegacyPartyLevelHistory;
+                ++migratedLegacyPlayers;
+            }
+        }
+        automatiaLegacyPartyLevelHistory.clear();
+    }
+    if (restoredPlayerHistoryEntries > 0 || restoredLegacyEntries > 0)
+    {
+        printlog(
+            "[Ladder Reverse] Restored %zu per-player history entry(s); migrated %zu legacy shared entry(s) to %zu currently connected player(s).",
+            restoredPlayerHistoryEntries,
+            restoredLegacyEntries,
+            migratedLegacyPlayers
+        );
+    }
+
     std::size_t restoredMaps = 0;
     std::size_t restoredTiles = 0;
     std::size_t restoredItems = 0;
@@ -3127,6 +3453,362 @@ bool prepareAutomatiaLateJoinPlayer(
     return true;
 }
 
+static std::string automatiaPlayerHistoryFallbackIdentity(
+    const int playerIndex
+)
+{
+    return playerIndex >= 0 && playerIndex < MAXPLAYERS
+        ? "slot:" + std::to_string(playerIndex)
+        : std::string{};
+}
+
+static std::string automatiaPlayerHistoryIdentity(
+    const int playerIndex
+)
+{
+    const std::string preferred =
+        persistentMinimapPlayerIdentity(playerIndex);
+    const std::string fallback =
+        automatiaPlayerHistoryFallbackIdentity(playerIndex);
+    if (preferred.empty())
+    {
+        return fallback;
+    }
+
+    std::vector<std::string> previousIdentities;
+    previousIdentities.push_back(fallback);
+    const std::string characterIdentity =
+        persistentMinimapCharacterNameIdentity(playerIndex);
+    if (!characterIdentity.empty())
+    {
+        previousIdentities.push_back(characterIdentity);
+    }
+    if (playerIndex >= 0 && playerIndex < MAXPLAYERS
+        && ReconnectToken::isValid(automatiaReconnectTokens[playerIndex]))
+    {
+        previousIdentities.push_back(
+            "reconnect:" + automatiaReconnectTokens[playerIndex]
+        );
+    }
+
+    AutomatiaPlayerLevelHistory& target =
+        automatiaPlayerLevelHistories[preferred];
+    std::unordered_set<std::string> migratedIdentities;
+    for (const std::string& previousIdentity : previousIdentities)
+    {
+        if (previousIdentity.empty() || previousIdentity == preferred
+            || !migratedIdentities.insert(previousIdentity).second)
+        {
+            continue;
+        }
+        auto previousHistory =
+            automatiaPlayerLevelHistories.find(previousIdentity);
+        if (previousHistory == automatiaPlayerLevelHistories.end())
+        {
+            continue;
+        }
+        if (target.empty())
+        {
+            target = std::move(previousHistory->second);
+        }
+        else if (!previousHistory->second.empty())
+        {
+            target.insert(
+                target.begin(),
+                std::make_move_iterator(previousHistory->second.begin()),
+                std::make_move_iterator(previousHistory->second.end())
+            );
+            if (target.size() > AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+            {
+                target.erase(
+                    target.begin(),
+                    target.begin()
+                        + (target.size()
+                            - AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+                );
+            }
+        }
+        automatiaPlayerLevelHistories.erase(previousHistory);
+        printlog(
+            "[Ladder Reverse] Migrated player %d route history from identity '%s' to '%s'.",
+            playerIndex,
+            previousIdentity.c_str(),
+            preferred.c_str()
+        );
+    }
+    return preferred;
+}
+
+static AutomatiaPlayerLevelHistory* automatiaHistoryForPlayer(
+    const int playerIndex
+)
+{
+    const std::string identity =
+        automatiaPlayerHistoryIdentity(playerIndex);
+    if (identity.empty())
+    {
+        return nullptr;
+    }
+    auto inserted = automatiaPlayerLevelHistories.emplace(
+        identity,
+        AutomatiaPlayerLevelHistory{}
+    );
+    return &inserted.first->second;
+}
+
+static bool buildAutomatiaPlayerLevelVisit(
+    const int playerIndex,
+    const MapInstance& sourceInstance,
+    const Entity& playerEntity,
+    const Entity* departureEntity,
+    AutomatiaPlayerLevelVisit& visit
+)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !sourceInstance.identity.isValid()
+        || !std::isfinite(static_cast<double>(playerEntity.x))
+        || !std::isfinite(static_cast<double>(playerEntity.y))
+        || !std::isfinite(static_cast<double>(playerEntity.z))
+        || !std::isfinite(static_cast<double>(playerEntity.yaw)))
+    {
+        return false;
+    }
+    visit = AutomatiaPlayerLevelVisit{};
+    visit.dungeonLevel = sourceInstance.dungeonLevel;
+    visit.secretLevel = sourceInstance.secretLevel;
+    visit.mapSeed = sourceInstance.mapSeed;
+    visit.mapInstanceKey = sourceInstance.key();
+    visit.returnPlacement.valid = true;
+    visit.returnPlacement.x = playerEntity.x;
+    visit.returnPlacement.y = playerEntity.y;
+    visit.returnPlacement.z = playerEntity.z;
+    visit.returnPlacement.yaw = playerEntity.yaw;
+    visit.returnPlacement.pitch = playerEntity.pitch;
+    visit.returnPlacement.roll = playerEntity.roll;
+    if (departureEntity
+        && std::isfinite(static_cast<double>(departureEntity->x))
+        && std::isfinite(static_cast<double>(departureEntity->y))
+        && std::isfinite(static_cast<double>(departureEntity->z)))
+    {
+        visit.hasReturnAnchor = true;
+        visit.returnAnchorPersistentID = departureEntity->persistentID;
+        visit.returnAnchorX = departureEntity->x;
+        visit.returnAnchorY = departureEntity->y;
+        visit.returnAnchorZ = departureEntity->z;
+    }
+    return true;
+}
+
+static bool appendAutomatiaPlayerLevelVisit(
+    const int playerIndex,
+    AutomatiaPlayerLevelVisit visit
+)
+{
+    AutomatiaPlayerLevelHistory* history =
+        automatiaHistoryForPlayer(playerIndex);
+    if (!history || visit.mapInstanceKey.empty())
+    {
+        return false;
+    }
+    if (!history->empty())
+    {
+        AutomatiaPlayerLevelVisit& previous = history->back();
+        const bool sameInstance =
+            previous.mapInstanceKey == visit.mapInstanceKey;
+        if (sameInstance)
+        {
+            previous = std::move(visit);
+            return true;
+        }
+    }
+    if (history->size() >= AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+    {
+        history->erase(history->begin());
+    }
+    history->push_back(std::move(visit));
+    const AutomatiaPlayerLevelVisit& recorded = history->back();
+    printlog(
+        "[Ladder Reverse] Recorded player %d departure from level %d (%s track, seed %u, instance '%s'); personal back stack now has %zu entr%s.",
+        playerIndex,
+        recorded.dungeonLevel,
+        recorded.secretLevel ? "secret" : "regular",
+        recorded.mapSeed,
+        recorded.mapInstanceKey.c_str(),
+        history->size(),
+        history->size() == 1 ? "y" : "ies"
+    );
+    return true;
+}
+
+void recordAutomatiaPlayerLevelVisit(
+    const int playerIndex,
+    const Entity* departureEntity
+)
+{
+    if (multiplayer == CLIENT || playerIndex < 0
+        || playerIndex >= MAXPLAYERS || !players[playerIndex])
+    {
+        return;
+    }
+    const MapInstance* sourceInstance = worldState.activeInstance();
+    if (!sourceInstance)
+    {
+        return;
+    }
+    Entity* playerEntity = worldState.playerEntityFor(
+        sourceInstance->key(),
+        playerIndex
+    );
+    if (!playerEntity && players[playerIndex]->worldInstance.matches(
+        sourceInstance->identity))
+    {
+        playerEntity = players[playerIndex]->entity;
+    }
+    if (!playerEntity)
+    {
+        return;
+    }
+    AutomatiaPlayerLevelVisit visit;
+    if (buildAutomatiaPlayerLevelVisit(
+        playerIndex,
+        *sourceInstance,
+        *playerEntity,
+        departureEntity,
+        visit))
+    {
+        appendAutomatiaPlayerLevelVisit(playerIndex, std::move(visit));
+    }
+}
+
+void recordAutomatiaPartyLevelVisit(
+    const Entity* departureEntity
+)
+{
+    if (multiplayer == CLIENT)
+    {
+        return;
+    }
+    const MapInstance* sourceInstance = worldState.activeInstance();
+    if (!sourceInstance)
+    {
+        return;
+    }
+    std::unordered_set<int> occupantSet(
+        sourceInstance->playersPresent.begin(),
+        sourceInstance->playersPresent.end()
+    );
+    for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+    {
+        if (players[playerIndex]
+            && players[playerIndex]->worldInstance.matches(
+                sourceInstance->identity))
+        {
+            occupantSet.insert(playerIndex);
+        }
+    }
+    std::vector<int> occupants(
+        occupantSet.begin(),
+        occupantSet.end()
+    );
+    std::sort(occupants.begin(), occupants.end());
+    for (const int playerIndex : occupants)
+    {
+        if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+            || client_disconnected[playerIndex]
+            || !players[playerIndex])
+        {
+            continue;
+        }
+        recordAutomatiaPlayerLevelVisit(
+            playerIndex,
+            departureEntity
+        );
+    }
+}
+
+bool consumeAutomatiaPreviousPlayerLevel(
+    const int playerIndex,
+    AutomatiaPlayerLevelVisit& destination,
+    std::string& error
+)
+{
+    error.clear();
+    destination = AutomatiaPlayerLevelVisit{};
+    if (multiplayer == CLIENT)
+    {
+        error = "only the server or local game may choose a previous level";
+        return false;
+    }
+    AutomatiaPlayerLevelHistory* history =
+        automatiaHistoryForPlayer(playerIndex);
+    if (!history || history->empty())
+    {
+        error = "this player has no previously visited level to return to";
+        return false;
+    }
+    destination = history->back();
+    history->pop_back();
+    if (destination.dungeonLevel < 0
+        || destination.mapInstanceKey.empty())
+    {
+        error = "the recorded previous player level is invalid";
+        return false;
+    }
+    printlog(
+        "[Ladder Reverse] Player %d consumed previous level %d (%s track, seed %u, instance '%s'); %zu earlier entr%s remain for that player.",
+        playerIndex,
+        destination.dungeonLevel,
+        destination.secretLevel ? "secret" : "regular",
+        destination.mapSeed,
+        destination.mapInstanceKey.c_str(),
+        history->size(),
+        history->size() == 1 ? "y" : "ies"
+    );
+    return true;
+}
+
+void restoreAutomatiaPreviousPlayerLevel(
+    const int playerIndex,
+    const AutomatiaPlayerLevelVisit& destination
+)
+{
+    if (multiplayer == CLIENT || destination.mapInstanceKey.empty())
+    {
+        return;
+    }
+    AutomatiaPlayerLevelHistory* history =
+        automatiaHistoryForPlayer(playerIndex);
+    if (!history)
+    {
+        return;
+    }
+    if (history->size() >= AUTOMATIA_PLAYER_LEVEL_HISTORY_LIMIT)
+    {
+        history->erase(history->begin());
+    }
+    history->push_back(destination);
+    printlog(
+        "[Ladder Reverse] Restored failed transition entry for player %d: level %d (%s track, instance '%s'); personal back stack now has %zu entr%s.",
+        playerIndex,
+        destination.dungeonLevel,
+        destination.secretLevel ? "secret" : "regular",
+        destination.mapInstanceKey.c_str(),
+        history->size(),
+        history->size() == 1 ? "y" : "ies"
+    );
+}
+
+void prepareAutomatiaReverseReturnSpawn(
+    const int playerIndex,
+    const AutomatiaPlayerLevelVisit& destination
+)
+{
+    pendingAutomatiaSinglePlayerReverseReturn.playerIndex = playerIndex;
+    pendingAutomatiaSinglePlayerReverseReturn.visit = destination;
+    pendingAutomatiaSinglePlayerReverseReturn.pending =
+        destination.returnPlacement.valid;
+}
+
 void resetPersistentWorldSession()
 {
     const size_t clearedMaps =
@@ -3144,6 +3826,13 @@ void resetPersistentWorldSession()
     const size_t clearedWorldFlags =
         persistentWorldStoryState.worldFlags.size();
 
+    size_t clearedPlayerLevelHistory =
+        automatiaLegacyPartyLevelHistory.size();
+    for (const auto& history : automatiaPlayerLevelHistories)
+    {
+        clearedPlayerLevelHistory += history.second.size();
+    }
+
     persistentMapRemovalRegistry.clear();
     worldState.clear();
     for (AutomatiaSavedPlayerPlacement& placement : automatiaSavedPlayerPlacements)
@@ -3159,9 +3848,15 @@ void resetPersistentWorldSession()
     }
 
 
+    automatiaPlayerLevelHistories.clear();
+    automatiaLegacyPartyLevelHistory.clear();
+    pendingAutomatiaSinglePlayerReverseReturn =
+        PendingAutomatiaSinglePlayerReverseReturn{};
     persistentPlayerMinimapRegistry.clear();
     persistentLegacyMinimapRegistry.clear();
     persistentMinimapServerTransferId = 0;
+    persistentMinimapClearedMapKey.clear();
+    persistentMinimapClearedMapRevision = 0;
     resetClientPersistentMinimapSync();
     persistentWorldStoryState =
         PersistentWorldStoryState{};
@@ -3175,12 +3870,14 @@ void resetPersistentWorldSession()
     hydratePreservedAutomatiaWorldDocument();
 
     printlog(
-        "[Persistent World] Reset session registry; cleared %zu map state record(s), %zu quest(s), %zu NPC dialogue memory record(s), %zu world variable(s), and %zu world flag(s).",
+        "[Persistent World] Reset session registry; cleared %zu map state record(s), %zu quest(s), %zu NPC dialogue memory record(s), %zu world variable(s), %zu world flag(s), and %zu per-player level-history entr%s.",
         clearedMaps,
         clearedQuests,
         clearedNPCMemories,
         clearedWorldVariables,
-        clearedWorldFlags
+        clearedWorldFlags,
+        clearedPlayerLevelHistory,
+        clearedPlayerLevelHistory == 1 ? "y" : "ies"
     );
 }
 /*
@@ -3329,6 +4026,78 @@ static bool captureAutomatiaPersistentWorldDocument(
     document["map_instances"] = std::move(mergedMaps);
     document["saved_at_unix_ms"] =
         static_cast<std::uint64_t>(std::time(nullptr)) * 1000ULL;
+
+    auto saveLevelVisit = [](const AutomatiaPlayerLevelVisit& visit)
+    {
+        Json savedVisit = {
+            {"dungeon_level", visit.dungeonLevel},
+            {"secret_level", visit.secretLevel},
+            {"map_seed", visit.mapSeed}
+        };
+        if (!visit.mapInstanceKey.empty())
+        {
+            savedVisit["map_instance"] = visit.mapInstanceKey;
+        }
+        if (visit.hasReturnAnchor)
+        {
+            savedVisit["return_anchor"] = {
+                {"persistent_id", visit.returnAnchorPersistentID},
+                {"x", visit.returnAnchorX},
+                {"y", visit.returnAnchorY},
+                {"z", visit.returnAnchorZ}
+            };
+        }
+        if (visit.returnPlacement.valid)
+        {
+            savedVisit["return_position"] = {
+                {"x", visit.returnPlacement.x},
+                {"y", visit.returnPlacement.y},
+                {"z", visit.returnPlacement.z},
+                {"yaw", visit.returnPlacement.yaw},
+                {"pitch", visit.returnPlacement.pitch},
+                {"roll", visit.returnPlacement.roll}
+            };
+        }
+        return savedVisit;
+    };
+
+    document["player_level_histories"] = Json::object();
+    std::vector<std::string> historyIdentities;
+    historyIdentities.reserve(automatiaPlayerLevelHistories.size());
+    for (const auto& history : automatiaPlayerLevelHistories)
+    {
+        historyIdentities.push_back(history.first);
+    }
+    std::sort(historyIdentities.begin(), historyIdentities.end());
+    for (const std::string& identity : historyIdentities)
+    {
+        Json savedHistory = Json::array();
+        const AutomatiaPlayerLevelHistory& history =
+            automatiaPlayerLevelHistories.at(identity);
+        for (const AutomatiaPlayerLevelVisit& visit : history)
+        {
+            savedHistory.push_back(saveLevelVisit(visit));
+        }
+        document["player_level_histories"][identity] =
+            std::move(savedHistory);
+    }
+    if (document["player_level_histories"].empty())
+    {
+        document.erase("player_level_histories");
+    }
+
+    document["party_level_history"] = Json::array();
+    for (const AutomatiaPlayerLevelVisit& visit
+        : automatiaLegacyPartyLevelHistory)
+    {
+        document["party_level_history"].push_back(
+            saveLevelVisit(visit)
+        );
+    }
+    if (document["party_level_history"].empty())
+    {
+        document.erase("party_level_history");
+    }
 
     auto sortedIntegerSet = [](const auto& values)
     {
@@ -4046,6 +4815,24 @@ static void restorePersistentMinimap()
     {
         return;
     }
+
+    const WorldInstanceIdentity* activeIdentity =
+        worldState.activeIdentity();
+    const std::uint64_t mapRevision = activeIdentity
+        ? activeIdentity->revision
+        : 0;
+    if (persistentMinimapClearedMapKey != mapKey
+        || persistentMinimapClearedMapRevision != mapRevision)
+    {
+        std::memset(minimap, 0, sizeof(minimap));
+        persistentMinimapClearedMapKey = mapKey;
+        persistentMinimapClearedMapRevision = mapRevision;
+        printlog(
+            "[Persistent Minimap] Cleared live minimap for newly loaded map '%s' revision %llu.",
+            mapKey.c_str(),
+            static_cast<unsigned long long>(mapRevision));
+    }
+
     PersistentMinimapState* found =
         persistentMinimapStateForPlayer(playerIndex, mapKey);
     auto legacy = persistentLegacyMinimapRegistry.find(mapKey);
@@ -8971,6 +9758,172 @@ void applyPersistentMapRemovals()
         }
     }
 
+	/*
+	 * Procedural map generation creates raw editor sprites with persistentID 0.
+	 * Assign deterministic IDs before assignActions() so monsters, fountains,
+	 * traps, mechanisms, containers, furniture, decorations, exits, and room
+	 * template entities can transfer the same identity into their runtime form.
+	 *
+	 * Preserve the older generated-breakable ordering first so saves produced
+	 * by the previous breakable-only patch continue to resolve those IDs. Every
+	 * remaining generated raw sprite is then assigned in map entity-list order.
+	 * Barony already requires that order to match between host and client for
+	 * map-load UIDs, so it is deterministic for a shared floor seed.
+	 */
+	std::vector<Entity*> generatedBreakables;
+	std::unordered_set<Sint32> usedPersistentIDs;
+
+	for ( node_t* node = map.entities->first;
+		node != nullptr;
+		node = node->next )
+	{
+		Entity* entity =
+			static_cast<Entity*>(node->element);
+
+		if ( !entity )
+		{
+			continue;
+		}
+
+		if ( entity->persistentID > 0 )
+		{
+			usedPersistentIDs.insert(entity->persistentID);
+			continue;
+		}
+
+		if ( entity->sprite == 1 )
+		{
+			// Player Starts are reusable spawn infrastructure.
+			continue;
+		}
+
+		bool persistentBreakable =
+			entity->isDamageableCollider();
+
+		if ( !persistentBreakable
+			&& entity->sprite == 179 )
+		{
+			auto colliderData =
+				EditorEntityData_t::colliderData.find(
+					entity->colliderDamageTypes
+				);
+
+			if ( colliderData
+				!= EditorEntityData_t::colliderData.end()
+				&& colliderData->second.hasOverride("hp")
+				&& colliderData->second.getOverride("hp") > 0 )
+			{
+				persistentBreakable = true;
+			}
+		}
+
+		if ( persistentBreakable )
+		{
+			generatedBreakables.push_back(entity);
+		}
+	}
+
+	std::stable_sort(
+		generatedBreakables.begin(),
+		generatedBreakables.end(),
+		[](const Entity* first, const Entity* second)
+		{
+			return std::make_tuple(
+				first->x,
+				first->y,
+				first->z,
+				first->colliderDamageTypes,
+				first->colliderDecorationModel,
+				first->colliderDecorationRotation,
+				first->sprite,
+				first->colliderContainedEntity,
+				first->colliderHasCollision
+			) < std::make_tuple(
+				second->x,
+				second->y,
+				second->z,
+				second->colliderDamageTypes,
+				second->colliderDecorationModel,
+				second->colliderDecorationRotation,
+				second->sprite,
+				second->colliderContainedEntity,
+				second->colliderHasCollision
+			);
+		}
+	);
+
+	Sint32 nextGeneratedPersistentID =
+		GENERATED_MAP_ENTITY_PERSISTENT_ID_BASE;
+
+	auto assignGeneratedID =
+		[&usedPersistentIDs, &nextGeneratedPersistentID](Entity* entity) -> bool
+		{
+			while ( nextGeneratedPersistentID > 0
+				&& usedPersistentIDs.find(nextGeneratedPersistentID)
+					!= usedPersistentIDs.end() )
+			{
+				++nextGeneratedPersistentID;
+			}
+
+			if ( !entity || nextGeneratedPersistentID <= 0 )
+			{
+				return false;
+			}
+
+			entity->persistentID = nextGeneratedPersistentID;
+			usedPersistentIDs.insert(nextGeneratedPersistentID);
+			++nextGeneratedPersistentID;
+			return true;
+		};
+
+	Uint32 assignedGeneratedBreakables = 0;
+	for ( Entity* entity : generatedBreakables )
+	{
+		if ( entity->persistentID == 0
+			&& assignGeneratedID(entity) )
+		{
+			++assignedGeneratedBreakables;
+		}
+	}
+
+	Uint32 assignedGeneratedSprites = 0;
+	for ( node_t* node = map.entities->first;
+		node != nullptr;
+		node = node->next )
+	{
+		Entity* entity =
+			static_cast<Entity*>(node->element);
+
+		if ( !entity
+			|| entity->persistentID != 0
+			|| entity->sprite == 1 )
+		{
+			continue;
+		}
+
+		if ( !assignGeneratedID(entity) )
+		{
+			printlog(
+				"[Persistent World] Warning: exhausted generated map-sprite IDs in '%s'.",
+				mapKey.c_str()
+			);
+			break;
+		}
+
+		++assignedGeneratedSprites;
+	}
+
+	if ( assignedGeneratedBreakables > 0
+		|| assignedGeneratedSprites > 0 )
+	{
+		printlog(
+			"[Persistent World] Assigned %u stable generated breakable ID(s) and %u additional generated map-sprite ID(s) in '%s'.",
+			assignedGeneratedBreakables,
+			assignedGeneratedSprites,
+			mapKey.c_str()
+		);
+	}
+
     PersistentMapRemovalState& state =
         persistentMapRemovalRegistry[mapKey];
 	    /*
@@ -9063,6 +10016,13 @@ void applyPersistentMapRemovals()
 
         if ( !entity || entity->persistentID <= 0 )
         {
+            continue;
+        }
+
+        if ( isGeneratedMapEntityPersistentID(entity->persistentID) )
+        {
+            // Register generated IDs only after assignActions() confirms the
+            // raw marker survived or transferred its identity.
             continue;
         }
 		if ( entity->sprite == 1 )
@@ -11615,6 +12575,154 @@ printlog(
  * Restore runtime mechanism state after assignActions() has created
  * the lever handles and moving gate entities.
  */
+static void finalizeGeneratedMapEntityPersistence(
+    PersistentMapRemovalState& mapState,
+    const std::string& mapKey
+)
+{
+    Uint32 assignedRuntimeFallbackIDs = 0;
+    Uint32 registeredGeneratedIDs = 0;
+    Uint32 removedGeneratedEntities = 0;
+
+    /*
+     * Most raw map markers keep or transfer the 0x40000000-range identity
+     * assigned before assignActions(). A few generators replace a marker
+     * without forwarding that field. Catch the resulting real, stateful root
+     * entity here using a separate deterministic range. Transient particles,
+     * limbs, projectiles and trap-created boulders are deliberately excluded.
+     */
+    std::unordered_set<Sint32> usedPersistentIDs;
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+        if ( entity && entity->persistentID > 0 )
+        {
+            usedPersistentIDs.insert(entity->persistentID);
+        }
+    }
+
+    Sint32 nextRuntimePersistentID =
+        GENERATED_RUNTIME_ENTITY_PERSISTENT_ID_BASE;
+
+    auto isSupportedPersistentRuntimeRoot =
+        [](const Entity* entity) -> bool
+        {
+            if ( !entity
+                || entity->persistentID != 0
+                || entity->parent != 0 )
+            {
+                return false;
+            }
+
+            return entity->behavior == &actMonster
+                || entity->behavior == &actSwitch
+                || entity->behavior == &actSwitchWithTimer
+                || entity->behavior == &actGate
+                || entity->behavior == &actDoor
+                || entity->behavior == &actIronDoor
+                || entity->behavior == &actFurniture
+                || entity->behavior == &actColliderDecoration
+                || entity->behavior == &actPowerCrystal
+                || getPersistentBoulderTrapBehavior(entity) != 0
+                || entity->behavior == &::actSignalTimer
+                || entity->behavior == &::actSignalGateAND
+                || entity->behavior == &actBell
+                || entity->behavior == &actSink
+                || entity->behavior == &actFountain
+                || entity->behavior == &actCampfire
+                || entity->behavior == &actWallLock
+                || entity->behavior == &actWallButton
+                || entity->behavior == &actTrap
+                || entity->behavior == &actTrapPermanent
+                || entity->behavior == &actPedestalBase
+                || entity->behavior == &actChest
+                || entity->behavior == &actSummonTrap
+                || entity->behavior == &actItem
+                || entity->behavior == &actGoldBag;
+        };
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr;
+        node = node->next )
+    {
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( !isSupportedPersistentRuntimeRoot(entity) )
+        {
+            continue;
+        }
+
+        while ( nextRuntimePersistentID > 0
+            && usedPersistentIDs.find(nextRuntimePersistentID)
+                != usedPersistentIDs.end() )
+        {
+            ++nextRuntimePersistentID;
+        }
+
+        if ( nextRuntimePersistentID <= 0 )
+        {
+            printlog(
+                "[Persistent World] Warning: exhausted generated runtime-entity IDs in '%s'.",
+                mapKey.c_str()
+            );
+            break;
+        }
+
+        entity->persistentID = nextRuntimePersistentID;
+        usedPersistentIDs.insert(nextRuntimePersistentID);
+        ++nextRuntimePersistentID;
+        ++assignedRuntimeFallbackIDs;
+    }
+
+    for ( node_t* node = map.entities->first;
+        node != nullptr; )
+    {
+        node_t* nextNode = node->next;
+        Entity* entity =
+            static_cast<Entity*>(node->element);
+
+        if ( entity
+            && isGeneratedMapEntityPersistentID(entity->persistentID) )
+        {
+            if ( mapState.removedEntityIDs.find(entity->persistentID)
+                != mapState.removedEntityIDs.end() )
+            {
+                printlog(
+                    "[Persistent World] Removing previously deleted generated entity ID %d, sprite %d, from '%s' after action assignment.",
+                    entity->persistentID,
+                    entity->sprite,
+                    mapKey.c_str()
+                );
+                list_RemoveNode(entity->mynode);
+                ++removedGeneratedEntities;
+            }
+            else if ( mapState.originalEntityIDs.insert(entity->persistentID).second )
+            {
+                ++registeredGeneratedIDs;
+            }
+        }
+
+        node = nextNode;
+    }
+
+    if ( assignedRuntimeFallbackIDs > 0
+        || registeredGeneratedIDs > 0
+        || removedGeneratedEntities > 0 )
+    {
+        printlog(
+            "[Persistent World] Finalized generated entities for '%s': %u runtime fallback ID(s) assigned, %u persistent ID(s) registered, %u removal(s) applied.",
+            mapKey.c_str(),
+            assignedRuntimeFallbackIDs,
+            registeredGeneratedIDs,
+            removedGeneratedEntities
+        );
+    }
+}
+
 void applyPersistentMechanismStates()
 {
     const std::string mapKey =
@@ -11662,6 +12770,11 @@ void applyPersistentMechanismStates()
 
 PersistentMapRemovalState& mapState =
     mapIterator->second;
+
+    finalizeGeneratedMapEntityPersistence(
+        mapState,
+        mapKey
+    );
 
     Uint32 restoredLevers = 0;
     Uint32 restoredTimedLevers = 0;
@@ -14153,6 +15266,196 @@ static void capturePersistentMapRemovals()
     );
 }
 
+static bool placePlayerAtAutomatiaReturn(
+    const int playerIndex,
+    const AutomatiaPlayerLevelVisit& destination
+)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || client_disconnected[playerIndex]
+        || !players[playerIndex]
+        || !players[playerIndex]->entity
+        || !destination.returnPlacement.valid)
+    {
+        return false;
+    }
+    const WorldInstanceIdentity* activeIdentity =
+        worldState.activeIdentity();
+    if (!activeIdentity
+        || (!destination.mapInstanceKey.empty()
+            && activeIdentity->key() != destination.mapInstanceKey)
+        || destination.dungeonLevel != currentlevel
+        || destination.secretLevel != secretlevel)
+    {
+        printlog(
+            "[Ladder Reverse] Refused stale return placement for player %d: requested '%s' level %d (%s), active '%s' level %d (%s).",
+            playerIndex,
+            destination.mapInstanceKey.c_str(),
+            destination.dungeonLevel,
+            destination.secretLevel ? "secret" : "regular",
+            activeIdentity ? activeIdentity->key().c_str() : "unknown",
+            currentlevel,
+            secretlevel ? "secret" : "regular"
+        );
+        return false;
+    }
+
+    real_t anchorDeltaX = 0.0;
+    real_t anchorDeltaY = 0.0;
+    real_t anchorDeltaZ = 0.0;
+    if (destination.hasReturnAnchor
+        && destination.returnAnchorPersistentID > 0)
+    {
+        for (node_t* node = map.entities->first; node; node = node->next)
+        {
+            Entity* entity = static_cast<Entity*>(node->element);
+            if (entity
+                && entity->persistentID
+                    == destination.returnAnchorPersistentID)
+            {
+                anchorDeltaX = entity->x - destination.returnAnchorX;
+                anchorDeltaY = entity->y - destination.returnAnchorY;
+                anchorDeltaZ = entity->z - destination.returnAnchorZ;
+                break;
+            }
+        }
+    }
+
+    const real_t x = static_cast<real_t>(
+        destination.returnPlacement.x + anchorDeltaX);
+    const real_t y = static_cast<real_t>(
+        destination.returnPlacement.y + anchorDeltaY);
+    const real_t z = static_cast<real_t>(
+        destination.returnPlacement.z + anchorDeltaZ);
+    const real_t yaw = static_cast<real_t>(
+        destination.returnPlacement.yaw);
+    const real_t pitch = static_cast<real_t>(
+        destination.returnPlacement.pitch);
+    const real_t roll = static_cast<real_t>(
+        destination.returnPlacement.roll);
+
+    bool placementPassable = false;
+    if (std::isfinite(static_cast<double>(x))
+        && std::isfinite(static_cast<double>(y))
+        && std::isfinite(static_cast<double>(z))
+        && std::isfinite(static_cast<double>(yaw))
+        && x >= 0.0 && y >= 0.0
+        && x < static_cast<real_t>(map.width) * 16.0
+        && y < static_cast<real_t>(map.height) * 16.0)
+    {
+        const Sint32 tileX = static_cast<Sint32>(x / 16.0);
+        const Sint32 tileY = static_cast<Sint32>(y / 16.0);
+        const std::size_t obstacleIndex =
+            OBSTACLELAYER
+            + tileY * MAPLAYERS
+            + tileX * MAPLAYERS * map.height;
+        placementPassable = map.tiles
+            && map.tiles[obstacleIndex] == 0;
+    }
+    if (!placementPassable)
+    {
+        printlog(
+            "[Ladder Reverse] Return placement for player %d is blocked or outside '%s'; retaining the safe Player Start.",
+            playerIndex,
+            activeIdentity->key().c_str()
+        );
+        return false;
+    }
+
+    Entity* playerEntity = players[playerIndex]->entity;
+    playerEntity->x = x;
+    playerEntity->y = y;
+    playerEntity->z = z;
+    playerEntity->yaw = yaw;
+    playerEntity->pitch = pitch;
+    playerEntity->roll = roll;
+    playerEntity->vel_x = 0.0;
+    playerEntity->vel_y = 0.0;
+    playerEntity->vel_z = 0.0;
+    playerEntity->new_x = x;
+    playerEntity->new_y = y;
+    playerEntity->new_z = z;
+    playerEntity->new_yaw = yaw;
+    playerEntity->new_pitch = pitch;
+    playerEntity->new_roll = roll;
+    playerEntity->lerp_ox = x;
+    playerEntity->lerp_oy = y;
+    playerEntity->bNeedsRenderPositionInit = true;
+    for (Entity* bodypart : playerEntity->bodyparts)
+    {
+        if (bodypart)
+        {
+            bodypart->bNeedsRenderPositionInit = true;
+        }
+    }
+    players[playerIndex]->player_last_x = x;
+    players[playerIndex]->player_last_y = y;
+
+    if (multiplayer == SERVER
+        && playerIndex > 0
+        && !players[playerIndex]->isLocalPlayer()
+        && net_packet
+        && net_packet->data)
+    {
+        std::memcpy(net_packet->data, "TNSP", 4);
+        SDLNet_Write32(
+            static_cast<Sint32>(x * 32.0),
+            &net_packet->data[4]
+        );
+        SDLNet_Write32(
+            static_cast<Sint32>(y * 32.0),
+            &net_packet->data[8]
+        );
+        SDLNet_Write32(
+            static_cast<Sint32>(z * 32.0),
+            &net_packet->data[12]
+        );
+        SDLNet_Write32(
+            static_cast<Sint32>(yaw * 256.0),
+            &net_packet->data[16]
+        );
+        net_packet->address.host =
+            net_clients[playerIndex - 1].host;
+        net_packet->address.port =
+            net_clients[playerIndex - 1].port;
+        net_packet->len = 20;
+        sendPacketSafe(
+            net_sock,
+            -1,
+            net_packet,
+            playerIndex - 1
+        );
+    }
+
+    printlog(
+        "[Ladder Reverse] Restored only player %d beside the previous exit in '%s' at %.2f, %.2f, %.2f.",
+        playerIndex,
+        activeIdentity->key().c_str(),
+        x,
+        y,
+        z
+    );
+    return true;
+}
+
+static bool placePendingAutomatiaSinglePlayerReverseReturn()
+{
+    if (!pendingAutomatiaSinglePlayerReverseReturn.pending)
+    {
+        return false;
+    }
+    const int playerIndex =
+        pendingAutomatiaSinglePlayerReverseReturn.playerIndex;
+    const AutomatiaPlayerLevelVisit destination =
+        pendingAutomatiaSinglePlayerReverseReturn.visit;
+    pendingAutomatiaSinglePlayerReverseReturn =
+        PendingAutomatiaSinglePlayerReverseReturn{};
+    return placePlayerAtAutomatiaReturn(
+        playerIndex,
+        destination
+    );
+}
+
 static bool placePlayersAtCustomTunnel(
     const Sint32 destinationTunnelID,
     const bool* playerMask = nullptr
@@ -14391,19 +15694,55 @@ static bool processAutomatiaTransition(
 		return false;
 	}
 
-	const std::string fullMapPath =
-		physfsFormatMapName(transition.destinationMap.c_str());
-	if ( fullMapPath.empty() )
+	AutomatiaPlayerLevelVisit sourceVisit;
+	const bool sourceVisitReady = transition.recordSourceVisit
+		&& buildAutomatiaPlayerLevelVisit(
+			player,
+			*source,
+			*sourceEntity,
+			nullptr,
+			sourceVisit
+		);
+
+	std::string fullMapPath;
+	WorldInstanceIdentity destinationIdentity;
+	if ( !transition.destinationInstanceKey.empty() )
+	{
+		if ( !parseAutomatiaMapInstanceKey(
+			transition.destinationInstanceKey,
+			destinationIdentity
+		) )
+		{
+			error = "destination map-instance identity is invalid";
+			return false;
+		}
+		if ( !transition.destinationGenerated )
+		{
+			fullMapPath = physfsFormatMapName(
+				destinationIdentity.mapFile.c_str()
+			);
+		}
+	}
+	else
+	{
+		fullMapPath =
+			physfsFormatMapName(transition.destinationMap.c_str());
+		if ( fullMapPath.empty() )
+		{
+			error = "destination map could not be resolved";
+			return false;
+		}
+		const std::string mapFile =
+			std::filesystem::path(fullMapPath).filename().string();
+		if ( !destinationIdentity.set(mapFile, "world") )
+		{
+			error = "destination identity is invalid";
+			return false;
+		}
+	}
+	if ( !transition.destinationGenerated && fullMapPath.empty() )
 	{
 		error = "destination map could not be resolved";
-		return false;
-	}
-	const std::string mapFile =
-		std::filesystem::path(fullMapPath).filename().string();
-	WorldInstanceIdentity destinationIdentity;
-	if ( !destinationIdentity.set(mapFile, "world") )
-	{
-		error = "destination identity is invalid";
 		return false;
 	}
 	constexpr std::size_t customTransitionFixedBytes = 14 + 1 + 4 + 6;
@@ -14423,10 +15762,27 @@ static bool processAutomatiaTransition(
 		}
 		bool playerMask[MAXPLAYERS] = {};
 		playerMask[player] = true;
-		placePlayersAtCustomTunnel(
-			transition.destinationTunnelID,
-			playerMask
-		);
+		if ( transition.hasReturnPlacement )
+		{
+			placePlayerAtAutomatiaReturn(
+				player,
+				transition.reverseVisit
+			);
+		}
+		else
+		{
+			placePlayersAtCustomTunnel(
+				transition.destinationTunnelID,
+				playerMask
+			);
+		}
+		if ( sourceVisitReady )
+		{
+			appendAutomatiaPlayerLevelVisit(
+				player,
+				sourceVisit
+			);
+		}
 		if ( !initialActiveKey.empty() && initialActiveKey != sourceKey )
 		{
 			worldState.activate(initialActiveKey);
@@ -14438,12 +15794,21 @@ static bool processAutomatiaTransition(
 	const bool destinationWasKnown = destination != nullptr;
 	if ( !destination || !destination->loadedMap )
 	{
-		if ( !worldState.loadDetachedMap(
-			fullMapPath,
-			mapFile,
-			"world",
-			error
-		) )
+		const bool loaded = transition.destinationGenerated
+			? worldState.loadDetachedGeneratedLevel(
+				destinationIdentity,
+				transition.destinationLevel,
+				transition.destinationMapSeed,
+				transition.destinationSecret,
+				error
+			)
+			: worldState.loadDetachedMap(
+				fullMapPath,
+				destinationIdentity.mapFile,
+				destinationIdentity.instanceId,
+				error
+			);
+		if ( !loaded )
 		{
 			return false;
 		}
@@ -14454,22 +15819,40 @@ static bool processAutomatiaTransition(
 		error = "destination instance is not loaded";
 		return false;
 	}
+	if ( !transition.destinationInstanceKey.empty()
+		&& destination->runtimeInitialized
+		&& (destination->dungeonLevel != transition.destinationLevel
+			|| destination->secretLevel != transition.destinationSecret
+			|| destination->mapSeed != transition.destinationMapSeed) )
+	{
+		error = "loaded destination metadata does not match the player's route history";
+		return false;
+	}
 	// Loading a previously unknown destination can insert into WorldState's
 	// unordered registry and invalidate pointers obtained before that insert.
 	// Reacquire the source instance (and its player entity) by stable key.
 	source = worldState.find(sourceKey);
 	sourceEntity = worldState.playerEntityFor(sourceKey, player);
-	if ( !source || !source->loadedMap || !sourceEntity )
+	destination = worldState.find(destinationKey);
+	if ( !source || !source->loadedMap || !sourceEntity
+		|| !destination || !destination->loadedMap )
 	{
-		error = "source instance changed while loading the destination";
+		error = "source or destination instance changed while loading";
 		restoreInitialInstance();
 		return false;
 	}
-	if ( !destination->runtimeInitialized && !destinationWasKnown )
+	if ( !destination->runtimeInitialized )
 	{
 		destination->dungeonLevel = transition.destinationLevel;
-		destination->mapSeed = local_rng.rand();
 		destination->secretLevel = transition.destinationSecret;
+		if ( !transition.destinationInstanceKey.empty() )
+		{
+			destination->mapSeed = transition.destinationMapSeed;
+		}
+		else if ( !destinationWasKnown )
+		{
+			destination->mapSeed = local_rng.rand();
+		}
 	}
 	if ( !worldState.activate(sourceKey) )
 	{
@@ -14500,6 +15883,21 @@ static bool processAutomatiaTransition(
 			if ( !follower || !followerStats || follower->behavior != &actMonster )
 			{
 				continue;
+			}
+			/*
+			 * Match Barony's original whole-floor follower transfer. A monster
+			 * can temporarily move its weapon or shield out of the equipped slot
+			 * during a special attack. Finish that temporary state before copying
+			 * the authoritative inventory/equipment loadout.
+			 */
+			if ( static_cast<int>(follower->monsterSpecialAttackUnequipSafeguard) > 0 )
+			{
+				follower->handleMonsterSpecialAttack(
+					followerStats,
+					nullptr,
+					0.0,
+					true
+				);
 			}
 			transferredFollowers.push_back(TransferredFollower{
 				follower,
@@ -14609,7 +16007,7 @@ static bool processAutomatiaTransition(
 	{
 		sendPersistentWorldSnapshotToClient(
 			player,
-			transition.destinationMap
+			destinationKey
 		);
 		std::memcpy(net_packet->data, "LVLC", 4);
 		net_packet->data[4] = transition.destinationSecret;
@@ -14640,10 +16038,20 @@ static bool processAutomatiaTransition(
 
 	// LVLC must enter the reliable queue before TNSP, otherwise the old
 	// source-map entity could consume the destination position.
-	placePlayersAtCustomTunnel(
-		transition.destinationTunnelID,
-		playerMask
-	);
+	if ( transition.hasReturnPlacement )
+	{
+		placePlayerAtAutomatiaReturn(
+			player,
+			transition.reverseVisit
+		);
+	}
+	else
+	{
+		placePlayersAtCustomTunnel(
+			transition.destinationTunnelID,
+			playerMask
+		);
+	}
 	destinationEntity = players[player]->entity;
 	if (destinationEntity
 		&& destinationEntity->behavior == &actPlayer
@@ -14739,6 +16147,14 @@ static bool processAutomatiaTransition(
 			printlog("[World State] Warning: unable to transfer one follower for player %d.", player);
 			continue;
 		}
+		/*
+		 * summonMonster() creates a fresh Stat and leaves MONSTER_INIT at 0.
+		 * The copied follower Stat already contains the authoritative inventory
+		 * and equipped pointers, so mark only the stats as initialized. The next
+		 * actMonster() pass will still build the species bodyparts, but its
+		 * init<Type>() routine will not randomize or overwrite that loadout.
+		 */
+		follower->skill[3] = 1;
 		list_RemoveNode(follower->children.last);
 		node_t* statNode = list_AddNodeLast(&follower->children);
 		statNode->element = transfer.stats.release();
@@ -14877,6 +16293,13 @@ static bool processAutomatiaTransition(
 	{
 		worldState.activate(initialActiveKey);
 	}
+	if ( sourceVisitReady )
+	{
+		appendAutomatiaPlayerLevelVisit(
+			player,
+			std::move(sourceVisit)
+		);
+	}
 	printlog(
 		"[World State] Player %d transitioned independently from '%s' to '%s'.",
 		player,
@@ -14900,6 +16323,14 @@ static void processPendingAutomatiaTransitions()
 		std::string error;
 		if ( !processAutomatiaTransition(transition, error) )
 		{
+			if ( !transition.recordSourceVisit
+				&& !transition.destinationInstanceKey.empty() )
+			{
+				restoreAutomatiaPreviousPlayerLevel(
+					transition.playerIndex,
+					transition.reverseVisit
+				);
+			}
 			printlog(
 				"[World State] Independent transition for player %d failed: %s.",
 				transition.playerIndex,
@@ -17325,6 +18756,7 @@ void gameLogic(void)
 							numplayers = 0;
 							assignActions(&map);
 							applyPersistentMechanismStates();
+							placePendingAutomatiaSinglePlayerReverseReturn();
 							if ( requestedTunnelID > 0 )
 							{
 								placePlayersAtCustomTunnel(
@@ -21785,14 +23217,19 @@ void drawAllPlayerCameras() {
 
 							real_t x = camera.x;
 							real_t y = camera.y;
+							real_t z = camera.z;
 							real_t ang = camera.ang;
 
-							camera.x = Player::getPlayerInteractEntity(i)->x / 16.0;
-							camera.y = Player::getPlayerInteractEntity(i)->y / 16.0;
-							camera.ang = Player::getPlayerInteractEntity(i)->yaw;
+							Entity* sharedViewEntity =
+								Player::getPlayerInteractEntity(i);
+							camera.x = sharedViewEntity->x / 16.0;
+							camera.y = sharedViewEntity->y / 16.0;
+							camera.z = sharedViewEntity->z * 2.0 - 2.5;
+							camera.ang = sharedViewEntity->yaw;
 							raycast(camera, minimap, false); // update minimap from other players' perspectives, player or ghost
 							camera.x = x;
 							camera.y = y;
+							camera.z = z;
 							camera.ang = ang;
 						}
 					}

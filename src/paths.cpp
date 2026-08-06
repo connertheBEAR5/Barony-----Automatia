@@ -467,7 +467,9 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 
 	// for boulders falling and checking if a player can reach the ladder.
 	bool playerCheckPathToExit = (my && my->behavior == &actPlayer
-		&& target && (target->behavior == &actLadder || target->behavior == &actPortal));
+		&& target && (target->behavior == &actLadder
+			|| target->behavior == &actLadderReverse
+			|| target->behavior == &actPortal));
 	bool playerCheckAchievement = (my && my->behavior == &actPlayer
 		&& target && (target->behavior == &actBomb || target->behavior == &actPlayerLimb || target->behavior == &actItem || target->behavior == &actSwitch));
 

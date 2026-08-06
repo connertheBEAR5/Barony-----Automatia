@@ -1854,7 +1854,7 @@ std::vector<const char*> spriteEditorNameStrings =
 	"HEADSTONE",
 	"NULL",
 	"LAVA",
-	"NOT USED",
+	"LADDER REVERSE (UP ONE LEVEL)",
 	"LADDER HOLE",
 	"BOULDER",
 	"PORTAL",
