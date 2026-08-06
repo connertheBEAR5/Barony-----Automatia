@@ -67,6 +67,8 @@ extern Uint32 joyimpulses[NUM_JOY_IMPULSES]; //Joystick/gamepad only impulses.
 bool handleEvents(void);
 void startMessages();
 void resetPersistentWorldSession();
+bool automatiaMagicGrimoireHasGenerated();
+void automatiaMarkMagicGrimoireGenerated();
 
 struct AutomatiaPlayerReturnPlacement
 {

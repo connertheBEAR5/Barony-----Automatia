@@ -36972,6 +36972,13 @@ void Player::Hotbar_t::updateHotbar()
         false
     );
     bool inventoryMagicHotbarSwapPressed = false;
+    const bool hasMagicGrimoire = hasEquippedMagicGrimoire();
+
+    if (magicHotbarActive && !hasMagicGrimoire)
+    {
+        magicHotbarToggleLatched = false;
+        setMagicHotbarActive(false, true);
+    }
 
     if ( !player.shootmode
         && player.entity
@@ -37012,7 +37019,10 @@ void Player::Hotbar_t::updateHotbar()
 
         if ( inventoryMagicHotbarSwapPressed )
         {
-            setMagicHotbarActive(!magicHotbarActive, true);
+            setMagicHotbarActive(
+                hasMagicGrimoire && !magicHotbarActive,
+                true
+            );
         }
     }
 
@@ -37020,21 +37030,32 @@ void Player::Hotbar_t::updateHotbar()
         && player.entity
         && !player.ghost.isActive() )
     {
-        const bool magicHotbarHeld =
-            Input::inputs[player.playernum].binary(
-                "Magic Hotbar"
-            );
-        const bool magicHotbarPressed =
-            Input::inputs[player.playernum].binaryToggle(
-                "Magic Hotbar"
-            );
+        Input& playerInput = Input::inputs[player.playernum];
+        const bool magicHotbarBindingHeld =
+            playerInput.binary("Magic Hotbar");
+        const bool magicHotbarBindingPressed =
+            playerInput.binaryToggle("Magic Hotbar");
+        const bool grimoireHoldInput =
+            playerInput.binary("Defend");
+        const bool grimoireHoldPressed =
+            playerInput.binaryToggle("Defend");
+        const bool magicHotbarHeld = hasMagicGrimoire
+            && (magicHotbarBindingHeld || grimoireHoldInput);
+        const bool magicHotbarPressed = hasMagicGrimoire
+            && (magicHotbarBindingPressed || grimoireHoldPressed);
 
         if ( *cvar_magic_hotbar_toggle_mode )
         {
             if ( magicHotbarPressed )
             {
-                Input::inputs[player.playernum]
-                    .consumeBinaryToggle("Magic Hotbar");
+                if (magicHotbarBindingPressed)
+                {
+                    playerInput.consumeBinaryToggle("Magic Hotbar");
+                }
+                if (grimoireHoldPressed)
+                {
+                    playerInput.consumeBinaryToggle("Defend");
+                }
                 magicHotbarToggleLatched =
                     !magicHotbarToggleLatched;
                 setMagicHotbarActive(

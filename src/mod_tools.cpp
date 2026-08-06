@@ -32,6 +32,7 @@ See LICENSE for details.
 #include <thread>
 #include <future>
 #include <fstream>
+#include <utility>
 
 MonsterStatCustomManager monsterStatCustomManager;
 MonsterCurveCustomManager monsterCurveCustomManager;
@@ -886,6 +887,53 @@ void hashSpellProp(Uint32& hash, Uint32& hashShift, real_t& toSet)
 	hash += (Uint32)(static_cast<Uint32>(abs(toSet) * 100000) << (hashShift % 32)); ++hashShift;
 }
 
+static void initializeMagicGrimoireItemDefinition()
+{
+	ItemGeneric& grimoire = items[MAGIC_GRIMOIRE];
+	const ItemGeneric& visualSource = items[SPELLBOOK_MAGICMISSILE];
+
+	grimoire.index = visualSource.index;
+	grimoire.indexShort = visualSource.indexShort;
+	grimoire.fpindex = visualSource.fpindex;
+	grimoire.variations = visualSource.variations;
+	grimoire.weight = 5;
+	grimoire.gold_value = 1000;
+	grimoire.category = TOOL;
+	grimoire.level = -1;
+	grimoire.item_slot = ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD;
+	grimoire.attributes.clear();
+	grimoire.attributes["no_stack"] = 1;
+	grimoire.tooltip = "tooltip_magic_grimoire";
+
+	list_FreeAll(&grimoire.images);
+	grimoire.images.first = nullptr;
+	grimoire.images.last = nullptr;
+	for (node_t* sourceNode = visualSource.images.first;
+		sourceNode; sourceNode = sourceNode->next)
+	{
+		const string_t* source =
+			static_cast<const string_t*>(sourceNode->element);
+		if (!source || !source->data)
+		{
+			continue;
+		}
+
+		string_t* destination =
+			static_cast<string_t*>(malloc(sizeof(string_t)));
+		const size_t length = strlen(source->data) + 1;
+		destination->data =
+			static_cast<char*>(malloc(sizeof(char) * length));
+		memcpy(destination->data, source->data, length);
+		destination->lines = source->lines;
+
+		node_t* destinationNode = list_AddNodeLast(&grimoire.images);
+		destinationNode->element = destination;
+		destinationNode->deconstructor = &stringDeconstructor;
+		destinationNode->size = sizeof(string_t);
+		destination->node = destinationNode;
+	}
+}
+
 void ItemTooltips_t::readItemsFromFile()
 {
 	printlog("loading items...\n");
@@ -1148,6 +1196,34 @@ void ItemTooltips_t::readItemsFromFile()
 				});
 			itemValueTableByCategory[items[i].category].insert(lower, pair);
 		}*/
+	}
+
+	// Keep every existing JSON item ID stable. The Grimoire is the final
+	// code-defined vanilla item and borrows the existing tome assets.
+	initializeMagicGrimoireItemDefinition();
+
+	// The unmodified items.json ends immediately before MAGIC_GRIMOIRE.
+	// Append matching tooltip metadata so legacy code may continue indexing
+	// tmpItems directly by vanilla item ID without reading past the vector.
+	if ( static_cast<std::size_t>(TOME_MYSTICISM) < tmpItems.size() )
+	{
+		tmpItem_t grimoireTooltip = tmpItems[TOME_MYSTICISM];
+		grimoireTooltip.internalName = "magic_grimoire";
+		grimoireTooltip.itemId = MAGIC_GRIMOIRE;
+		grimoireTooltip.gold = items[MAGIC_GRIMOIRE].gold_value;
+		grimoireTooltip.weight = items[MAGIC_GRIMOIRE].weight;
+		grimoireTooltip.itemLevel = items[MAGIC_GRIMOIRE].level;
+		grimoireTooltip.category = "TOOL";
+		grimoireTooltip.equipSlot = "offhand";
+		grimoireTooltip.attributes = items[MAGIC_GRIMOIRE].attributes;
+		grimoireTooltip.tooltip = items[MAGIC_GRIMOIRE].tooltip;
+		grimoireTooltip.iconLabelPath.clear();
+
+		if ( tmpItems.size() <= static_cast<std::size_t>(MAGIC_GRIMOIRE) )
+		{
+			tmpItems.resize(static_cast<std::size_t>(MAGIC_GRIMOIRE) + 1);
+		}
+		tmpItems[MAGIC_GRIMOIRE] = std::move(grimoireTooltip);
 	}
 
 	spellItems.clear();
@@ -1604,7 +1680,8 @@ void ItemTooltips_t::readItemLocalizationsFromFile(bool forceLoadBaseDirectory)
 	}
 
 	printlog("[JSON]: Successfully read %d item names, %d spell names from '%s'", itemNameLocalizations.size(), spellNameLocalizations.size(), inputPath.c_str());
-	assert(itemNameLocalizations.size() == (NUMITEMS));
+	// MAGIC_GRIMOIRE is intentionally absent from the unmodified JSON.
+	assert(itemNameLocalizations.size() >= (NUMITEMS - 1));
 #ifndef NDEBUG
 	//assert(spellNameLocalizations.size() == (NUM_SPELLS - 1)); // ignore SPELL_NONE
 #endif
@@ -1623,6 +1700,9 @@ void ItemTooltips_t::readItemLocalizationsFromFile(bool forceLoadBaseDirectory)
 			items[item.itemId].setUnidentifiedName(itemNameLocalizations[item.internalName].name_unidentified);
 		}
 	}
+	items[MAGIC_GRIMOIRE].setIdentifiedName("Magic Grimoire");
+	items[MAGIC_GRIMOIRE].setUnidentifiedName("Magic Grimoire");
+
 	for ( auto& spell : spellItems )
 	{
 		spell.second.name = spellNameLocalizations[spell.second.internalName];
@@ -2061,6 +2141,35 @@ void ItemTooltips_t::readTooltipsFromFile(bool forceLoadBaseDirectory)
 
 			tooltips[tooltipType_itr->name.GetString()] = tooltip;
 		}
+	}
+
+	// The Grimoire is code-defined rather than present in item_tooltips.json.
+	// Clone the normal item tooltip layout so weight/value and all standard
+	// presentation remain intact, then replace only the placeholder description
+	// with lore text that does not expose the hotbar mechanic as a tutorial.
+	auto defaultTooltip = tooltips.find("tooltip_default");
+	if ( defaultTooltip != tooltips.end() )
+	{
+		ItemTooltip_t grimoireTooltip = defaultTooltip->second;
+		grimoireTooltip.descriptionText.clear();
+		grimoireTooltip.descriptionText.emplace_back(
+			"An ancient violet grimoire etched with the faded name "
+			"of a former wielder."
+		);
+
+		// The Grimoire's lore needs more horizontal room than the default
+		// utility-item tooltip. Keep the standard layout, but widen only this
+		// item so the description and offhand prompt remain separate.
+		constexpr int magicGrimoireTooltipMinWidth = 320;
+		constexpr int magicGrimoireTooltipMaxWidth = 360;
+		grimoireTooltip.minWidths["magic_grimoire"] =
+			magicGrimoireTooltipMinWidth;
+		grimoireTooltip.maxWidths["magic_grimoire"] =
+			magicGrimoireTooltipMaxWidth;
+		grimoireTooltip.headerMaxWidths["magic_grimoire"] =
+			magicGrimoireTooltipMaxWidth;
+
+		tooltips["tooltip_magic_grimoire"] = std::move(grimoireTooltip);
 	}
 
 	printlog("[JSON]: Successfully read %d item tooltips from '%s'", tooltips.size(), inputPath.c_str());

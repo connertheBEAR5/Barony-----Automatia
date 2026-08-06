@@ -1318,6 +1318,7 @@ char itemNameStrings[NUM_ITEM_STRINGS][32] =
 	"spellbook_sanctuary",
 	"spellbook_holy_beam",
 	"spellbook_dominate",
+	"magic_grimoire",
 	""
 };
 

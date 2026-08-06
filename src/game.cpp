@@ -1064,6 +1064,17 @@ static PersistentWorldStoryState
     persistentWorldStoryState;
 static AutomatiaSave::Json preservedAutomatiaWorldDocument;
 static AutomatiaSave::Json pendingAutomatiaWorldDocument;
+static bool automatiaMagicGrimoireGenerated = false;
+
+bool automatiaMagicGrimoireHasGenerated()
+{
+	return automatiaMagicGrimoireGenerated;
+}
+
+void automatiaMarkMagicGrimoireGenerated()
+{
+	automatiaMagicGrimoireGenerated = true;
+}
 
 /*
  * Per-character level back stacks.
@@ -2201,6 +2212,13 @@ void hydratePreservedAutomatiaWorldDocument()
     if (!preservedAutomatiaWorldDocument.is_object())
     {
         return;
+    }
+
+    if (preservedAutomatiaWorldDocument.contains("magic_grimoire_generated")
+        && preservedAutomatiaWorldDocument["magic_grimoire_generated"].is_boolean())
+    {
+        automatiaMagicGrimoireGenerated =
+            preservedAutomatiaWorldDocument["magic_grimoire_generated"].get<bool>();
     }
 
     auto restoreLevelVisit = [](
@@ -3848,6 +3866,7 @@ void resetPersistentWorldSession()
     }
 
 
+    automatiaMagicGrimoireGenerated = false;
     automatiaPlayerLevelHistories.clear();
     automatiaLegacyPartyLevelHistory.clear();
     pendingAutomatiaSinglePlayerReverseReturn =
@@ -4026,6 +4045,8 @@ static bool captureAutomatiaPersistentWorldDocument(
     document["map_instances"] = std::move(mergedMaps);
     document["saved_at_unix_ms"] =
         static_cast<std::uint64_t>(std::time(nullptr)) * 1000ULL;
+    document["magic_grimoire_generated"] =
+        automatiaMagicGrimoireGenerated;
 
     auto saveLevelVisit = [](const AutomatiaPlayerLevelVisit& visit)
     {

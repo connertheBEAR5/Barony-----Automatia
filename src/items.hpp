@@ -545,6 +545,7 @@ typedef enum ItemType
 	SPELLBOOK_SANCTUARY,
 	SPELLBOOK_HOLY_BEAM,
 	SPELLBOOK_DOMINATE,
+	MAGIC_GRIMOIRE,
 	ITEM_ENUM_MAX
 } ItemType;
 const int NUMITEMS = ITEM_ENUM_MAX;
@@ -1061,6 +1062,7 @@ enum SpellbookColors
 };
 
 int getItemVariationFromSpellbookOrTome(const Item& item);
+int getMagicGrimoireVisualVariation();
 
 #ifdef EDITOR
 SDL_Surface* itemSprite(Item* const item);

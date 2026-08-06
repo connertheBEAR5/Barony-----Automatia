@@ -4196,11 +4196,16 @@ void actHudShield(Entity* my)
 		hideShield = true;
 	}
 
+	const bool magicGrimoire =
+		stats[HUDSHIELD_PLAYERNUM]->shield
+		&& stats[HUDSHIELD_PLAYERNUM]->shield->type == MAGIC_GRIMOIRE;
 	bool spellbook = false;
 	bool quiver = false;
 	bool foci = false;
 	bool duck = false;
-	if ( stats[HUDSHIELD_PLAYERNUM]->shield && itemCategory(stats[HUDSHIELD_PLAYERNUM]->shield) == SPELLBOOK )
+	if ( stats[HUDSHIELD_PLAYERNUM]->shield
+		&& (itemCategory(stats[HUDSHIELD_PLAYERNUM]->shield) == SPELLBOOK
+			|| magicGrimoire) )
 	{
 		spellbook = true;
 		if ( playerRace == CREATURE_IMP )
@@ -4224,6 +4229,16 @@ void actHudShield(Entity* my)
 	{
 		duck = true;
 	}
+
+	const bool grimoireOpen = magicGrimoire
+		&& players[HUDSHIELD_PLAYERNUM]
+		&& players[HUDSHIELD_PLAYERNUM]->hotbar.magicHotbarActive;
+	const bool spellbookOpen =
+		cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook
+		|| grimoireOpen;
+	const bool hideShieldForBasicCast =
+		cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast()
+		&& !grimoireOpen;
 
 	// when reverting form, render shield as invisible for 2 ticks as it's position needs to settle.
 	if ( HUD_LASTSHAPESHIFT_FORM != playerRace )
@@ -4311,12 +4326,12 @@ void actHudShield(Entity* my)
 		my->flags[INVISIBLE] = true;
 		my->flags[INVISIBLE_DITHER] = false;
 	}
-	else if ( cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast() )
+	else if ( hideShieldForBasicCast )
 	{
 		my->flags[INVISIBLE] = true;
 		my->flags[INVISIBLE_DITHER] = false;
 	}
-	else if ( cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook && !spellbook )
+	else if ( spellbookOpen && !spellbook )
 	{
 		my->flags[INVISIBLE] = true;
 		my->flags[INVISIBLE_DITHER] = false;
@@ -4356,8 +4371,8 @@ void actHudShield(Entity* my)
 		if ( players[HUDSHIELD_PLAYERNUM] && players[HUDSHIELD_PLAYERNUM]->entity 
 			&& allowDefend
 			&& players[HUDSHIELD_PLAYERNUM]->entity->isMobile() 
-			&& !cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast()
-			&& !cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook
+			&& !hideShieldForBasicCast
+			&& !spellbookOpen
 			&& (!spellbook || (spellbook && (hideShield || playerRace == SPIDER)))
 			&& HUDSHIELD_DEFEND_DELAY_TICK == 0
 			&& !((foci || duck) && !hideShield && players[HUDSHIELD_PLAYERNUM]->hud.shieldSwitch) )
@@ -4382,6 +4397,13 @@ void actHudShield(Entity* my)
 			    sneaking = true;
 			}
 		}
+	}
+
+	// Space/Left Trigger is the Grimoire hold input. Do not let the
+	// shared Sneak binding make the player crouch while choosing a spell.
+	if ( magicGrimoire && input.binary("Defend") )
+	{
+		sneaking = false;
 	}
 
 	if ( HUDSHIELD_DEFEND_DELAY_TICK > 0 )
@@ -4524,7 +4546,7 @@ void actHudShield(Entity* my)
 		{
 			players[HUDSHIELD_PLAYERNUM]->hud.shieldSwitch = false;
 		}
-		if ( !(defending || (spellbook && cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook) || doBowReload) )
+		if ( !(defending || (spellbook && spellbookOpen) || doBowReload) )
 		{
 			HUDSHIELD_MOVEY = -6;
 			HUDSHIELD_MOVEZ = 2;
@@ -4548,7 +4570,7 @@ void actHudShield(Entity* my)
 	}
 
 	// main animation
-	if ( defending || cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook )
+	if ( defending || spellbookOpen )
 	{
 		if ( duck )
 		{
@@ -4624,7 +4646,7 @@ void actHudShield(Entity* my)
 		}
 		else
 		{
-			if ( cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook )
+			if ( spellbookOpen )
 			{
 				HUDSHIELD_ROLL = std::min<real_t>(HUDSHIELD_ROLL + .15, PI / 2);
 				if ( HUDSHIELD_MOVEZ > -1 )
@@ -5084,8 +5106,8 @@ void actHudShield(Entity* my)
 	}
 	if (stats[HUDSHIELD_PLAYERNUM]->shield 
 		&& !swimming 
-		&& !cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast()
-		&& !cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook
+		&& !hideShieldForBasicCast
+		&& !spellbookOpen
 		&& !players[HUDSHIELD_PLAYERNUM]->hud.shieldSwitch)
 	{
 		if (itemCategory(stats[HUDSHIELD_PLAYERNUM]->shield) == TOOL)
@@ -5406,11 +5428,26 @@ void actHudAdditional2(Entity* my)
 
 void actHudAdditional(Entity* my)
 {
+	const bool magicGrimoire =
+		stats[HUDSHIELD_PLAYERNUM]->shield
+		&& stats[HUDSHIELD_PLAYERNUM]->shield->type == MAGIC_GRIMOIRE;
 	bool spellbook = false;
-	if ( stats[HUDSHIELD_PLAYERNUM]->shield && itemCategory(stats[HUDSHIELD_PLAYERNUM]->shield) == SPELLBOOK )
+	if ( stats[HUDSHIELD_PLAYERNUM]->shield
+		&& (itemCategory(stats[HUDSHIELD_PLAYERNUM]->shield) == SPELLBOOK
+			|| magicGrimoire) )
 	{
 		spellbook = true;
 	}
+
+	const bool grimoireOpen = magicGrimoire
+		&& players[HUDSHIELD_PLAYERNUM]
+		&& players[HUDSHIELD_PLAYERNUM]->hotbar.magicHotbarActive;
+	const bool spellbookOpen =
+		cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook
+		|| grimoireOpen;
+	const bool hideShieldForBasicCast =
+		cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast()
+		&& !grimoireOpen;
 
 	my->flags[UNCLICKABLE] = true;
 
@@ -5526,12 +5563,12 @@ void actHudAdditional(Entity* my)
 		return;
 	}
 
-	if ( cast_animation[HUDSHIELD_PLAYERNUM].hideShieldFromBasicCast() )
+	if ( hideShieldForBasicCast )
 	{
 		my->flags[INVISIBLE] = true;
 		my->flags[INVISIBLE_DITHER] = false;
 	}
-	else if ( cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook && !spellbook )
+	else if ( spellbookOpen && !spellbook )
 	{
 		my->flags[INVISIBLE] = true;
 		my->flags[INVISIBLE_DITHER] = false;
@@ -5546,7 +5583,7 @@ void actHudAdditional(Entity* my)
 		{
 			players[HUDSHIELD_PLAYERNUM]->hud.shieldSwitch = false;
 		}
-		if ( !(defending || (spellbook && cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook)) )
+		if ( !(defending || (spellbook && spellbookOpen)) )
 		{
 			HUDSHIELD_MOVEY = -6;
 			HUDSHIELD_MOVEZ = 2;
@@ -5555,7 +5592,7 @@ void actHudAdditional(Entity* my)
 	}
 
 	// main animation
-	if ( cast_animation[HUDSHIELD_PLAYERNUM].active_spellbook && spellbook )
+	if ( spellbookOpen && spellbook )
 	{
 		HUDSHIELD_ROLL = std::max<real_t>(HUDSHIELD_ROLL - .1, -1 * PI / 3);
 		if ( HUDSHIELD_MOVEZ > -1 )

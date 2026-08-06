@@ -2304,7 +2304,21 @@ std::string getItemSpritePath(const int player, Item& item)
 
         node_t* imagePathsNode = nullptr;
 
-        if ( item.type == TOOL_PLAYER_LOOT_BAG )
+        if ( item.type == MAGIC_GRIMOIRE )
+        {
+            const int variation = std::max(
+                0,
+                std::min(
+                    getMagicGrimoireVisualVariation(),
+                    items[item.type].variations - 1
+                )
+            );
+            imagePathsNode = list_Node(
+                &items[item.type].images,
+                variation
+            );
+        }
+        else if ( item.type == TOOL_PLAYER_LOOT_BAG )
         {
             const int playerOwner =
                 item.getLootBagPlayer();
@@ -6443,7 +6457,11 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
             
             
             int attributesWidth = frameAttrPos.w;
-            txtAttributes->setSize(SDL_Rect{ padx * 2, frameAttrPos.h + pady, attributesWidth - padx * 2, frameAttrPos.h - pady });
+            const int descriptionInsetX =
+                tooltipType == "tooltip_magic_grimoire" ? 0 : padx * 2;
+            const int descriptionWidth = attributesWidth - descriptionInsetX;
+            txtAttributes->setSize(SDL_Rect{ descriptionInsetX, frameAttrPos.h + pady,
+                descriptionWidth, frameAttrPos.h - pady });
             if ( tooltipType.find("tooltip_spell_") != std::string::npos )
             {
                 // don't reflow
@@ -6454,7 +6472,20 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
             }
             int currentHeight = frameAttrPos.h;
             frameAttrPos.h += txtAttributes->getNumTextLines() * charHeight + pady * 3;
-            txtAttributes->setSize(SDL_Rect{ padx * 2, currentHeight + pady, attributesWidth - padx * 2, frameAttrPos.h - pady });
+            txtAttributes->setSize(SDL_Rect{ descriptionInsetX, currentHeight + pady,
+                descriptionWidth, frameAttrPos.h - pady });
+
+            if ( tooltipType == "tooltip_magic_grimoire" && !txtSlotName->isDisabled() )
+            {
+                const int slotRowY = frameAttrPos.h + pady;
+                txtSlotName->setSize(SDL_Rect{
+                    padx,
+                    slotRowY,
+                    txtHeader->getSize().w,
+                    imgPrimaryIcon->pos.h
+                });
+                frameAttrPos.h = slotRowY + txtSlotName->getSize().h + pady;
+            }
         }
         
         frameAttr->setSize(frameAttrPos);

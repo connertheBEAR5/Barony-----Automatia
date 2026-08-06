@@ -5153,6 +5153,15 @@ void Player::Hotbar_t::selectHotbarSlot(int slot)
 	player.GUI.activateModule(GUI_t::MODULE_HOTBAR);
 }
 
+bool Player::Hotbar_t::hasEquippedMagicGrimoire() const
+{
+	return player.playernum >= 0
+		&& player.playernum < MAXPLAYERS
+		&& stats[player.playernum]
+		&& stats[player.playernum]->shield
+		&& stats[player.playernum]->shield->type == MAGIC_GRIMOIRE;
+}
+
 int Player::Hotbar_t::getUnlockedMagicHotbarSlots() const
 {
 	if ( player.playernum < 0
@@ -5217,6 +5226,11 @@ void Player::Hotbar_t::setMagicHotbarActive(
 	bool cancelSelection
 )
 {
+	if (active && !hasEquippedMagicGrimoire())
+	{
+		active = false;
+	}
+
 	if ( magicHotbarActive == active )
 	{
 		if ( cancelSelection

@@ -2385,6 +2385,7 @@ public:
 		auto& slotsAlternate(int alternate) { return hotbar_alternate[alternate]; };
 		auto& slotsAlternate() { return hotbar_alternate; }
 		void selectHotbarSlot(int slot);
+		bool hasEquippedMagicGrimoire() const;
 		int getUnlockedMagicHotbarSlots() const;
 		bool isMagicHotbarSlotUnlocked(int slot) const;
 		void validateMagicHotbar();

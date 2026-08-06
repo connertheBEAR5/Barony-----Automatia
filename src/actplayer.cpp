@@ -13531,7 +13531,8 @@ void actPlayer(Entity* my)
 						}
 						if ( stats[PLAYER_NUM]->shield != NULL )
 						{
-							if ( itemCategory(stats[PLAYER_NUM]->shield) == SPELLBOOK )
+							if ( itemCategory(stats[PLAYER_NUM]->shield) == SPELLBOOK
+								|| stats[PLAYER_NUM]->shield->type == MAGIC_GRIMOIRE )
 							{
 								bendArm = false;
 							}

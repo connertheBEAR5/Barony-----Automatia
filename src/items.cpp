@@ -1464,6 +1464,11 @@ char* Item::getName() const
 	return tempstr;
 }
 
+int getMagicGrimoireVisualVariation()
+{
+	return SPELLBOOK_COLOR_MYSTICISM_3;
+}
+
 int getItemVariationFromSpellbookOrTome(const Item& item)
 {
 	int spellID = SPELL_NONE;
@@ -1650,7 +1655,15 @@ Sint32 itemModel(const Item* const item, bool shortModel, Entity* creature)
 
 	int index = shortModel ? items[item->type].indexShort : items[item->type].index;
 
-	if ( item->type == TOOL_PLAYER_LOOT_BAG )
+	if (item->type == MAGIC_GRIMOIRE)
+	{
+		const int variation = getMagicGrimoireVisualVariation();
+		return index + std::max(
+			0,
+			std::min(variation, items[item->type].variations - 1)
+		);
+	}
+	else if ( item->type == TOOL_PLAYER_LOOT_BAG )
 	{
 		return index
 			+ getLootBagVariationForPlayer(
@@ -1733,7 +1746,15 @@ Sint32 itemModelFirstperson(const Item* const item)
 		return 0;
 	}
 
-	if ( item->type == MAGICSTAFF_SCEPTER )
+	if (item->type == MAGIC_GRIMOIRE)
+	{
+		const int variation = getMagicGrimoireVisualVariation();
+		return items[item->type].fpindex + std::max(
+			0,
+			std::min(variation, items[item->type].variations - 1)
+		);
+	}
+	else if ( item->type == MAGICSTAFF_SCEPTER )
 	{
 		if ( item->appearance % MAGICSTAFF_SCEPTER_CHARGE_MAX == 0 )
 		{
@@ -3118,6 +3139,7 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 	switch ( item->type )
 	{
 		case WOODEN_SHIELD:
+		case MAGIC_GRIMOIRE:
 			equipItemResult = equipItem(item, &stats[player]->shield, player, checkInventorySpaceForPaperDoll);
 			break;
 		case QUARTERSTAFF:
@@ -8024,9 +8046,11 @@ void playerTryEquipItemAndUpdateServer(const int player, Item* const item, bool 
 		const bool identified = item->identified;
 
 		const Category cat = itemCategory(item);
+		const bool equipInOffhand =
+			cat == SPELLBOOK || item->type == MAGIC_GRIMOIRE;
 
 		EquipItemResult equipResult = EQUIP_ITEM_FAIL_CANT_UNEQUIP;
-		if ( cat == SPELLBOOK )
+		if ( equipInOffhand )
 		{
 			if ( !cast_animation[player].active_spellbook )
 			{
@@ -8039,7 +8063,7 @@ void playerTryEquipItemAndUpdateServer(const int player, Item* const item, bool 
 		}
 		if ( equipResult != EQUIP_ITEM_FAIL_CANT_UNEQUIP )
 		{
-			if ( cat == SPELLBOOK )
+			if ( equipInOffhand )
 			{
 				if ( !cast_animation[player].active_spellbook )
 				{
@@ -8058,7 +8082,8 @@ void playerTryEquipItemAndUpdateServer(const int player, Item* const item, bool 
 	{
 		// server/singleplayer
 		EquipItemResult equipResult = EQUIP_ITEM_FAIL_CANT_UNEQUIP;
-		if ( itemCategory(item) == SPELLBOOK )
+		if ( itemCategory(item) == SPELLBOOK
+			|| item->type == MAGIC_GRIMOIRE )
 		{
 			if ( !cast_animation[player].active_spellbook )
 			{

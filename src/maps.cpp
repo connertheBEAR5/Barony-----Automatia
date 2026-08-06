@@ -28,6 +28,7 @@
 #include "mod_tools.hpp"
 #include "menu.hpp"
 #include "ui/MainMenu.hpp"
+#include <cstdint>
 #ifndef EDITOR
 #include "world_state.hpp"
 #endif
@@ -11273,6 +11274,59 @@ void assignActions(
 		}
 		list_RemoveNode(chest->mynode);
 	}
+
+#ifndef EDITOR
+	if (multiplayer != CLIENT
+		&& currentlevel > 0
+		&& gameModeManager.getMode() != GameModeManager_t::GAME_MODE_TUTORIAL
+		&& gameModeManager.getMode() != GameModeManager_t::GAME_MODE_TUTORIAL_INIT
+		&& !automatiaMagicGrimoireHasGenerated()
+		&& !chests.empty())
+	{
+		const std::uint64_t selectionSeed =
+			static_cast<std::uint64_t>(mapseed)
+			^ (static_cast<std::uint64_t>(currentlevel + 1)
+				* 0x9E3779B97F4A7C15ULL);
+		const std::size_t firstChest =
+			static_cast<std::size_t>(selectionSeed % chests.size());
+
+		for (std::size_t offset = 0; offset < chests.size(); ++offset)
+		{
+			Entity* chest = chests[(firstChest + offset) % chests.size()];
+			if (!chest || chest->behavior != &actChest || !chest->children.first)
+			{
+				continue;
+			}
+
+			list_t* inventory = static_cast<list_t*>(
+				chest->children.first->element
+			);
+			if (!inventory)
+			{
+				continue;
+			}
+
+			Item* grimoire = newItem(
+				MAGIC_GRIMOIRE,
+				EXCELLENT,
+				0,
+				1,
+				static_cast<Uint32>(getMagicGrimoireVisualVariation()),
+				true,
+				inventory
+			);
+			if (grimoire)
+			{
+				automatiaMarkMagicGrimoireGenerated();
+				printlog(
+					"[Magic Grimoire] Generated the run's unique Grimoire in a chest on dungeon level %d.",
+					currentlevel
+				);
+			}
+			break;
+		}
+	}
+#endif
 
 	if ( monsterCurveCustomManager.inUse() )
 	{
