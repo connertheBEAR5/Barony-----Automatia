@@ -1253,33 +1253,62 @@ void WorldState::refreshActiveContext()
 
 void WorldState::clear()
 {
+    /*
+     * generatePathMaps() may replace and free the process-wide path maps after
+     * a map has already been bound. Keep the foreground instance synchronized
+     * before deciding which raw simulation allocations WorldState owns. Without
+     * this refresh, the active instance can retain the address of an old path
+     * map that generatePathMaps() has already freed, and clear() will free that
+     * stale address a second time while returning to the main menu or loading a
+     * save.
+     */
+    refreshActiveContext();
+
     std::unordered_set<int*> freedPathMaps;
     std::unordered_set<bool*> freedShopAreas;
     for (auto& entry : instances)
     {
         MapInstance& instance = entry.second;
-        int* pathMaps[2] = {
-            instance.groundedPathMap,
-            instance.flyingPathMap
-        };
-        for (int* pathMap : pathMaps)
+
+        /*
+         * WorldState owns simulation-side raw allocations only while their map
+         * is stored in one of our detached map_t objects. The foreground map's
+         * allocations remain owned by the legacy engine globals, and retired or
+         * unloaded summaries may contain non-owning historical aliases. Never
+         * free those aliases here.
+         */
+        const bool ownsDetachedSimulationStorage =
+            instance.loadedMap
+            && instance.loadedMap != &map
+            && ownedMapStorage.count(instance.loadedMap) != 0;
+
+        if (ownsDetachedSimulationStorage)
         {
-            if (pathMap
-                && pathMap != pathMapGrounded
-                && pathMap != pathMapFlying
-                && freedPathMaps.insert(pathMap).second)
+            int* pathMaps[2] = {
+                instance.groundedPathMap,
+                instance.flyingPathMap
+            };
+            for (int* pathMap : pathMaps)
             {
-                std::free(pathMap);
+                if (pathMap
+                    && pathMap != pathMapGrounded
+                    && pathMap != pathMapFlying
+                    && freedPathMaps.insert(pathMap).second)
+                {
+                    std::free(pathMap);
+                }
+            }
+
+            if (instance.shopArea
+                && instance.shopArea != shoparea
+                && freedShopAreas.insert(instance.shopArea).second)
+            {
+                std::free(instance.shopArea);
             }
         }
+
         instance.groundedPathMap = nullptr;
         instance.flyingPathMap = nullptr;
-        if (instance.shopArea
-            && instance.shopArea != shoparea
-            && freedShopAreas.insert(instance.shopArea).second)
-        {
-            std::free(instance.shopArea);
-        }
         instance.shopArea = nullptr;
         destroyVisualState(instance.visualState);
         instance.visualState = nullptr;

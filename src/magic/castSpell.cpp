@@ -25,6 +25,7 @@
 #include "magic.hpp"
 #include "../prng.hpp"
 #include "../mod_tools.hpp"
+#include <cmath>
 #include "../paths.hpp"
 #include "../status_effect_owner_encoding.hpp"
 
@@ -194,6 +195,17 @@ void castSpellInit(Uint32 caster_uid, spell_t* spell, bool usingSpellbook, bool 
 	//else
 	{
 		magiccost = getCostOfSpell(spell, caster);
+	}
+
+	const bool usingMagicGrimoire = usingSpellbook
+		&& stat->shield
+		&& stat->shield->type == MAGIC_GRIMOIRE;
+	if ( usingMagicGrimoire )
+	{
+		magiccost = getMagicGrimoireAdjustedManaCost(
+			magiccost,
+			getMagicGrimoireManaReduction(caster, stat, spell->skillID, stat->shield)
+		);
 	}
 
 	if ( player >= 0 )
@@ -560,14 +572,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			strcpy( (char*)net_packet->data, "SPEL" );
 			net_packet->data[4] = clientnum;
 			SDLNet_Write32(spell->ID, &net_packet->data[5]);
-			if ( usingSpellbook )
-			{
-				net_packet->data[9] = 1;
-			}
-			else
-			{
-				net_packet->data[9] = 0;
-			}
+			const Stat* casterStats = caster->getStats();
+			const bool usingMagicGrimoirePacket = usingSpellbook
+				&& casterStats
+				&& casterStats->shield
+				&& casterStats->shield->type == MAGIC_GRIMOIRE;
+			net_packet->data[9] = usingMagicGrimoirePacket ? 2 : (usingSpellbook ? 1 : 0);
 			if ( castSpellProps )
 			{
 				SDLNet_Write32(static_cast<Sint32>(castSpellProps->caster_x * 256.0), &net_packet->data[10]);
@@ -607,6 +617,30 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	spell_t* channeled_spell = NULL; //Pointer to the spell if it's a channeled spell. For the purpose of giving it its node in the channeled spell list.
 	node_t* node = spell->elements.first;
 
+	struct MagicGrimoireContextGuard
+	{
+		bool previousActive = magicGrimoireCastContextActive();
+		real_t previousPotency = magicGrimoireCastContextPotency();
+
+		~MagicGrimoireContextGuard()
+		{
+			setMagicGrimoireCastContext(previousActive, previousPotency);
+		}
+	} magicGrimoireContextGuard;
+
+	struct MagicGrimoireSpellCopyGuard
+	{
+		spell_t* copiedSpell = nullptr;
+
+		~MagicGrimoireSpellCopyGuard()
+		{
+			if ( copiedSpell )
+			{
+				spellDeconstructor(copiedSpell);
+			}
+		}
+	} magicGrimoireSpellCopyGuard;
+
 	Stat* stat = caster->getStats();
 
 	int player = -1;
@@ -621,9 +655,15 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	bool newbie = false;
 	bool overdrewIntoHP = false;
 	bool playerCastingFromKnownSpellbook = false;
-	int spellBookBonusPercent = 0;
+	int spellBookBonusPercent = spell->magic_grimoire
+		? static_cast<int>(std::lround(spell->magic_grimoire_potency * 100.0)) : 0;
 	int spellBookBeatitude = 0;
 	ItemType spellbookType = WOODEN_SHIELD;
+	const bool equippedMagicGrimoire = usingSpellbook && stat && stat->shield
+		&& stat->shield->type == MAGIC_GRIMOIRE;
+	bool usingMagicGrimoire = spell->magic_grimoire || equippedMagicGrimoire;
+	real_t magicGrimoireManaReduction = spell->magic_grimoire
+		? spell->magic_grimoire_mana_reduction : 0.0;
 	bool sustainedSpell = false;
 	auto findSpellDef = ItemTooltips.spellItems.find(spell->ID);
 	if ( findSpellDef != ItemTooltips.spellItems.end() )
@@ -661,7 +701,18 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	{
 		newbie = isSpellcasterBeginner(player, caster, spell->skillID);
 
-		if ( usingSpellbook && stat->shield && itemCategory(stat->shield) == SPELLBOOK )
+		if ( usingMagicGrimoire )
+		{
+			spellEventFlags |= spell_t::SPELL_LEVEL_EVENT_SPELLBOOK;
+			spellbookType = MAGIC_GRIMOIRE;
+			if ( equippedMagicGrimoire )
+			{
+				spellBookBeatitude = stat->shield->beatitude;
+				spellBookBonusPercent = getMagicGrimoirePotencyPercent(caster, stat, spell->skillID, stat->shield);
+				magicGrimoireManaReduction = getMagicGrimoireManaReduction(caster, stat, spell->skillID, stat->shield);
+			}
+		}
+		else if ( usingSpellbook && stat->shield && itemCategory(stat->shield) == SPELLBOOK )
 		{
 			spellEventFlags |= spell_t::SPELL_LEVEL_EVENT_SPELLBOOK;
 
@@ -680,6 +731,20 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 
 			newbie = isSpellcasterBeginnerFromSpellbook(player, caster, stat, spell, stat->shield);
+		}
+
+		if ( usingMagicGrimoire )
+		{
+			const real_t potency = std::max<real_t>(0.0, spellBookBonusPercent / 100.0);
+			if ( !spell->magic_grimoire )
+			{
+				magicGrimoireSpellCopyGuard.copiedSpell = copySpell(spell);
+				applyMagicGrimoireUtilityScalingToSpell(magicGrimoireSpellCopyGuard.copiedSpell, potency);
+				magicGrimoireSpellCopyGuard.copiedSpell->magic_grimoire_mana_reduction = magicGrimoireManaReduction;
+				spell = magicGrimoireSpellCopyGuard.copiedSpell;
+				node = spell->elements.first;
+			}
+			setMagicGrimoireCastContext(true, potency);
 		}
 
 		/*magiccost = getCostOfSpell(spell);
@@ -742,6 +807,10 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 
 				magiccost = getCostOfSpell(spell, caster);
+				if ( usingMagicGrimoire )
+				{
+					magiccost = getMagicGrimoireAdjustedManaCost(magiccost, magicGrimoireManaReduction);
+				}
 				if ( castSpellProps && castSpellProps->overcharge > 0 && !usingSpellbook )
 				{
 					magiccost = std::max(1, magiccost / 2);
@@ -817,7 +886,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		//First, drain some extra mana maybe.
 		int chance = local_rng.rand() % 100;
 		int spellcastingAbility = getEffectiveSpellcastingAbility(caster, stat, spell);
-		if ( usingSpellbook )
+		if ( usingSpellbook && !usingMagicGrimoire )
 		{
 			spellcastingAbility = getSpellcastingAbilityFromUsingSpellbook(spell, caster, stat);
 		}
@@ -875,7 +944,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		if ( fizzleSpell )
 		{
 			int fizzleChance = 35;
-			if ( usingSpellbook )
+			if ( usingSpellbook && !usingMagicGrimoire )
 			{
 				fizzleChance += std::max(spell->difficulty - getEffectiveSpellcastingAbility(caster, stat, spell), 0) / 2;
 			}
@@ -1662,7 +1731,9 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				if ( players[i] && caster && (caster == players[i]->entity) )
 				{
 					spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
-					int radius = getSpellDamageFromID(spell->ID, caster, nullptr, caster, usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0);
+					const real_t coverageBonus = usingSpellbook
+						? spellBookBonusPercent / (usingMagicGrimoire ? 200.0 : 100.0) : 0.0;
+					int radius = getSpellDamageFromID(spell->ID, caster, nullptr, caster, coverageBonus);
 					radius = std::max(4, radius);
 					spell_magicMap(i, radius, caster->x / 16, caster->y / 16);
 
@@ -2069,7 +2140,10 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			{
 				if ( Stat* casterStats = caster->getStats() )
 				{
-					caster->setEffect(EFF_SACRED_PATH, (Uint8)element->getDamage(), element->duration, false);
+					const int strength = std::min(255, std::max(1,
+						getSpellDamageFromID(SPELL_SACRED_PATH, caster, casterStats, caster,
+							usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0)));
+					caster->setEffect(EFF_SACRED_PATH, static_cast<Uint8>(strength), element->duration, false);
 					messagePlayerColor(caster->isEntityPlayer(),
 						MESSAGE_HINT, makeColorRGB(0, 255, 0), Language::get(6493));
 					playSoundEntity(caster, 166, 128);
@@ -2942,7 +3016,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 						{
 							fx->actmagicSpellbookBonus = spellBookBonusPercent;
 						}
-						fx->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+						fx->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 					}
 				}
 				/*if ( !found )
@@ -3621,7 +3695,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					{
 						spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
 					}
-					spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+					spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 					floorMagicCreateLightningSequence(spellTimer, 0);
 				}
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 171);
@@ -3857,7 +3931,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 						{
 							wave->actmagicSpellbookBonus = spellBookBonusPercent;
 						}
-						wave->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+						wave->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 						wave->flags[UPDATENEEDED] = true;
 					}
 				}
@@ -3971,7 +4045,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					{
 						spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
 					}
-					spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+					spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 					int lifetime_tick = 0;
 					auto& timerEffects = particleTimerEffects[spellTimer->getUID()];
 
@@ -4034,7 +4108,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					{
 						spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
 					}
-					spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+					spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 					int lifetime_tick = 0;
 					auto& timerEffects = particleTimerEffects[spellTimer->getUID()];
 
@@ -4112,7 +4186,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					{
 						spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
 					}
-					spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+					spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 
 					if ( caster->behavior == &actMonster )
 					{
@@ -4674,8 +4748,11 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					found = true;
 
 					int duration = element->duration;
-					int maxLen = getSpellEffectDurationSecondaryFromID(SPELL_WINDGATE, caster, nullptr, caster, usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0);
-					int length = std::max(2, std::min(std::min(0xF, maxLen), getSpellDamageFromID(SPELL_WINDGATE, caster, nullptr, caster, usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0)));
+					const real_t sourceBonus = usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0;
+					const real_t rangeBonus = usingMagicGrimoire ? sourceBonus * 0.5 : sourceBonus;
+					int maxLen = getSpellEffectDurationSecondaryFromID(SPELL_WINDGATE, caster, nullptr, caster, sourceBonus);
+					int length = std::max(2, std::min(std::min(0xF, maxLen),
+						getSpellDamageFromID(SPELL_WINDGATE, caster, nullptr, caster, rangeBonus)));
 					createWindMagic(caster->getUID(), castSpellProps->target_x, castSpellProps->target_y, duration, castSpellProps->wallDir, length);
 					Uint32 data = (castSpellProps->wallDir) & 0xF;
 					data |= ((length) & 0xF) << 4;
@@ -5873,7 +5950,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 								{
 									fx->actmagicSpellbookBonus = spellBookBonusPercent;
 								}
-								fx->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+								fx->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 							}
 							serverSpawnMiscParticles(entity, PARTICLE_EFFECT_PINPOINT, 1767, caster->getUID(), duration, spell->ID);
 
@@ -6187,7 +6264,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 						if ( Entity* fx = createRadiusMagic(spell->ID, caster,
 							target->x, target->y, 16, amount, target) )
 						{
-							fx->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+							fx->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 							if ( spellBookBonusPercent > 0 )
 							{
 								fx->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -6521,8 +6598,11 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		{
 			if ( caster )
 			{
-				int charges = getSpellDamageFromID(SPELL_OVERCHARGE, caster, caster->getStats(), caster, spellBookBonusPercent);
-				charges = std::min(charges, getSpellEffectDurationSecondaryFromID(SPELL_OVERCHARGE, caster, caster->getStats(), caster, spellBookBonusPercent));
+				const real_t resourceBonus = usingSpellbook ? spellBookBonusPercent / 100.0 : 0.0;
+				const real_t resourceCapBonus = usingMagicGrimoire ? resourceBonus * 2.0 : resourceBonus;
+				int charges = getSpellDamageFromID(SPELL_OVERCHARGE, caster, caster->getStats(), caster, resourceBonus);
+				charges = std::min(charges,
+					getSpellEffectDurationSecondaryFromID(SPELL_OVERCHARGE, caster, caster->getStats(), caster, resourceCapBonus));
 
 				//if ( caster->setEffect(EFF_OVERCHARGE, (Uint8)charges, element->duration, false, true, true) )
 				{
@@ -7463,6 +7543,8 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				timer->particleTimerEndAction = PARTICLE_EFFECT_SPELL_SUMMON;
 				timer->z = 0;
 				Entity* sapParticle = createParticleSapCenter(caster, caster, SPELL_SUMMON, 599, 599);
+				sapParticle->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
+				sapParticle->actmagicSpellbookBonus = spellBookBonusPercent;
 				sapParticle->parent = 0;
 				sapParticle->yaw = caster->yaw;
 				sapParticle->skill[7] = caster->getUID();
@@ -7641,7 +7723,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				Entity* spellTimer = createParticleTimer(caster, 30, -1);
 				spellTimer->particleTimerCountdownAction = PARTICLE_TIMER_ACTION_MAGIC_SPRAY;
 				spellTimer->particleTimerCountdownSprite = particle;
-				spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+				spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 				if ( spellBookBonusPercent > 0 )
 				{
 					spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -8031,7 +8113,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					{
 						spellTimer->actmagicSpellbookBonus = spellBookBonusPercent;
 					}
-					spellTimer->actmagicFromSpellbook = usingSpellbook ? 1 : 0;
+					spellTimer->actmagicFromSpellbook = usingMagicGrimoire ? 2 : (usingSpellbook ? 1 : 0);
 					serverSpawnMiscParticles(caster, PARTICLE_EFFECT_SHATTER_OBJECTS, 0);
 				}
 
@@ -8191,7 +8273,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			else if ( usingSpellbook )
 			{
-				missileEntity->actmagicFromSpellbook = 1;
+				missileEntity->actmagicFromSpellbook = usingMagicGrimoire ? 2 : 1;
 				if ( spellBookBonusPercent > 0 )
 				{
 					missileEntity->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -8589,7 +8671,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			else if ( usingSpellbook )
 			{
-				missileEntity->actmagicFromSpellbook = 1;
+				missileEntity->actmagicFromSpellbook = usingMagicGrimoire ? 2 : 1;
 				if ( spellBookBonusPercent > 0 )
 				{
 					missileEntity->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -8630,7 +8712,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			else if ( usingSpellbook )
 			{
-				entity1->actmagicFromSpellbook = 1;
+				entity1->actmagicFromSpellbook = usingMagicGrimoire ? 2 : 1;
 				if ( spellBookBonusPercent > 0 )
 				{
 					entity1->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -8667,7 +8749,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			else if ( usingSpellbook )
 			{
-				entity2->actmagicFromSpellbook = 1;
+				entity2->actmagicFromSpellbook = usingMagicGrimoire ? 2 : 1;
 				if ( spellBookBonusPercent > 0 )
 				{
 					entity2->actmagicSpellbookBonus = spellBookBonusPercent;
@@ -9341,6 +9423,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			if ( usingSpellbook )
 			{
 				channeled_spell->spellbook = true;
+			}
+			if ( usingMagicGrimoire )
+			{
+				channeled_spell->magic_grimoire = true;
+				channeled_spell->magic_grimoire_potency = std::max<real_t>(0.0, spellBookBonusPercent / 100.0);
+				channeled_spell->magic_grimoire_mana_reduction = magicGrimoireManaReduction;
 			}
 
 			//Add this spell to the list of channeled spells.

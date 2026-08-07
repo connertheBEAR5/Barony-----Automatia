@@ -494,6 +494,9 @@ void spellConstructor(spell_t* spell, int ID)
 	spell->sustain = true;
 	spell->magicstaff = false;
 	spell->spellbook = false;
+	spell->magic_grimoire = false;
+	spell->magic_grimoire_potency = 0.0;
+	spell->magic_grimoire_mana_reduction = 0.0;
 	spell->sustain_node = NULL;
 	spell->magic_effects_node = NULL;
 	spell->caster = -1;
@@ -821,6 +824,10 @@ int getSustainCostOfSpell(spell_t* spell, Entity* caster)
 	{
 		spellElement_t* spellElement = (spellElement_t*)node->element;
 		cost += spellElement->channeledMana;
+	}
+	if ( spell->magic_grimoire )
+	{
+		cost = getMagicGrimoireAdjustedManaCost(cost, spell->magic_grimoire_mana_reduction);
 	}
 	return cost;
 }

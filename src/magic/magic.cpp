@@ -27,6 +27,7 @@
 #include "../scores.hpp"
 #include "../prng.hpp"
 #include "../mod_tools.hpp"
+#include <cmath>
 
 std::map<Uint32, std::map<Uint32, ParticleEmitterHit_t>> particleTimerEmitterHitEntities;
 std::map<Uint32, ParticleTimerEffect_t> particleTimerEffects;
@@ -3149,6 +3150,8 @@ Entity* spellEffectAdorcise(Entity& caster, spellElement_t& element, real_t x, r
 				Stat* monsterStats = monster->getStats();
 				if ( monsterStats )
 				{
+					const real_t grimoireSummonBonus = magicGrimoireCastContextActive()
+						? magicGrimoireCastContextPotency() * 0.5 : 0.0;
 					if ( &element == &spellElementMap[SPELL_SPIRIT_WEAPON] )
 					{
 						int duration = getSpellEffectDurationFromID(SPELL_SPIRIT_WEAPON, &caster, nullptr, &caster);
@@ -3174,8 +3177,8 @@ Entity* spellEffectAdorcise(Entity& caster, spellElement_t& element, real_t x, r
 							break;
 						}
 
-						monsterStats->STR = getSpellDamageFromID(SPELL_SPIRIT_WEAPON, &caster, nullptr, &caster);
-						monsterStats->MAXHP = getSpellDamageSecondaryFromID(SPELL_SPIRIT_WEAPON, &caster, nullptr, &caster);
+						monsterStats->STR = getSpellDamageFromID(SPELL_SPIRIT_WEAPON, &caster, nullptr, &caster, grimoireSummonBonus);
+						monsterStats->MAXHP = getSpellDamageSecondaryFromID(SPELL_SPIRIT_WEAPON, &caster, nullptr, &caster, grimoireSummonBonus);
 						monsterStats->HP = monsterStats->MAXHP;
 						monsterStats->OLDHP = monsterStats->MAXHP;
 
@@ -3254,8 +3257,8 @@ Entity* spellEffectAdorcise(Entity& caster, spellElement_t& element, real_t x, r
 								break;
 							}
 
-							monsterStats->STR = getSpellDamageFromID(SPELL_ADORCISM, &caster, nullptr, &caster);
-							monsterStats->MAXHP = getSpellDamageSecondaryFromID(SPELL_ADORCISM, &caster, nullptr, &caster);
+							monsterStats->STR = getSpellDamageFromID(SPELL_ADORCISM, &caster, nullptr, &caster, grimoireSummonBonus);
+							monsterStats->MAXHP = getSpellDamageSecondaryFromID(SPELL_ADORCISM, &caster, nullptr, &caster, grimoireSummonBonus);
 							monsterStats->HP = monsterStats->MAXHP;
 							monsterStats->OLDHP = monsterStats->MAXHP;
 
@@ -3378,6 +3381,9 @@ Entity* spellEffectFlameSprite(Entity& caster, spellElement_t& element, real_t x
 				Stat* monsterStats = monster->getStats();
 				if ( monsterStats )
 				{
+					const real_t grimoirePotency = magicGrimoireCastContextActive()
+						? magicGrimoireCastContextPotency() : 0.0;
+					const real_t grimoireSummonBonus = grimoirePotency * 0.5;
 					if ( &element == &spellElementMap[SPELL_FIRE_SPRITE] )
 					{
 						int duration = getSpellEffectDurationSecondaryFromID(SPELL_FIRE_SPRITE, &caster, nullptr, &caster);
@@ -3388,8 +3394,8 @@ Entity* spellEffectFlameSprite(Entity& caster, spellElement_t& element, real_t x
 						monsterStats->setAttribute("special_npc", "fire sprite");
 						strcpy(monsterStats->name, MonsterData_t::getSpecialNPCName(*monsterStats).c_str());
 
-						int lvl = getSpellDamageFromID(SPELL_FIRE_SPRITE, &caster, nullptr, &caster);
-						int maxlvl = getSpellDamageSecondaryFromID(SPELL_FIRE_SPRITE, &caster, nullptr, &caster);
+						int lvl = getSpellDamageFromID(SPELL_FIRE_SPRITE, &caster, nullptr, &caster, grimoireSummonBonus);
+						int maxlvl = getSpellDamageSecondaryFromID(SPELL_FIRE_SPRITE, &caster, nullptr, &caster, grimoireSummonBonus);
 						lvl = std::min(lvl, maxlvl);
 						monsterStats->LVL = lvl;
 
@@ -3413,8 +3419,8 @@ Entity* spellEffectFlameSprite(Entity& caster, spellElement_t& element, real_t x
 						monsterStats->monsterNoDropItems = 1;
 						monsterStats->MISC_FLAGS[STAT_FLAG_MONSTER_DISABLE_HC_SCALING] = 1;
 
-						int lvl = getSpellDamageFromID(SPELL_FLAME_ELEMENTAL, &caster, nullptr, &caster);
-						int maxlvl = getSpellDamageSecondaryFromID(SPELL_FLAME_ELEMENTAL, &caster, nullptr, &caster);
+						int lvl = getSpellDamageFromID(SPELL_FLAME_ELEMENTAL, &caster, nullptr, &caster, grimoireSummonBonus);
+						int maxlvl = getSpellDamageSecondaryFromID(SPELL_FLAME_ELEMENTAL, &caster, nullptr, &caster, grimoireSummonBonus);
 						lvl = std::min(lvl, maxlvl);
 						monsterStats->LVL = lvl;
 
@@ -3430,6 +3436,11 @@ Entity* spellEffectFlameSprite(Entity& caster, spellElement_t& element, real_t x
 								}
 							}
 						}
+					}
+
+					if ( grimoirePotency > 0.0 )
+					{
+						applyMagicGrimoireSummonBonus(monster, grimoirePotency);
 					}
 
 					if ( caster.behavior == &actPlayer )
@@ -4143,6 +4154,224 @@ Entity* spellEffectDemesneDoor(Entity& caster, Entity& target)
 	return door;
 }
 
+namespace
+{
+	thread_local bool automatiaMagicGrimoireContextActive = false;
+	thread_local real_t automatiaMagicGrimoireContextPotency = 0.0;
+
+	int magicGrimoireEffectiveBlessing(Stat* stats, Item* grimoire)
+	{
+		if ( !stats || !grimoire )
+		{
+			return 0;
+		}
+		if ( grimoire->beatitude > 0
+			|| (grimoire->beatitude < 0 && shouldInvertEquipmentBeatitude(stats)) )
+		{
+			return abs(grimoire->beatitude);
+		}
+		return 0;
+	}
+
+	void scaleMagicGrimoireElementDurations(spellElement_t* element, real_t multiplier)
+	{
+		if ( !element )
+		{
+			return;
+		}
+		if ( element->duration > 0 )
+		{
+			element->duration = std::max(1, static_cast<int>(std::lround(element->duration * multiplier)));
+		}
+		for ( node_t* node = element->elements.first; node; node = node->next )
+		{
+			scaleMagicGrimoireElementDurations(static_cast<spellElement_t*>(node->element), multiplier);
+		}
+	}
+}
+
+real_t getMagicGrimoireEffectiveSkill(Stat* stats, int primarySkillID)
+{
+	if ( !stats )
+	{
+		return 0.0;
+	}
+
+	const real_t sorcery = std::max(0, stats->getModifiedProficiency(PRO_SORCERY));
+	const real_t mysticism = std::max(0, stats->getModifiedProficiency(PRO_MYSTICISM));
+	const real_t thaumaturgy = std::max(0, stats->getModifiedProficiency(PRO_THAUMATURGY));
+
+	switch ( primarySkillID )
+	{
+		case PRO_MYSTICISM:
+			return mysticism + (sorcery + thaumaturgy) * 0.5;
+		case PRO_THAUMATURGY:
+			return thaumaturgy + (sorcery + mysticism) * 0.5;
+		case PRO_SORCERY:
+		default:
+			return sorcery + (mysticism + thaumaturgy) * 0.5;
+	}
+}
+
+int getMagicGrimoirePotencyPercent(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire)
+{
+	(void)caster;
+	if ( !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
+	{
+		return 0;
+	}
+	const real_t effectiveSkill = getMagicGrimoireEffectiveSkill(stats, primarySkillID);
+	return 10
+		+ static_cast<int>(std::floor(effectiveSkill / 10.0))
+		+ magicGrimoireEffectiveBlessing(stats, grimoire) * 5;
+}
+
+real_t getMagicGrimoireManaReduction(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire)
+{
+	(void)caster;
+	if ( !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
+	{
+		return 0.0;
+	}
+	const real_t effectiveSkill = getMagicGrimoireEffectiveSkill(stats, primarySkillID);
+	const real_t reduction = effectiveSkill / 400.0
+		+ magicGrimoireEffectiveBlessing(stats, grimoire) * 0.05;
+	return std::min<real_t>(0.5, std::max<real_t>(0.0, reduction));
+}
+
+int getMagicGrimoireAdjustedManaCost(int baseCost, real_t reduction)
+{
+	if ( baseCost <= 0 )
+	{
+		return baseCost;
+	}
+	return std::max(1, static_cast<int>(std::lround(baseCost * (1.0 - std::min<real_t>(0.5, std::max<real_t>(0.0, reduction))))));
+}
+
+void setMagicGrimoireCastContext(bool active, real_t potency)
+{
+	automatiaMagicGrimoireContextActive = active;
+	automatiaMagicGrimoireContextPotency = active ? std::max<real_t>(0.0, potency) : 0.0;
+}
+
+bool magicGrimoireCastContextActive()
+{
+	return automatiaMagicGrimoireContextActive;
+}
+
+real_t magicGrimoireCastContextPotency()
+{
+	return automatiaMagicGrimoireContextPotency;
+}
+
+bool magicGrimoireSpellSource(Entity* magicSourceParticle)
+{
+	return automatiaMagicGrimoireContextActive
+		|| (magicSourceParticle && magicSourceParticle->actmagicFromSpellbook == 2);
+}
+
+real_t getMagicGrimoireSourcePotency(Entity* magicSourceParticle, real_t suppliedBonus)
+{
+	if ( suppliedBonus > 0.0 )
+	{
+		return suppliedBonus;
+	}
+	if ( magicSourceParticle && magicSourceParticle->actmagicFromSpellbook == 2 )
+	{
+		return std::max<real_t>(0.0, magicSourceParticle->actmagicSpellbookBonus / 100.0);
+	}
+	if ( automatiaMagicGrimoireContextActive )
+	{
+		return automatiaMagicGrimoireContextPotency;
+	}
+	return 0.0;
+}
+
+void propagateMagicGrimoireSource(Entity* destination, Entity* source)
+{
+	if ( !destination )
+	{
+		return;
+	}
+	real_t potency = 0.0;
+	if ( source && source->actmagicFromSpellbook == 2 )
+	{
+		potency = std::max<real_t>(0.0, source->actmagicSpellbookBonus / 100.0);
+	}
+	else if ( automatiaMagicGrimoireContextActive )
+	{
+		potency = automatiaMagicGrimoireContextPotency;
+	}
+	if ( potency <= 0.0 )
+	{
+		return;
+	}
+	destination->actmagicFromSpellbook = 2;
+	destination->actmagicSpellbookBonus = static_cast<Sint32>(std::lround(potency * 100.0));
+}
+
+void applyMagicGrimoireUtilityScalingToSpell(spell_t* spell, real_t potency)
+{
+	if ( !spell || potency <= 0.0 || spell->magic_grimoire )
+	{
+		return;
+	}
+	const real_t utilityMultiplier = 1.0 + potency * 0.5;
+	spell->magic_grimoire = true;
+	spell->magic_grimoire_potency = potency;
+	if ( spell->distance > 0.0 )
+	{
+		spell->distance *= utilityMultiplier;
+	}
+	if ( spell->radius > 0 )
+	{
+		spell->radius = std::max(1, static_cast<int>(std::lround(spell->radius * std::sqrt(utilityMultiplier))));
+	}
+	if ( spell->life_time > 0 )
+	{
+		spell->life_time = std::max(1, static_cast<int>(std::lround(spell->life_time * utilityMultiplier)));
+	}
+	for ( node_t* node = spell->elements.first; node; node = node->next )
+	{
+		scaleMagicGrimoireElementDurations(static_cast<spellElement_t*>(node->element), utilityMultiplier);
+	}
+}
+
+void applyMagicGrimoireSummonBonus(Entity* summon, real_t potency)
+{
+	if ( !summon || potency <= 0.0 )
+	{
+		return;
+	}
+	Stat* stats = summon->getStats();
+	if ( !stats || stats->getAttribute("magic_grimoire_scaled") == "1" )
+	{
+		return;
+	}
+	stats->setAttribute("magic_grimoire_scaled", "1");
+	const real_t multiplier = 1.0 + potency * 0.5;
+	const real_t hpRatio = stats->MAXHP > 0 ? stats->HP / static_cast<real_t>(stats->MAXHP) : 1.0;
+	const real_t mpRatio = stats->MAXMP > 0 ? stats->MP / static_cast<real_t>(stats->MAXMP) : 1.0;
+	auto scalePositive = [multiplier](Sint32& value)
+	{
+		if ( value > 0 )
+		{
+			value = static_cast<Sint32>(std::max<real_t>(1.0, std::lround(value * multiplier)));
+		}
+	};
+	scalePositive(stats->MAXHP);
+	scalePositive(stats->MAXMP);
+	scalePositive(stats->STR);
+	scalePositive(stats->DEX);
+	scalePositive(stats->CON);
+	scalePositive(stats->INT);
+	scalePositive(stats->PER);
+	scalePositive(stats->CHR);
+	stats->HP = stats->MAXHP > 0 ? std::max(1, static_cast<int>(std::lround(stats->MAXHP * hpRatio))) : stats->HP;
+	stats->MP = stats->MAXMP > 0 ? std::max(0, static_cast<int>(std::lround(stats->MAXMP * mpRatio))) : stats->MP;
+	stats->OLDHP = stats->HP;
+}
+
 int getSpellDamageFromID(int spellID, Entity* parent, Stat* parentStats, Entity* magicSourceParticle, real_t addSpellBonus, bool applyingDamageOnCast)
 {
 	int damage = 0;
@@ -4172,6 +4401,10 @@ int getSpellDamageFromID(int spellID, Entity* parent, Stat* parentStats, Entity*
 		damage = element->getDamage();
 		if ( abs(element->getDamageMult()) > 0.01 )
 		{
+			if ( magicGrimoireSpellSource(magicSourceParticle) && addSpellBonus <= 0.0 )
+			{
+				addSpellBonus = getMagicGrimoireSourcePotency(magicSourceParticle);
+			}
 			real_t bonus = (getBonusFromCasterOfSpellElement(parent, myStats, element, spellID, skillID));
 			bonus += addSpellBonus;
 			if ( applyingDamageOnCast )
@@ -4223,6 +4456,10 @@ int getSpellDamageSecondaryFromID(int spellID, Entity* parent, Stat* parentStats
 		damage = element->getDamageSecondary();
 		if ( abs(element->getDamageSecondaryMult()) > 0.01 )
 		{
+			if ( magicGrimoireSpellSource(magicSourceParticle) && addSpellBonus <= 0.0 )
+			{
+				addSpellBonus = getMagicGrimoireSourcePotency(magicSourceParticle);
+			}
 			real_t bonus = (getBonusFromCasterOfSpellElement(parent, myStats, element, spellID, skillID));
 			bonus += addSpellBonus;
 			if ( applyingDamageOnCast )
@@ -4263,6 +4500,11 @@ int getSpellEffectDurationFromID(int spellID, Entity* parent, Stat* parentStats,
 	if ( element )
 	{
 		duration = element->duration;
+		if ( magicGrimoireSpellSource(magicSourceParticle) )
+		{
+			const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+			duration = std::max(1, static_cast<int>(std::lround(duration * (1.0 + potency * 0.5))));
+		}
 		//real_t bonus = (getBonusFromCasterOfSpellElement(parent, parent ? parent->getStats() : nullptr, element, spellID));
 		//bonus += addSpellBonus;
 		//duration += duration * bonus;
@@ -4290,6 +4532,11 @@ int getSpellEffectDurationSecondaryFromID(int spellID, Entity* parent, Stat* par
 	if ( element )
 	{
 		duration = element->getDurationSecondary();
+		if ( magicGrimoireSpellSource(magicSourceParticle) )
+		{
+			const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+			duration = std::max(1, static_cast<int>(std::lround(duration * (1.0 + potency * 0.5))));
+		}
 		//real_t bonus = (getBonusFromCasterOfSpellElement(parent, parent ? parent->getStats() : nullptr, element, spellID));
 		//bonus += addSpellBonus;
 		//duration += duration * bonus;
@@ -4387,6 +4634,11 @@ real_t getSpellPropertyFromID(spell_t::SpellBasePropertiesFloat prop, int spellI
 					result *= (1 - bonus);
 				}
 				result *= (1 - std::min(1.0, equipmentModifier));
+				if ( addSpellBonus > 0.0 || magicGrimoireSpellSource(magicSourceParticle) )
+				{
+					const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+					result /= (1.0 + potency * 0.5);
+				}
 				if ( spell->cast_time < 1.01 )
 				{
 					result = std::max(0.5, result);
@@ -4446,6 +4698,11 @@ real_t getSpellPropertyFromID(spell_t::SpellBasePropertiesFloat prop, int spellI
 					maxDist = *cvar_spell_max_distance;
 				}
 				result = std::min(maxDist, (spell->distance + modifier) * (1.0 + equipmentModifier));
+				if ( addSpellBonus > 0.0 || magicGrimoireSpellSource(magicSourceParticle) )
+				{
+					const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+					result *= (1.0 + potency * 0.5);
+				}
 				if ( bonus < -0.05 )
 				{
 					result *= (1 + bonus);
@@ -4503,6 +4760,11 @@ int getSpellPropertyFromID(spell_t::SpellBasePropertiesInt prop, int spellID, En
 						percent = std::max(0, percent);
 						result *= percent / 100.0;
 					}
+					if ( addSpellBonus > 0.0 || magicGrimoireSpellSource(magicSourceParticle) )
+					{
+						const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+						result = std::max(1, static_cast<int>(std::lround(result / (1.0 + potency * 0.5))));
+					}
 				}
 			}
 		}
@@ -4522,6 +4784,11 @@ int getSpellPropertyFromID(spell_t::SpellBasePropertiesInt prop, int spellID, En
 			real_t radiusScale = 0.0;
 			real_t modifier = 1.0 + spell->radius_mult * radiusScale;
 			result *= modifier;
+			if ( addSpellBonus > 0.0 || magicGrimoireSpellSource(magicSourceParticle) )
+			{
+				const real_t potency = getMagicGrimoireSourcePotency(magicSourceParticle, addSpellBonus);
+				result = std::max(1, static_cast<int>(std::lround(result * std::sqrt(1.0 + potency * 0.5))));
+			}
 		}
 	}
 	return result;

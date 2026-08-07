@@ -966,6 +966,14 @@ void Item::applyOrb(int player, ItemType type, Entity& entity)
 {
 	if ( entity.behavior == &actPedestalBase && entity.pedestalHasOrb == 0 )
 	{
+		if ( type == ARTIFACT_ORB_PURPLE
+			&& entity.pedestalOrbType == 3
+			&& !strncmp(map.name, "Boss", 4) )
+		{
+			messagePlayer(player, MESSAGE_INTERACTION,
+				"The exit is already linked to Baron Herx's defeat. The Purple Orb is not consumed.");
+			return;
+		}
 		if ( multiplayer == CLIENT )
 		{
 			Item* item = stats[player]->weapon;
@@ -1021,13 +1029,40 @@ void Item::applyOrb(int player, ItemType type, Entity& entity)
 	}
 	else if ( entity.behavior == &actMonster || entity.behavior == &actPlayer )
 	{
-		if ( entity.getMonsterTypeFromSprite() == SHOPKEEPER && shopIsMysteriousShopkeeper(&entity) && this->type != ARTIFACT_ORB_PURPLE )
+		if ( entity.getMonsterTypeFromSprite() == SHOPKEEPER && shopIsMysteriousShopkeeper(&entity) )
 		{
 			if ( multiplayer == CLIENT )
 			{
 				Item* item = stats[player]->weapon;
 				stats[player]->weapon = nullptr;
 				consumeItem(item, player);
+				return;
+			}
+
+			if ( this->type == ARTIFACT_ORB_PURPLE )
+			{
+				if ( !automatiaUnlockMagicGrimoireMerchant() )
+				{
+					messagePlayer(player, MESSAGE_INTERACTION,
+						"The Mysterious Merchant has already accepted the Purple Orb.");
+					Item* duplicateOrb = stats[player]->weapon;
+					consumeItem(duplicateOrb, player);
+					stats[player]->weapon = nullptr;
+					return;
+				}
+
+				players[player]->worldUI.worldTooltipDialogue.createDialogueTooltip(
+					entity.getUID(),
+					Player::WorldUI_t::WorldTooltipDialogue_t::DIALOGUE_NPC,
+					"A fitting exchange. My rarest grimoire is now available to you."
+				);
+				playSoundEntity(&entity, 35 + local_rng.rand() % 3, 64);
+				automatiaEnsureMagicGrimoireMerchantStock(&entity);
+
+				Item* item = stats[player]->weapon;
+				consumeItem(item, player);
+				stats[player]->weapon = nullptr;
+				printlog("[Magic Grimoire] Player %d surrendered the Purple Orb to the Mysterious Merchant.", player);
 				return;
 			}
 

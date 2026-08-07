@@ -25031,8 +25031,39 @@ bool Entity::monsterAddNearbyItemToInventory(Stat* myStats, int rangeToFind, int
 						}
 					}
 					playSoundEntity(this, 35 + local_rng.rand() % 3, 64);
-					addItemToMonsterInventory(item);
-					item = nullptr;
+					if ( item->type == ARTIFACT_ORB_PURPLE )
+					{
+						if ( !automatiaUnlockMagicGrimoireMerchant() )
+						{
+							/*
+							 * The one legitimate Purple exchange is already complete.
+							 * Keep this floor entity intact instead of silently eating a
+							 * duplicate orb.
+							 */
+							if ( owner && owner->behavior == &actPlayer )
+							{
+								messagePlayer(owner->skill[2], MESSAGE_INTERACTION,
+									"The Mysterious Merchant has already accepted the Purple Orb.");
+							}
+							free(item);
+							continue;
+						}
+
+						automatiaEnsureMagicGrimoireMerchantStock(this);
+						if ( owner && owner->behavior == &actPlayer )
+						{
+							messagePlayer(owner->skill[2], MESSAGE_INTERACTION,
+								"The Mysterious Merchant accepts the Purple Orb and reveals a Magic Grimoire for sale.");
+						}
+						printlog("[Magic Grimoire] The Mysterious Merchant picked up the Purple Orb and unlocked the merchant Grimoire.");
+						free(item);
+						item = nullptr;
+					}
+					else
+					{
+						addItemToMonsterInventory(item);
+						item = nullptr;
+					}
 					entity->removeLightField();
 					list_RemoveNode(entity->mynode);
 					pickedUpItemReturnValue = true;
@@ -25426,6 +25457,10 @@ bool Entity::monsterWantsItem(const Item& item, Item**& shouldEquip, node_t*& re
 		case SHOPKEEPER:
 			if ( myStats->MISC_FLAGS[STAT_FLAG_MYSTERIOUS_SHOPKEEP] > 0 )
 			{
+				if ( item.type == ARTIFACT_ORB_PURPLE )
+				{
+					return !automatiaMagicGrimoireMerchantIsUnlocked();
+				}
 				if ( item.type == ARTIFACT_ORB_BLUE
 					|| item.type == ARTIFACT_ORB_GREEN
 					|| item.type == ARTIFACT_ORB_RED )

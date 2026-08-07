@@ -1121,7 +1121,7 @@ bool magicOnSpellCastEvent(Entity* parent, Entity* projectile, Entity* hitentity
 			|| projectile->behavior == &actParticleTimer) )
 	{
 		magicstaff = projectile->actmagicCastByMagicstaff == 1;
-		spellbook = projectile->actmagicFromSpellbook == 1;
+		spellbook = projectile->actmagicFromSpellbook > 0;
 		if ( magicstaff && projectile->actmagicReflectionCount > 0 )
 		{
 			allowedLevelup = false;
@@ -10215,6 +10215,7 @@ Entity* createParticleSapCenter(Entity* parent, Entity* target, int spell, int s
 	entity->flags[PASSABLE] = true;
 	entity->flags[UPDATENEEDED] = true;
 	entity->flags[UNCLICKABLE] = true;
+	propagateMagicGrimoireSource(entity, parent);
 	return entity;
 }
 
@@ -10454,6 +10455,7 @@ Entity* createParticleTimer(Entity* parent, int duration, int sprite)
 	entity->flags[INVISIBLE] = true;
 	entity->flags[PASSABLE] = true;
 	entity->flags[NOUPDATE] = true;
+	propagateMagicGrimoireSource(entity, parent);
 	/*if ( multiplayer != CLIENT )
 	{
 		entity_uids--;
@@ -11111,6 +11113,10 @@ void actParticleTimer(Entity* my)
 				Entity* monster = summonMonster(static_cast<Monster>(my->particleTimerVariable1), my->x, my->y, forceLocation);
 				if ( monster )
 				{
+					if ( my->actmagicFromSpellbook == 2 )
+					{
+						applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
+					}
 					if ( Stat* monsterStats = monster->getStats() )
 					{
 						if ( my->parent != 0 )
@@ -13139,6 +13145,7 @@ void actParticleTimer(Entity* my)
 						}
 						spellTimer->parent = parent ? parent->getUID() : 0;
 						spellTimer->actmagicOrbitHitTargetUID1 = target ? my->actmagicOrbitHitTargetUID1 : 0;
+						propagateMagicGrimoireSource(spellTimer, my);
 						Sint32 val = (1 << 31);
 						val |= (Uint8)(19);
 						val |= (((Uint16)(spellTimer->particleTimerDuration) & 0xFFF) << 8);
@@ -14330,6 +14337,10 @@ void actParticleSapCenter(Entity* my)
 					Entity* monster = summonMonster(creature, my->skill[8], my->skill[9]);
 					if ( monster )
 					{
+						if ( my->actmagicFromSpellbook == 2 )
+						{
+							applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
+						}
 						Stat* monsterStats = monster->getStats();
 						monster->yaw = my->yaw - PI;
 						if ( monsterStats )
@@ -14384,6 +14395,10 @@ void actParticleSapCenter(Entity* my)
 								Entity* monster = summonMonster(creature, my->skill[8], my->skill[9]);
 								if ( monster )
 								{
+									if ( my->actmagicFromSpellbook == 2 )
+									{
+										applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
+									}
 									if ( multiplayer != CLIENT )
 									{
 										spawnExplosion(monster->x, monster->y, -1);
@@ -16773,6 +16788,7 @@ Entity* createFloorMagic(ParticleTimerEffect_t::EffectType particleType, int spr
 	entity->flags[UNCLICKABLE] = true;
 	entity->flags[UPDATENEEDED] = true;
 	entity->skill[2] = -18;
+	propagateMagicGrimoireSource(entity);
 	return entity;
 }
 
@@ -18353,6 +18369,7 @@ Entity* createParticleWave(ParticleTimerEffect_t::EffectType particleType, int s
 	}
 	entity->setUID(-3);*/
 	waveParticleSetUID(*entity, true);
+	propagateMagicGrimoireSource(entity);
 	return entity;
 }
 
@@ -19818,6 +19835,7 @@ Entity* createRadiusMagic(int spellID, Entity* caster, real_t x, real_t y, real_
 	entity->flags[INVISIBLE] = true;
 	bool noupdate = !follow;
 	radiusMagicSetUID(*entity, noupdate);
+	propagateMagicGrimoireSource(entity, caster);
 	return entity;
 }
 
@@ -21376,7 +21394,7 @@ void actParticleShatterEarth(Entity* my)
 					entity->sizey = 7;
 					entity->behavior = &actBoulder;
 					entity->boulderShatterEarthSpell = my->parent;
-					entity->boulderShatterEarthDamage = getSpellDamageFromID(SPELL_SHATTER_EARTH, uidToEntity(my->parent), nullptr, uidToEntity(my->parent));
+					entity->boulderShatterEarthDamage = getSpellDamageFromID(SPELL_SHATTER_EARTH, uidToEntity(my->parent), nullptr, my);
 					entity->flags[UPDATENEEDED] = true;
 					entity->flags[PASSABLE] = true;
 
@@ -21416,10 +21434,17 @@ void actParticleShatterEarth(Entity* my)
 									{
 										monsterStats->setAttribute("SUMMONED_CREATURE", "1");
 										monsterStats->MISC_FLAGS[STAT_FLAG_MONSTER_DISABLE_HC_SCALING] = 1;
-										int lvl = getSpellDamageFromID(SPELL_EARTH_ELEMENTAL, caster, nullptr, caster);
-										int maxlvl = getSpellDamageSecondaryFromID(SPELL_EARTH_ELEMENTAL, caster, nullptr, caster);
+										const real_t summonBonus = my->actmagicFromSpellbook == 2
+											? (my->actmagicSpellbookBonus / 100.0) * 0.5
+											: my->actmagicSpellbookBonus / 100.0;
+										int lvl = getSpellDamageFromID(SPELL_EARTH_ELEMENTAL, caster, nullptr, my, summonBonus);
+										int maxlvl = getSpellDamageSecondaryFromID(SPELL_EARTH_ELEMENTAL, caster, nullptr, my, summonBonus);
 										lvl = std::min(lvl, maxlvl);
 										monsterStats->LVL = lvl;
+										if ( my->actmagicFromSpellbook == 2 )
+										{
+											applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
+										}
 									}
 									if ( caster->behavior == &actPlayer )
 									{

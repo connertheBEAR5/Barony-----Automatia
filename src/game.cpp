@@ -1065,6 +1065,9 @@ static PersistentWorldStoryState
 static AutomatiaSave::Json preservedAutomatiaWorldDocument;
 static AutomatiaSave::Json pendingAutomatiaWorldDocument;
 static bool automatiaMagicGrimoireGenerated = false;
+static bool automatiaMagicGrimoireMerchantUnlocked = false;
+static bool automatiaMagicGrimoireMerchantPurchased = false;
+static bool automatiaHerxPurpleOrbRewardGenerated = false;
 
 bool automatiaMagicGrimoireHasGenerated()
 {
@@ -1074,6 +1077,139 @@ bool automatiaMagicGrimoireHasGenerated()
 void automatiaMarkMagicGrimoireGenerated()
 {
 	automatiaMagicGrimoireGenerated = true;
+}
+
+bool automatiaMagicGrimoireMerchantIsUnlocked()
+{
+	return automatiaMagicGrimoireMerchantUnlocked;
+}
+
+bool automatiaMagicGrimoireMerchantWasPurchased()
+{
+	return automatiaMagicGrimoireMerchantPurchased;
+}
+
+bool automatiaUnlockMagicGrimoireMerchant()
+{
+	if ( automatiaMagicGrimoireMerchantUnlocked )
+	{
+		return false;
+	}
+	automatiaMagicGrimoireMerchantUnlocked = true;
+	automatiaMagicGrimoireMerchantPurchased = false;
+	return true;
+}
+
+void automatiaMarkMagicGrimoireMerchantPurchased()
+{
+	automatiaMagicGrimoireMerchantUnlocked = true;
+	automatiaMagicGrimoireMerchantPurchased = true;
+}
+
+bool automatiaHerxPurpleOrbRewardHasGenerated()
+{
+	return automatiaHerxPurpleOrbRewardGenerated;
+}
+
+void automatiaMarkHerxPurpleOrbRewardGenerated()
+{
+	automatiaHerxPurpleOrbRewardGenerated = true;
+}
+
+void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant)
+{
+	if ( multiplayer == CLIENT || !merchant || !shopIsMysteriousShopkeeper(merchant) )
+	{
+		return;
+	}
+	Stat* merchantStats = merchant->getStats();
+	if ( !merchantStats )
+	{
+		return;
+	}
+
+	/*
+	 * A stale pre-initialization persistence snapshot can contain the
+	 * default Arms & Armor store type. The Mysterious Merchant always uses
+	 * store type 10, including while his Purple-Orb stock is reconstructed.
+	 */
+	merchant->monsterStoreType = 10;
+
+	Item* existingGrimoire = nullptr;
+	node_t* nextNode = nullptr;
+	for ( node_t* node = merchantStats->inventory.first; node; node = nextNode )
+	{
+		nextNode = node->next;
+		Item* item = static_cast<Item*>(node->element);
+		if ( !item || item->type != MAGIC_GRIMOIRE || item->playerSoldItemToShop )
+		{
+			continue;
+		}
+		if ( !automatiaMagicGrimoireMerchantUnlocked
+			|| automatiaMagicGrimoireMerchantPurchased
+			|| existingGrimoire )
+		{
+			list_RemoveNode(node);
+			continue;
+		}
+		existingGrimoire = item;
+	}
+
+	if ( !automatiaMagicGrimoireMerchantUnlocked
+		|| automatiaMagicGrimoireMerchantPurchased
+		|| existingGrimoire )
+	{
+		return;
+	}
+
+	std::unordered_set<int> occupiedSlots;
+	for ( node_t* node = merchantStats->inventory.first; node; node = node->next )
+	{
+		Item* item = static_cast<Item*>(node->element);
+		if ( item && item->x >= 0 && item->y >= 0 )
+		{
+			occupiedSlots.insert(item->x + item->y * Player::ShopGUI_t::MAX_SHOP_X);
+		}
+	}
+
+	int slotX = 0;
+	int slotY = 0;
+	bool foundSlot = false;
+	for ( int y = 0; y < Player::ShopGUI_t::MAX_SHOP_Y && !foundSlot; ++y )
+	{
+		for ( int x = 0; x < Player::ShopGUI_t::MAX_SHOP_X; ++x )
+		{
+			if ( occupiedSlots.find(x + y * Player::ShopGUI_t::MAX_SHOP_X) == occupiedSlots.end() )
+			{
+				slotX = x;
+				slotY = y;
+				foundSlot = true;
+				break;
+			}
+		}
+	}
+
+	if ( !foundSlot )
+	{
+		printlog("[Magic Grimoire] Mysterious Merchant stock is full; deferred adding the unlocked Grimoire.");
+		return;
+	}
+
+	Item* grimoire = newItem(
+		MAGIC_GRIMOIRE,
+		EXCELLENT,
+		0,
+		1,
+		static_cast<Uint32>(getMagicGrimoireVisualVariation()),
+		true,
+		&merchantStats->inventory
+	);
+	if ( grimoire )
+	{
+		grimoire->x = slotX;
+		grimoire->y = slotY;
+		printlog("[Magic Grimoire] Added the purple-orb Grimoire to the Mysterious Merchant's stock.");
+	}
 }
 
 /*
@@ -2219,6 +2355,28 @@ void hydratePreservedAutomatiaWorldDocument()
     {
         automatiaMagicGrimoireGenerated =
             preservedAutomatiaWorldDocument["magic_grimoire_generated"].get<bool>();
+    }
+    if (preservedAutomatiaWorldDocument.contains("magic_grimoire_merchant_unlocked")
+        && preservedAutomatiaWorldDocument["magic_grimoire_merchant_unlocked"].is_boolean())
+    {
+        automatiaMagicGrimoireMerchantUnlocked =
+            preservedAutomatiaWorldDocument["magic_grimoire_merchant_unlocked"].get<bool>();
+    }
+    if (preservedAutomatiaWorldDocument.contains("magic_grimoire_merchant_purchased")
+        && preservedAutomatiaWorldDocument["magic_grimoire_merchant_purchased"].is_boolean())
+    {
+        automatiaMagicGrimoireMerchantPurchased =
+            preservedAutomatiaWorldDocument["magic_grimoire_merchant_purchased"].get<bool>();
+    }
+    if (automatiaMagicGrimoireMerchantPurchased)
+    {
+        automatiaMagicGrimoireMerchantUnlocked = true;
+    }
+    if (preservedAutomatiaWorldDocument.contains("herx_purple_orb_reward_generated")
+        && preservedAutomatiaWorldDocument["herx_purple_orb_reward_generated"].is_boolean())
+    {
+        automatiaHerxPurpleOrbRewardGenerated =
+            preservedAutomatiaWorldDocument["herx_purple_orb_reward_generated"].get<bool>();
     }
 
     auto restoreLevelVisit = [](
@@ -3867,6 +4025,9 @@ void resetPersistentWorldSession()
 
 
     automatiaMagicGrimoireGenerated = false;
+    automatiaMagicGrimoireMerchantUnlocked = false;
+    automatiaMagicGrimoireMerchantPurchased = false;
+    automatiaHerxPurpleOrbRewardGenerated = false;
     automatiaPlayerLevelHistories.clear();
     automatiaLegacyPartyLevelHistory.clear();
     pendingAutomatiaSinglePlayerReverseReturn =
@@ -4047,6 +4208,12 @@ static bool captureAutomatiaPersistentWorldDocument(
         static_cast<std::uint64_t>(std::time(nullptr)) * 1000ULL;
     document["magic_grimoire_generated"] =
         automatiaMagicGrimoireGenerated;
+    document["magic_grimoire_merchant_unlocked"] =
+        automatiaMagicGrimoireMerchantUnlocked;
+    document["magic_grimoire_merchant_purchased"] =
+        automatiaMagicGrimoireMerchantPurchased;
+    document["herx_purple_orb_reward_generated"] =
+        automatiaHerxPurpleOrbRewardGenerated;
 
     auto saveLevelVisit = [](const AutomatiaPlayerLevelVisit& visit)
     {
@@ -11514,6 +11681,19 @@ static void capturePersistentMechanismStates()
                     }
 
                     /*
+                     * skill[3] is MONSTER_INIT. Values below 2 mean species
+                     * initialization has not completed yet. Capturing at that
+                     * point records default store type/name/inventory values and
+                     * can later replace valid shop or boss state with a corrupt
+                     * pre-initialization snapshot. Preserve any prior valid state
+                     * instead of overwriting it.
+                     */
+                    if ( entity->skill[3] < 2 )
+                    {
+                        continue;
+                    }
+
+                    /*
                     * Preserve the shopkeeper restock counter before replacing its
                     * previous mechanism-state record.
                     */
@@ -14900,6 +15080,56 @@ printlog(
 
     return true;
 }
+
+/*
+ * Delete only inventory-owned shop items. A shopkeeper equipment pointer can
+ * occasionally alias an inventory node, so detach those aliases before freeing
+ * the list to prevent a later Stat teardown from freeing the same item twice.
+ */
+static void clearPersistentShopkeeperGeneratedInventory(
+    Stat* shopStats
+)
+{
+    if ( !shopStats )
+    {
+        return;
+    }
+
+    std::unordered_set<Item*> inventoryItems;
+    for ( node_t* itemNode = shopStats->inventory.first;
+        itemNode != nullptr;
+        itemNode = itemNode->next )
+    {
+        Item* item = static_cast<Item*>(itemNode->element);
+        if ( item )
+        {
+            inventoryItems.insert(item);
+        }
+    }
+
+    auto detachInventoryAlias = [&inventoryItems](Item*& equipment)
+    {
+        if ( equipment
+            && inventoryItems.find(equipment) != inventoryItems.end() )
+        {
+            equipment = nullptr;
+        }
+    };
+
+    detachInventoryAlias(shopStats->weapon);
+    detachInventoryAlias(shopStats->shield);
+    detachInventoryAlias(shopStats->helmet);
+    detachInventoryAlias(shopStats->breastplate);
+    detachInventoryAlias(shopStats->gloves);
+    detachInventoryAlias(shopStats->shoes);
+    detachInventoryAlias(shopStats->cloak);
+    detachInventoryAlias(shopStats->amulet);
+    detachInventoryAlias(shopStats->ring);
+    detachInventoryAlias(shopStats->mask);
+
+    list_FreeAll(&shopStats->inventory);
+}
+
 bool applyPersistentShopkeeperInventory(
     Entity* shopkeeperEntity
 )
@@ -14959,6 +15189,81 @@ PersistentMechanismState& savedState =
     {
         return false;
     }
+
+    auto captureCurrentShopInventory = [&]()
+    {
+        savedState.shopkeeperSavedStoreType =
+            shopkeeperEntity->monsterStoreType;
+        savedState.shopkeeperSavedGold =
+            shopStats->GOLD;
+        savedState.shopkeeperSavedName =
+            shopStats->name;
+        savedState.shopkeeperSavedInventory.clear();
+
+        for ( node_t* itemNode = shopStats->inventory.first;
+            itemNode != nullptr;
+            itemNode = itemNode->next )
+        {
+            Item* item = static_cast<Item*>(itemNode->element);
+            if ( !item || item->count <= 0 )
+            {
+                continue;
+            }
+
+            PersistentChestItemState itemState;
+            itemState.type = static_cast<Sint32>(item->type);
+            itemState.stableId = persistentStableItemId(itemState.type);
+            itemState.status = static_cast<Sint32>(item->status);
+            itemState.beatitude = item->beatitude;
+            itemState.count = item->count;
+            itemState.appearance = item->appearance;
+            itemState.identified = item->identified;
+            itemState.x = item->x;
+            itemState.y = item->y;
+            itemState.isDroppable = item->isDroppable;
+            itemState.playerSoldItemToShop = item->playerSoldItemToShop;
+            itemState.itemSpecialShopConsumable = item->itemSpecialShopConsumable;
+            itemState.itemRequireTradingSkillInShop = item->itemRequireTradingSkillInShop;
+            savedState.shopkeeperSavedInventory.push_back(itemState);
+        }
+    };
+
+    const bool mysteriousShopkeeper =
+        shopIsMysteriousShopkeeper(shopkeeperEntity);
+    const bool invalidSavedStoreType =
+        savedState.shopkeeperSavedStoreType < 0
+        || savedState.shopkeeperSavedStoreType > 10;
+    const bool stalePreInitializationSnapshot =
+        savedState.shopkeeperSavedName.empty()
+        || invalidSavedStoreType
+        || (mysteriousShopkeeper
+            && savedState.shopkeeperSavedStoreType != 10);
+
+    if ( stalePreInitializationSnapshot )
+    {
+        /*
+         * initShopkeeper() has already produced a complete fresh shop. Keep it
+         * and replace the old default/empty snapshot. This also repairs saves
+         * made by the broken build without requiring the player to restart.
+         */
+        if ( mysteriousShopkeeper )
+        {
+            shopkeeperEntity->monsterStoreType = 10;
+        }
+        savedState.shopkeeperLoadsSinceRestock = 0;
+        automatiaEnsureMagicGrimoireMerchantStock(shopkeeperEntity);
+        captureCurrentShopInventory();
+
+        printlog(
+            "[Persistent World] Repaired stale pre-initialization shopkeeper snapshot ID %d in '%s': store type %d, %zu item stack(s).",
+            shopkeeperEntity->persistentID,
+            mapKey.c_str(),
+            shopkeeperEntity->monsterStoreType,
+            savedState.shopkeeperSavedInventory.size()
+        );
+        return true;
+    }
+
 	/*
 	* Restock every second return to this shopkeeper's map.
 	*
@@ -14978,83 +15283,12 @@ PersistentMechanismState& savedState =
 		savedState.shopkeeperLoadsSinceRestock = 0;
 
 		/*
-		* initShopkeeper() already generated a fresh inventory.
-		* Keep that inventory and copy it into persistent storage.
-		*/
-		savedState.shopkeeperSavedStoreType =
-			shopkeeperEntity->monsterStoreType;
-
-		savedState.shopkeeperSavedGold =
-			shopStats->GOLD;
-
-		savedState.shopkeeperSavedName =
-			shopStats->name;
-
-		savedState.shopkeeperSavedInventory.clear();
-
-		for ( node_t* itemNode =
-				shopStats->inventory.first;
-			itemNode != nullptr;
-			itemNode = itemNode->next )
-		{
-			Item* item =
-				static_cast<Item*>(
-					itemNode->element
-				);
-
-			if ( !item
-				|| item->count <= 0 )
-			{
-				continue;
-			}
-
-			PersistentChestItemState itemState;
-
-			itemState.type =
-				static_cast<Sint32>(
-					item->type
-				);
-            itemState.stableId = persistentStableItemId(itemState.type);
-
-			itemState.status =
-				static_cast<Sint32>(
-					item->status
-				);
-
-			itemState.beatitude =
-				item->beatitude;
-
-			itemState.count =
-				item->count;
-
-			itemState.appearance =
-				item->appearance;
-
-			itemState.identified =
-				item->identified;
-
-			itemState.x =
-				item->x;
-
-			itemState.y =
-				item->y;
-
-			itemState.isDroppable =
-				item->isDroppable;
-
-			itemState.playerSoldItemToShop =
-				item->playerSoldItemToShop;
-
-			itemState.itemSpecialShopConsumable =
-				item->itemSpecialShopConsumable;
-
-			itemState.itemRequireTradingSkillInShop =
-				item->itemRequireTradingSkillInShop;
-
-			savedState
-				.shopkeeperSavedInventory
-				.push_back(itemState);
-		}
+		 * initShopkeeper() already generated a fresh inventory. Preserve the
+		 * Purple-Orb Grimoire when unlocked, then copy the complete stock into
+		 * persistent storage.
+		 */
+		automatiaEnsureMagicGrimoireMerchantStock(shopkeeperEntity);
+		captureCurrentShopInventory();
 
 		printlog(
 			"[Persistent World] Restocked shopkeeper ID %d in '%s' with %zu item stack(s).",
@@ -15069,8 +15303,8 @@ PersistentMechanismState& savedState =
      * initShopkeeper() has now generated a fresh random inventory.
      * Delete it before restoring the saved authoritative inventory.
      */
-    list_FreeAll(
-        &shopStats->inventory
+    clearPersistentShopkeeperGeneratedInventory(
+        shopStats
     );
 
     shopkeeperEntity->monsterStoreType =
@@ -15154,6 +15388,8 @@ PersistentMechanismState& savedState =
 
         ++restoredItems;
     }
+
+    automatiaEnsureMagicGrimoireMerchantStock(shopkeeperEntity);
 
     printlog(
         "[Persistent World] Restored shopkeeper ID %d in '%s': store type %d, gold %d, %u item stack(s).",
@@ -22366,6 +22602,8 @@ void ingameHud()
 		{
             const bool shootmode = players[player]->shootmode;
 			bool hasSpellbook = false;
+			const bool grimoireHotbarCast = players[player]->hotbar.magicHotbarActive
+				&& players[player]->hotbar.hasEquippedMagicGrimoire();
 			bool tryHotbarQuickCast = players[player]->hotbar.faceMenuQuickCast;
 			bool tryInventoryQuickCast = players[player]->magic.doQuickCastSpell();
 			bool tryTomeQuickCast = players[player]->magic.doQuickCastTome();
@@ -22405,7 +22643,8 @@ void ingameHud()
 						input.consumeBinaryToggle("Hotbar Up / Select");
 						input.consumeBinaryToggle("Hotbar Right");
 
-						castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(), false, false);
+						castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(),
+							cast_animation[player].active_magic_grimoire, false);
 					}
 				}
 			    else if (tryHotbarQuickCast || castMemorizedSpell || castSpellbook )
@@ -22543,7 +22782,8 @@ void ingameHud()
 							}
 							else
 							{
-								castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(), false, false);
+								castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(),
+									grimoireHotbarCast, false);
 							}
 							if ( players[player]->magic.selectedSpell() )
 							{
@@ -22586,7 +22826,8 @@ void ingameHud()
 						}
 						else
 						{
-							castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(), false, false);
+							castSpellInit(players[player]->entity->getUID(), players[player]->magic.selectedSpell(),
+								grimoireHotbarCast, false);
 						}
 					}
 				}

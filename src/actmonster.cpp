@@ -9327,7 +9327,8 @@ void actMonster(Entity* my)
 							}
 						}
 
-						bool hasOrb = false;
+						bool hasOrb = automatiaMagicGrimoireMerchantIsUnlocked()
+							&& !automatiaMagicGrimoireMerchantWasPurchased();
 						for ( node_t* node = myStats->inventory.first; node; node = node->next )
 						{
 							Item* item = (Item*)node->element;
@@ -9367,6 +9368,7 @@ void actMonster(Entity* my)
 						}
 						else
 						{
+							automatiaEnsureMagicGrimoireMerchantStock(my);
 							// shopkeepers start trading
 							startTradingServer(my, monsterclicked);
 						}

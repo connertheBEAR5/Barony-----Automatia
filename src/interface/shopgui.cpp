@@ -1243,8 +1243,18 @@ void Player::ShopGUI_t::updateShop()
 				{
 					int oldQty = item->count;
 					bool consumedEntireStack = false;
+					const ItemType purchasedType = item->type;
+					const bool purchasedWasPlayerSold = item->playerSoldItemToShop;
 					if ( buyItemFromShop(player.playernum, item, consumedEntireStack) )
 					{
+						if ( multiplayer != CLIENT
+							&& purchasedType == MAGIC_GRIMOIRE
+							&& !purchasedWasPlayerSold
+							&& shopkeepertype[player.playernum] == 10 )
+						{
+							automatiaMarkMagicGrimoireMerchantPurchased();
+							printlog("[Magic Grimoire] The Mysterious Merchant's Grimoire was purchased by player %d.", player.playernum);
+						}
 						if ( consumedEntireStack )
 						{
 							animTooltipTicks = 0;

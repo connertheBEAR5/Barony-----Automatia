@@ -198,6 +198,40 @@ void Entity::actPedestalBase()
 		switchUpdateNeighbors();
 	}
 
+	// Baron Herx's purple pedestal grants the portable reward once, while
+	// powering the exit independently so removing the orb never closes the route.
+	Entity* baronHerx = nullptr;
+	const bool baronHerxDefeated =
+		pedestalOrbType == 3
+		&& pedestalInit
+		&& !pedestalInGround
+		&& !strncmp(map.name, "Boss", 4)
+		&& numMonsterTypeAliveOnMap(LICH, baronHerx) == 0;
+
+	if ( baronHerxDefeated )
+	{
+		if ( !automatiaHerxPurpleOrbRewardHasGenerated() )
+		{
+			/*
+			 * Older broken saves can contain an emerged Purple pedestal whose
+			 * persisted orb state was zero. Restore the authored reward directly
+			 * on the pedestal and persist a run-wide one-shot marker so taking it
+			 * cannot create another copy after map travel or reload.
+			 */
+			pedestalHasOrb = pedestalOrbType;
+			serverUpdateEntitySkill(this, 0);
+			automatiaMarkHerxPurpleOrbRewardGenerated();
+			printlog("[Magic Grimoire] Restored Baron Herx's Purple Orb reward on the exit pedestal.");
+		}
+
+		if ( pedestalPowerStatus == SWITCH_UNPOWERED
+			&& !pedestalInvertedPower )
+		{
+			toggleSwitch(8);
+			printlog("[Magic Grimoire] Baron Herx exit portal activated without consuming the Purple Orb.");
+		}
+	}
+
 	if ( pedestalHasOrb == pedestalOrbType )
 	{
 		bool applyAura = false;

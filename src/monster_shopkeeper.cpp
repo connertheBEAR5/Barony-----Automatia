@@ -1058,6 +1058,11 @@ void initShopkeeper(Entity* my, Stat* myStats)
 				default:
 					break;
 			}
+
+			if ( myStats->MISC_FLAGS[STAT_FLAG_MYSTERIOUS_SHOPKEEP] > 0 )
+			{
+				automatiaEnsureMagicGrimoireMerchantStock(my);
+			}
 		}
 
 		node_t* nextnode;

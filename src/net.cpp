@@ -16143,6 +16143,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 				printlog("[Shops]: client %d bought item from shop (uid=%d)\n", client, uidnum);
 				if ( shopIsMysteriousShopkeeper(entity) )
 				{
+					if ( item2->type == MAGIC_GRIMOIRE && !item2->playerSoldItemToShop )
+					{
+						automatiaMarkMagicGrimoireMerchantPurchased();
+						printlog("[Magic Grimoire] The Mysterious Merchant's Grimoire was purchased by remote player %d.", client);
+					}
 					buyItemFromMysteriousShopkeepConsumeOrb(client, *entity, *item2);
 				}
 				if ( itemTypeIsQuiver(item2->type) )
@@ -17197,9 +17202,37 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 	    }
 
 		spell_t* thespell = getSpellFromID(SDLNet_Read32(&net_packet->data[5]));
-		if ( players[player] && players[player]->entity )
+		if ( players[player] && players[player]->entity && thespell )
 		{
-			bool spellbookCast = net_packet->data[9] == 1;
+			const Uint8 requestedSpellSource = net_packet->data[9];
+			bool spellbookCast = false;
+			if ( requestedSpellSource == 2 )
+			{
+				if ( !stats[player] || !stats[player]->shield
+					|| stats[player]->shield->type != MAGIC_GRIMOIRE )
+				{
+					printlog("[Magic Grimoire] Rejected invalid Grimoire spell request from player %d.", player);
+					return;
+				}
+				spellbookCast = true;
+			}
+			else if ( requestedSpellSource == 1 )
+			{
+				if ( !stats[player] || !stats[player]->shield
+					|| itemCategory(stats[player]->shield) != SPELLBOOK
+					|| getSpellIDFromSpellbook(stats[player]->shield->type) != thespell->ID )
+				{
+					printlog("[Magic Grimoire] Rejected invalid spellbook spell request from player %d.", player);
+					return;
+				}
+				spellbookCast = true;
+			}
+			else if ( requestedSpellSource != 0 )
+			{
+				printlog("[Magic Grimoire] Rejected unknown spell source %u from player %d.",
+					static_cast<unsigned int>(requestedSpellSource), player);
+				return;
+			}
 			if ( net_packet->len > 10 )
 			{
 				CastSpellProps_t castSpellProps;

@@ -802,6 +802,9 @@ typedef struct spell_t
 	bool sustain; //If a spell is channeled, should it be sustained? (NOTE: True by default. Set to false when the player decides to cancel/abandon a spell)
 	bool magicstaff; // if true the spell was cast from a magicstaff and thus it may have slightly different behavior
 	bool spellbook = false;
+	bool magic_grimoire = false;
+	real_t magic_grimoire_potency = 0.0;
+	real_t magic_grimoire_mana_reduction = 0.0;
 	node_t* sustain_node = nullptr; //Node in the sustained/channeled spells list.
 	node_t* magic_effects_node = nullptr;
 	bool hide_from_ui = false; // hide from skillsheet/other UI places
@@ -1118,6 +1121,9 @@ typedef struct spellcastingAnimationManager
 
 	bool active;
 	bool active_spellbook;
+	bool active_magic_grimoire = false;
+	real_t magic_grimoire_potency = 0.0;
+	real_t magic_grimoire_mana_reduction = 0.0;
 	int stage; //The current stage of the animation.
 	int circle_count; //How many times it's circled around in the circle stage.
 	int times_to_circle; //How many times to circle around in the circle stage.
@@ -1187,6 +1193,19 @@ Entity* spellEffectHologram(Entity& caster, spellElement_t& element, real_t x, r
 Entity* spellEffectDemesneDoor(Entity& caster, Entity& doorFrame);
 void magicSetResistance(Entity* entity, Entity* parent, int& resistance, real_t& damageMultiplier, DamageGib& dmgGib, int& trapResist, int spellID);
 Sint32 convertResistancePointsToMagicValue(Sint32 value, int resistance);
+real_t getMagicGrimoireEffectiveSkill(Stat* stats, int primarySkillID);
+int getMagicGrimoirePotencyPercent(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire);
+real_t getMagicGrimoireManaReduction(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire);
+int getMagicGrimoireAdjustedManaCost(int baseCost, real_t reduction);
+void setMagicGrimoireCastContext(bool active, real_t potency);
+bool magicGrimoireCastContextActive();
+real_t magicGrimoireCastContextPotency();
+bool magicGrimoireSpellSource(Entity* magicSourceParticle);
+real_t getMagicGrimoireSourcePotency(Entity* magicSourceParticle, real_t suppliedBonus = 0.0);
+void propagateMagicGrimoireSource(Entity* destination, Entity* source = nullptr);
+void applyMagicGrimoireUtilityScalingToSpell(spell_t* spell, real_t potency);
+void applyMagicGrimoireSummonBonus(Entity* summon, real_t potency);
+
 int getSpellDamageFromID(int spellID, Entity* parent, Stat* parentStats, Entity* magicSourceParticle, real_t addSpellBonus = 0.0, bool applyingDamageOnCast = true);
 int getSpellDamageSecondaryFromID(int spellID, Entity* parent, Stat* parentStats, Entity* magicSourceParticle, real_t addSpellBonus = 0.0, bool applyingDamageOnCast = true);
 int getSpellEffectDurationFromID(int spellID, Entity* parent, Stat* parentStats, Entity* magicSourceParticle, real_t addSpellBonus = 0.0);

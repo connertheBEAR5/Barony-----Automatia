@@ -69,6 +69,13 @@ void startMessages();
 void resetPersistentWorldSession();
 bool automatiaMagicGrimoireHasGenerated();
 void automatiaMarkMagicGrimoireGenerated();
+bool automatiaMagicGrimoireMerchantIsUnlocked();
+bool automatiaMagicGrimoireMerchantWasPurchased();
+bool automatiaUnlockMagicGrimoireMerchant();
+void automatiaMarkMagicGrimoireMerchantPurchased();
+void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant);
+bool automatiaHerxPurpleOrbRewardHasGenerated();
+void automatiaMarkHerxPurpleOrbRewardGenerated();
 
 struct AutomatiaPlayerReturnPlacement
 {

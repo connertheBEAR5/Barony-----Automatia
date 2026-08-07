@@ -445,7 +445,14 @@ void spellcasting_animation_manager_t::setRangeFinderLocation()
 	int index = 0;
 	wallDir = 0;
 
-	real_t spellDistance = getSpellPropertyFromID(spell_t::SPELLPROP_MODIFIED_DISTANCE, spell->ID, caster, nullptr, caster);
+	real_t spellDistance = getSpellPropertyFromID(
+		spell_t::SPELLPROP_MODIFIED_DISTANCE,
+		spell->ID,
+		caster,
+		nullptr,
+		caster,
+		active_magic_grimoire ? magic_grimoire_potency : 0.0
+	);
 	static ConsoleVariable<bool> cvar_rangefinder_linetrace("/rangefinder_linetrace", true);
 
 	if ( rangefinder == RANGEFINDER_TOUCH_WALL_TILE )
@@ -949,6 +956,18 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 	animation_manager->caster = caster->getUID();
 	animation_manager->spell = spell;
 
+	const bool usingMagicGrimoire = usingSpellbook
+		&& stat
+		&& stat->shield
+		&& stat->shield->type == MAGIC_GRIMOIRE;
+	animation_manager->active_magic_grimoire = usingMagicGrimoire;
+	animation_manager->magic_grimoire_potency = usingMagicGrimoire
+		? getMagicGrimoirePotencyPercent(caster, stat, spell->skillID, stat->shield) / 100.0
+		: 0.0;
+	animation_manager->magic_grimoire_mana_reduction = usingMagicGrimoire
+		? getMagicGrimoireManaReduction(caster, stat, spell->skillID, stat->shield)
+		: 0.0;
+
 	if ( !usingSpellbook )
 	{
 		animation_manager->active = true;
@@ -993,6 +1012,13 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 	animation_manager->lefthand_movex = 0;
 	animation_manager->lefthand_movey = 0;
 	int spellCost = getCostOfSpell(spell, caster);
+	if ( usingMagicGrimoire )
+	{
+		spellCost = getMagicGrimoireAdjustedManaCost(
+			spellCost,
+			animation_manager->magic_grimoire_mana_reduction
+		);
+	}
 	if ( !usingSpellbook && spell->ID != SPELL_OVERCHARGE )
 	{
 		if ( usingTome )
@@ -1027,7 +1053,14 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 	animation_manager->circle_count = 0;
 	animation_manager->throw_count = 0;
 	animation_manager->active_count = 0;
-	animation_manager->times_to_circle = getSpellPropertyFromID(spell_t::SPELLPROP_MODIFIED_SPELL_CAST_TIME, spell->ID, caster, nullptr, caster) * HANDMAGIC_TICKS_PER_CIRCLE;// (spellCost / 10) + 1; //Circle once for every 10 mana the spell costs.
+	animation_manager->times_to_circle = getSpellPropertyFromID(
+		spell_t::SPELLPROP_MODIFIED_SPELL_CAST_TIME,
+		spell->ID,
+		caster,
+		nullptr,
+		caster,
+		usingMagicGrimoire ? animation_manager->magic_grimoire_potency : 0.0
+	) * HANDMAGIC_TICKS_PER_CIRCLE;// (spellCost / 10) + 1; //Circle once for every 10 mana the spell costs.
 	animation_manager->mana_left = spellCost;
 	animation_manager->mana_cost = spellCost;
 	animation_manager->consumeMana = true;
@@ -1098,6 +1131,9 @@ void spellcastingAnimationManager_deactivate(spellcasting_animation_manager_t* a
 	animation_manager->spell = NULL;
 	animation_manager->active = false;
 	animation_manager->active_spellbook = false;
+	animation_manager->active_magic_grimoire = false;
+	animation_manager->magic_grimoire_potency = 0.0;
+	animation_manager->magic_grimoire_mana_reduction = 0.0;
 	animation_manager->stage = 0;
 	animation_manager->circle_count = 0;
 	animation_manager->active_count = 0;
