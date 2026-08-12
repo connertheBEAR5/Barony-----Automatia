@@ -356,12 +356,18 @@ bool WorldState::bindMap(
 
 bool WorldState::bindLegacyMap(map_t& loadedMap, const std::string& mapFile)
 {
-    if (!bindMap(loadedMap, mapFile, "world"))
+    const std::string instanceId =
+        automatiaInfiniteDungeonInstanceId("world");
+    if (!bindMap(loadedMap, mapFile, instanceId))
     {
         return false;
     }
 
-    MapInstance* instance = find(WorldInstanceIdentity::canonicalMapFile(mapFile) + "#world");
+    MapInstance* instance = find(
+        WorldInstanceIdentity::canonicalMapFile(mapFile)
+            + "#"
+            + instanceId
+    );
     if (!instance)
     {
         return false;

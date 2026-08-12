@@ -86,6 +86,7 @@ static std::string normalizePersistentMapKey(std::string key);
 static void capturePersistentMinimap(bool requirePlayerOnActiveMap = true);
 static void capturePersistentMechanismStates();
 static void capturePersistentMapRemovals();
+static void resetAutomatiaInfiniteDungeonRouteHistories();
 
 static bool parseAutomatiaMapInstanceKey(
 	const std::string& key,
@@ -120,6 +121,35 @@ struct PendingAutomatiaTransition
 };
 
 static std::vector<PendingAutomatiaTransition> pendingAutomatiaTransitions;
+
+static bool automatiaIsLegacyWorldInstanceId(
+	const std::string& instanceId
+)
+{
+	if ( instanceId == "world" )
+	{
+		return true;
+	}
+	if ( instanceId.rfind("cycle_", 0) != 0 )
+	{
+		return false;
+	}
+	const std::size_t suffixSeparator = instanceId.find('_', 6);
+	if ( suffixSeparator == std::string::npos
+		|| suffixSeparator == 6
+		|| instanceId.substr(suffixSeparator + 1) != "world" )
+	{
+		return false;
+	}
+	return std::all_of(
+		instanceId.begin() + 6,
+		instanceId.begin() + suffixSeparator,
+		[](const unsigned char character)
+		{
+			return std::isdigit(character) != 0;
+		}
+	);
+}
 
 bool queueAutomatiaCustomTransition(
 	int playerIndex,
@@ -188,14 +218,16 @@ bool queueAutomatiaReverseTransition(
 	}
 	PendingAutomatiaTransition transition;
 	transition.playerIndex = playerIndex;
-	transition.destinationMap = identity.instanceId == "world"
+	const bool destinationIsLegacyWorld =
+		automatiaIsLegacyWorldInstanceId(identity.instanceId);
+	transition.destinationMap = destinationIsLegacyWorld
 		? identity.mapFile
 		: std::string{};
 	transition.destinationInstanceKey = identity.key();
 	transition.destinationLevel = destination.dungeonLevel;
 	transition.destinationSecret = destination.secretLevel;
 	transition.destinationMapSeed = destination.mapSeed;
-	transition.destinationGenerated = identity.instanceId != "world";
+	transition.destinationGenerated = !destinationIsLegacyWorld;
 	transition.recordSourceVisit = false;
 	transition.hasReturnPlacement = destination.returnPlacement.valid;
 	transition.reverseVisit = destination;
@@ -1068,6 +1100,8 @@ static bool automatiaMagicGrimoireGenerated = false;
 static bool automatiaMagicGrimoireMerchantUnlocked = false;
 static bool automatiaMagicGrimoireMerchantPurchased = false;
 static bool automatiaHerxPurpleOrbRewardGenerated = false;
+static Uint32 automatiaInfiniteDungeonCycle = 0;
+static Uint32 automatiaInfiniteDungeonCycleSeed = 0;
 
 bool automatiaMagicGrimoireHasGenerated()
 {
@@ -1114,6 +1148,326 @@ bool automatiaHerxPurpleOrbRewardHasGenerated()
 void automatiaMarkHerxPurpleOrbRewardGenerated()
 {
 	automatiaHerxPurpleOrbRewardGenerated = true;
+}
+
+Uint32 automatiaInfiniteDungeonGetCycle()
+{
+	return automatiaInfiniteDungeonCycle;
+}
+
+Uint32 automatiaInfiniteDungeonGetCycleSeed()
+{
+	return automatiaInfiniteDungeonCycleSeed;
+}
+
+void automatiaSetInfiniteDungeonStateFromServer(
+	Uint32 cycle,
+	Uint32 cycleSeed
+)
+{
+	const bool changed =
+		automatiaInfiniteDungeonCycle != cycle
+		|| automatiaInfiniteDungeonCycleSeed != cycleSeed;
+	automatiaInfiniteDungeonCycle = cycle;
+	automatiaInfiniteDungeonCycleSeed = cycleSeed;
+	if ( changed )
+	{
+		resetAutomatiaInfiniteDungeonRouteHistories();
+		printlog(
+			"[Infinite Dungeon] Client synchronized to cycle %u with seed %u.",
+			automatiaInfiniteDungeonCycle,
+			automatiaInfiniteDungeonCycleSeed
+		);
+	}
+}
+
+std::string automatiaInfiniteDungeonInstanceId(
+	const std::string& baseInstanceId
+)
+{
+	if ( automatiaInfiniteDungeonCycle == 0 )
+	{
+		return baseInstanceId;
+	}
+
+	std::string prefix =
+		"cycle_" + std::to_string(automatiaInfiniteDungeonCycle) + "_";
+	std::string result = prefix + baseInstanceId;
+	if ( result.size() > WorldInstanceIdentity::MAX_INSTANCE_ID_LENGTH )
+	{
+		const std::size_t available =
+			WorldInstanceIdentity::MAX_INSTANCE_ID_LENGTH - prefix.size();
+		result = prefix + baseInstanceId.substr(0, available);
+	}
+	return result;
+}
+
+Uint32 automatiaMixInfiniteDungeonMapSeed(
+	Uint32 seed,
+	Sint32 dungeonLevel,
+	bool secretTrack
+)
+{
+	if ( automatiaInfiniteDungeonCycle == 0 )
+	{
+		return seed;
+	}
+
+	Uint32 mixed = seed;
+	mixed ^= automatiaInfiniteDungeonCycleSeed + 0x9e3779b9u
+		+ (mixed << 6) + (mixed >> 2);
+	mixed ^= automatiaInfiniteDungeonCycle * 0x85ebca6bu;
+	mixed ^= static_cast<Uint32>(std::max<Sint32>(0, dungeonLevel))
+		* 0xc2b2ae35u;
+	if ( secretTrack )
+	{
+		mixed ^= 0x27d4eb2fu;
+	}
+	if ( mixed == 0 )
+	{
+		mixed = 0x6d2b79f5u ^ automatiaInfiniteDungeonCycle;
+	}
+	return mixed;
+}
+
+bool automatiaBeginInfiniteDungeonCycle()
+{
+	if ( multiplayer == CLIENT
+		|| !(svFlags & SV_FLAG_INFINITE_DUNGEON) )
+	{
+		return false;
+	}
+
+	if ( automatiaInfiniteDungeonCycle == std::numeric_limits<Uint32>::max() )
+	{
+		printlog(
+			"[Infinite Dungeon] Refusing to advance beyond cycle %u.",
+			automatiaInfiniteDungeonCycle
+		);
+		return false;
+	}
+
+	++automatiaInfiniteDungeonCycle;
+	automatiaInfiniteDungeonCycleSeed = local_rng.rand();
+	if ( automatiaInfiniteDungeonCycleSeed == 0 )
+	{
+		automatiaInfiniteDungeonCycleSeed =
+			0x6d2b79f5u ^ automatiaInfiniteDungeonCycle;
+	}
+
+	/*
+	 * Reverse-ladder histories belong to one cycle's map identities. They must
+	 * not permit travel back into a completed cycle after the Citadel rollover.
+	 */
+	resetAutomatiaInfiniteDungeonRouteHistories();
+
+	printlog(
+		"[Infinite Dungeon] Beginning cycle %u with cycle seed %u.",
+		automatiaInfiniteDungeonCycle,
+		automatiaInfiniteDungeonCycleSeed
+	);
+	return true;
+}
+
+bool automatiaApplyInfiniteDungeonMonsterScaling(
+	Entity* monsterEntity
+)
+{
+	if ( multiplayer == CLIENT
+		|| !(svFlags & SV_FLAG_INFINITE_DUNGEON)
+		|| automatiaInfiniteDungeonCycle == 0
+		|| !monsterEntity
+		|| monsterEntity->behavior != &actMonster )
+	{
+		return false;
+	}
+
+	Stat* monsterStats = monsterEntity->getStats();
+	if ( !monsterStats
+		|| monsterStats->type == NOTHING
+		|| monsterStats->type == SHOPKEEPER
+		|| monsterStats->HP <= 0
+		|| monsterEntity->monsterAllyIndex >= 0
+		|| monsterEntity->monsterCanTradeWith(-1)
+		|| monsterStats->monsterForceAllegiance
+			== Stat::MONSTER_FORCE_PLAYER_ALLY
+		|| monsterStats->monsterForceAllegiance
+			== Stat::MONSTER_FORCE_PLAYER_RECRUITABLE )
+	{
+		return false;
+	}
+
+	int highestPlayerLevel = 1;
+	bool foundLivingPlayer = false;
+	bool evaluatedFriendship = false;
+	bool hostileToPlayer = false;
+	for ( int player = 0; player < MAXPLAYERS; ++player )
+	{
+		if ( client_disconnected[player]
+			|| !stats[player]
+			|| stats[player]->HP <= 0 )
+		{
+			continue;
+		}
+
+		foundLivingPlayer = true;
+		highestPlayerLevel =
+			std::max(highestPlayerLevel, stats[player]->LVL);
+		if ( players[player] && players[player]->entity )
+		{
+			evaluatedFriendship = true;
+			if ( !monsterEntity->checkFriend(players[player]->entity) )
+			{
+				hostileToPlayer = true;
+			}
+		}
+	}
+
+	if ( !foundLivingPlayer
+		|| (evaluatedFriendship && !hostileToPlayer) )
+	{
+		return false;
+	}
+
+	const int originalLevel = std::max(1, monsterStats->LVL);
+	const Uint32 difficultyCycle = std::min<Uint32>(
+		automatiaInfiniteDungeonCycle,
+		10000u
+	);
+	const std::int64_t requestedLevel =
+		static_cast<std::int64_t>(highestPlayerLevel)
+			+ static_cast<std::int64_t>(difficultyCycle) * 2;
+	const int desiredLevel = std::max(
+		originalLevel,
+		static_cast<int>(
+			std::min<std::int64_t>(
+				requestedLevel,
+				std::numeric_limits<Sint32>::max()
+			)
+		)
+	);
+	const int levelGain = std::max(0, desiredLevel - originalLevel);
+
+	const double hpMultiplier = std::min(
+		8.0,
+		1.0
+			+ static_cast<double>(difficultyCycle) * 0.20
+			+ static_cast<double>(levelGain) * 0.055
+	);
+	const double mpMultiplier = std::min(
+		5.0,
+		1.0
+			+ static_cast<double>(difficultyCycle) * 0.12
+			+ static_cast<double>(levelGain) * 0.035
+	);
+	const double rewardMultiplier = std::min(
+		6.0,
+		1.0
+			+ static_cast<double>(difficultyCycle) * 0.15
+			+ static_cast<double>(levelGain) * 0.025
+	);
+
+	auto scaledPositive = [](Sint32 value, double multiplier) -> Sint32
+	{
+		const double scaled =
+			std::ceil(static_cast<double>(std::max<Sint32>(1, value))
+				* multiplier);
+		return static_cast<Sint32>(
+			std::min<double>(scaled, static_cast<double>(std::numeric_limits<Sint32>::max()))
+		);
+	};
+	auto addClamped = [](Sint32 value, int amount) -> Sint32
+	{
+		const std::int64_t result =
+			static_cast<std::int64_t>(value) + amount;
+		return static_cast<Sint32>(
+			std::max<std::int64_t>(
+				std::numeric_limits<Sint32>::min(),
+				std::min<std::int64_t>(
+					std::numeric_limits<Sint32>::max(),
+					result
+				)
+			)
+		);
+	};
+
+	const double healthRatio =
+		monsterStats->MAXHP > 0
+			? std::max(
+				0.0,
+				std::min(
+					1.0,
+					static_cast<double>(monsterStats->HP)
+						/ static_cast<double>(monsterStats->MAXHP)
+				)
+			)
+			: 1.0;
+
+	monsterStats->MAXHP =
+		scaledPositive(monsterStats->MAXHP, hpMultiplier);
+	monsterStats->HP = std::max<Sint32>(
+		1,
+		static_cast<Sint32>(
+			std::ceil(monsterStats->MAXHP * healthRatio)
+		)
+	);
+	monsterStats->OLDHP = monsterStats->HP;
+
+	if ( monsterStats->MAXMP > 0 )
+	{
+		const double manaRatio = std::min(
+			1.0,
+			static_cast<double>(std::max<Sint32>(0, monsterStats->MP))
+				/ static_cast<double>(monsterStats->MAXMP)
+		);
+		monsterStats->MAXMP =
+			scaledPositive(monsterStats->MAXMP, mpMultiplier);
+		monsterStats->MP = static_cast<Sint32>(
+			std::ceil(monsterStats->MAXMP * manaRatio)
+		);
+	}
+
+	const int offenseGain = static_cast<int>(std::min<std::int64_t>(
+		static_cast<std::int64_t>(difficultyCycle) * 2
+			+ (static_cast<std::int64_t>(levelGain) + 1) / 2,
+		std::numeric_limits<int>::max()
+	));
+	/*
+	 * Infinite Dungeon used to apply the full offense gain to STR, DEX,
+	 * and INT. That made late-cycle monsters both hit too hard and move far
+	 * too quickly. Keep the underlying difficulty curve, but split the
+	 * contribution by purpose: damage-oriented stats receive 75% of the
+	 * previous bonus while DEX receives 50% of it.
+	 */
+	const int damageGain = static_cast<int>(std::min<std::int64_t>(
+		(static_cast<std::int64_t>(offenseGain) * 3 + 3) / 4,
+		std::numeric_limits<int>::max()
+	));
+	const int speedGain = static_cast<int>(std::min<std::int64_t>(
+		(static_cast<std::int64_t>(offenseGain) + 1) / 2,
+		std::numeric_limits<int>::max()
+	));
+	const int defenseGain = static_cast<int>(std::min<std::int64_t>(
+		static_cast<std::int64_t>(difficultyCycle)
+			+ (static_cast<std::int64_t>(levelGain) + 2) / 3,
+		std::numeric_limits<int>::max()
+	));
+
+	monsterStats->STR = addClamped(monsterStats->STR, damageGain);
+	monsterStats->DEX = addClamped(monsterStats->DEX, speedGain);
+	monsterStats->INT = addClamped(monsterStats->INT, damageGain);
+	monsterStats->PER = addClamped(monsterStats->PER, defenseGain);
+	monsterStats->CON = addClamped(monsterStats->CON, defenseGain);
+	monsterStats->LVL = desiredLevel;
+	if ( monsterStats->EXP > 0 )
+	{
+		monsterStats->EXP = scaledPositive(
+			monsterStats->EXP,
+			rewardMultiplier
+		);
+	}
+
+	return true;
 }
 
 void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant)
@@ -1235,6 +1589,16 @@ struct PendingAutomatiaSinglePlayerReverseReturn
 };
 static PendingAutomatiaSinglePlayerReverseReturn
 	pendingAutomatiaSinglePlayerReverseReturn;
+
+static void resetAutomatiaInfiniteDungeonRouteHistories()
+{
+	automatiaPlayerLevelHistories.clear();
+	automatiaLegacyPartyLevelHistory.clear();
+	pendingAutomatiaSinglePlayerReverseReturn =
+		PendingAutomatiaSinglePlayerReverseReturn{};
+	pendingAutomatiaTransitions.clear();
+}
+
 struct AutomatiaSavedPlayerPlacement
 {
     WorldInstanceIdentity identity;
@@ -2377,6 +2741,50 @@ void hydratePreservedAutomatiaWorldDocument()
     {
         automatiaHerxPurpleOrbRewardGenerated =
             preservedAutomatiaWorldDocument["herx_purple_orb_reward_generated"].get<bool>();
+    }
+    if (preservedAutomatiaWorldDocument.contains("infinite_dungeon_cycle")
+        && preservedAutomatiaWorldDocument["infinite_dungeon_cycle"].is_number_unsigned())
+    {
+        const std::uint64_t savedCycle =
+            preservedAutomatiaWorldDocument["infinite_dungeon_cycle"].get<std::uint64_t>();
+        if ( savedCycle <= std::numeric_limits<Uint32>::max() )
+        {
+            automatiaInfiniteDungeonCycle = static_cast<Uint32>(savedCycle);
+        }
+    }
+    else if (preservedAutomatiaWorldDocument.contains("infinite_dungeon_cycle")
+        && preservedAutomatiaWorldDocument["infinite_dungeon_cycle"].is_number_integer())
+    {
+        const std::int64_t savedCycle =
+            preservedAutomatiaWorldDocument["infinite_dungeon_cycle"].get<std::int64_t>();
+        if ( savedCycle >= 0
+            && static_cast<std::uint64_t>(savedCycle)
+                <= std::numeric_limits<Uint32>::max() )
+        {
+            automatiaInfiniteDungeonCycle = static_cast<Uint32>(savedCycle);
+        }
+    }
+    if (preservedAutomatiaWorldDocument.contains("infinite_dungeon_cycle_seed")
+        && preservedAutomatiaWorldDocument["infinite_dungeon_cycle_seed"].is_number_unsigned())
+    {
+        const std::uint64_t savedSeed =
+            preservedAutomatiaWorldDocument["infinite_dungeon_cycle_seed"].get<std::uint64_t>();
+        if ( savedSeed <= std::numeric_limits<Uint32>::max() )
+        {
+            automatiaInfiniteDungeonCycleSeed = static_cast<Uint32>(savedSeed);
+        }
+    }
+    else if (preservedAutomatiaWorldDocument.contains("infinite_dungeon_cycle_seed")
+        && preservedAutomatiaWorldDocument["infinite_dungeon_cycle_seed"].is_number_integer())
+    {
+        const std::int64_t savedSeed =
+            preservedAutomatiaWorldDocument["infinite_dungeon_cycle_seed"].get<std::int64_t>();
+        if ( savedSeed >= 0
+            && static_cast<std::uint64_t>(savedSeed)
+                <= std::numeric_limits<Uint32>::max() )
+        {
+            automatiaInfiniteDungeonCycleSeed = static_cast<Uint32>(savedSeed);
+        }
     }
 
     auto restoreLevelVisit = [](
@@ -4028,6 +4436,8 @@ void resetPersistentWorldSession()
     automatiaMagicGrimoireMerchantUnlocked = false;
     automatiaMagicGrimoireMerchantPurchased = false;
     automatiaHerxPurpleOrbRewardGenerated = false;
+    automatiaInfiniteDungeonCycle = 0;
+    automatiaInfiniteDungeonCycleSeed = 0;
     automatiaPlayerLevelHistories.clear();
     automatiaLegacyPartyLevelHistory.clear();
     pendingAutomatiaSinglePlayerReverseReturn =
@@ -4062,7 +4472,7 @@ void resetPersistentWorldSession()
 }
 /*
  * Normalize either a legacy map filename or a canonical map-instance key.
- * Legacy callers intentionally resolve to the shared "world" instance.
+ * Legacy callers resolve to the current cycle's shared "world" instance.
  */
 static std::string normalizePersistentMapKey(
     std::string key
@@ -4073,7 +4483,8 @@ static std::string normalizePersistentMapKey(
         return "";
     }
 
-    std::string instanceId = "world";
+    std::string instanceId =
+        automatiaInfiniteDungeonInstanceId("world");
     const size_t separator = key.find('#');
     if ( separator != std::string::npos )
     {
@@ -4214,6 +4625,10 @@ static bool captureAutomatiaPersistentWorldDocument(
         automatiaMagicGrimoireMerchantPurchased;
     document["herx_purple_orb_reward_generated"] =
         automatiaHerxPurpleOrbRewardGenerated;
+    document["infinite_dungeon_cycle"] =
+        automatiaInfiniteDungeonCycle;
+    document["infinite_dungeon_cycle_seed"] =
+        automatiaInfiniteDungeonCycleSeed;
 
     auto saveLevelVisit = [](const AutomatiaPlayerLevelVisit& visit)
     {
@@ -15991,7 +16406,10 @@ static bool processAutomatiaTransition(
 		}
 		const std::string mapFile =
 			std::filesystem::path(fullMapPath).filename().string();
-		if ( !destinationIdentity.set(mapFile, "world") )
+		if ( !destinationIdentity.set(
+			mapFile,
+			automatiaInfiniteDungeonInstanceId("world")
+		) )
 		{
 			error = "destination identity is invalid";
 			return false;
@@ -16002,7 +16420,7 @@ static bool processAutomatiaTransition(
 		error = "destination map could not be resolved";
 		return false;
 	}
-	constexpr std::size_t customTransitionFixedBytes = 14 + 1 + 4 + 6;
+	constexpr std::size_t customTransitionFixedBytes = 14 + 1 + 4 + 6 + 9;
 	if ( transition.destinationMap.size()
 		> NET_PACKET_SIZE - 9 - customTransitionFixedBytes )
 	{
@@ -16287,7 +16705,17 @@ static bool processAutomatiaTransition(
 		net_packet->data[extensionOffset] = 0xA1;
 		net_packet->data[extensionOffset + 1] = player;
 		SDLNet_Write32(runtimeUidStart, &net_packet->data[extensionOffset + 2]);
-		net_packet->len = extensionOffset + 6;
+		const std::size_t infiniteExtensionOffset = extensionOffset + 6;
+		net_packet->data[infiniteExtensionOffset] = 0xA2;
+		SDLNet_Write32(
+			automatiaInfiniteDungeonGetCycle(),
+			&net_packet->data[infiniteExtensionOffset + 1]
+		);
+		SDLNet_Write32(
+			automatiaInfiniteDungeonGetCycleSeed(),
+			&net_packet->data[infiniteExtensionOffset + 5]
+		);
+		net_packet->len = infiniteExtensionOffset + 9;
 		net_packet->address.host = net_clients[player - 1].host;
 		net_packet->address.port = net_clients[player - 1].port;
 		sendPacketSafe(net_sock, -1, net_packet, player - 1);
@@ -18828,6 +19256,11 @@ void gameLogic(void)
 						}
 						mapseed = map_sequence_rng.rand();
 					}
+					mapseed = automatiaMixInfiniteDungeonMapSeed(
+						mapseed,
+						currentlevel,
+						secretlevel
+					);
 					lastEntityUIDs = entity_uids;
 					if ( forceMapSeed > 0 )
 					{
@@ -18926,8 +19359,19 @@ void gameLogic(void)
 								&net_packet->data[tunnelIDOffset]
 							);
 
-							net_packet->len =
+							const size_t infiniteExtensionOffset =
 								tunnelIDOffset + sizeof(Uint32);
+							net_packet->data[infiniteExtensionOffset] = 0xA2;
+							SDLNet_Write32(
+								automatiaInfiniteDungeonGetCycle(),
+								&net_packet->data[infiniteExtensionOffset + 1]
+							);
+							SDLNet_Write32(
+								automatiaInfiniteDungeonGetCycleSeed(),
+								&net_packet->data[infiniteExtensionOffset + 5]
+							);
+							net_packet->len =
+								infiniteExtensionOffset + 9;
 
 							printlog(
 								"[Custom Tunnel] Sending map '%s' and destination tunnel ID %d to client %d.",
@@ -19550,9 +19994,22 @@ void gameLogic(void)
 							SDLNet_Write32(lastEntityUIDs, &net_packet->data[9]);
 							net_packet->data[13] = currentlevel;
 							net_packet->data[14] = 0;
+							const std::size_t tunnelOffset = 15;
+							SDLNet_Write32(0, &net_packet->data[tunnelOffset]);
+							const std::size_t infiniteExtensionOffset =
+								tunnelOffset + sizeof(Uint32);
+							net_packet->data[infiniteExtensionOffset] = 0xA2;
+							SDLNet_Write32(
+								automatiaInfiniteDungeonGetCycle(),
+								&net_packet->data[infiniteExtensionOffset + 1]
+							);
+							SDLNet_Write32(
+								automatiaInfiniteDungeonGetCycleSeed(),
+								&net_packet->data[infiniteExtensionOffset + 5]
+							);
 							net_packet->address.host = net_clients[c - 1].host;
 							net_packet->address.port = net_clients[c - 1].port;
-							net_packet->len = 15;
+							net_packet->len = infiniteExtensionOffset + 9;
 							sendPacketSafe(net_sock, -1, net_packet, c - 1);
 						}
 					}
@@ -24005,6 +24462,7 @@ int main(int argc, char** argv)
 #endif
 		SDL_Rect pos, src;
 		int c;
+		bool commandLineInfiniteDungeonRequested = false;
 		//int tilesreceived=0;
 		//Mix_Music **music, *intromusic, *splashmusic, *creditsmusic;
 		node_t* node;
@@ -24083,6 +24541,13 @@ int main(int argc, char** argv)
                     else if ( !strcmp(argv[c], "--late-join") )
                     {
                         headlessLateJoinRequested = true;
+                    }
+                    else if ( !strcmp(argv[c], "--infinite-dungeon")
+                        || !strcmp(argv[c], "--infinite") )
+                    {
+                        commandLineInfiniteDungeonRequested = true;
+                        svFlags |= SV_FLAG_INFINITE_DUNGEON;
+                        printlog("Infinite Dungeon mode requested from the command line.");
                     }
                     else if ( !strcmp(argv[c], "--autostart") )
                     {
@@ -24347,6 +24812,11 @@ int main(int argc, char** argv)
 		}
 		else {
 			skipintro = false;
+		}
+		if ( commandLineInfiniteDungeonRequested )
+		{
+			svFlags |= SV_FLAG_INFINITE_DUNGEON;
+			printlog("Infinite Dungeon mode enabled after loading saved settings.");
 		}
 
 		// initialize map

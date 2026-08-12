@@ -7443,9 +7443,14 @@ void actMonster(Entity* my)
 						);
 					}
 
-					applyPersistentMonsterLivingState(
-						my
-					);
+					const bool restoredPersistentMonster =
+						applyPersistentMonsterLivingState(
+							my
+						);
+					if ( !restoredPersistentMonster )
+					{
+						automatiaApplyInfiniteDungeonMonsterScaling(my);
+					}
 		}
 
 		MONSTER_INIT = 2;

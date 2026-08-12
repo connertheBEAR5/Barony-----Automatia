@@ -948,6 +948,40 @@ void Entity::actExpansionEndGamePortal()
 						return;
 					}
 				}
+				if ( (svFlags & SV_FLAG_INFINITE_DUNGEON)
+					&& automatiaBeginInfiniteDungeonCycle() )
+				{
+					/*
+					 * Reuse the ordinary floor transition so inventories, spells,
+					 * followers, hotbars and multiplayer ownership survive intact.
+					 * currentlevel + skipLevelsOnLoad + 1 becomes level 1, the
+					 * first generated mine floor.
+					 */
+					secretlevel = false;
+					loadCustomNextMap.clear();
+					loadCustomNextTunnelID = 0;
+					loadingSameLevelAsCurrent = false;
+					skipLevelsOnLoad = -currentlevel;
+					Compendium_t::Events_t::previousCurrentLevel =
+						currentlevel;
+					Compendium_t::Events_t::previousSecretlevel =
+						false;
+					for ( int player = 0; player < MAXPLAYERS; ++player )
+					{
+						if ( !client_disconnected[player] )
+						{
+							messagePlayer(
+								player,
+								MESSAGE_PROGRESSION,
+								"Infinite Dungeon cycle %u begins. The dungeon reforms around the party.",
+								automatiaInfiniteDungeonGetCycle()
+							);
+						}
+					}
+					loadnextlevel = true;
+					return;
+				}
+
 				victory = portalVictoryType;
 				if ( multiplayer == SERVER )
 				{

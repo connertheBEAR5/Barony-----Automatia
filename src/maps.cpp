@@ -6963,8 +6963,10 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 	 * actual level/track identity before persistence or minimap restoration.
 	 */
 	const std::string generatedInstanceId =
-		"level_" + std::to_string(std::max(0, currentlevel))
-		+ (secretlevel ? "_secret" : "_regular");
+		automatiaInfiniteDungeonInstanceId(
+			"level_" + std::to_string(std::max(0, currentlevel))
+			+ (secretlevel ? "_secret" : "_regular")
+		);
 	if ( worldState.bindMap(map, map.filename, generatedInstanceId) )
 	{
 		if ( MapInstance* generatedInstance = worldState.activeInstance() )

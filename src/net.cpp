@@ -6240,6 +6240,70 @@ void clientActions(Entity* entity)
 
 -------------------------------------------------------------------------------*/
 
+static bool syncInfiniteDungeonStateFromLevelPacket()
+{
+	constexpr std::size_t customMapOffset = 14;
+	if ( !net_packet
+		|| !net_packet->data
+		|| net_packet->len <= customMapOffset )
+	{
+		return false;
+	}
+
+	const std::size_t availableMapBytes =
+		static_cast<std::size_t>(net_packet->len) - customMapOffset;
+	const char* customMapName = reinterpret_cast<const char*>(
+		&net_packet->data[customMapOffset]
+	);
+	const std::size_t customMapNameLength = strnlen(
+		customMapName,
+		availableMapBytes
+	);
+	if ( customMapNameLength >= availableMapBytes )
+	{
+		return false;
+	}
+
+	const std::size_t tunnelOffset =
+		customMapOffset + customMapNameLength + 1;
+	if ( static_cast<std::size_t>(net_packet->len)
+		< tunnelOffset + sizeof(Uint32) )
+	{
+		return false;
+	}
+
+	std::size_t extensionOffset = tunnelOffset + sizeof(Uint32);
+	while ( extensionOffset < static_cast<std::size_t>(net_packet->len) )
+	{
+		const Uint8 marker = net_packet->data[extensionOffset];
+		if ( marker == 0xA1
+			&& static_cast<std::size_t>(net_packet->len)
+				>= extensionOffset + 6 )
+		{
+			extensionOffset += 6;
+			continue;
+		}
+		if ( marker == 0xA2
+			&& static_cast<std::size_t>(net_packet->len)
+				>= extensionOffset + 9 )
+		{
+			const Uint32 cycle = SDLNet_Read32(
+				&net_packet->data[extensionOffset + 1]
+			);
+			const Uint32 cycleSeed = SDLNet_Read32(
+				&net_packet->data[extensionOffset + 5]
+			);
+			const bool changed =
+				automatiaInfiniteDungeonGetCycle() != cycle
+				|| automatiaInfiniteDungeonGetCycleSeed() != cycleSeed;
+			automatiaSetInfiniteDungeonStateFromServer(cycle, cycleSeed);
+			return changed;
+		}
+		break;
+	}
+	return false;
+}
+
 static void changeLevel()
 {
     WorldInstanceIdentity previousPlayerInstances[MAXPLAYERS];
@@ -6312,17 +6376,46 @@ static void changeLevel()
                         )
                     );
 
-                const size_t extensionOffset =
+                size_t extensionOffset =
                     tunnelIDOffset + sizeof(Uint32);
-                if ( net_packet->len >= extensionOffset + 6
-                    && net_packet->data[extensionOffset] == 0xA1 )
+                while ( extensionOffset < static_cast<size_t>(net_packet->len) )
                 {
-                    pendingIndependentPlayer =
-                        net_packet->data[extensionOffset + 1];
-                    pendingIndependentRuntimeUid =
-                        SDLNet_Read32(&net_packet->data[extensionOffset + 2]);
-                    pendingIndependentLevelChange =
-                        pendingIndependentPlayer == clientnum;
+                    const Uint8 marker =
+                        net_packet->data[extensionOffset];
+                    if ( marker == 0xA1
+                        && net_packet->len >= extensionOffset + 6 )
+                    {
+                        pendingIndependentPlayer =
+                            net_packet->data[extensionOffset + 1];
+                        pendingIndependentRuntimeUid =
+                            SDLNet_Read32(
+                                &net_packet->data[extensionOffset + 2]
+                            );
+                        pendingIndependentLevelChange =
+                            pendingIndependentPlayer == clientnum;
+                        extensionOffset += 6;
+                    }
+                    else if ( marker == 0xA2
+                        && net_packet->len >= extensionOffset + 9 )
+                    {
+                        automatiaSetInfiniteDungeonStateFromServer(
+                            SDLNet_Read32(
+                                &net_packet->data[extensionOffset + 1]
+                            ),
+                            SDLNet_Read32(
+                                &net_packet->data[extensionOffset + 5]
+                            )
+                        );
+                        extensionOffset += 9;
+                    }
+                    else
+                    {
+                        printlog(
+                            "[Custom Tunnel] Ignored unknown or truncated level-change extension 0x%02x.",
+                            marker
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -11642,11 +11735,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		const bool hasExplicitCustomMap =
 			net_packet->len > 14
 			&& net_packet->data[14] != 0;
+		const bool infiniteCycleChanged =
+			syncInfiniteDungeonStateFromLevelPacket();
 
 		if ( currentlevel
 				== static_cast<Sint8>(net_packet->data[13])
 			&& secretlevel == net_packet->data[4]
-			&& !hasExplicitCustomMap )
+			&& !hasExplicitCustomMap
+			&& !infiniteCycleChanged )
 		{
 			return;
 		}

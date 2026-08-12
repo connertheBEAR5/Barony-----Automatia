@@ -3945,7 +3945,11 @@ static void handleMainMenu(bool mode)
 			for ( int i = 0; i < NUM_SERVER_FLAGS; i++, current_y += 16 )
 			{
 				char flagStringBuffer[512] = "";
-				if ( i < 5 )
+				if ( (1u << i) == SV_FLAG_INFINITE_DUNGEON )
+				{
+					strncpy(flagStringBuffer, "Infinite Dungeon", 255);
+				}
+				else if ( i < 5 )
 				{
 					strncpy(flagStringBuffer, Language::get(153 + i), 255);
 				}
@@ -3970,7 +3974,15 @@ static void handleMainMenu(bool mode)
 				}
 				if (mouseInBounds(clientnum, subx1 + 36 + 6, subx1 + 36 + 24 + 6, current_y, current_y + 12))   //So many gosh dang magic numbers ._.
 				{
-					if ( i < 5 )
+					if ( (1u << i) == SV_FLAG_INFINITE_DUNGEON )
+					{
+						strncpy(
+							flagStringBuffer,
+							"After the Citadel, begin a fresh dungeon cycle.\nPlayers keep their characters, and hostile monsters\nscale to the party.",
+							255
+						);
+					}
+					else if ( i < 5 )
 					{
 						strncpy(flagStringBuffer, Language::get(1942 + i), 255);
 					}
@@ -3993,7 +4005,7 @@ static void handleMainMenu(bool mode)
 						{
 							tooltip_box.h = TTF12_HEIGHT * 2 + 8;
 						}
-						else if ( i == 4 || i == 8 )
+						else if ( i == 4 || i == 8 || i == 10 )
 						{
 							tooltip_box.h = TTF12_HEIGHT * 3 + 8;
 						}
@@ -4001,7 +4013,7 @@ static void handleMainMenu(bool mode)
 						{
 							tooltip_box.h = TTF12_HEIGHT + 8;
 						}
-						if ( gameModeManager.isServerflagDisabledForCurrentMode(i) )
+						if ( gameModeManager.isServerflagDisabledForCurrentMode(1u << i) )
 						{
 							strcat(flagStringBuffer, Language::get(3962)); // changing flags disabled.
 							tooltip_box.h += TTF12_HEIGHT;
@@ -4046,7 +4058,15 @@ static void handleMainMenu(bool mode)
 				if (hovering_selection < NUM_SERVER_FLAGS)
 				{
 					char flagStringBuffer[512] = "";
-					if ( hovering_selection < 5 )
+					if ( (1u << hovering_selection) == SV_FLAG_INFINITE_DUNGEON )
+					{
+						strncpy(
+							flagStringBuffer,
+							"After the Citadel, begin a fresh dungeon cycle.\nPlayers keep their characters, and hostile monsters\nscale to the party.",
+							255
+						);
+					}
+					else if ( hovering_selection < 5 )
 					{
 						strncpy(flagStringBuffer, Language::get(1942 + hovering_selection), 255);
 					}
@@ -4054,7 +4074,7 @@ static void handleMainMenu(bool mode)
 					{
 						strncpy(flagStringBuffer, Language::get(2921 - 5 + hovering_selection), 255);
 					}
-					if ( gameModeManager.isServerflagDisabledForCurrentMode(hovering_selection) )
+					if ( gameModeManager.isServerflagDisabledForCurrentMode(1u << hovering_selection) )
 					{
 						strcat(flagStringBuffer, Language::get(3962)); // changing flags disabled.
 					}
@@ -4175,7 +4195,7 @@ static void handleMainMenu(bool mode)
 					current_y = server_flags_start_y;
 					for ( int i = 0; i < NUM_SERVER_FLAGS; i++, current_y += 16 )
 					{
-						if ( !gameModeManager.isServerflagDisabledForCurrentMode(i)
+						if ( !gameModeManager.isServerflagDisabledForCurrentMode(1u << i)
 							&& mouseInBounds(clientnum, subx1 + 36 + 6, subx1 + 36 + 24 + 6, current_y, current_y + 12) )
 						{
 							inputs.mouseClearLeft(clientnum);
@@ -4911,7 +4931,11 @@ static void handleMainMenu(bool mode)
 		for ( i = 0; i < NUM_SERVER_FLAGS; i++ )
 		{
 			char flagStringBuffer[256] = "";
-			if ( i < 5 )
+			if ( (1u << i) == SV_FLAG_INFINITE_DUNGEON )
+			{
+				strncpy(flagStringBuffer, "Infinite Dungeon", 255);
+			}
+			else if ( i < 5 )
 			{
 				strncpy(flagStringBuffer, Language::get(153 + i), 255);
 			}
@@ -4936,7 +4960,15 @@ static void handleMainMenu(bool mode)
 			}
 			if (mouseInBounds(clientnum, (xres / 2) + 8 + 6, (xres / 2) + 8 + 30, suby1 + 80 + (i * 16), suby1 + 92 + (i * 16)))   //So many gosh dang magic numbers ._.
 			{
-				if ( i < 5 )
+				if ( (1u << i) == SV_FLAG_INFINITE_DUNGEON )
+				{
+					strncpy(
+						flagStringBuffer,
+						"After the Citadel, begin a fresh dungeon cycle.\nPlayers keep their characters, and hostile monsters\nscale to the party.",
+						255
+					);
+				}
+				else if ( i < 5 )
 				{
 					strncpy(flagStringBuffer, Language::get(1942 + i), 255);
 				}
@@ -4961,7 +4993,7 @@ static void handleMainMenu(bool mode)
 					{
 						tooltip_box.h = TTF12_HEIGHT * 2 + 8;
 					}
-					else if ( i == 4 || i == 8)
+					else if ( i == 4 || i == 8 || i == 10)
 					{
 						tooltip_box.h = TTF12_HEIGHT * 3 + 8;
 					}
@@ -5305,7 +5337,15 @@ static void handleMainMenu(bool mode)
 		{
 			drawTooltip(&tooltip_box);
 			char flagStringBuffer[256] = "";
-			if ( hovering_selection < 5 )
+			if ( (1u << hovering_selection) == SV_FLAG_INFINITE_DUNGEON )
+			{
+				strncpy(
+					flagStringBuffer,
+					"After the Citadel, begin a fresh dungeon cycle.\nPlayers keep their characters, and hostile monsters\nscale to the party.",
+					255
+				);
+			}
+			else if ( hovering_selection < 5 )
 			{
 				strncpy(flagStringBuffer, Language::get(1942 + hovering_selection), 255);
 			}
@@ -8781,6 +8821,7 @@ void doNewGame(bool makeHighscore) {
 		svFlags &= ~(SV_FLAG_CHEATS);
 		svFlags &= ~(SV_FLAG_LIFESAVING);
 		svFlags &= ~(SV_FLAG_ASSIST_ITEMS);
+		svFlags &= ~(SV_FLAG_INFINITE_DUNGEON);
 		svFlags &= ~(SV_FLAG_CLASSIC);
 		svFlags &= ~(SV_FLAG_KEEPINVENTORY);
 		svFlags |= SV_FLAG_HUNGER;

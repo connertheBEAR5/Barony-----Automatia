@@ -1040,6 +1040,63 @@ namespace ConsoleCommands {
 		}
 		});
 
+	static ConsoleCommand ccmd_infinitecycle(
+		"/infinitecycle",
+		"begin the next Infinite Dungeon cycle and return to the first generated floor (cheat)",
+		[]CCMD
+		{
+			if ( !(svFlags & SV_FLAG_CHEATS) )
+			{
+				messagePlayer(clientnum, MESSAGE_MISC, Language::get(277));
+				return;
+			}
+			if ( multiplayer == CLIENT )
+			{
+				messagePlayer(clientnum, MESSAGE_MISC, Language::get(284));
+				return;
+			}
+			if ( !(svFlags & SV_FLAG_INFINITE_DUNGEON) )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"Enable the Infinite Dungeon server flag first."
+				);
+				return;
+			}
+			if ( !automatiaBeginInfiniteDungeonCycle() )
+			{
+				messagePlayer(
+					clientnum,
+					MESSAGE_MISC,
+					"The Infinite Dungeon cycle could not be advanced."
+				);
+				return;
+			}
+
+			secretlevel = false;
+			loadCustomNextMap.clear();
+			loadCustomNextTunnelID = 0;
+			loadingSameLevelAsCurrent = false;
+			skipLevelsOnLoad = -currentlevel;
+			Compendium_t::Events_t::previousCurrentLevel = currentlevel;
+			Compendium_t::Events_t::previousSecretlevel = false;
+			for ( int player = 0; player < MAXPLAYERS; ++player )
+			{
+				if ( !client_disconnected[player] )
+				{
+					messagePlayer(
+						player,
+						MESSAGE_PROGRESSION,
+						"Infinite Dungeon cycle %u begins. The dungeon reforms around the party.",
+						automatiaInfiniteDungeonGetCycle()
+					);
+				}
+			}
+			loadnextlevel = true;
+		}
+	);
+
 	static ConsoleCommand ccmd_pos("/pos", "show the camera coordinates", []CCMD{
 		if (!(svFlags & SV_FLAG_CHEATS))
 		{

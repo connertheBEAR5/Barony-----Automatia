@@ -77,6 +77,30 @@ void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant);
 bool automatiaHerxPurpleOrbRewardHasGenerated();
 void automatiaMarkHerxPurpleOrbRewardGenerated();
 
+/*
+ * Infinite Dungeon is server-authoritative. Cycle zero is the ordinary
+ * campaign. Each completed Citadel increments the cycle before the party
+ * loads the first generated mine floor again.
+ */
+Uint32 automatiaInfiniteDungeonGetCycle();
+Uint32 automatiaInfiniteDungeonGetCycleSeed();
+bool automatiaBeginInfiniteDungeonCycle();
+void automatiaSetInfiniteDungeonStateFromServer(
+	Uint32 cycle,
+	Uint32 cycleSeed
+);
+std::string automatiaInfiniteDungeonInstanceId(
+	const std::string& baseInstanceId
+);
+Uint32 automatiaMixInfiniteDungeonMapSeed(
+	Uint32 seed,
+	Sint32 dungeonLevel,
+	bool secretTrack
+);
+bool automatiaApplyInfiniteDungeonMonsterScaling(
+	Entity* monsterEntity
+);
+
 struct AutomatiaPlayerReturnPlacement
 {
 	bool valid = false;
