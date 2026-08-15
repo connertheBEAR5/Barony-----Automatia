@@ -117,6 +117,7 @@ void refreshRuntimeReferences(MapInstance& instance)
         instance.worldUI = nullptr;
         instance.width = 0;
         instance.height = 0;
+        instance.playableFloors.assign(1, DEFAULT_PLAYABLE_FLOOR);
         return;
     }
 
@@ -126,6 +127,16 @@ void refreshRuntimeReferences(MapInstance& instance)
     instance.worldUI = instance.loadedMap->worldUI;
     instance.width = instance.loadedMap->width;
     instance.height = instance.loadedMap->height;
+    instance.playableFloors.clear();
+    instance.playableFloors.reserve(instance.loadedMap->playableFloors.floors.size());
+    for (const PlayableFloorData& floor : instance.loadedMap->playableFloors.floors)
+    {
+        instance.playableFloors.push_back(floor.id);
+    }
+    if (instance.playableFloors.empty())
+    {
+        instance.playableFloors.push_back(DEFAULT_PLAYABLE_FLOOR);
+    }
 }
 
 void captureLegacySimulationContext(MapInstance& instance)
@@ -254,6 +265,7 @@ void swapLoadedMapState(map_t& first, map_t& second)
     swap(first.lootexcludelocations, second.lootexcludelocations);
     swap(first.liquidSfxPlayedTiles, second.liquidSfxPlayedTiles);
     swap(first.tileAttributes, second.tileAttributes);
+    swap(first.playableFloors, second.playableFloors);
     swap(first.filename, second.filename);
 }
 }
@@ -425,6 +437,9 @@ bool WorldState::registerUnloadedInstance(const MapInstanceSummary& summary)
     instance.identity = summary.identity;
     instance.dungeonLevel = summary.dungeonLevel;
     instance.mapSeed = summary.mapSeed;
+    instance.playableFloors = summary.playableFloors.empty()
+        ? std::vector<PlayableFloorId>{DEFAULT_PLAYABLE_FLOOR}
+        : summary.playableFloors;
     instance.nextEntityUid = std::max<std::uint32_t>(1, summary.nextEntityUid);
     instance.nextPersistentId = std::max<std::uint64_t>(1, summary.nextPersistentId);
     instance.simulationTick = summary.simulationTick;
@@ -1172,6 +1187,7 @@ std::vector<MapInstanceSummary> WorldState::instanceSummaries() const
         std::sort(summary.playersPresent.begin(), summary.playersPresent.end());
         summary.width = instance.width;
         summary.height = instance.height;
+        summary.playableFloors = instance.playableFloors;
         summary.dungeonLevel = instance.dungeonLevel;
         summary.mapSeed = instance.mapSeed;
         summary.nextEntityUid = instance.nextEntityUid;

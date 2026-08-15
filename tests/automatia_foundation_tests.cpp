@@ -605,6 +605,7 @@ static bool testAtomicWorldSave()
         {"instance_id", "world"},
         {"revision", 3},
         {"loaded", true},
+        {"playable_floors", Json::array({0})},
 		{"players_present", Json::array({0})},
         {"persistent_state", Json{
 			{"followers", Json::array({Json{{"owner", 0}, {"uid", 41}}})},
@@ -619,6 +620,7 @@ static bool testAtomicWorldSave()
 		{"instance_id", "world"},
 		{"revision", 4},
 		{"loaded", false},
+        {"playable_floors", Json::array({0})},
 		{"players_present", Json::array({1})},
 		{"persistent_state", Json{{"dropped_items", Json::array()}}}
 	});
@@ -628,6 +630,7 @@ static bool testAtomicWorldSave()
         {"map_file", "start.lmp"},
         {"instance_id", "world"},
         {"revision", 3},
+        {"playable_floor", 0},
         {"inventory", Json::array()}
     });
 	document["players"].push_back(Json{
@@ -635,22 +638,44 @@ static bool testAtomicWorldSave()
 		{"map_file", "mines01.lmp"},
 		{"instance_id", "world"},
 		{"revision", 4},
+        {"playable_floor", 0},
 		{"inventory", Json::array()}
 	});
 	document["quests"] = Json{{"foundation_quest", Json{{"stage", 2}}}};
 	document["dialogue"] = Json{{"npc:7", Json{{"current_node", 3}}}};
 
     EXPECT(AutomatiaSave::validate(document).ok);
-    EXPECT(document["schema_version"] == 2);
+    EXPECT(document["schema_version"] == 3);
     EXPECT(document["party"]["next_id"] == 1);
 
-    Json versionOne = document;
+    Json versionTwo = document;
+    versionTwo["schema_version"] = 2;
+    for (Json& instance : versionTwo["map_instances"])
+    {
+        instance.erase("playable_floors");
+    }
+    for (Json& player : versionTwo["players"])
+    {
+        player.erase("playable_floor");
+    }
+    EXPECT(AutomatiaSave::validate(versionTwo).ok);
+
+    Json versionOne = versionTwo;
     versionOne["schema_version"] = 1;
     versionOne.erase("party");
     EXPECT(AutomatiaSave::validate(versionOne).ok);
     Json missingParty = document;
     missingParty.erase("party");
     EXPECT(!AutomatiaSave::validate(missingParty));
+    Json invalidFloors = document;
+    invalidFloors["map_instances"][0]["playable_floors"] = Json::array({2});
+    EXPECT(!AutomatiaSave::validate(invalidFloors));
+    invalidFloors = document;
+    invalidFloors["map_instances"][0]["playable_floors"] = Json::array({0, 0});
+    EXPECT(!AutomatiaSave::validate(invalidFloors));
+    invalidFloors = document;
+    invalidFloors["players"][0]["playable_floor"] = 2;
+    EXPECT(!AutomatiaSave::validate(invalidFloors));
 
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path directory =

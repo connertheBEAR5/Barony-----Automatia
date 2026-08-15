@@ -12957,13 +12957,16 @@ bind_failed:
 				const std::size_t mapNameLength = net_packet->data[18];
 				const std::size_t metadataOffset = 19 + mapNameLength;
 				const std::size_t positionOffset = metadataOffset + 9;
+				const std::size_t positionBytes = runtimeVersion >= 5
+					? 36
+					: (runtimeVersion >= 2 ? 24 : 0);
 				const std::size_t transformationOffset =
-					positionOffset + (runtimeVersion >= 2 ? 24 : 0);
+					positionOffset + positionBytes;
 				const std::size_t visiblePlayerMaskOffset =
 					transformationOffset + (runtimeVersion >= 3 ? 8 : 0);
 				const std::size_t expectedSize = visiblePlayerMaskOffset
 					+ (runtimeVersion >= 4 ? 4 : 0);
-				if (runtimeVersion > 4 || mapNameLength == 0
+				if (runtimeVersion > 5 || mapNameLength == 0
 					|| mapNameLength >= sizeof(maptoload)
 					|| static_cast<std::size_t>(net_packet->len) != expectedSize)
 				{
@@ -12972,7 +12975,7 @@ bind_failed:
 				}
 				if (runtimeVersion >= 2
 					&& !clientStageAutomatiaLateJoinPosition(
-						&net_packet->data[positionOffset], 24))
+						&net_packet->data[positionOffset], positionBytes))
 				{
 					printlog(
 						"[Character Save] Rejected malformed authoritative "

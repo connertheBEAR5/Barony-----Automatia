@@ -10,6 +10,7 @@
 
 #include "party_manager.hpp"
 #include "world_instance.hpp"
+#include "playable_z.hpp"
 
 #include <cerrno>
 #include <cmath>
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <limits>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -65,6 +67,24 @@ bool nonNegativeInteger(const Json& value)
         return true;
     }
     return value.is_number_integer() && value.get<std::int64_t>() >= 0;
+}
+
+bool validPlayableFloor(const Json& value)
+{
+    if (!value.is_number_integer())
+    {
+        return false;
+    }
+    try
+    {
+        const std::int64_t floor = value.get<std::int64_t>();
+        return floor >= std::numeric_limits<PlayableFloorId>::min()
+            && floor <= std::numeric_limits<PlayableFloorId>::max();
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
 }
 
 bool finiteNumber(const Json& value)
@@ -247,6 +267,8 @@ Result validate(const Json& document)
     }
 
     std::unordered_set<std::string> mapKeys;
+    std::unordered_map<std::string, std::unordered_set<std::int64_t>>
+        mapPlayableFloors;
     std::size_t index = 0;
     for (const Json& instance : document["map_instances"])
     {
@@ -293,6 +315,37 @@ Result validate(const Json& document)
                 + "] has an invalid persistent-state payload"
             );
         }
+        std::unordered_set<std::int64_t> validatedFloorIds;
+        if (version >= 3)
+        {
+            if (!instance.contains("playable_floors")
+                || !instance["playable_floors"].is_array()
+                || instance["playable_floors"].empty()
+                || instance["playable_floors"].size() > MAX_PLAYABLE_FLOORS_PER_MAP)
+            {
+                return failure(
+                    "map_instances[" + std::to_string(index)
+                    + "] has an invalid playable-floor table");
+            }
+            bool hasDefaultFloor = false;
+            for (const Json& floor : instance["playable_floors"])
+            {
+                if (!validPlayableFloor(floor))
+                {
+                    return failure("world save playable-floor ID is invalid");
+                }
+                const std::int64_t id = floor.get<std::int64_t>();
+                if (!validatedFloorIds.insert(id).second)
+                {
+                    return failure("world save playable-floor ID is duplicate");
+                }
+                hasDefaultFloor = hasDefaultFloor || id == DEFAULT_PLAYABLE_FLOOR;
+            }
+            if (!hasDefaultFloor)
+            {
+                return failure("world save map instance is missing playable floor Z0");
+            }
+        }
         if (instance.contains("players_present"))
         {
             const Json& occupants = instance["players_present"];
@@ -321,6 +374,10 @@ Result validate(const Json& document)
         if (!mapKeys.insert(key).second)
         {
             return failure("world save contains a duplicate map instance");
+        }
+        if (version >= 3)
+        {
+            mapPlayableFloors.emplace(key, std::move(validatedFloorIds));
         }
         ++index;
     }
@@ -381,6 +438,14 @@ Result validate(const Json& document)
                 + "] has an invalid rotation"
             );
         }
+        if (version >= 3
+            && (!player.contains("playable_floor")
+                || !validPlayableFloor(player["playable_floor"])))
+        {
+            return failure(
+                "players[" + std::to_string(index)
+                + "] has an invalid playable floor");
+        }
         const Result identityResult = validateIdentity(
             player,
             "players[" + std::to_string(index) + "]"
@@ -399,6 +464,20 @@ Result validate(const Json& document)
                 "players[" + std::to_string(index)
                 + "] refers to an unknown map instance"
             );
+        }
+        if (version >= 3)
+        {
+            const std::int64_t playerFloor =
+                player["playable_floor"].get<std::int64_t>();
+            const auto floors = mapPlayableFloors.find(key);
+            if (floors == mapPlayableFloors.end()
+                || floors->second.count(playerFloor) == 0)
+            {
+                return failure(
+                    "players[" + std::to_string(index)
+                    + "] refers to a playable floor absent from its map instance"
+                );
+            }
         }
         ++index;
     }

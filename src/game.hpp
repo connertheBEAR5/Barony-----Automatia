@@ -104,6 +104,7 @@ bool automatiaApplyInfiniteDungeonMonsterScaling(
 struct AutomatiaPlayerReturnPlacement
 {
 	bool valid = false;
+	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
 	double x = 0.0;
 	double y = 0.0;
 	double z = 0.0;
@@ -120,6 +121,7 @@ struct AutomatiaPlayerLevelVisit
 	std::string mapInstanceKey;
 	bool hasReturnAnchor = false;
 	Sint32 returnAnchorPersistentID = 0;
+	PlayableFloorId returnAnchorPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
 	double returnAnchorX = 0.0;
 	double returnAnchorY = 0.0;
 	double returnAnchorZ = 0.0;
@@ -673,6 +675,23 @@ bool importAutomatiaPersistentMinimapSnapshot(
     const std::vector<Sint8>& tiles,
     bool allowResize
 );
+bool exportAutomatiaPersistentMinimapSnapshotForFloor(
+    int playerIndex,
+    const std::string& mapKey,
+    PlayableFloorId playableFloor,
+    Sint32& width,
+    Sint32& height,
+    std::vector<Sint8>& tiles
+);
+bool importAutomatiaPersistentMinimapSnapshotForFloor(
+    int playerIndex,
+    const std::string& mapKey,
+    PlayableFloorId playableFloor,
+    Sint32 width,
+    Sint32 height,
+    const std::vector<Sint8>& tiles,
+    bool allowResize
+);
 void syncClientPersistentMinimap(bool force);
 void resetClientPersistentMinimapSync();
 void restoreAutomatiaPersistentMinimapForLocalPlayer();
@@ -685,6 +704,18 @@ bool loadAutomatiaPersistentWorldSave(
 void applyAutomatiaSavedPlayerPlacements();
 bool automatiaHasSavedPlayerPlacement(int playerIndex);
 void consumeAutomatiaSavedPlayerPlacement(int playerIndex);
+bool stageAutomatiaCharacterSavedPlacement(
+    int playerIndex,
+    const std::string& mapFile,
+    const std::string& instanceId,
+    Uint64 revision,
+    PlayableFloorId playableFloor,
+    real_t x,
+    real_t y,
+    real_t z,
+    real_t yaw,
+    real_t pitch,
+    real_t roll);
 bool stageAutomatiaCharacterSavedPlacement(
     int playerIndex,
     const std::string& mapFile,

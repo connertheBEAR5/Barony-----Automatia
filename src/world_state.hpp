@@ -10,6 +10,7 @@
 
 #include "party_manager.hpp"
 #include "world_instance.hpp"
+#include "playable_z.hpp"
 
 #include <cstdint>
 #include <string>
@@ -32,6 +33,7 @@ struct MapInstance
     list_t* worldUI = nullptr;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::vector<PlayableFloorId> playableFloors{DEFAULT_PLAYABLE_FLOOR};
     std::int32_t dungeonLevel = 0;
     std::uint32_t mapSeed = 0;
     std::uint32_t nextEntityUid = 1;
@@ -66,6 +68,7 @@ struct MapInstanceSummary
     std::vector<int> playersPresent;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::vector<PlayableFloorId> playableFloors{DEFAULT_PLAYABLE_FLOOR};
     std::int32_t dungeonLevel = 0;
     std::uint32_t mapSeed = 0;
     std::uint32_t nextEntityUid = 1;

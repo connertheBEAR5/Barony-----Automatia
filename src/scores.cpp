@@ -229,6 +229,8 @@ namespace
         "automatia_character_instance_id";
     constexpr const char* AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY =
         "automatia_character_instance_revision";
+    constexpr const char* AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY =
+        "automatia_character_playable_floor";
     constexpr const char* AUTOMATIA_CHARACTER_POSITION_X_KEY =
         "automatia_character_position_x";
     constexpr const char* AUTOMATIA_CHARACTER_POSITION_Y_KEY =
@@ -252,6 +254,7 @@ namespace
     {
         std::string identity;
         WorldInstanceIdentity worldIdentity;
+        PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
         real_t x = 0.0;
         real_t y = 0.0;
         real_t z = 0.0;
@@ -429,6 +432,7 @@ namespace
         return key == AUTOMATIA_CHARACTER_MAP_FILE_KEY
             || key == AUTOMATIA_CHARACTER_INSTANCE_ID_KEY
             || key == AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY
+            || key == AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_X_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_Y_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_Z_KEY
@@ -574,6 +578,10 @@ namespace
                 info,
                 AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY,
                 std::to_string(runtime.worldIdentity.revision));
+            setCharacterMetadata(
+                info,
+                AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY,
+                std::to_string(static_cast<Sint32>(runtime.playableFloor)));
             setCharacterMetadata(
                 info,
                 AUTOMATIA_CHARACTER_POSITION_X_KEY,
@@ -841,6 +849,16 @@ namespace
         real_t pitch = 0.0;
         real_t roll = 0.0;
         Uint64 revision = 0;
+        Sint32 playableFloorRaw = DEFAULT_PLAYABLE_FLOOR;
+        (void)parseCharacterSint32Metadata(
+            info, AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY, playableFloorRaw);
+        if (playableFloorRaw < std::numeric_limits<PlayableFloorId>::min()
+            || playableFloorRaw > std::numeric_limits<PlayableFloorId>::max())
+        {
+            return false;
+        }
+        const PlayableFloorId playableFloor =
+            static_cast<PlayableFloorId>(playableFloorRaw);
         if (!parseCharacterRealMetadata(
                 info, AUTOMATIA_CHARACTER_POSITION_X_KEY, x)
             || !parseCharacterRealMetadata(
@@ -864,6 +882,7 @@ namespace
             mapFile,
             instanceId,
             revision,
+            playableFloor,
             x,
             y,
             z,
@@ -1146,6 +1165,7 @@ bool captureAutomatiaCharacterSaveRuntimeState(int player)
         automatiaCharacterRuntimeState[player];
     runtime.identity = identity;
     runtime.worldIdentity = identityState;
+    runtime.playableFloor = entity->playableFloor;
 
     // PMOV collision-checks remote clients against new_x/new_y, then restores
     // entity->x/entity->y until actPlayer runs. A periodic save can arrive in

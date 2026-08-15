@@ -67,6 +67,31 @@ if(BUILD_TESTING)
     target_compile_features(party_chat_tests PRIVATE cxx_std_17)
     add_test(NAME party_chat COMMAND party_chat_tests)
 
+    add_executable(
+        playable_z_characterization_tests
+        tests/playable_z_characterization_tests.cpp
+        src/automatia_save.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/party_protocol.cpp
+    )
+    target_include_directories(
+        playable_z_characterization_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_definitions(
+        playable_z_characterization_tests
+        PRIVATE
+        BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+        BARONY_BINARY_DIR="${PROJECT_BINARY_DIR}"
+    )
+    target_compile_features(
+        playable_z_characterization_tests PRIVATE cxx_std_17)
+    add_test(
+        NAME playable_z_characterization
+        COMMAND playable_z_characterization_tests)
+
     if(UNIX)
         add_executable(
             late_join_live_probe
@@ -659,6 +684,27 @@ else()
 endif(APPLE)
 
 if (GAME_ENABLED)
+  if(BUILD_TESTING)
+	target_sources(
+		barony
+		PRIVATE
+			"${PROJECT_SOURCE_DIR}/tests/playable_z_runtime_characterization.cpp"
+	)
+	target_compile_definitions(
+		barony
+		PRIVATE
+			AUTOMATIA_STAGE4B_TEST_HOOK=1
+	)
+	add_test(
+		NAME playable_z_runtime_characterization
+		COMMAND barony --automatia-stage4b-runtime-characterization
+	)
+	set_tests_properties(
+		playable_z_runtime_characterization
+		PROPERTIES
+			WORKING_DIRECTORY "${PROJECT_BINARY_DIR}"
+	)
+  endif()
   if (SAM_FRAMEWORK_ENABLED)
 	target_sources(
 		barony

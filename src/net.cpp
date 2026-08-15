@@ -249,8 +249,11 @@ namespace
 
 	constexpr real_t kAutomatiaLateJoinPositionWireScale = 1024.0;
 	constexpr std::size_t kAutomatiaLateJoinPositionWireBytes = 24;
+	constexpr std::size_t kAutomatiaLateJoinPositionV5WireBytes = 36;
 	struct ClientLateJoinPosition
 	{
+		PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+		std::uint64_t spatialRevision = 0;
 		real_t x = 0.0;
 		real_t y = 0.0;
 		real_t z = 0.0;
@@ -2289,7 +2292,9 @@ bool clientStageAutomatiaLateJoinPosition(
     const Uint8* data,
     std::size_t size)
 {
-	if (!data || size != kAutomatiaLateJoinPositionWireBytes)
+	if (!data
+		|| (size != kAutomatiaLateJoinPositionWireBytes
+			&& size != kAutomatiaLateJoinPositionV5WireBytes))
 	{
 		return false;
 	}
@@ -2312,6 +2317,21 @@ bool clientStageAutomatiaLateJoinPosition(
 	staged.yaw = decode(12);
 	staged.pitch = decode(16);
 	staged.roll = decode(20);
+	if (size == kAutomatiaLateJoinPositionV5WireBytes)
+	{
+		const Uint32 floorRaw = LateJoinProtocol::read32(data, 24);
+		Sint32 floorSigned = 0;
+		memcpy(&floorSigned, &floorRaw, sizeof(floorSigned));
+		if (floorSigned < std::numeric_limits<PlayableFloorId>::min()
+			|| floorSigned > std::numeric_limits<PlayableFloorId>::max())
+		{
+			return false;
+		}
+		staged.playableFloor = static_cast<PlayableFloorId>(floorSigned);
+		const std::uint64_t low = LateJoinProtocol::read32(data, 28);
+		const std::uint64_t high = LateJoinProtocol::read32(data, 32);
+		staged.spatialRevision = low | (high << 32U);
+	}
 	staged.pending =
 		std::isfinite(static_cast<double>(staged.x))
 		&& std::isfinite(static_cast<double>(staged.y))
@@ -2327,8 +2347,10 @@ bool clientStageAutomatiaLateJoinPosition(
 	g_clientPendingLateJoinPosition = staged;
 	printlog(
 		"[Character Save] Client staged authoritative late-join position "
-		"%.2f, %.2f, %.2f.",
-		staged.x, staged.y, staged.z);
+		"%.2f, %.2f, %.2f floor=%d spatialRevision=%llu.",
+		staged.x, staged.y, staged.z,
+		static_cast<int>(staged.playableFloor),
+		static_cast<unsigned long long>(staged.spatialRevision));
 	return true;
 }
 
@@ -2390,6 +2412,16 @@ bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
 	}
 
 	Entity* entity = players[clientnum]->entity;
+	if (placement.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+	{
+		printlog(
+			"[Playable Z] Runtime STRT requested floor %d during Z1; "
+			"nonzero floor activation remains gated until Z2.",
+			static_cast<int>(placement.playableFloor));
+		return false;
+	}
+	entity->playableFloor = placement.playableFloor;
+	entity->spatialRevision = placement.spatialRevision;
 	entity->x = placement.x;
 	entity->y = placement.y;
 	entity->z = placement.z;
@@ -2412,6 +2444,7 @@ bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
 	{
 		if (bodypart)
 		{
+			bodypart->inheritSpatialContextFrom(entity);
 			bodypart->bNeedsRenderPositionInit = true;
 		}
 	}
@@ -4851,7 +4884,7 @@ static bool sendServerLateJoinStart(int playerIndex)
     const std::size_t metadataOffset = 19 + identity.mapFile.size();
     const std::size_t positionOffset = metadataOffset + 9;
     const std::size_t transformationOffset =
-        positionOffset + kAutomatiaLateJoinPositionWireBytes;
+        positionOffset + kAutomatiaLateJoinPositionV5WireBytes;
     const std::size_t visiblePlayerMaskOffset =
         transformationOffset + kAutomatiaLateJoinTransformationWireBytes;
     std::vector<std::uint8_t> record(
@@ -4862,7 +4895,7 @@ static bool sendServerLateJoinStart(int playerIndex)
     LateJoinProtocol::write32(record, 8, uniqueGameKey);
     record[12] = g_lateJoinReturningPlayer[playerIndex] ? 1 : 0;
     LateJoinProtocol::write32(record, 13, uniqueLobbyKey);
-    record[17] = 4; // Runtime STRT v4: map, position, transformations, visible-player mask.
+    record[17] = 5; // Runtime STRT v5: v4 data plus playable floor and spatial revision.
     record[18] = static_cast<std::uint8_t>(identity.mapFile.size());
     memcpy(record.data() + 19, identity.mapFile.data(), identity.mapFile.size());
     LateJoinProtocol::write32(
@@ -4875,6 +4908,16 @@ static bool sendServerLateJoinStart(int playerIndex)
     writeFixed(record, positionOffset + 12, authoritativePlayer->yaw);
     writeFixed(record, positionOffset + 16, authoritativePlayer->pitch);
     writeFixed(record, positionOffset + 20, authoritativePlayer->roll);
+    Sint32 floorSigned = static_cast<Sint32>(authoritativePlayer->playableFloor);
+    Uint32 floorRaw = 0;
+    memcpy(&floorRaw, &floorSigned, sizeof(floorRaw));
+    LateJoinProtocol::write32(record, positionOffset + 24, floorRaw);
+    LateJoinProtocol::write32(
+        record, positionOffset + 28,
+        static_cast<Uint32>(authoritativePlayer->spatialRevision & 0xffffffffULL));
+    LateJoinProtocol::write32(
+        record, positionOffset + 32,
+        static_cast<Uint32>(authoritativePlayer->spatialRevision >> 32U));
 
     Sint32 polymorphTarget = NOTHING;
     Sint32 shapeshiftTarget = NOTHING;

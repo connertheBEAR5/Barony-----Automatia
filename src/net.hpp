@@ -105,8 +105,9 @@ bool clientSendAutomatiaCharacterSaveBeforeDisconnect(
     Uint32 timeoutMilliseconds = 1500);
 bool clientReapplyAutomatiaCharacterRestoreAfterPlayerInit();
 /*
- * Runtime STRT v4 carries the server-authoritative spawn position, exact
- * polymorph/shapeshift targets, and a visible-player mask. The mask separates
+ * Runtime STRT v5 carries the server-authoritative spawn position, playable
+ * floor/spatial revision, exact polymorph/shapeshift targets, and a visible-player
+ * mask. The mask separates
  * live actors from the dedicated endpoint and reconnect-reserved identities.
  */
 bool clientStageAutomatiaLateJoinVisiblePlayerMask(

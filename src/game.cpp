@@ -75,6 +75,9 @@
 #include <ctime>
 #include <filesystem>
 #include <cstring>
+#ifdef AUTOMATIA_STAGE4B_TEST_HOOK
+int runPlayableZRuntimeCharacterization();
+#endif
 /*
  * Implemented in mechanisms.cpp.
  * Reapplies the restored output of a signal timer or AND gate.
@@ -314,6 +317,7 @@ struct PersistentChestItemState
  */
 struct PersistentWorldItemState
 {
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     std::string stableId;
     Sint32 type = 0;
     Sint32 status = 0;
@@ -355,6 +359,7 @@ struct PersistentWorldItemState
  */
 struct PersistentGoldBagState
 {
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     Sint32 amount = 0;
     Sint32 amountBonus = 0;
 
@@ -458,6 +463,7 @@ enum class Kind : Uint8
 };
 
     Kind kind = Kind::None;
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
 
     // Ordinary lever.
     Sint32 switchPower = 0;
@@ -798,6 +804,7 @@ enum class Kind : Uint8
  */
 struct PersistentBoulderState
 {
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     Sint32 sourceTrapPersistentID = 0;
     Sint32 sprite = 0;
 
@@ -832,6 +839,7 @@ struct PersistentBoulderState
  */
 struct PersistentTileState
 {
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     Sint32 x = 0;
     Sint32 y = 0;
     Sint32 layer = 0;
@@ -839,34 +847,52 @@ struct PersistentTileState
 };
 
 /*
- * Existing wall packets use 16-bit map coordinates, and runtime maps
- * use far fewer than 65536 tiles per axis.
+ * Versioned spatial key for persistent tile overrides.
  *
- * Packed layout:
- * bits  0-15: x
- * bits 16-31: y
- * bits 32-47: layer
+ * Stage Z1 keeps all existing tile capture on floor Z0, but the key already
+ * carries PlayableFloorId so future floors cannot alias identical x/y/layer
+ * coordinates.
  */
-static Uint64 makePersistentTileKey(
+struct PersistentTileKey
+{
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    Sint32 x = 0;
+    Sint32 y = 0;
+    Sint32 layer = 0;
+
+    bool operator==(const PersistentTileKey& other) const
+    {
+        return playableFloor == other.playableFloor
+            && x == other.x
+            && y == other.y
+            && layer == other.layer;
+    }
+};
+
+struct PersistentTileKeyHash
+{
+    std::size_t operator()(const PersistentTileKey& key) const
+    {
+        std::size_t value = static_cast<std::size_t>(
+            static_cast<std::uint16_t>(key.playableFloor));
+        value ^= static_cast<std::size_t>(static_cast<Uint32>(key.x))
+            + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+        value ^= static_cast<std::size_t>(static_cast<Uint32>(key.y))
+            + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+        value ^= static_cast<std::size_t>(static_cast<Uint32>(key.layer))
+            + 0x9e3779b9U + (value << 6U) + (value >> 2U);
+        return value;
+    }
+};
+
+static PersistentTileKey makePersistentTileKey(
     Sint32 x,
     Sint32 y,
-    Sint32 layer
+    Sint32 layer,
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR
 )
 {
-    return
-        static_cast<Uint64>(
-            static_cast<Uint16>(x)
-        )
-        | (
-            static_cast<Uint64>(
-                static_cast<Uint16>(y)
-            ) << 16
-        )
-        | (
-            static_cast<Uint64>(
-                static_cast<Uint16>(layer)
-            ) << 32
-        );
+    return PersistentTileKey{playableFloor, x, y, layer};
 }
 struct PersistentMapRemovalState
 {
@@ -898,8 +924,9 @@ struct PersistentMapRemovalState
      * Only coordinates whose current tile differs from originalTiles.
      */
     std::unordered_map<
-        Uint64,
-        PersistentTileState
+        PersistentTileKey,
+        PersistentTileState,
+        PersistentTileKeyHash
     > tileStates;
 	    /*
      * Current surviving runtime boulders created by map traps.
@@ -1602,6 +1629,7 @@ static void resetAutomatiaInfiniteDungeonRouteHistories()
 struct AutomatiaSavedPlayerPlacement
 {
     WorldInstanceIdentity identity;
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     real_t x = 0.0;
     real_t y = 0.0;
     real_t z = 0.0;
@@ -1617,7 +1645,9 @@ static AutomatiaSavedPlayerPlacement
  * Per-character explored minimap state.
  *
  * The first key is the stable reconnect/character identity. The second key
- * is the canonical map-instance identity (for example start.lmp#world).
+ * is the canonical map-instance identity (for example start.lmp#world). The
+ * third key is PlayableFloorId, so discovery at identical x/y on separate
+ * playable floors can never alias in persistence.
  * Remote clients report their own minimap progress to the authoritative
  * server; a headless server must never treat its process-local minimap array
  * as a remote player's discovery state.
@@ -1628,8 +1658,10 @@ struct PersistentMinimapState
     Sint32 height = 0;
     std::vector<Sint8> tiles;
 };
+using PersistentMinimapFloorRegistry =
+    std::unordered_map<PlayableFloorId, PersistentMinimapState>;
 using PersistentMinimapMapRegistry =
-    std::unordered_map<std::string, PersistentMinimapState>;
+    std::unordered_map<std::string, PersistentMinimapFloorRegistry>;
 static std::unordered_map<std::string, PersistentMinimapMapRegistry>
     persistentPlayerMinimapRegistry;
 /*
@@ -1647,6 +1679,8 @@ static Uint32 persistentMinimapServerTransferId = 0;
  */
 static std::string persistentMinimapClearedMapKey;
 static std::uint64_t persistentMinimapClearedMapRevision = 0;
+static PlayableFloorId persistentMinimapClearedPlayableFloor =
+    DEFAULT_PLAYABLE_FLOOR;
 constexpr std::size_t PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD = 1600;
 static_assert(
     28U + 255U + PERSISTENT_MINIMAP_SERVER_CHUNK_PAYLOAD
@@ -1792,23 +1826,30 @@ static void mergePersistentMinimapIdentity(
         persistentPlayerMinimapRegistry[destinationIdentity];
     for (auto& savedMap : sourceMaps)
     {
-        auto inserted = destination.emplace(savedMap.first, savedMap.second);
-        if (inserted.second)
+        PersistentMinimapFloorRegistry& destinationFloors =
+            destination[savedMap.first];
+        for (auto& savedFloor : savedMap.second)
         {
-            continue;
-        }
-        PersistentMinimapState& target = inserted.first->second;
-        const PersistentMinimapState& source = savedMap.second;
-        if (target.width != source.width || target.height != source.height
-            || target.tiles.size() != source.tiles.size())
-        {
-            continue;
-        }
-        for (std::size_t index = 0; index < target.tiles.size(); ++index)
-        {
-            if (target.tiles[index] == 0 && source.tiles[index] != 0)
+            auto found = destinationFloors.find(savedFloor.first);
+            if (found == destinationFloors.end())
             {
-                target.tiles[index] = source.tiles[index];
+                destinationFloors.emplace(
+                    savedFloor.first, std::move(savedFloor.second));
+                continue;
+            }
+            PersistentMinimapState& target = found->second;
+            const PersistentMinimapState& source = savedFloor.second;
+            if (target.width != source.width || target.height != source.height
+                || target.tiles.size() != source.tiles.size())
+            {
+                continue;
+            }
+            for (std::size_t index = 0; index < target.tiles.size(); ++index)
+            {
+                if (target.tiles[index] == 0 && source.tiles[index] != 0)
+                {
+                    target.tiles[index] = source.tiles[index];
+                }
             }
         }
     }
@@ -1857,9 +1898,22 @@ static int persistentMinimapLocalPlayerIndex()
     return clientnum >= 0 && clientnum < MAXPLAYERS ? clientnum : 0;
 }
 
+static PlayableFloorId persistentMinimapPlayableFloorForPlayer(
+    const int playerIndex
+)
+{
+    if (playerIndex >= 0 && playerIndex < MAXPLAYERS
+        && players[playerIndex] && players[playerIndex]->entity)
+    {
+        return players[playerIndex]->entity->playableFloor;
+    }
+    return DEFAULT_PLAYABLE_FLOOR;
+}
+
 static PersistentMinimapState* persistentMinimapStateForPlayer(
     const int playerIndex,
-    const std::string& mapKey
+    const std::string& mapKey,
+    const PlayableFloorId playableFloor
 )
 {
     migratePersistentMinimapFallbackIdentity(playerIndex);
@@ -1874,8 +1928,24 @@ static PersistentMinimapState* persistentMinimapStateForPlayer(
     {
         return nullptr;
     }
-    auto state = player->second.find(mapKey);
-    return state != player->second.end() ? &state->second : nullptr;
+    auto savedMap = player->second.find(mapKey);
+    if (savedMap == player->second.end())
+    {
+        return nullptr;
+    }
+    auto state = savedMap->second.find(playableFloor);
+    return state != savedMap->second.end() ? &state->second : nullptr;
+}
+
+static PersistentMinimapState* persistentMinimapStateForPlayer(
+    const int playerIndex,
+    const std::string& mapKey
+)
+{
+    return persistentMinimapStateForPlayer(
+        playerIndex,
+        mapKey,
+        persistentMinimapPlayableFloorForPlayer(playerIndex));
 }
 
 namespace
@@ -1896,6 +1966,42 @@ bool savedJsonInt(const AutomatiaSave::Json& object, const char* key, Sint32& va
             return false;
         }
         value = static_cast<Sint32>(parsed);
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
+bool savedJsonPlayableFloor(
+    const AutomatiaSave::Json& object,
+    const char* key,
+    PlayableFloorId& value,
+    const bool optionalForLegacy = true)
+{
+    if (!object.is_object() || !object.contains(key))
+    {
+        if (optionalForLegacy)
+        {
+            value = DEFAULT_PLAYABLE_FLOOR;
+            return true;
+        }
+        return false;
+    }
+    if (!object[key].is_number_integer())
+    {
+        return false;
+    }
+    try
+    {
+        const std::int64_t parsed = object[key].get<std::int64_t>();
+        if (parsed < std::numeric_limits<PlayableFloorId>::min()
+            || parsed > std::numeric_limits<PlayableFloorId>::max())
+        {
+            return false;
+        }
+        value = static_cast<PlayableFloorId>(parsed);
         return true;
     }
     catch (const std::exception&)
@@ -2125,6 +2231,7 @@ bool restoreMonsterItemState(
 AutomatiaSave::Json saveWorldItemState(const PersistentWorldItemState& item)
 {
     return AutomatiaSave::Json{
+        {"playable_floor", item.playableFloor},
         {"stable_id", item.stableId},
         {"legacy_type", item.type},
         {"status", item.status},
@@ -2152,7 +2259,8 @@ bool restoreWorldItemState(
     PersistentWorldItemState& item
 )
 {
-    if (!savedJsonInt(saved, "legacy_type", item.type)
+    if (!savedJsonPlayableFloor(saved, "playable_floor", item.playableFloor)
+        || !savedJsonInt(saved, "legacy_type", item.type)
         || !savedJsonInt(saved, "status", item.status)
         || !savedJsonInt(saved, "beatitude", item.beatitude)
         || !savedJsonInt(saved, "count", item.count)
@@ -2185,6 +2293,7 @@ bool restoreWorldItemState(
 AutomatiaSave::Json saveGoldState(const PersistentGoldBagState& gold)
 {
     return AutomatiaSave::Json{
+        {"playable_floor", gold.playableFloor},
         {"amount", gold.amount},
         {"bonus", gold.amountBonus},
         {"sokoban", gold.sokoban},
@@ -2203,7 +2312,8 @@ bool restoreGoldState(
     PersistentGoldBagState& gold
 )
 {
-    if (!savedJsonInt(saved, "amount", gold.amount)
+    if (!savedJsonPlayableFloor(saved, "playable_floor", gold.playableFloor)
+        || !savedJsonInt(saved, "amount", gold.amount)
         || !savedJsonInt(saved, "bonus", gold.amountBonus)
         || gold.amount <= 0
         || !savedJsonTriplet(saved, "position", gold.x, gold.y, gold.z)
@@ -2230,6 +2340,7 @@ AutomatiaSave::Json saveMechanismState(
         {"persistent_id", persistentId},
         {"payload_version", 1},
         {"kind", static_cast<Uint8>(state.kind)},
+        {"playable_floor", state.playableFloor},
         {"switch_power", state.switchPower},
         {"roll", state.roll},
         {"lever_status", state.leverStatus},
@@ -2415,6 +2526,10 @@ bool restoreMechanismState(
         return false;
     }
     state.kind = static_cast<PersistentMechanismState::Kind>(kind);
+    if (!savedJsonPlayableFloor(saved, "playable_floor", state.playableFloor))
+    {
+        return false;
+    }
 
     savedJsonInt(saved, "switch_power", state.switchPower);
     savedJsonReal(saved, "roll", state.roll);
@@ -2898,6 +3013,8 @@ void hydratePreservedAutomatiaWorldDocument()
             && savedVisit["return_anchor"].is_object())
         {
             const Json& anchor = savedVisit["return_anchor"];
+            savedJsonPlayableFloor(
+                anchor, "playable_floor", visit.returnAnchorPlayableFloor);
             if (restoreFinite(anchor, "x", visit.returnAnchorX)
                 && restoreFinite(anchor, "y", visit.returnAnchorY)
                 && restoreFinite(anchor, "z", visit.returnAnchorZ))
@@ -2921,6 +3038,8 @@ void hydratePreservedAutomatiaWorldDocument()
         {
             const Json& position = savedVisit["return_position"];
             AutomatiaPlayerReturnPlacement placement;
+            savedJsonPlayableFloor(
+                position, "playable_floor", placement.playableFloor);
             if (restoreFinite(position, "x", placement.x)
                 && restoreFinite(position, "y", placement.y)
                 && restoreFinite(position, "z", placement.z)
@@ -3112,6 +3231,34 @@ void hydratePreservedAutomatiaWorldDocument()
                 savedMap.value("secret_level", false);
             restoredSummary.darkMap =
                 savedMap.value("dark_map", false);
+            restoredSummary.playableFloors.clear();
+            if (savedSchemaVersion >= 3
+                && savedMap.contains("playable_floors")
+                && savedMap["playable_floors"].is_array())
+            {
+                for (const Json& savedFloor : savedMap["playable_floors"])
+                {
+                    const Json wrapper = {{"playable_floor", savedFloor}};
+                    PlayableFloorId floor = DEFAULT_PLAYABLE_FLOOR;
+                    if (savedJsonPlayableFloor(
+                            wrapper, "playable_floor", floor, false))
+                    {
+                        restoredSummary.playableFloors.push_back(floor);
+                    }
+                }
+            }
+            if (restoredSummary.playableFloors.empty())
+            {
+                restoredSummary.playableFloors.push_back(DEFAULT_PLAYABLE_FLOOR);
+            }
+            const auto restoredFloorExists = [&restoredSummary](
+                const PlayableFloorId floor)
+            {
+                return std::find(
+                    restoredSummary.playableFloors.begin(),
+                    restoredSummary.playableFloors.end(),
+                    floor) != restoredSummary.playableFloors.end();
+            };
             worldState.registerUnloadedInstance(restoredSummary);
             const Json& persistent = savedMap["persistent_state"];
             PersistentMapRemovalState& state =
@@ -3159,7 +3306,10 @@ void hydratePreservedAutomatiaWorldDocument()
                 for (const Json& savedTile : persistent["tile_states"])
                 {
                     PersistentTileState tile;
-                    if (!savedJsonInt(savedTile, "x", tile.x)
+                    if (!savedJsonPlayableFloor(
+                            savedTile, "playable_floor", tile.playableFloor)
+                        || !restoredFloorExists(tile.playableFloor)
+                        || !savedJsonInt(savedTile, "x", tile.x)
                         || !savedJsonInt(savedTile, "y", tile.y)
                         || !savedJsonInt(savedTile, "layer", tile.layer)
                         || !savedJsonInt(savedTile, "tile", tile.tile)
@@ -3171,7 +3321,7 @@ void hydratePreservedAutomatiaWorldDocument()
                         continue;
                     }
                     state.tileStates[makePersistentTileKey(
-                        tile.x, tile.y, tile.layer
+                        tile.x, tile.y, tile.layer, tile.playableFloor
                     )] = tile;
                     ++restoredTiles;
                 }
@@ -3183,7 +3333,10 @@ void hydratePreservedAutomatiaWorldDocument()
                 for (const Json& savedItem : persistent["dynamic_world_items"])
                 {
                     PersistentWorldItemState item;
-                    if (!savedJsonInt(savedItem, "legacy_type", item.type)
+                    if (!savedJsonPlayableFloor(
+                            savedItem, "playable_floor", item.playableFloor)
+                        || !restoredFloorExists(item.playableFloor)
+                        || !savedJsonInt(savedItem, "legacy_type", item.type)
                         || !savedJsonInt(savedItem, "status", item.status)
                         || !savedJsonInt(savedItem, "beatitude", item.beatitude)
                         || !savedJsonInt(savedItem, "count", item.count)
@@ -3226,7 +3379,10 @@ void hydratePreservedAutomatiaWorldDocument()
                 for (const Json& savedGold : persistent["dynamic_gold_bags"])
                 {
                     PersistentGoldBagState gold;
-                    if (!savedJsonInt(savedGold, "amount", gold.amount)
+                    if (!savedJsonPlayableFloor(
+                            savedGold, "playable_floor", gold.playableFloor)
+                        || !restoredFloorExists(gold.playableFloor)
+                        || !savedJsonInt(savedGold, "amount", gold.amount)
                         || !savedJsonInt(savedGold, "bonus", gold.amountBonus)
                         || gold.amount <= 0
                         || !savedJsonTriplet(savedGold, "position", gold.x, gold.y, gold.z)
@@ -3254,7 +3410,10 @@ void hydratePreservedAutomatiaWorldDocument()
                 for (const Json& savedBoulder : persistent["dynamic_boulders"])
                 {
                     PersistentBoulderState boulder;
-                    if (!savedJsonInt(
+                    if (!savedJsonPlayableFloor(
+                            savedBoulder, "playable_floor", boulder.playableFloor)
+                        || !restoredFloorExists(boulder.playableFloor)
+                        || !savedJsonInt(
                             savedBoulder,
                             "source_trap_id",
                             boulder.sourceTrapPersistentID
@@ -3314,7 +3473,7 @@ void hydratePreservedAutomatiaWorldDocument()
                             savedMechanism,
                             persistentId,
                             mechanism
-                        ))
+                        ) && restoredFloorExists(mechanism.playableFloor))
                     {
                         state.mechanismStates[persistentId] =
                             std::move(mechanism);
@@ -3364,44 +3523,37 @@ void hydratePreservedAutomatiaWorldDocument()
                 && persistent["player_minimaps"].size() <= 4096)
             {
                 const Json& savedPlayers = persistent["player_minimaps"];
-                for (auto player = savedPlayers.begin();
-                    player != savedPlayers.end(); ++player)
+                auto decodeMinimapState = [&](
+                    const Json& savedState,
+                    PersistentMinimapState& minimapState) -> bool
                 {
-                    if (player.key().empty() || player.key().size() > 256
-                        || !player.value().is_object())
-                    {
-                        continue;
-                    }
                     Sint32 width = 0;
                     Sint32 height = 0;
-                    if (!savedJsonInt(player.value(), "width", width)
-                        || !savedJsonInt(player.value(), "height", height)
+                    if (!savedJsonInt(savedState, "width", width)
+                        || !savedJsonInt(savedState, "height", height)
                         || width <= 0 || height <= 0
                         || width > MINIMAP_MAX_DIMENSION
                         || height > MINIMAP_MAX_DIMENSION
-                        || !player.value().contains("runs")
-                        || !player.value()["runs"].is_array()
-                        || player.value()["runs"].size()
+                        || !savedState.contains("runs")
+                        || !savedState["runs"].is_array()
+                        || savedState["runs"].size()
                             > static_cast<std::size_t>(width)
                                 * static_cast<std::size_t>(height))
                     {
-                        continue;
+                        return false;
                     }
                     const std::size_t tileCount =
                         static_cast<std::size_t>(width)
                         * static_cast<std::size_t>(height);
-                    PersistentMinimapState minimapState;
                     minimapState.width = width;
                     minimapState.height = height;
                     minimapState.tiles.assign(tileCount, 0);
-                    bool valid = true;
                     std::size_t previousRunEnd = 0;
-                    for (const Json& run : player.value()["runs"])
+                    for (const Json& run : savedState["runs"])
                     {
                         if (!run.is_array() || run.size() != 3)
                         {
-                            valid = false;
-                            break;
+                            return false;
                         }
                         const Json startWrapper = {{"value", run[0]}};
                         const Json lengthWrapper = {{"value", run[1]}};
@@ -3415,14 +3567,11 @@ void hydratePreservedAutomatiaWorldDocument()
                             || startIndex < 0 || length <= 0
                             || value <= 0 || value > 4
                             || static_cast<std::size_t>(startIndex) >= tileCount
-                            || static_cast<std::size_t>(startIndex)
-                                < previousRunEnd
+                            || static_cast<std::size_t>(startIndex) < previousRunEnd
                             || static_cast<std::size_t>(length)
-                                > tileCount
-                                    - static_cast<std::size_t>(startIndex))
+                                > tileCount - static_cast<std::size_t>(startIndex))
                         {
-                            valid = false;
-                            break;
+                            return false;
                         }
                         std::fill(
                             minimapState.tiles.begin() + startIndex,
@@ -3432,10 +3581,63 @@ void hydratePreservedAutomatiaWorldDocument()
                             static_cast<std::size_t>(startIndex)
                             + static_cast<std::size_t>(length);
                     }
-                    if (valid)
+                    return true;
+                };
+
+                for (auto player = savedPlayers.begin();
+                    player != savedPlayers.end(); ++player)
+                {
+                    if (player.key().empty() || player.key().size() > 256
+                        || !player.value().is_object())
                     {
-                        persistentPlayerMinimapRegistry[player.key()]
-                            [identity.key()] = std::move(minimapState);
+                        continue;
+                    }
+
+                    /*
+                     * Schema 3 stores a separate discovery surface for every
+                     * playable floor. Schema 1/2 used the player object itself
+                     * as the one implicit Z0 state; accept that representation
+                     * during migration and place it on DEFAULT_PLAYABLE_FLOOR.
+                     */
+                    if (savedSchemaVersion >= 3
+                        && player.value().contains("floors"))
+                    {
+                        const Json& floors = player.value()["floors"];
+                        if (!floors.is_array()
+                            || floors.size() > MAX_PLAYABLE_FLOORS_PER_MAP)
+                        {
+                            continue;
+                        }
+                        std::unordered_set<Sint32> seenFloors;
+                        for (const Json& savedFloor : floors)
+                        {
+                            PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+                            if (!savedJsonPlayableFloor(
+                                    savedFloor, "playable_floor", playableFloor, false)
+                                || !restoredFloorExists(playableFloor)
+                                || !seenFloors.insert(
+                                    static_cast<Sint32>(playableFloor)).second)
+                            {
+                                continue;
+                            }
+                            PersistentMinimapState minimapState;
+                            if (decodeMinimapState(savedFloor, minimapState))
+                            {
+                                persistentPlayerMinimapRegistry[player.key()]
+                                    [identity.key()][playableFloor] =
+                                        std::move(minimapState);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        PersistentMinimapState minimapState;
+                        if (decodeMinimapState(player.value(), minimapState))
+                        {
+                            persistentPlayerMinimapRegistry[player.key()]
+                                [identity.key()][DEFAULT_PLAYABLE_FLOOR] =
+                                    std::move(minimapState);
+                        }
                     }
                 }
             }
@@ -3546,6 +3748,11 @@ void hydratePreservedAutomatiaWorldDocument()
                 placement.identity.revision =
                     savedPlayer["revision"].get<std::uint64_t>();
             }
+            if (!savedJsonPlayableFloor(
+                    savedPlayer, "playable_floor", placement.playableFloor))
+            {
+                continue;
+            }
             placement.hasPosition = savedJsonTriplet(
                 savedPlayer,
                 "position",
@@ -3598,8 +3805,10 @@ void applyAutomatiaSavedPlayerPlacements()
             continue;
         }
         Entity& entity = *players[playerIndex]->entity;
+        const bool playableFloorAvailable =
+            placement.playableFloor == DEFAULT_PLAYABLE_FLOOR;
         bool savedTilePassable = false;
-        if (placement.hasPosition
+        if (playableFloorAvailable && placement.hasPosition
             && placement.x >= 0.0
             && placement.y >= 0.0
             && placement.x < map.width * 16.0
@@ -3616,6 +3825,8 @@ void applyAutomatiaSavedPlayerPlacements()
         if (placement.hasPosition
             && savedTilePassable)
         {
+            entity.playableFloor = placement.playableFloor;
+            entity.spatialRevision = 0;
             entity.x = placement.x;
             entity.y = placement.y;
             entity.z = placement.z;
@@ -3638,6 +3849,7 @@ void applyAutomatiaSavedPlayerPlacements()
             {
                 if (bodypart)
                 {
+                    bodypart->inheritSpatialContextFrom(&entity);
                     bodypart->bNeedsRenderPositionInit = true;
                 }
             }
@@ -3654,11 +3866,25 @@ void applyAutomatiaSavedPlayerPlacements()
         }
         else if (placement.hasPosition)
         {
-            printlog(
-                "[Character Save] Saved position for player %d was blocked or "
-                "out of bounds in '%s'; using the safe Player Start fallback.",
-                playerIndex,
-                activeIdentity->key().c_str());
+            entity.playableFloor = DEFAULT_PLAYABLE_FLOOR;
+            entity.spatialRevision = 0;
+            if (!playableFloorAvailable)
+            {
+                printlog(
+                    "[Playable Z] Saved player %d belongs to floor %d in '%s'; "
+                    "Z1 keeps nonzero floors data-only, so the safe Z0 Player Start is used.",
+                    playerIndex,
+                    static_cast<int>(placement.playableFloor),
+                    activeIdentity->key().c_str());
+            }
+            else
+            {
+                printlog(
+                    "[Character Save] Saved position for player %d was blocked or "
+                    "out of bounds in '%s'; using the safe Player Start fallback.",
+                    playerIndex,
+                    activeIdentity->key().c_str());
+            }
         }
         worldState.placePlayer(playerIndex, map);
         placement.pending = false;
@@ -3690,6 +3916,7 @@ bool stageAutomatiaCharacterSavedPlacement(
     const std::string& mapFile,
     const std::string& instanceId,
     Uint64 revision,
+    PlayableFloorId playableFloor,
     real_t x,
     real_t y,
     real_t z,
@@ -3718,6 +3945,7 @@ bool stageAutomatiaCharacterSavedPlacement(
     AutomatiaSavedPlayerPlacement& placement =
         automatiaSavedPlayerPlacements[playerIndex];
     placement.identity = identity;
+    placement.playableFloor = playableFloor;
     placement.x = x;
     placement.y = y;
     placement.z = z;
@@ -3727,6 +3955,23 @@ bool stageAutomatiaCharacterSavedPlacement(
     placement.hasPosition = true;
     placement.pending = true;
     return true;
+}
+
+bool stageAutomatiaCharacterSavedPlacement(
+    int playerIndex,
+    const std::string& mapFile,
+    const std::string& instanceId,
+    Uint64 revision,
+    real_t x,
+    real_t y,
+    real_t z,
+    real_t yaw,
+    real_t pitch,
+    real_t roll)
+{
+    return stageAutomatiaCharacterSavedPlacement(
+        playerIndex, mapFile, instanceId, revision,
+        DEFAULT_PLAYABLE_FLOOR, x, y, z, yaw, pitch, roll);
 }
 
 bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS])
@@ -4217,6 +4462,7 @@ static bool buildAutomatiaPlayerLevelVisit(
     visit.mapSeed = sourceInstance.mapSeed;
     visit.mapInstanceKey = sourceInstance.key();
     visit.returnPlacement.valid = true;
+    visit.returnPlacement.playableFloor = playerEntity.playableFloor;
     visit.returnPlacement.x = playerEntity.x;
     visit.returnPlacement.y = playerEntity.y;
     visit.returnPlacement.z = playerEntity.z;
@@ -4230,6 +4476,7 @@ static bool buildAutomatiaPlayerLevelVisit(
     {
         visit.hasReturnAnchor = true;
         visit.returnAnchorPersistentID = departureEntity->persistentID;
+        visit.returnAnchorPlayableFloor = departureEntity->playableFloor;
         visit.returnAnchorX = departureEntity->x;
         visit.returnAnchorY = departureEntity->y;
         visit.returnAnchorZ = departureEntity->z;
@@ -4501,6 +4748,7 @@ void resetPersistentWorldSession()
     persistentMinimapServerTransferId = 0;
     persistentMinimapClearedMapKey.clear();
     persistentMinimapClearedMapRevision = 0;
+    persistentMinimapClearedPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
     resetClientPersistentMinimapSync();
     persistentWorldStoryState =
         PersistentWorldStoryState{};
@@ -4604,9 +4852,30 @@ static bool captureAutomatiaPersistentWorldDocument(
     }
 
     Json runtimeDocument = AutomatiaSave::captureWorldState(sessionId, worldState);
+    runtimeDocument["schema_version"] = AutomatiaSave::CURRENT_SCHEMA_VERSION;
+    for (Json& runtimeMap : runtimeDocument["map_instances"])
+    {
+        runtimeMap["playable_floors"] = Json::array();
+        const std::string runtimeKey =
+            runtimeMap["map_file"].get<std::string>() + "#"
+            + runtimeMap["instance_id"].get<std::string>();
+        const MapInstance* runtimeInstance = worldState.find(runtimeKey);
+        if (runtimeInstance && !runtimeInstance->playableFloors.empty())
+        {
+            for (const PlayableFloorId floor : runtimeInstance->playableFloors)
+            {
+                runtimeMap["playable_floors"].push_back(floor);
+            }
+        }
+        else
+        {
+            runtimeMap["playable_floors"].push_back(DEFAULT_PLAYABLE_FLOOR);
+        }
+    }
     Json document = preservedAutomatiaWorldDocument.is_object()
         ? preservedAutomatiaWorldDocument
         : AutomatiaSave::makeEmptyWorldSave(sessionId);
+    document["schema_version"] = AutomatiaSave::CURRENT_SCHEMA_VERSION;
     for (auto member = runtimeDocument.begin(); member != runtimeDocument.end(); ++member)
     {
         if (member.key() != "map_instances")
@@ -4669,6 +4938,16 @@ static bool captureAutomatiaPersistentWorldDocument(
         }
     }
     document["map_instances"] = std::move(mergedMaps);
+    for (Json& savedMap : document["map_instances"])
+    {
+        if (!savedMap.contains("playable_floors")
+            || !savedMap["playable_floors"].is_array()
+            || savedMap["playable_floors"].empty())
+        {
+            savedMap["playable_floors"] =
+                Json::array({DEFAULT_PLAYABLE_FLOOR});
+        }
+    }
     document["saved_at_unix_ms"] =
         static_cast<std::uint64_t>(std::time(nullptr)) * 1000ULL;
     document["magic_grimoire_generated"] =
@@ -4699,6 +4978,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         {
             savedVisit["return_anchor"] = {
                 {"persistent_id", visit.returnAnchorPersistentID},
+                {"playable_floor", visit.returnAnchorPlayableFloor},
                 {"x", visit.returnAnchorX},
                 {"y", visit.returnAnchorY},
                 {"z", visit.returnAnchorZ}
@@ -4707,6 +4987,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         if (visit.returnPlacement.valid)
         {
             savedVisit["return_position"] = {
+                {"playable_floor", visit.returnPlacement.playableFloor},
                 {"x", visit.returnPlacement.x},
                 {"y", visit.returnPlacement.y},
                 {"z", visit.returnPlacement.z},
@@ -4820,6 +5101,7 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"instance_id", mapKey.substr(separator + 1)},
                 {"revision", 0},
                 {"loaded", false},
+                {"playable_floors", Json::array({DEFAULT_PLAYABLE_FLOOR})},
                 {"persistent_state", Json::object()}
             });
             mapDocument = &document["map_instances"].back();
@@ -4846,6 +5128,10 @@ static bool captureAutomatiaPersistentWorldDocument(
             tiles.end(),
             [](const PersistentTileState& first, const PersistentTileState& second)
             {
+                if (first.playableFloor != second.playableFloor)
+                {
+                    return first.playableFloor < second.playableFloor;
+                }
                 if (first.x != second.x) { return first.x < second.x; }
                 if (first.y != second.y) { return first.y < second.y; }
                 return first.layer < second.layer;
@@ -4854,6 +5140,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         for (const PersistentTileState& tile : tiles)
         {
             persistent["tile_states"].push_back(Json{
+                {"playable_floor", tile.playableFloor},
                 {"x", tile.x},
                 {"y", tile.y},
                 {"layer", tile.layer},
@@ -4865,6 +5152,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         for (const PersistentWorldItemState& item : state.dynamicWorldItems)
         {
             persistent["dynamic_world_items"].push_back(Json{
+                {"playable_floor", item.playableFloor},
                 {"stable_id", item.stableId},
                 {"legacy_type", item.type},
                 {"status", item.status},
@@ -4891,6 +5179,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         for (const PersistentGoldBagState& gold : state.dynamicGoldBags)
         {
             persistent["dynamic_gold_bags"].push_back(Json{
+                {"playable_floor", gold.playableFloor},
                 {"amount", gold.amount},
                 {"bonus", gold.amountBonus},
                 {"sokoban", gold.sokoban},
@@ -4908,6 +5197,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         for (const PersistentBoulderState& boulder : state.dynamicBoulders)
         {
             persistent["dynamic_boulders"].push_back(Json{
+                {"playable_floor", boulder.playableFloor},
                 {"source_trap_id", boulder.sourceTrapPersistentID},
                 {"sprite", boulder.sprite},
                 {"position", {boulder.x, boulder.y, boulder.z}},
@@ -4962,7 +5252,8 @@ static bool captureAutomatiaPersistentWorldDocument(
         minimapPlayerIdentities.reserve(persistentPlayerMinimapRegistry.size());
         for (const auto& player : persistentPlayerMinimapRegistry)
         {
-            if (player.second.find(mapKey) != player.second.end())
+            auto savedMap = player.second.find(mapKey);
+            if (savedMap != player.second.end() && !savedMap->second.empty())
             {
                 minimapPlayerIdentities.push_back(player.first);
             }
@@ -4970,51 +5261,77 @@ static bool captureAutomatiaPersistentWorldDocument(
         std::sort(minimapPlayerIdentities.begin(), minimapPlayerIdentities.end());
         for (const std::string& playerIdentity : minimapPlayerIdentities)
         {
-            const PersistentMinimapState& state =
+            const PersistentMinimapFloorRegistry& floorStates =
                 persistentPlayerMinimapRegistry.at(playerIdentity).at(mapKey);
-            const std::size_t expected =
-                state.width > 0 && state.height > 0
-                ? static_cast<std::size_t>(state.width)
-                    * static_cast<std::size_t>(state.height)
-                : 0;
-            if (state.width <= 0 || state.height <= 0
-                || state.width > MINIMAP_MAX_DIMENSION
-                || state.height > MINIMAP_MAX_DIMENSION
-                || state.tiles.size() != expected)
+            std::vector<PlayableFloorId> floorIds;
+            floorIds.reserve(floorStates.size());
+            for (const auto& floorState : floorStates)
             {
-                continue;
+                floorIds.push_back(floorState.first);
             }
-            Json runs = Json::array();
-            std::size_t index = 0;
-            while (index < state.tiles.size())
+            std::sort(floorIds.begin(), floorIds.end());
+
+            Json savedFloors = Json::array();
+            for (const PlayableFloorId playableFloor : floorIds)
             {
-                const Sint8 value = state.tiles[index];
-                if (value <= 0 || value > 4)
+                const PersistentMinimapState& state = floorStates.at(playableFloor);
+                const std::size_t expected =
+                    state.width > 0 && state.height > 0
+                    ? static_cast<std::size_t>(state.width)
+                        * static_cast<std::size_t>(state.height)
+                    : 0;
+                if (state.width <= 0 || state.height <= 0
+                    || state.width > MINIMAP_MAX_DIMENSION
+                    || state.height > MINIMAP_MAX_DIMENSION
+                    || state.tiles.size() != expected)
                 {
-                    ++index;
                     continue;
                 }
-                const std::size_t start = index;
-                while (index < state.tiles.size()
-                    && state.tiles[index] == value
-                    && index - start < static_cast<std::size_t>(INT32_MAX))
+                Json runs = Json::array();
+                std::size_t index = 0;
+                while (index < state.tiles.size())
                 {
-                    ++index;
+                    const Sint8 value = state.tiles[index];
+                    if (value <= 0 || value > 4)
+                    {
+                        ++index;
+                        continue;
+                    }
+                    const std::size_t start = index;
+                    while (index < state.tiles.size()
+                        && state.tiles[index] == value
+                        && index - start < static_cast<std::size_t>(INT32_MAX))
+                    {
+                        ++index;
+                    }
+                    runs.push_back(Json::array({
+                        static_cast<Sint32>(start),
+                        static_cast<Sint32>(index - start),
+                        static_cast<Sint32>(value)
+                    }));
                 }
-                runs.push_back(Json::array({
-                    static_cast<Sint32>(start),
-                    static_cast<Sint32>(index - start),
-                    static_cast<Sint32>(value)
-                }));
+                savedFloors.push_back(Json{
+                    {"playable_floor", playableFloor},
+                    {"width", state.width},
+                    {"height", state.height},
+                    {"runs", std::move(runs)}
+                });
+            }
+
+            if (savedFloors.empty())
+            {
+                continue;
             }
             Json savedPlayer =
                 savedPlayerMinimaps.contains(playerIdentity)
                     && savedPlayerMinimaps[playerIdentity].is_object()
                 ? savedPlayerMinimaps[playerIdentity]
                 : Json::object();
-            savedPlayer["width"] = state.width;
-            savedPlayer["height"] = state.height;
-            savedPlayer["runs"] = std::move(runs);
+            // Remove the schema-1/2 direct Z0 representation after migration.
+            savedPlayer.erase("width");
+            savedPlayer.erase("height");
+            savedPlayer.erase("runs");
+            savedPlayer["floors"] = std::move(savedFloors);
             savedPlayerMinimaps[playerIdentity] = std::move(savedPlayer);
         }
         if (savedPlayerMinimaps.empty())
@@ -5087,7 +5404,8 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"slot", playerIndex},
                 {"map_file", placement.identity.mapFile},
                 {"instance_id", placement.identity.instanceId},
-                {"revision", placement.identity.revision}
+                {"revision", placement.identity.revision},
+                {"playable_floor", placement.playableFloor}
             };
             if (placement.hasPosition)
             {
@@ -5114,7 +5432,10 @@ static bool captureAutomatiaPersistentWorldDocument(
             {"slot", playerIndex},
             {"map_file", players[playerIndex]->worldInstance.mapFile},
             {"instance_id", players[playerIndex]->worldInstance.instanceId},
-            {"revision", players[playerIndex]->worldInstance.revision}
+            {"revision", players[playerIndex]->worldInstance.revision},
+            {"playable_floor", players[playerIndex]->entity
+                ? players[playerIndex]->entity->playableFloor
+                : DEFAULT_PLAYABLE_FLOOR}
         };
         Entity* savedEntity = worldState.playerEntityFor(
             players[playerIndex]->worldInstance.key(),
@@ -5412,6 +5733,8 @@ static void capturePersistentMinimap(
     migratePersistentMinimapFallbackIdentity(playerIndex);
     const std::string playerIdentity =
         persistentMinimapPlayerIdentity(playerIndex);
+    const PlayableFloorId playableFloor =
+        persistentMinimapPlayableFloorForPlayer(playerIndex);
     if (playerIndex < 0 || mapKey.empty() || playerIdentity.empty()
         || map.width <= 0 || map.height <= 0
         || map.width > MINIMAP_MAX_DIMENSION
@@ -5427,7 +5750,7 @@ static void capturePersistentMinimap(
         return;
     }
     PersistentMinimapState& saved =
-        persistentPlayerMinimapRegistry[playerIdentity][mapKey];
+        persistentPlayerMinimapRegistry[playerIdentity][mapKey][playableFloor];
     const std::size_t tileCount =
         static_cast<std::size_t>(map.width)
         * static_cast<std::size_t>(map.height);
@@ -5440,7 +5763,8 @@ static void capturePersistentMinimap(
         saved.tiles.assign(tileCount, 0);
     }
     auto legacy = persistentLegacyMinimapRegistry.find(mapKey);
-    if (legacy != persistentLegacyMinimapRegistry.end()
+    if (playableFloor == DEFAULT_PLAYABLE_FLOOR
+        && legacy != persistentLegacyMinimapRegistry.end()
         && legacy->second.width == map.width
         && legacy->second.height == map.height
         && legacy->second.tiles.size() == tileCount)
@@ -5478,8 +5802,9 @@ static void capturePersistentMinimap(
     if (changed > 0)
     {
         printlog(
-            "[Persistent Minimap] Captured %zu new/updated tile(s), %zu total for player %d in '%s'.",
-            changed, discovered, playerIndex, mapKey.c_str());
+            "[Persistent Minimap] Captured %zu new/updated tile(s), %zu total for player %d in '%s' floor=%d.",
+            changed, discovered, playerIndex, mapKey.c_str(),
+            static_cast<int>(playableFloor));
     }
 }
 
@@ -5487,6 +5812,8 @@ static void restorePersistentMinimap()
 {
     const int playerIndex = persistentMinimapLocalPlayerIndex();
     const std::string mapKey = getPersistentMapKey();
+    const PlayableFloorId playableFloor =
+        persistentMinimapPlayableFloorForPlayer(playerIndex);
     if (playerIndex < 0 || mapKey.empty() || map.width <= 0 || map.height <= 0
         || map.width > MINIMAP_MAX_DIMENSION
         || map.height > MINIMAP_MAX_DIMENSION)
@@ -5500,21 +5827,25 @@ static void restorePersistentMinimap()
         ? activeIdentity->revision
         : 0;
     if (persistentMinimapClearedMapKey != mapKey
-        || persistentMinimapClearedMapRevision != mapRevision)
+        || persistentMinimapClearedMapRevision != mapRevision
+        || persistentMinimapClearedPlayableFloor != playableFloor)
     {
         std::memset(minimap, 0, sizeof(minimap));
         persistentMinimapClearedMapKey = mapKey;
         persistentMinimapClearedMapRevision = mapRevision;
+        persistentMinimapClearedPlayableFloor = playableFloor;
         printlog(
-            "[Persistent Minimap] Cleared live minimap for newly loaded map '%s' revision %llu.",
+            "[Persistent Minimap] Cleared live minimap for map '%s' revision %llu floor=%d.",
             mapKey.c_str(),
-            static_cast<unsigned long long>(mapRevision));
+            static_cast<unsigned long long>(mapRevision),
+            static_cast<int>(playableFloor));
     }
 
     PersistentMinimapState* found =
-        persistentMinimapStateForPlayer(playerIndex, mapKey);
+        persistentMinimapStateForPlayer(playerIndex, mapKey, playableFloor);
     auto legacy = persistentLegacyMinimapRegistry.find(mapKey);
-    if (!found && legacy != persistentLegacyMinimapRegistry.end())
+    if (!found && playableFloor == DEFAULT_PLAYABLE_FLOOR
+        && legacy != persistentLegacyMinimapRegistry.end())
     {
         found = &legacy->second;
     }
@@ -5541,13 +5872,43 @@ static void restorePersistentMinimap()
         }
     }
     printlog(
-        "[Persistent Minimap] Restored %zu discovered tile(s) for player %d in '%s'.",
-        restored, playerIndex, mapKey.c_str());
+        "[Persistent Minimap] Restored %zu discovered tile(s) for player %d in '%s' floor=%d.",
+        restored, playerIndex, mapKey.c_str(),
+        static_cast<int>(playableFloor));
 }
 
 void restoreAutomatiaPersistentMinimapForLocalPlayer()
 {
     restorePersistentMinimap();
+}
+
+bool exportAutomatiaPersistentMinimapSnapshotForFloor(
+    const int playerIndex,
+    const std::string& requestedMapKey,
+    const PlayableFloorId playableFloor,
+    Sint32& width,
+    Sint32& height,
+    std::vector<Sint8>& tiles
+)
+{
+    width = 0;
+    height = 0;
+    tiles.clear();
+    const std::string mapKey = normalizePersistentMapKey(requestedMapKey);
+    if (mapKey.empty())
+    {
+        return false;
+    }
+    PersistentMinimapState* state =
+        persistentMinimapStateForPlayer(playerIndex, mapKey, playableFloor);
+    if (!state)
+    {
+        return false;
+    }
+    width = state->width;
+    height = state->height;
+    tiles = state->tiles;
+    return true;
 }
 
 bool exportAutomatiaPersistentMinimapSnapshot(
@@ -5568,21 +5929,19 @@ bool exportAutomatiaPersistentMinimapSnapshot(
     }
     capturePersistentMinimap();
     mapKey = getPersistentMapKey();
-    PersistentMinimapState* state =
-        persistentMinimapStateForPlayer(playerIndex, mapKey);
-    if (!state)
-    {
-        return false;
-    }
-    width = state->width;
-    height = state->height;
-    tiles = state->tiles;
-    return true;
+    return exportAutomatiaPersistentMinimapSnapshotForFloor(
+        playerIndex,
+        mapKey,
+        persistentMinimapPlayableFloorForPlayer(playerIndex),
+        width,
+        height,
+        tiles);
 }
 
-bool importAutomatiaPersistentMinimapSnapshot(
+bool importAutomatiaPersistentMinimapSnapshotForFloor(
     const int playerIndex,
     const std::string& requestedMapKey,
+    const PlayableFloorId playableFloor,
     const Sint32 width,
     const Sint32 height,
     const std::vector<Sint8>& tiles,
@@ -5609,10 +5968,22 @@ bool importAutomatiaPersistentMinimapSnapshot(
     }
     PersistentMinimapMapRegistry& playerMaps =
         persistentPlayerMinimapRegistry[playerIdentity];
-    auto found = playerMaps.find(mapKey);
-    if (found == playerMaps.end())
+    auto savedMap = playerMaps.find(mapKey);
+    if (savedMap == playerMaps.end())
     {
         if (!allowResize || playerMaps.size() >= 4096)
+        {
+            return false;
+        }
+        savedMap = playerMaps.emplace(
+            mapKey, PersistentMinimapFloorRegistry{}).first;
+    }
+    PersistentMinimapFloorRegistry& floorStates = savedMap->second;
+    auto found = floorStates.find(playableFloor);
+    if (found == floorStates.end())
+    {
+        if (!allowResize
+            || floorStates.size() >= MAX_PLAYABLE_FLOORS_PER_MAP)
         {
             return false;
         }
@@ -5620,7 +5991,7 @@ bool importAutomatiaPersistentMinimapSnapshot(
         initial.width = width;
         initial.height = height;
         initial.tiles.assign(tileCount, 0);
-        found = playerMaps.emplace(mapKey, std::move(initial)).first;
+        found = floorStates.emplace(playableFloor, std::move(initial)).first;
     }
     PersistentMinimapState& saved = found->second;
     if (saved.width != width || saved.height != height
@@ -5649,9 +6020,29 @@ bool importAutomatiaPersistentMinimapSnapshot(
         }
     }
     printlog(
-        "[Persistent Minimap] Server stored %zu discovered tile(s) for player %d in '%s'.",
-        discovered, playerIndex, mapKey.c_str());
+        "[Persistent Minimap] Stored %zu discovered tile(s) for player %d in '%s' floor=%d.",
+        discovered, playerIndex, mapKey.c_str(),
+        static_cast<int>(playableFloor));
     return true;
+}
+
+bool importAutomatiaPersistentMinimapSnapshot(
+    const int playerIndex,
+    const std::string& requestedMapKey,
+    const Sint32 width,
+    const Sint32 height,
+    const std::vector<Sint8>& tiles,
+    const bool allowResize
+)
+{
+    return importAutomatiaPersistentMinimapSnapshotForFloor(
+        playerIndex,
+        requestedMapKey,
+        persistentMinimapPlayableFloorForPlayer(playerIndex),
+        width,
+        height,
+        tiles,
+        allowResize);
 }
 
 
@@ -8507,6 +8898,7 @@ void receiveClientPersistentTileState(
     }
 
     PersistentTileState state;
+    state.playableFloor = DEFAULT_PLAYABLE_FLOOR;
 
     state.x = x;
     state.y = y;
@@ -8695,6 +9087,11 @@ void sendPersistentWorldSnapshotToClient(
         {
             const PersistentTileState& tileState =
                 tilePair.second;
+
+            if (tileState.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+            {
+                continue;
+            }
 
             strcpy(
                 reinterpret_cast<char*>(
@@ -10507,6 +10904,7 @@ void applyPersistentMapRemovals()
 		[](const Entity* first, const Entity* second)
 		{
 			return std::make_tuple(
+				first->playableFloor,
 				first->x,
 				first->y,
 				first->z,
@@ -10517,6 +10915,7 @@ void applyPersistentMapRemovals()
 				first->colliderContainedEntity,
 				first->colliderHasCollision
 			) < std::make_tuple(
+				second->playableFloor,
 				second->x,
 				second->y,
 				second->z,
@@ -10564,21 +10963,36 @@ void applyPersistentMapRemovals()
 		}
 	}
 
-	Uint32 assignedGeneratedSprites = 0;
+	std::vector<Entity*> generatedSprites;
 	for ( node_t* node = map.entities->first;
 		node != nullptr;
 		node = node->next )
 	{
 		Entity* entity =
 			static_cast<Entity*>(node->element);
-
-		if ( !entity
-			|| entity->persistentID != 0
-			|| entity->sprite == 1 )
+		if ( entity
+			&& entity->persistentID == 0
+			&& entity->sprite != 1 )
 		{
-			continue;
+			generatedSprites.push_back(entity);
 		}
+	}
+	/*
+	 * Stage Z1 adds playable floor ahead of legacy entity-list order. The
+	 * stable sort is therefore equivalent for old Z0 maps, while future
+	 * generated floors receive deterministic ordering before x/y ties matter.
+	 */
+	std::stable_sort(
+		generatedSprites.begin(),
+		generatedSprites.end(),
+		[](const Entity* first, const Entity* second)
+		{
+			return first->playableFloor < second->playableFloor;
+		});
 
+	Uint32 assignedGeneratedSprites = 0;
+	for ( Entity* entity : generatedSprites )
+	{
 		if ( !assignGeneratedID(entity) )
 		{
 			printlog(
@@ -10587,7 +11001,6 @@ void applyPersistentMapRemovals()
 			);
 			break;
 		}
-
 		++assignedGeneratedSprites;
 	}
 
@@ -10639,6 +11052,12 @@ void applyPersistentMapRemovals()
     {
         const PersistentTileState& tileState =
             tilePair.second;
+
+        if (tileState.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+        {
+            // Z1 stores the identity but does not expose nonzero floor gameplay.
+            continue;
+        }
 
         if ( tileState.x < 0
             || tileState.x >= map.width
@@ -11324,6 +11743,8 @@ static bool capturePersistentGoldBagState(
         return false;
     }
 
+    savedState.playableFloor = entity->playableFloor;
+
     savedState.amount =
         entity->goldAmount;
 
@@ -11422,6 +11843,9 @@ static bool applyPersistentGoldBagState(
      */
     entity->goldAmbience = 0;
     entity->goldTelepathy = 0;
+
+    entity->playableFloor = savedState.playableFloor;
+    entity->spatialRevision = 0;
 
     entity->x =
         savedState.x;
@@ -11523,6 +11947,8 @@ static bool capturePersistentWorldItemState(
     {
         return false;
     }
+
+    savedState.playableFloor = entity->playableFloor;
 
     savedState.type =
         entity->skill[10];
@@ -11653,6 +12079,9 @@ static bool applyPersistentWorldItemState(
      * ordinary first-tick presentation state.
      */
     entity->skill[16] = 0;
+
+    entity->playableFloor = savedState.playableFloor;
+    entity->spatialRevision = 0;
 
     entity->x =
         savedState.x;
@@ -11882,8 +12311,9 @@ static void capturePersistentMechanismStates()
     else
     {
         std::unordered_map<
-            Uint64,
-            PersistentTileState
+            PersistentTileKey,
+            PersistentTileState,
+            PersistentTileKeyHash
         > currentTileStates;
 
         for ( Sint32 x = 0;
@@ -11918,6 +12348,7 @@ static void capturePersistentMechanismStates()
                     }
 
                     PersistentTileState tileState;
+                    tileState.playableFloor = DEFAULT_PLAYABLE_FLOOR;
 
                     tileState.x = x;
                     tileState.y = y;
@@ -12067,6 +12498,7 @@ static void capturePersistentMechanismStates()
     }
 
     PersistentMechanismState mechanismState;
+    mechanismState.playableFloor = entity->playableFloor;
 
         if ( entity->behavior == &actSwitch )
         {
@@ -13073,6 +13505,7 @@ static void capturePersistentMechanismStates()
         }
 
         PersistentBoulderState boulderState;
+        boulderState.playableFloor = boulder->playableFloor;
 
         boulderState.sourceTrapPersistentID =
             sourceTrap->persistentID;
@@ -13520,6 +13953,9 @@ PersistentMapRemovalState& mapState =
 
 		const PersistentMechanismState& savedState =
             stateIterator->second;
+
+        entity->playableFloor = savedState.playableFloor;
+        entity->spatialRevision = 0;
 
         switch ( savedState.kind )
         {
@@ -14830,6 +15266,8 @@ PersistentMapRemovalState& mapState =
 
             boulder->parent =
                 sourceTrap->getUID();
+            boulder->playableFloor = savedBoulder.playableFloor;
+            boulder->spatialRevision = 0;
 
             boulder->x =
                 savedBoulder.x;
@@ -15362,6 +15800,9 @@ bool applyPersistentMonsterLivingState(
 
     const PersistentMechanismState& savedState =
         stateIterator->second;
+
+    monsterEntity->playableFloor = savedState.playableFloor;
+    monsterEntity->spatialRevision = 0;
 
     /*
      * Shopkeepers retain ShopkeeperInventory as their kind because
@@ -16026,6 +16467,14 @@ static bool placePlayerAtAutomatiaReturn(
     {
         return false;
     }
+    if (destination.returnPlacement.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+    {
+        printlog(
+            "[Playable Z] Reverse return requested floor %d during Z1; "
+            "nonzero floor activation remains gated until Z2.",
+            static_cast<int>(destination.returnPlacement.playableFloor));
+        return false;
+    }
     const WorldInstanceIdentity* activeIdentity =
         worldState.activeIdentity();
     if (!activeIdentity
@@ -16057,6 +16506,7 @@ static bool placePlayerAtAutomatiaReturn(
         {
             Entity* entity = static_cast<Entity*>(node->element);
             if (entity
+                && entity->playableFloor == destination.returnAnchorPlayableFloor
                 && entity->persistentID
                     == destination.returnAnchorPersistentID)
             {
@@ -16110,6 +16560,8 @@ static bool placePlayerAtAutomatiaReturn(
     }
 
     Entity* playerEntity = players[playerIndex]->entity;
+    playerEntity->playableFloor = destination.returnPlacement.playableFloor;
+    playerEntity->spatialRevision = 0;
     playerEntity->x = x;
     playerEntity->y = y;
     playerEntity->z = z;
@@ -24500,6 +24952,15 @@ static void doConsoleCommands() {
 
 int main(int argc, char** argv)
 {
+#ifdef AUTOMATIA_STAGE4B_TEST_HOOK
+	if (argc == 2
+		&& strcmp(
+			argv[1],
+			"--automatia-stage4b-runtime-characterization") == 0)
+	{
+		return runPlayableZRuntimeCharacterization();
+	}
+#endif
 #ifdef WINDOWS
 	SetUnhandledExceptionFilter(unhandled_handler);
 #ifdef _DEBUG

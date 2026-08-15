@@ -443,6 +443,8 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	// New entities have no persistent identity until the map is saved
 	// or an existing V4.5 map restores one.
 	persistentID = 0;
+	playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	spatialRevision = 0;
 	x = 0;
 	y = 0;
 	z = 0;
@@ -542,6 +544,36 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 
 	clientStats = nullptr;
 	clientsHaveItsStats = false;
+}
+
+Entity* newEntityWithSpatialContext(
+	Sint32 sprite,
+	Uint32 pos,
+	list_t* entlist,
+	list_t* creaturelist,
+	const SpatialSpawnContext& context)
+{
+	Entity* entity = newEntity(sprite, pos, entlist, creaturelist);
+	if (entity)
+	{
+		entity->applySpatialSpawnContext(context);
+	}
+	return entity;
+}
+
+Entity* newEntityWithSpatialContext(
+	Sint32 sprite,
+	Uint32 pos,
+	list_t* entlist,
+	list_t* creaturelist,
+	const Entity* source)
+{
+	return newEntityWithSpatialContext(
+		sprite,
+		pos,
+		entlist,
+		creaturelist,
+		source ? source->spatialSpawnContext() : SpatialSpawnContext{});
 }
 
 Monster editorSpriteTypeToMonster(Sint32 sprite)
@@ -2511,12 +2543,16 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
         // entity through undo, redo, cycling, or duplication.
         entityNew->z = entityToCopy->z;
         entityNew->persistentID = entityToCopy->persistentID;
+        entityNew->playableFloor = entityToCopy->playableFloor;
+        entityNew->spatialRevision = 0;
     }
     else
     {
         // Newly placed entities receive an ID on their first save.
         entityNew->z = 0.0;
         entityNew->persistentID = 0;
+        entityNew->playableFloor = DEFAULT_PLAYABLE_FLOOR;
+        entityNew->spatialRevision = 0;
     }
 	if ( entityStatToCopy != nullptr )
 	{

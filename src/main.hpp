@@ -29,6 +29,7 @@ typedef double real_t;
 #include <cstdint>
 #include <cstddef>
 #include <algorithm>
+#include "playable_z.hpp"
 
 // the following functions are safe variants of C's string library.
 // they include the buffer length of each input as secondary parameters to
@@ -473,6 +474,7 @@ typedef struct map_t
 	bool* lootexcludelocations = nullptr;
 	std::set<int> liquidSfxPlayedTiles;
 	std::map<int, Uint32> tileAttributes;
+	PlayableFloorTable playableFloors;
 	static const Uint32 TILE_ATTRIBUTE_NODIG = 1 << 0;
 	static const Uint32 TILE_ATTRIBUTE_SLIPPERY = 1 << 1;
 	static const Uint32 TILE_ATTRIBUTE_SLOW = 1 << 2;
@@ -892,6 +894,18 @@ void mapDeconstructor(void* data);
 void stringDeconstructor(void* data);
 void listDeconstructor(void* data);
 Entity* newEntity(Sint32 sprite, Uint32 pos, list_t* entlist, list_t* creaturelist);
+Entity* newEntityWithSpatialContext(
+	Sint32 sprite,
+	Uint32 pos,
+	list_t* entlist,
+	list_t* creaturelist,
+	const SpatialSpawnContext& context);
+Entity* newEntityWithSpatialContext(
+	Sint32 sprite,
+	Uint32 pos,
+	list_t* entlist,
+	list_t* creaturelist,
+	const Entity* source);
 button_t* newButton(void);
 string_t* newString(list_t* list, Uint32 color, Uint32 time, int player, char const * const content, ...);
 

@@ -100,6 +100,11 @@ public:
     // 0 means the entity has not received an ID yet.
 	Sint32 persistentID = 0;
 
+	// Discrete gameplay floor identity. Entity::z remains local elevation.
+	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	// Monotonic routing/barrier generation for future floor transitions.
+	std::uint64_t spatialRevision = 0;
+
 	/*
 	* Runtime monsters normally have persistentID == 0 and disappear when
 	* their map unloads.
@@ -165,6 +170,28 @@ public:
 
 	Uint32 getUID() const {return uid;}
 	void setUID(Uint32 new_uid);
+	SpatialSpawnContext spatialSpawnContext() const
+	{
+		return SpatialSpawnContext{playableFloor, spatialRevision};
+	}
+	void applySpatialSpawnContext(const SpatialSpawnContext& context)
+	{
+		playableFloor = context.playableFloor;
+		spatialRevision = context.spatialRevision;
+	}
+	void inheritSpatialContextFrom(const Entity* source)
+	{
+		if (source)
+		{
+			playableFloor = source->playableFloor;
+			spatialRevision = source->spatialRevision;
+		}
+		else
+		{
+			playableFloor = DEFAULT_PLAYABLE_FLOOR;
+			spatialRevision = 0;
+		}
+	}
 	Uint32 ticks;                  // duration of the entity's existence
 	real_t x, y, z;                // world coordinates
 	real_t yaw, pitch, roll;       // rotation

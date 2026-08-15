@@ -49,6 +49,499 @@ char outputdir[PATH_MAX];
  * Loading temporary submaps must not replace it.
  */
 int currentLoadedMapVersion = 0;
+
+namespace
+{
+constexpr char kPlayableZExtensionMagic[4] = {'P', 'Z', 'L', 'V'};
+constexpr std::uint16_t kPlayableZExtensionVersion = 1;
+constexpr std::size_t kPlayableZExtensionHeaderBytes = 12;
+constexpr std::size_t kPlayableZMaximumPayloadBytes = 512U * 1024U * 1024U;
+
+void appendPlayableZU16(std::vector<std::uint8_t>& output, const std::uint16_t value)
+{
+    output.push_back(static_cast<std::uint8_t>(value & 0xffU));
+    output.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
+}
+
+void appendPlayableZU32(std::vector<std::uint8_t>& output, const std::uint32_t value)
+{
+    for (unsigned shift = 0; shift < 32; shift += 8)
+    {
+        output.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+    }
+}
+
+void appendPlayableZI16(std::vector<std::uint8_t>& output, const std::int16_t value)
+{
+    appendPlayableZU16(output, static_cast<std::uint16_t>(value));
+}
+
+void appendPlayableZI32(std::vector<std::uint8_t>& output, const std::int32_t value)
+{
+    appendPlayableZU32(output, static_cast<std::uint32_t>(value));
+}
+
+bool readPlayableZU16(
+    const std::vector<std::uint8_t>& input,
+    std::size_t& offset,
+    std::uint16_t& value)
+{
+    if (offset > input.size() || input.size() - offset < 2)
+    {
+        return false;
+    }
+    value = static_cast<std::uint16_t>(input[offset])
+        | static_cast<std::uint16_t>(input[offset + 1]) << 8U;
+    offset += 2;
+    return true;
+}
+
+bool readPlayableZU32(
+    const std::vector<std::uint8_t>& input,
+    std::size_t& offset,
+    std::uint32_t& value)
+{
+    if (offset > input.size() || input.size() - offset < 4)
+    {
+        return false;
+    }
+    value = static_cast<std::uint32_t>(input[offset])
+        | static_cast<std::uint32_t>(input[offset + 1]) << 8U
+        | static_cast<std::uint32_t>(input[offset + 2]) << 16U
+        | static_cast<std::uint32_t>(input[offset + 3]) << 24U;
+    offset += 4;
+    return true;
+}
+
+bool readPlayableZI16(
+    const std::vector<std::uint8_t>& input,
+    std::size_t& offset,
+    std::int16_t& value)
+{
+    std::uint16_t raw = 0;
+    if (!readPlayableZU16(input, offset, raw))
+    {
+        return false;
+    }
+    value = static_cast<std::int16_t>(raw);
+    return true;
+}
+
+bool readPlayableZI32(
+    const std::vector<std::uint8_t>& input,
+    std::size_t& offset,
+    std::int32_t& value)
+{
+    std::uint32_t raw = 0;
+    if (!readPlayableZU32(input, offset, raw))
+    {
+        return false;
+    }
+    value = static_cast<std::int32_t>(raw);
+    return true;
+}
+
+bool playableZTileCount(
+    const map_t& loadedMap,
+    std::size_t& tileCount)
+{
+    if (loadedMap.width == 0 || loadedMap.height == 0)
+    {
+        return false;
+    }
+    const std::size_t width = static_cast<std::size_t>(loadedMap.width);
+    const std::size_t height = static_cast<std::size_t>(loadedMap.height);
+    if (width > std::numeric_limits<std::size_t>::max() / height)
+    {
+        return false;
+    }
+    const std::size_t cells = width * height;
+    if (cells > std::numeric_limits<std::size_t>::max() / MAPLAYERS)
+    {
+        return false;
+    }
+    tileCount = cells * MAPLAYERS;
+    return tileCount <= std::numeric_limits<std::uint32_t>::max();
+}
+
+void appendPlayableZChunk(
+    std::vector<std::uint8_t>& payload,
+    const char tag[4],
+    const std::vector<std::uint8_t>& data)
+{
+    payload.insert(payload.end(), tag, tag + 4);
+    appendPlayableZU32(payload, static_cast<std::uint32_t>(data.size()));
+    payload.insert(payload.end(), data.begin(), data.end());
+}
+
+bool savePlayableZExtension(File* fp, const map_t& loadedMap)
+{
+    if (!fp || loadedMap.playableFloors.floors.empty()
+        || !loadedMap.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR)
+        || loadedMap.playableFloors.floors.size() > MAX_PLAYABLE_FLOORS_PER_MAP)
+    {
+        return false;
+    }
+
+    std::size_t expectedTileCount = 0;
+    if (!playableZTileCount(loadedMap, expectedTileCount))
+    {
+        return false;
+    }
+
+    std::vector<std::uint8_t> payload;
+    for (const PlayableFloorData& floor : loadedMap.playableFloors.floors)
+    {
+        if (floor.id == DEFAULT_PLAYABLE_FLOOR)
+        {
+            if (!floor.tiles.empty())
+            {
+                printlog("[Playable Z] Refusing to save a duplicated Z0 tile stack.");
+                return false;
+            }
+            continue;
+        }
+        if (floor.tiles.size() != expectedTileCount)
+        {
+            printlog(
+                "[Playable Z] Floor %d has %zu tiles; expected %zu.",
+                static_cast<int>(floor.id),
+                floor.tiles.size(),
+                expectedTileCount);
+            return false;
+        }
+
+        std::vector<std::uint8_t> chunk;
+        if (floor.tiles.size()
+            > (std::numeric_limits<std::uint32_t>::max() - 8U) / 4U)
+        {
+            return false;
+        }
+        const std::size_t bytesNeeded = 8U + floor.tiles.size() * 4U;
+        chunk.reserve(bytesNeeded);
+        appendPlayableZI16(chunk, floor.id);
+        appendPlayableZU16(chunk, 0);
+        appendPlayableZU32(
+            chunk, static_cast<std::uint32_t>(floor.tiles.size()));
+        for (const std::int32_t tile : floor.tiles)
+        {
+            appendPlayableZI32(chunk, tile);
+        }
+        appendPlayableZChunk(payload, "FLOR", chunk);
+        if (payload.size() > kPlayableZMaximumPayloadBytes)
+        {
+            return false;
+        }
+    }
+
+    std::vector<std::uint8_t> assignments;
+    std::uint32_t assignmentCount = 0;
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (entity && entity->playableFloor != DEFAULT_PLAYABLE_FLOOR)
+        {
+            if (entity->persistentID <= 0
+                || !loadedMap.playableFloors.hasFloor(entity->playableFloor))
+            {
+                printlog(
+                    "[Playable Z] Entity sprite %d has invalid authored floor %d or persistent ID %d.",
+                    entity->sprite,
+                    static_cast<int>(entity->playableFloor),
+                    entity->persistentID);
+                return false;
+            }
+            ++assignmentCount;
+        }
+    }
+    appendPlayableZU32(assignments, assignmentCount);
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity || entity->playableFloor == DEFAULT_PLAYABLE_FLOOR)
+        {
+            continue;
+        }
+        appendPlayableZI32(assignments, entity->persistentID);
+        appendPlayableZI16(assignments, entity->playableFloor);
+        appendPlayableZU16(assignments, 0);
+    }
+    appendPlayableZChunk(payload, "EFLR", assignments);
+
+    if (payload.size() > kPlayableZMaximumPayloadBytes
+        || payload.size() > std::numeric_limits<std::uint32_t>::max())
+    {
+        return false;
+    }
+
+    std::vector<std::uint8_t> header;
+    header.reserve(kPlayableZExtensionHeaderBytes);
+    header.insert(
+        header.end(),
+        kPlayableZExtensionMagic,
+        kPlayableZExtensionMagic + 4);
+    appendPlayableZU16(header, kPlayableZExtensionVersion);
+    appendPlayableZU16(header, 0);
+    appendPlayableZU32(header, static_cast<std::uint32_t>(payload.size()));
+    if (header.size() != kPlayableZExtensionHeaderBytes)
+    {
+        return false;
+    }
+    if (fp->write(header.data(), sizeof(std::uint8_t), header.size())
+        != header.size())
+    {
+        return false;
+    }
+    if (!payload.empty()
+        && fp->write(payload.data(), sizeof(std::uint8_t), payload.size())
+            != payload.size())
+    {
+        return false;
+    }
+    return true;
+}
+
+bool loadPlayableZExtension(
+    File* fp,
+    map_t& loadedMap,
+    list_t* entities,
+    const char* filename)
+{
+    if (!fp)
+    {
+        return false;
+    }
+    const long currentPosition = fp->tell();
+    const std::size_t totalSize = fp->size();
+    if (currentPosition < 0
+        || static_cast<std::size_t>(currentPosition) > totalSize
+        || totalSize - static_cast<std::size_t>(currentPosition)
+            < kPlayableZExtensionHeaderBytes)
+    {
+        printlog("[Playable Z] Map '%s' is missing its V4.9 extension.", filename);
+        return false;
+    }
+
+    std::vector<std::uint8_t> header(kPlayableZExtensionHeaderBytes);
+    if (fp->read(header.data(), sizeof(std::uint8_t), header.size())
+        != header.size())
+    {
+        printlog("[Playable Z] Map '%s' has a truncated PZLV header.", filename);
+        return false;
+    }
+    if (!std::equal(
+            kPlayableZExtensionMagic,
+            kPlayableZExtensionMagic + 4,
+            header.begin()))
+    {
+        printlog("[Playable Z] Map '%s' has an invalid PZLV extension marker.", filename);
+        return false;
+    }
+    std::size_t headerOffset = 4;
+    std::uint16_t version = 0;
+    std::uint16_t reserved = 0;
+    std::uint32_t payloadLength = 0;
+    if (!readPlayableZU16(header, headerOffset, version)
+        || !readPlayableZU16(header, headerOffset, reserved)
+        || !readPlayableZU32(header, headerOffset, payloadLength)
+        || version != kPlayableZExtensionVersion
+        || reserved != 0
+        || payloadLength > kPlayableZMaximumPayloadBytes)
+    {
+        printlog("[Playable Z] Map '%s' has an unsupported PZLV envelope.", filename);
+        return false;
+    }
+
+    const long payloadPosition = fp->tell();
+    if (payloadPosition < 0
+        || static_cast<std::size_t>(payloadPosition) > totalSize
+        || payloadLength > totalSize - static_cast<std::size_t>(payloadPosition)
+        || static_cast<std::size_t>(payloadPosition) + payloadLength != totalSize)
+    {
+        printlog("[Playable Z] Map '%s' has a truncated or trailing PZLV payload.", filename);
+        return false;
+    }
+
+    std::vector<std::uint8_t> payload(payloadLength);
+    if (payloadLength > 0
+        && fp->read(payload.data(), sizeof(std::uint8_t), payload.size())
+            != payload.size())
+    {
+        printlog("[Playable Z] Map '%s' has a truncated PZLV payload.", filename);
+        return false;
+    }
+
+    loadedMap.playableFloors.resetToDefault();
+    std::size_t expectedTileCount = 0;
+    if (!playableZTileCount(loadedMap, expectedTileCount))
+    {
+        return false;
+    }
+
+    struct EntityFloorAssignment
+    {
+        Sint32 persistentId = 0;
+        PlayableFloorId floor = DEFAULT_PLAYABLE_FLOOR;
+    };
+    std::vector<EntityFloorAssignment> pendingAssignments;
+    bool sawEntityAssignments = false;
+
+    std::size_t offset = 0;
+    while (offset < payload.size())
+    {
+        if (payload.size() - offset < 8)
+        {
+            printlog("[Playable Z] Map '%s' has a truncated PZLV chunk header.", filename);
+            return false;
+        }
+        const char tag[5] = {
+            static_cast<char>(payload[offset]),
+            static_cast<char>(payload[offset + 1]),
+            static_cast<char>(payload[offset + 2]),
+            static_cast<char>(payload[offset + 3]),
+            '\0'};
+        offset += 4;
+        std::uint32_t chunkLength = 0;
+        if (!readPlayableZU32(payload, offset, chunkLength)
+            || chunkLength > payload.size() - offset)
+        {
+            printlog("[Playable Z] Map '%s' has an invalid PZLV chunk length.", filename);
+            return false;
+        }
+        const std::size_t chunkEnd = offset + chunkLength;
+
+        if (std::memcmp(tag, "FLOR", 4) == 0)
+        {
+            std::int16_t floorId = 0;
+            std::uint16_t chunkReserved = 0;
+            std::uint32_t tileCount = 0;
+            if (!readPlayableZI16(payload, offset, floorId)
+                || !readPlayableZU16(payload, offset, chunkReserved)
+                || !readPlayableZU32(payload, offset, tileCount)
+                || chunkReserved != 0
+                || floorId == DEFAULT_PLAYABLE_FLOOR
+                || tileCount != expectedTileCount
+                || chunkLength != 8U + static_cast<std::size_t>(tileCount) * 4U
+                || loadedMap.playableFloors.floors.size()
+                    >= MAX_PLAYABLE_FLOORS_PER_MAP
+                || loadedMap.playableFloors.hasFloor(floorId))
+            {
+                printlog("[Playable Z] Map '%s' has an invalid or duplicate FLOR chunk.", filename);
+                return false;
+            }
+            PlayableFloorData floor;
+            floor.id = floorId;
+            floor.tiles.resize(tileCount);
+            for (std::uint32_t index = 0; index < tileCount; ++index)
+            {
+                std::int32_t tile = 0;
+                if (!readPlayableZI32(payload, offset, tile))
+                {
+                    return false;
+                }
+                floor.tiles[index] = tile;
+            }
+            if (!loadedMap.playableFloors.addFloor(std::move(floor)))
+            {
+                return false;
+            }
+        }
+        else if (std::memcmp(tag, "EFLR", 4) == 0)
+        {
+            if (sawEntityAssignments)
+            {
+                printlog("[Playable Z] Map '%s' has duplicate EFLR chunks.", filename);
+                return false;
+            }
+            sawEntityAssignments = true;
+            std::uint32_t count = 0;
+            if (!readPlayableZU32(payload, offset, count)
+                || count > 1048576U
+                || chunkLength != 4U + static_cast<std::size_t>(count) * 8U)
+            {
+                return false;
+            }
+            pendingAssignments.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index)
+            {
+                std::int32_t persistentId = 0;
+                std::int16_t floorId = 0;
+                std::uint16_t chunkReserved = 0;
+                if (!readPlayableZI32(payload, offset, persistentId)
+                    || !readPlayableZI16(payload, offset, floorId)
+                    || !readPlayableZU16(payload, offset, chunkReserved)
+                    || persistentId <= 0
+                    || floorId == DEFAULT_PLAYABLE_FLOOR
+                    || chunkReserved != 0)
+                {
+                    return false;
+                }
+                pendingAssignments.push_back({persistentId, floorId});
+            }
+        }
+        else
+        {
+            // V4.9 optional chunks are length-delimited and may be skipped.
+            offset = chunkEnd;
+        }
+
+        if (offset != chunkEnd)
+        {
+            printlog("[Playable Z] Map '%s' has malformed PZLV chunk data.", filename);
+            return false;
+        }
+    }
+
+    if (!sawEntityAssignments)
+    {
+        printlog("[Playable Z] Map '%s' is missing the required EFLR chunk.", filename);
+        return false;
+    }
+
+    std::unordered_map<Sint32, Entity*> entityByPersistentId;
+    std::unordered_set<Sint32> duplicatePersistentIds;
+    for (node_t* node = entities ? entities->first : nullptr; node; node = node->next)
+    {
+        Entity* entity = static_cast<Entity*>(node->element);
+        if (!entity)
+        {
+            continue;
+        }
+        entity->playableFloor = DEFAULT_PLAYABLE_FLOOR;
+        entity->spatialRevision = 0;
+        if (entity->persistentID > 0)
+        {
+            if (!entityByPersistentId.emplace(entity->persistentID, entity).second)
+            {
+                duplicatePersistentIds.insert(entity->persistentID);
+            }
+        }
+    }
+
+    std::unordered_set<Sint32> assignedPersistentIds;
+    for (const EntityFloorAssignment& assignment : pendingAssignments)
+    {
+        if (!loadedMap.playableFloors.hasFloor(assignment.floor)
+            || duplicatePersistentIds.count(assignment.persistentId) != 0
+            || !assignedPersistentIds.insert(assignment.persistentId).second)
+        {
+            printlog("[Playable Z] Map '%s' has an ambiguous EFLR assignment.", filename);
+            return false;
+        }
+        const auto found = entityByPersistentId.find(assignment.persistentId);
+        if (found == entityByPersistentId.end() || !found->second)
+        {
+            printlog("[Playable Z] Map '%s' assigns a floor to missing entity ID %d.",
+                filename, assignment.persistentId);
+            return false;
+        }
+        found->second->playableFloor = assignment.floor;
+    }
+    return true;
+}
+}
 const char* holidayThemeDirs[HolidayTheme::THEME_MAX] = {
     "",
     "themes/scarony/",
@@ -2413,6 +2906,15 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 
 	if ( strncmp(
 			valid_data,
+			"BARONY LMPV4.9",
+			strlen("BARONY LMPV4.9")
+		) == 0 )
+	{
+		// V4.9 preserves the V4.8 Z0 payload and appends typed playable-floor data.
+		editorVersion = 49;
+	}
+	else if ( strncmp(
+			valid_data,
 			"BARONY LMPV4.8",
 			strlen("BARONY LMPV4.8")
 		) == 0 )
@@ -2613,6 +3115,7 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 		free(destmap->tiles);
 		destmap->tiles = nullptr;
 	}
+	destmap->playableFloors.resetToDefault();
 	if ( destmap == &map )
 	{
 #ifdef EDITOR
@@ -3555,6 +4058,41 @@ fp->read(&numentities, sizeof(Uint32), 1);
 		mapHashData += (sprite * c);
 	}
 
+	if (editorVersion >= 49
+		&& !loadPlayableZExtension(fp, *destmap, entlist, filename))
+	{
+		FileIO::close(fp);
+		list_FreeAll(entlist);
+		if (creatureList)
+		{
+			list_FreeAll(creatureList);
+		}
+		return -1;
+	}
+#ifndef EDITOR
+	/*
+	 * Stage Z1 can store and inspect nonzero playable floors, but gameplay
+	 * isolation is intentionally not active until Z2. Never run a real game
+	 * with overlapping floor data under the legacy 2D collision/query rules.
+	 */
+	if (destmap == &map && game
+		&& destmap->playableFloors.floors.size() > 1)
+	{
+		printlog(
+			"[Playable Z] Map '%s' contains %zu playable floors; "
+			"Stage Z1 keeps nonzero floors data-only until Z2 isolation.",
+			filename,
+			destmap->playableFloors.floors.size());
+		FileIO::close(fp);
+		list_FreeAll(entlist);
+		if (creatureList)
+		{
+			list_FreeAll(creatureList);
+		}
+		return -1;
+	}
+#endif
+
 	FileIO::close(fp);
 
 	std::string mapShortName = filename2;
@@ -3934,13 +4472,13 @@ int saveMap(const char* filename2)
 		);
 
 		/*
-		* Saving produces a V4.8 32-layer map with expanded editor-authored
-		* monster inventories and custom dialogue IDs.
+		* Saving produces a V4.9 map. The complete V4.8-compatible payload
+		* remains floor Z0, followed by the PZLV extension envelope.
 		*/
 		fp->write(
-			"BARONY LMPV4.8",
+			"BARONY LMPV4.9",
 			sizeof(char),
-			strlen("BARONY LMPV4.8")
+			strlen("BARONY LMPV4.9")
 		);
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
@@ -4365,6 +4903,12 @@ int saveMap(const char* filename2)
 
 			// V4.1 stores the entity's true vertical world position.
 			fp->write(&entity->z, sizeof(real_t), 1);
+		}
+		if (!savePlayableZExtension(fp, map))
+		{
+			printlog("[Playable Z] Failed to serialize the V4.9 PZLV extension for '%s'.", filename);
+			FileIO::close(fp);
+			return 1;
 		}
 		FileIO::close(fp);
 		return 0;
