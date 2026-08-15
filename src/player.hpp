@@ -14,6 +14,7 @@
 #include "interface/interface.hpp"
 #include "magic/magic.hpp"
 #include "messages.hpp"
+#include "party_chat.hpp"
 #include "engine/audio/sound.hpp"
 #include "input.hpp"
 #include "ui/Frame.hpp"
@@ -1966,6 +1967,11 @@ public:
 		real_t animFade = 1.0;
 		bool bottomAlignedMessages = false;
 		bool useBigFont = false;
+		AutomatiaPartyChat::Channel chatChannel =
+			AutomatiaPartyChat::Channel::Global;
+		bool chatChannelSelectorActive = false;
+		bool chatChannelSelectorManagedCursor = false;
+		bool chatChannelSelectorPriorCursor = false;
 		static const char* bigfont;
 		static const char* smallfont;
 		enum ChatAlignment_t : int

@@ -18,7 +18,7 @@ namespace AutomatiaSave
 {
 using Json = nlohmann::json;
 
-constexpr std::uint32_t CURRENT_SCHEMA_VERSION = 1;
+constexpr std::uint32_t CURRENT_SCHEMA_VERSION = 2;
 constexpr std::uint32_t MINIMUM_SCHEMA_VERSION = 1;
 constexpr std::size_t MAX_SAVE_BYTES = 128U * 1024U * 1024U;
 

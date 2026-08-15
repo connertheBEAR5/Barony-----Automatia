@@ -8,6 +8,9 @@ if(BUILD_TESTING)
         automatia_foundation_tests
         tests/automatia_foundation_tests.cpp
         src/automatia_save.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/party_protocol.cpp
     )
     target_include_directories(
         automatia_foundation_tests
@@ -17,10 +20,60 @@ if(BUILD_TESTING)
     target_compile_features(automatia_foundation_tests PRIVATE cxx_std_17)
     add_test(NAME automatia_foundation COMMAND automatia_foundation_tests)
 
+    add_executable(
+        party_backend_tests
+        tests/party_backend_tests.cpp
+        src/automatia_save.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/party_protocol.cpp
+    )
+    target_include_directories(
+        party_backend_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_features(party_backend_tests PRIVATE cxx_std_17)
+    add_test(NAME party_backend COMMAND party_backend_tests)
+
+    add_executable(
+        social_party_ui_model_tests
+        tests/social_party_ui_model_tests.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/party_protocol.cpp
+        src/social_party_ui_model.cpp
+    )
+    target_include_directories(
+        social_party_ui_model_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_features(social_party_ui_model_tests PRIVATE cxx_std_17)
+    add_test(NAME social_party_ui_model COMMAND social_party_ui_model_tests)
+
+    add_executable(
+        party_chat_tests
+        tests/party_chat_tests.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/party_chat.cpp
+    )
+    target_include_directories(
+        party_chat_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_features(party_chat_tests PRIVATE cxx_std_17)
+    add_test(NAME party_chat COMMAND party_chat_tests)
+
     if(UNIX)
         add_executable(
             late_join_live_probe
             tests/late_join_live_probe.cpp
+            src/automatia_identity.cpp
+            src/party_manager.cpp
+            src/party_protocol.cpp
         )
         target_include_directories(
             late_join_live_probe
@@ -28,6 +81,23 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/src"
         )
         target_compile_features(late_join_live_probe PRIVATE cxx_std_17)
+
+        add_executable(
+            party_cross_map_live_probe
+            tests/party_cross_map_live_probe.cpp
+            src/automatia_identity.cpp
+            src/party_manager.cpp
+            src/party_protocol.cpp
+            src/party_chat.cpp
+            src/social_party_ui_model.cpp
+        )
+        target_include_directories(
+            party_cross_map_live_probe
+            PRIVATE
+            "${PROJECT_SOURCE_DIR}/src"
+        )
+        target_compile_features(
+            party_cross_map_live_probe PRIVATE cxx_std_17)
     endif()
 endif()
 

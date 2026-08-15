@@ -2,7 +2,7 @@
 
     BARONY AUTOMATIA
     File: automatia_world_save.hpp
-    Desc: Serialization bridge from the runtime world registry to schema v1.
+    Desc: Serialization bridge from the runtime world registry to the save schema.
 
 -------------------------------------------------------------------------------*/
 

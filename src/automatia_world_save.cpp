@@ -2,7 +2,7 @@
 
     BARONY AUTOMATIA
     File: automatia_world_save.cpp
-    Desc: Serialization bridge from the runtime world registry to schema v1.
+    Desc: Serialization bridge from the runtime world registry to the save schema.
 
 -------------------------------------------------------------------------------*/
 
@@ -47,6 +47,7 @@ Json captureWorldState(const std::string& sessionId, const WorldState& world)
             {"persistent_state", Json::object()}
         });
     }
+    document["party"] = world.partyManager().toPersistentJson();
     return document;
 }
 }

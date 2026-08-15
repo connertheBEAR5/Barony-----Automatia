@@ -1689,7 +1689,7 @@ static std::string clientPersistentSnapshotMapKey;
 static bool clientPersistentSnapshotReceiving = false;
 static bool clientPersistentSnapshotComplete = false;
 
-static std::string persistentMinimapCharacterNameIdentity(
+static std::string legacyPersistentMinimapCharacterNameIdentity(
     const int playerIndex
 )
 {
@@ -1716,6 +1716,21 @@ static std::string persistentMinimapCharacterNameIdentity(
     {
         normalized.pop_back();
     }
+    return normalized.empty() ? "" : "character_name:" + normalized;
+}
+
+static std::string persistentMinimapCharacterNameIdentity(
+    const int playerIndex
+)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !stats[playerIndex] || stats[playerIndex]->name[0] == '\0')
+    {
+        return "";
+    }
+    const std::string normalized =
+        AutomatiaParty::normalizeLocalCharacterIdentity(
+            stats[playerIndex]->name);
     return normalized.empty() ? "" : "character_name:" + normalized;
 }
 
@@ -1814,6 +1829,10 @@ static void migratePersistentMinimapFallbackIdentity(const int playerIndex)
 
     const std::string characterIdentity =
         persistentMinimapCharacterNameIdentity(playerIndex);
+    const std::string legacyCharacterIdentity =
+        legacyPersistentMinimapCharacterNameIdentity(playerIndex);
+    mergePersistentMinimapIdentity(
+        legacyCharacterIdentity, preferredIdentity);
     mergePersistentMinimapIdentity(
         characterIdentity, preferredIdentity);
 
@@ -2712,6 +2731,35 @@ void hydratePreservedAutomatiaWorldDocument()
     if (!preservedAutomatiaWorldDocument.is_object())
     {
         return;
+    }
+
+    /*
+     * Party membership is authoritative world state. Schema-v1 documents had
+     * no party records and intentionally hydrate as an empty manager. Clients
+     * receive recipient-specific party state over PTYS instead of importing
+     * the server's complete social graph from a map snapshot.
+     */
+    const std::uint64_t savedSchemaVersion =
+        preservedAutomatiaWorldDocument.value(
+            "schema_version", std::uint64_t{1});
+    if (multiplayer != CLIENT && savedSchemaVersion >= 2
+        && preservedAutomatiaWorldDocument.contains("party"))
+    {
+        std::string partyError;
+        if (!worldState.partyManager().loadPersistentJson(
+                preservedAutomatiaWorldDocument["party"], partyError))
+        {
+            printlog(
+                "[Party] Rejected persistent party state during hydration: %s.",
+                partyError.c_str());
+            worldState.partyManager().clear();
+        }
+        else
+        {
+            printlog(
+                "[Party] Hydrated %zu persistent party record(s).",
+                worldState.partyManager().partyCount());
+        }
     }
 
     if (preservedAutomatiaWorldDocument.contains("magic_grimoire_generated")
@@ -4067,6 +4115,12 @@ static std::string automatiaPlayerHistoryIdentity(
     {
         previousIdentities.push_back(characterIdentity);
     }
+    const std::string legacyCharacterIdentity =
+        legacyPersistentMinimapCharacterNameIdentity(playerIndex);
+    if (!legacyCharacterIdentity.empty())
+    {
+        previousIdentities.push_back(legacyCharacterIdentity);
+    }
     if (playerIndex >= 0 && playerIndex < MAXPLAYERS
         && ReconnectToken::isValid(automatiaReconnectTokens[playerIndex]))
     {
@@ -5171,6 +5225,10 @@ bool serializeAutomatiaPersistentWorldSnapshot(
             std::move(scopedPlayerMinimaps);
     }
     document["map_instances"] = std::move(scopedMaps);
+    document["party"] = AutomatiaSave::Json{
+        {"next_id", 1},
+        {"parties", AutomatiaSave::Json::array()}
+    };
     document["snapshot_scope"] = "map_instance";
 #ifdef SAM_FRAMEWORK_ENABLED
     document["sam_fingerprint"] = SAMSync::generateFingerprint();
@@ -5201,6 +5259,7 @@ bool serializeAutomatiaPersistentWorldSnapshot(
 bool writeAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,
+    const std::string& saveTransactionId,
     std::string& error
 )
 {
@@ -5209,6 +5268,10 @@ bool writeAutomatiaPersistentWorldSave(
             sessionId, document, error))
     {
         return false;
+    }
+    if (!saveTransactionId.empty())
+    {
+        document["save_transaction_id"] = saveTransactionId;
     }
     const AutomatiaSave::Result result =
         AutomatiaSave::writeAtomic(path, document);
@@ -5288,6 +5351,7 @@ void discardAutomatiaPersistentWorldSnapshot()
 bool loadAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,
+    const std::string& saveTransactionId,
     std::string& error
 )
 {
@@ -5296,6 +5360,17 @@ bool loadAutomatiaPersistentWorldSave(
     if (!result.ok)
     {
         error = result.error;
+        return false;
+    }
+    const bool hasSaveTransaction =
+        document.contains("save_transaction_id");
+    if (hasSaveTransaction != !saveTransactionId.empty()
+        || (hasSaveTransaction
+            && (!document["save_transaction_id"].is_string()
+                || document["save_transaction_id"].get<std::string>()
+                    != saveTransactionId)))
+    {
+        error = "world save transaction ID does not match the character save";
         return false;
     }
     return stageAutomatiaPersistentWorldDocument(
@@ -24237,6 +24312,27 @@ static void doConsoleCommands() {
 				}
 			}
 		}
+		if (multiplayer != SINGLE)
+		{
+			const bool keyboardChannelToggle = keystatus[SDLK_TAB] != 0;
+			if (keyboardChannelToggle)
+			{
+				keystatus[SDLK_TAB] = 0;
+				Input::keys[SDLK_TAB] = 0;
+			}
+			const bool controllerChannelLeft =
+				input.consumeBinaryToggle("MenuPageLeft");
+			const bool controllerChannelRight =
+				input.consumeBinaryToggle("MenuPageRight");
+			if (keyboardChannelToggle || controllerChannelLeft
+				|| controllerChannelRight)
+			{
+				players[commandPlayer]->messageZone.chatChannel =
+					AutomatiaPartyChat::toggleChannel(
+						players[commandPlayer]->messageZone.chatChannel);
+				Player::soundActivate();
+			}
+		}
 
 		// set inputstr
 		if (!SDL_IsTextInputActive()) {
@@ -24267,28 +24363,44 @@ static void doConsoleCommands() {
 			}
 			else if (!intro) // can't send messages in multiplayer
 			{
+				const bool partyChannel = multiplayer != SINGLE
+					&& players[commandPlayer]->messageZone.chatChannel
+						== AutomatiaPartyChat::Channel::Party;
 				if (multiplayer == CLIENT) // send message as a client
 				{
 					if (strcmp(command_str, ""))
 					{
-						char chatstring[256];
-						strcpy(chatstring, Language::get(739));
-						strcat(chatstring, command_str);
-						Uint32 color = playerColor(commandPlayer, colorblind_lobby, false);
-						if (messagePlayerColor(commandPlayer, MESSAGE_CHAT, color, chatstring)) {
-							playSound(Message::CHAT_MESSAGE_SFX, 64);
+						if (partyChannel)
+						{
+							if (!submitAutomatiaPartyChat(
+									commandPlayer, command_str))
+							{
+								messagePlayer(
+									commandPlayer, MESSAGE_CHAT,
+									"Party chat could not be sent.");
+							}
 						}
+						else
+						{
+							char chatstring[256];
+							strcpy(chatstring, Language::get(739));
+							strcat(chatstring, command_str);
+							Uint32 color = playerColor(commandPlayer, colorblind_lobby, false);
+							if (messagePlayerColor(commandPlayer, MESSAGE_CHAT, color, chatstring)) {
+								playSound(Message::CHAT_MESSAGE_SFX, 64);
+							}
 
-						// send message to server
-						if (net_packet && net_packet->data) {
-							strcpy((char*)net_packet->data, "MSGS");
-							net_packet->data[4] = commandPlayer;
-							SDLNet_Write32(color, &net_packet->data[5]);
-							strcpy((char*)(&net_packet->data[9]), command_str);
-							net_packet->address.host = net_server.host;
-							net_packet->address.port = net_server.port;
-							net_packet->len = 9 + strlen(command_str) + 1;
-							sendPacketSafe(net_sock, -1, net_packet, 0);
+							// send message to server
+							if (net_packet && net_packet->data) {
+								strcpy((char*)net_packet->data, "MSGS");
+								net_packet->data[4] = commandPlayer;
+								SDLNet_Write32(color, &net_packet->data[5]);
+								strcpy((char*)(&net_packet->data[9]), command_str);
+								net_packet->address.host = net_server.host;
+								net_packet->address.port = net_server.port;
+								net_packet->len = 9 + strlen(command_str) + 1;
+								sendPacketSafe(net_sock, -1, net_packet, 0);
+							}
 						}
 					}
 					else
@@ -24300,6 +24412,18 @@ static void doConsoleCommands() {
 				{
 					if (strcmp(command_str, ""))
 					{
+						if (partyChannel && multiplayer == SERVER)
+						{
+							if (!submitAutomatiaPartyChat(
+									commandPlayer, command_str))
+							{
+								messagePlayer(
+									commandPlayer, MESSAGE_CHAT,
+									"Party chat could not be sent.");
+							}
+						}
+						else
+						{
 						char chatstring[256];
 						strcpy(chatstring, Language::get(739));
 						strcat(chatstring, command_str);
@@ -24335,8 +24459,9 @@ static void doConsoleCommands() {
 									net_packet->address.port = net_clients[c - 1].port;
 									net_packet->len = 12 + strlen(chatstring) + 1;
 									sendPacketSafe(net_sock, -1, net_packet, c - 1);
-								}
 							}
+						}
+					}
 						}
 					}
 					else

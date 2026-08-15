@@ -11,6 +11,7 @@
 #include "../init.hpp"
 #include "../game.hpp"
 #include "../net.hpp"
+#include "../social_party_ui_model.hpp"
 #include "../late_join_protocol.hpp"
 #include "../lan_discovery.hpp"
 #include "../player.hpp"
@@ -1386,6 +1387,7 @@ namespace MainMenu {
 	static void mainPlayGame(Button&);
 	static void mainArchives(Button&);
 	static void mainAssignControllers(Button&);
+	static void mainSocial(Button&);
 	static void mainSettings(Button&);
 	static void mainEditor(Button&);
 	static void mainClose(Button&);
@@ -12487,6 +12489,43 @@ bind_failed:
 		}},
     };
 
+#ifdef STEAMWORKS
+	static int steamLobbyPacketSenderHostIndex(const CSteamID& sender)
+	{
+		for (int hostIndex = 0; hostIndex < MAXPLAYERS - 1; ++hostIndex)
+		{
+			if (steamIDRemote[hostIndex]
+				&& static_cast<CSteamID*>(steamIDRemote[hostIndex])
+					->ConvertToUint64() == sender.ConvertToUint64())
+			{
+				return hostIndex;
+			}
+		}
+		return -1;
+	}
+#endif
+
+#ifdef USE_EOS
+	static int eosLobbyPacketSenderHostIndex(EOS_ProductUserId sender)
+	{
+		if (multiplayer == CLIENT
+			&& EOSFuncs::Helpers_t::isMatchingProductIds(
+				sender, EOS.P2PConnectionInfo.getPeerIdFromIndex(0)))
+		{
+			return 0;
+		}
+		if (!sender || !EOS.P2PConnectionInfo.isPeerIndexed(sender))
+		{
+			return -1;
+		}
+		const int hostIndex =
+			EOS.P2PConnectionInfo.getIndexFromPeerId(sender);
+		return hostIndex >= 0 && hostIndex < MAXPLAYERS
+			? hostIndex
+			: -1;
+	}
+#endif
+
 	static void handlePacketsAsServer() {
 #ifdef STEAMWORKS
 		CSteamID newSteamID;
@@ -12498,6 +12537,7 @@ bind_failed:
         updateLobby();
 
 		for (int numpacket = 0; numpacket < PACKET_LIMIT; numpacket++) {
+			setLobbyPacketSenderHostIndex(-1);
 			if (directConnect) {
 				if (!SDLNet_UDP_Recv(net_sock, net_packet)) {
 					break;
@@ -12520,16 +12560,20 @@ bind_failed:
 					}
 
 					CSteamID mySteamID = SteamUser()->GetSteamID();
-					if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
-						continue;
-					}
+						if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
+							continue;
+						}
+						setLobbyPacketSenderHostIndex(
+							steamLobbyPacketSenderHostIndex(newSteamID));
 #endif // STEAMWORKS
 				} else if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY) {
 #ifdef USE_EOS
 					if (!EOS.HandleReceivedMessages(&newRemoteProductId)) {
 						continue;
-					}
-					EOS.P2PConnectionInfo.insertProductIdIntoPeers(newRemoteProductId);
+						}
+						EOS.P2PConnectionInfo.insertProductIdIntoPeers(newRemoteProductId);
+						setLobbyPacketSenderHostIndex(
+							eosLobbyPacketSenderHostIndex(newRemoteProductId));
 #endif // USE_EOS
 				}
 			}
@@ -13294,6 +13338,7 @@ bind_failed:
 			// receive the packet:
 			checkHeloChunkReassemblyTimeout();
 			bool gotPacket = false;
+			setLobbyPacketSenderHostIndex(-1);
 			if (directConnect) {
 			    if (SDLNet_UDP_Recv(net_sock, net_packet)) {
 			        if (!handleSafePacket()) {
@@ -13320,11 +13365,13 @@ bind_failed:
 					}
 
 					CSteamID mySteamID = SteamUser()->GetSteamID();
-					if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
-						continue;
-					}
+						if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
+							continue;
+						}
+						setLobbyPacketSenderHostIndex(
+							steamLobbyPacketSenderHostIndex(newSteamID));
 
-			        if (!handleSafePacket()) {
+				        if (!handleSafePacket()) {
 						processJoinHandshakePacket(gotPacket);
 					}
 					break;
@@ -13333,11 +13380,13 @@ bind_failed:
 			} else if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY) {
 #ifdef USE_EOS
 				for (Uint32 numpacket = 0; numpacket < PACKET_LIMIT; numpacket++) {
-					if (!EOS.HandleReceivedMessages(&newRemoteProductId)) {
-						continue;
-					}
+						if (!EOS.HandleReceivedMessages(&newRemoteProductId)) {
+							continue;
+						}
+						setLobbyPacketSenderHostIndex(
+							eosLobbyPacketSenderHostIndex(newRemoteProductId));
 
-			        if (!handleSafePacket()) {
+				        if (!handleSafePacket()) {
 						processJoinHandshakePacket(gotPacket);
 					}
 					break;
@@ -13579,6 +13628,7 @@ bind_failed:
 		    EOS.bJoinLobbyWaitingForHostResponse = false;
 #endif
 		    for (int numpacket = 0; numpacket < PACKET_LIMIT && net_packet; numpacket++) {
+				setLobbyPacketSenderHostIndex(-1);
 			    if (directConnect) {
 				    if (!SDLNet_UDP_Recv(net_sock, net_packet)) {
 					    break;
@@ -13603,16 +13653,20 @@ bind_failed:
 					    }
 
 					    CSteamID mySteamID = SteamUser()->GetSteamID();
-					    if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
-						    continue;
-					    }
+						    if (mySteamID.ConvertToUint64() == newSteamID.ConvertToUint64()) {
+							    continue;
+						    }
+						    setLobbyPacketSenderHostIndex(
+								steamLobbyPacketSenderHostIndex(newSteamID));
 #endif // STEAMWORKS
 				    } else if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY) {
 #ifdef USE_EOS
 					    EOS_ProductUserId remoteId = nullptr;
-					    if ( !EOS.HandleReceivedMessages(&remoteId) ) {
-						    continue;
-					    }
+						    if ( !EOS.HandleReceivedMessages(&remoteId) ) {
+							    continue;
+						    }
+						    setLobbyPacketSenderHostIndex(
+								eosLobbyPacketSenderHostIndex(remoteId));
 #endif // USE_EOS
 				    }
 			    }
@@ -24947,6 +25001,117 @@ failed:
         mainloop = 0;
     }
 
+    static bool headlessAutomatiaLiveProbeEnabled()
+    {
+        const char* enabled = std::getenv(
+            "BARONY_AUTOMATIA_LIVE_PROBE");
+        return enabled && !strcmp(enabled, "1");
+    }
+
+    static bool headlessExecuteAutomatiaLiveProbeCommand(
+        const char* command)
+    {
+        if (!headlessAutomatiaLiveProbeEnabled() || !command)
+        {
+            return false;
+        }
+
+        int player = -1;
+        char mapFile[WorldInstanceIdentity::MAX_MAP_FILE_LENGTH + 1] = {};
+        char trailing = '\0';
+        if (sscanf(
+                command,
+                "party-probe-transition %d %255s %c",
+                &player,
+                mapFile,
+                &trailing) == 2)
+        {
+            const std::string canonicalMap =
+                WorldInstanceIdentity::canonicalMapFile(mapFile);
+            if (player <= 0 || player >= MAXPLAYERS
+                || canonicalMap != mapFile
+                || !WorldInstanceIdentity::isSafeMapFile(canonicalMap)
+                || !serverPlayerCanReceiveGameplayUpdates(player)
+                || !queueAutomatiaCustomTransition(
+                    player, canonicalMap, 0, 1, false))
+            {
+                printlog(
+                    "HEADLESS PARTY PROBE: rejected transition command for player %d map '%s'.",
+                    player,
+                    mapFile);
+                return true;
+            }
+            printlog(
+                "HEADLESS PARTY PROBE: queued player %d transition to '%s'.",
+                player,
+                canonicalMap.c_str());
+            return true;
+        }
+
+        trailing = '\0';
+        if (sscanf(
+                command,
+                "party-probe-entity %d %c",
+                &player,
+                &trailing) == 1)
+        {
+            if (player <= 0 || player >= MAXPLAYERS
+                || !serverPlayerCanReceiveGameplayUpdates(player)
+                || !players[player]
+                || !players[player]->worldInstance.isValid())
+            {
+                printlog(
+                    "HEADLESS PARTY PROBE: rejected entity command for player %d.",
+                    player);
+                return true;
+            }
+            const WorldInstanceIdentity* initial = worldState.activeIdentity();
+            const std::string initialKey =
+                initial ? initial->key() : std::string{};
+            const std::string sourceKey =
+                players[player]->worldInstance.key();
+            Entity* source = worldState.playerEntityFor(sourceKey, player);
+            if (!source || !worldState.activate(sourceKey))
+            {
+                printlog(
+                    "HEADLESS PARTY PROBE: player %d source entity is unavailable.",
+                    player);
+                return true;
+            }
+
+            // Serialize through the real ENTU path with a transient marker.
+            // The entity is restored before simulation resumes.
+            const real_t previousFocalZ = source->focalz;
+            const real_t previousVelocityZ = source->vel_z;
+            source->focalz = 15.0;
+            source->vel_z = 123.0;
+            int attemptedRecipients = 0;
+            for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+            {
+                if (!serverPlayerCanReceiveGameplayUpdates(recipient))
+                {
+                    continue;
+                }
+                ++attemptedRecipients;
+                sendEntityUDP(source, recipient, true);
+            }
+            source->focalz = previousFocalZ;
+            source->vel_z = previousVelocityZ;
+            if (!initialKey.empty() && initialKey != sourceKey)
+            {
+                (void)worldState.activate(initialKey);
+            }
+            printlog(
+                "HEADLESS PARTY PROBE: emitted marked ENTU uid=%u from '%s' toward %d live recipient(s); map scope remains authoritative.",
+                static_cast<unsigned>(source->getUID()),
+                sourceKey.c_str(),
+                attemptedRecipients);
+            return true;
+        }
+
+        return false;
+    }
+
     static void headlessExecuteAdminCommand(const char* command)
     {
         if ( !command )
@@ -24957,6 +25122,11 @@ failed:
         if ( !strcmp(command, "help") )
         {
             printlog("HEADLESS ADMIN: help | status | start | save | shutdown");
+			if (headlessAutomatiaLiveProbeEnabled())
+			{
+				printlog(
+					"HEADLESS PARTY PROBE: party-probe-transition <player> <map.lmp> | party-probe-entity <source-player>");
+			}
         }
         else if ( !strcmp(command, "status") )
         {
@@ -24982,6 +25152,10 @@ failed:
         {
             headlessRequestShutdown("administrator request");
         }
+		else if (headlessExecuteAutomatiaLiveProbeCommand(command))
+		{
+			// Gated acceptance-test command handled above.
+		}
         else if ( command[0] != '\0' )
         {
             printlog("HEADLESS ADMIN: unknown command '%s'. Type help.", command);
@@ -27686,6 +27860,1474 @@ failed:
 		closeMainMenu();
 	}
 
+	/**************************************************************************/
+	/* Automatia Social / Party UI                                            */
+
+	enum class SocialCompactTab : Uint8
+	{
+		Players,
+		Party,
+		Invitations
+	};
+
+	struct SocialMenuRuntime
+	{
+		int actorSlot = -1;
+		bool serviceAvailable = false;
+		bool compact = false;
+		SocialCompactTab compactTab = SocialCompactTab::Players;
+		int selectedPlayerSlot = -1;
+		std::string selectedMemberKey;
+		AutomatiaParty::InvitationID selectedInvitationId =
+			AutomatiaParty::INVALID_INVITATION_ID;
+		std::string renderedFingerprint;
+		std::string status;
+		bool statusError = false;
+		Uint32 pendingRequestId = 0;
+		Uint32 pendingSinceTick = 0;
+		AutomatiaSocial::Action pendingAction =
+			AutomatiaSocial::Action::Create;
+		AutomatiaSocial::Action confirmationAction =
+			AutomatiaSocial::Action::Create;
+		AutomatiaSocial::ActionSelection confirmationSelection;
+		AutomatiaParty::Protocol::PartyState partyState;
+		AutomatiaParty::Protocol::InvitationList invitationList;
+		AutomatiaSocial::ViewModel view;
+	};
+
+	static SocialMenuRuntime socialMenu;
+	static Uint32 socialRequestCounter = 0;
+
+	static Frame* socialWindow()
+	{
+		return main_menu_frame
+			? main_menu_frame->findFrame("social") : nullptr;
+	}
+
+	static Button* socialActionButton(const char* name)
+	{
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return nullptr;
+		}
+		if (Button* button = window->findButton(name))
+		{
+			return button;
+		}
+		for (const char* panelName : {
+			"social_players_panel",
+			"social_party_panel",
+			"social_invitations_panel"})
+		{
+			if (Frame* panel = window->findFrame(panelName))
+			{
+				if (Button* button = panel->findButton(name))
+				{
+					return button;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	static int socialLocalPlayerSlot()
+	{
+		return multiplayer == CLIENT ? clientnum : getMenuOwner();
+	}
+
+	static std::vector<AutomatiaSocial::ConnectedPlayer>
+	connectedPlayersForSocial()
+	{
+		std::vector<AutomatiaSocial::ConnectedPlayer> connected;
+		connected.reserve(MAXPLAYERS);
+		for (int player = 0; player < MAXPLAYERS; ++player)
+		{
+			if (client_disconnected[player]
+				|| !players[player] || !stats[player]
+				|| (player == 0 && (headless
+					|| (multiplayer == CLIENT
+						&& clientConnectedToDedicatedServer))))
+			{
+				continue;
+			}
+			std::string name = stats[player]->name;
+			if (name.empty() || name == "...")
+			{
+				const char* accountName = players[player]->getAccountName();
+				if (accountName && accountName[0] != '\0'
+					&& strcmp(accountName, "...") != 0)
+				{
+					name = accountName;
+				}
+			}
+			if (name.empty() || name == "...")
+			{
+				name = "Player " + std::to_string(player + 1);
+			}
+			connected.push_back({
+				static_cast<std::uint8_t>(player), name, {}});
+		}
+		return connected;
+	}
+
+	static std::string socialViewFingerprint(
+		const AutomatiaSocial::ViewModel& view)
+	{
+		std::string value = view.synchronized ? "S" : "U";
+		value += ':' + std::to_string(view.partyId);
+		value += ':' + std::to_string(view.revision);
+		value += ':' + std::to_string(view.syncSequence);
+		for (const auto& player : view.players)
+		{
+			value += "|P" + std::to_string(player.slot) + ':'
+				+ player.displayName + ':'
+				+ std::to_string(static_cast<unsigned>(player.relationship))
+				+ (player.inviteEligible ? "+" : "-");
+		}
+		for (const auto& member : view.members)
+		{
+			value += "|M" + AutomatiaSocial::durableSelectionKey(
+				member.identity) + ':' + member.displayName
+				+ (member.online ? "+" : "-")
+				+ (member.leader ? "L" : "")
+				+ (member.localPlayer ? "Y" : "");
+		}
+		for (const auto& invitation : view.invitations)
+		{
+			value += "|I" + std::to_string(invitation.invitationId)
+				+ ':' + std::to_string(invitation.partyId)
+				+ ':' + invitation.inviterDisplayName;
+		}
+		return value;
+	}
+
+	static Button* addSocialActionButton(
+		Frame& parent,
+		const char* name,
+		const char* text,
+		void (*callback)(Button&),
+		const bool destructive = false)
+	{
+		Button* button = parent.addButton(name);
+		button->setSize(SDL_Rect{16, parent.getSize().h - 56, 140, 44});
+		button->setBackground(destructive
+			? "*images/ui/Main Menus/Disconnect/UI_Disconnect_Button_Abandon00.png"
+			: "*images/ui/Main Menus/Settings/Settings_Button_Basic00.png");
+		button->setBackgroundHighlighted(destructive
+			? "*images/ui/Main Menus/Disconnect/UI_Disconnect_Button_AbandonHigh00.png"
+			: "*images/ui/Main Menus/Settings/Settings_Button_BasicHigh00.png");
+		button->setBackgroundActivated(destructive
+			? "*images/ui/Main Menus/Disconnect/UI_Disconnect_Button_AbandonPress00.png"
+			: "*images/ui/Main Menus/Settings/Settings_Button_BasicPress00.png");
+		button->setBorder(0);
+		button->setColor(uint32ColorWhite);
+		button->setHighlightColor(uint32ColorWhite);
+		button->setTextColor(uint32ColorWhite);
+		button->setTextHighlightColor(uint32ColorWhite);
+		button->setText(text);
+		button->setFont(smallfont_outline);
+		button->setCallback(callback);
+		button->setWidgetSearchParent("social");
+		button->setWidgetBack("back_button");
+		button->setGlyphPosition(Widget::glyph_position_t::CENTERED_BOTTOM);
+		return button;
+	}
+
+	static Frame* addSocialPanel(
+		Frame& window,
+		const char* name,
+		const char* title,
+		const SDL_Rect size,
+		const char* listName,
+		const char* emptyName)
+	{
+		Frame* panel = window.addFrame(name);
+		panel->setSize(size);
+		panel->setActualSize(SDL_Rect{0, 0, size.w, size.h});
+		panel->setBorder(0);
+		panel->setColor(makeColor(21, 22, 27, 255));
+		createGenericWindowDecorations(*panel);
+		sizeWindowDecorations(*panel, panel->getActualSize());
+
+		Field* heading = panel->addField(
+			(std::string(name) + "_title").c_str(), 64);
+		heading->setSize(SDL_Rect{18, 10, size.w - 36, 28});
+		heading->setFont(bigfont_outline);
+		heading->setHJustify(Field::justify_t::LEFT);
+		heading->setVJustify(Field::justify_t::CENTER);
+		heading->setColor(makeColor(203, 171, 101, 255));
+		heading->setText(title);
+
+		const int listHeight = std::max(40, size.h - 104);
+		Frame* list = panel->addFrame(listName);
+		list->setSize(SDL_Rect{18, 42, size.w - 36, listHeight});
+		list->setActualSize(SDL_Rect{0, 0, size.w - 36, listHeight});
+		list->setBorder(2);
+		list->setBorderStyle(Frame::BORDER_FLAT);
+		list->setBorderColor(makeColor(92, 67, 44, 255));
+		list->setColor(makeColor(12, 14, 18, 220));
+		list->setFont(smallfont_outline);
+		list->setListOffset(SDL_Rect{10, 6, 0, 0});
+		list->setEntrySize(46);
+		list->setSelectedEntryColor(makeColor(92, 68, 36, 210));
+		list->setActivatedEntryColor(makeColor(111, 80, 38, 230));
+		list->setScrollBarsEnabled(true);
+		list->setScrollWithLeftControls(false);
+		list->setClickable(true);
+		list->setWidgetSearchParent("social");
+		list->setWidgetBack("back_button");
+		list->setListMenuCancelOverride(false);
+
+		Field* empty = panel->addField(emptyName, 256);
+		empty->setSize(list->getSize());
+		empty->setFont(smallfont_outline);
+		empty->setJustify(Field::justify_t::CENTER);
+		empty->setColor(makeColor(170, 134, 102, 255));
+		return panel;
+	}
+
+	static void socialSetButtonState(
+		Button* button,
+		const bool visible,
+		const bool enabled)
+	{
+		if (!button)
+		{
+			return;
+		}
+		button->setInvisible(!visible);
+		button->setDisabled(!visible || !enabled);
+		const Uint32 color = enabled
+			? uint32ColorWhite : makeColor(104, 104, 104, 255);
+		button->setTextColor(color);
+		button->setTextHighlightColor(color);
+	}
+
+	static int socialEntryIndex(const Frame::entry_t& entry)
+	{
+		const auto& entries = entry.parent.getEntries();
+		for (std::size_t index = 0; index < entries.size(); ++index)
+		{
+			if (entries[index] == &entry)
+			{
+				return static_cast<int>(index);
+			}
+		}
+		return -1;
+	}
+
+	static void socialPlayerEntrySelected(Frame::entry_t& entry)
+	{
+		const int index = socialEntryIndex(entry);
+		if (index >= 0
+			&& index < static_cast<int>(socialMenu.view.players.size()))
+		{
+			socialMenu.selectedPlayerSlot =
+				socialMenu.view.players[index].slot;
+		}
+	}
+
+	static void socialPartyEntrySelected(Frame::entry_t& entry)
+	{
+		const int index = socialEntryIndex(entry);
+		if (index >= 0
+			&& index < static_cast<int>(socialMenu.view.members.size()))
+		{
+			socialMenu.selectedMemberKey =
+				AutomatiaSocial::durableSelectionKey(
+					socialMenu.view.members[index].identity);
+		}
+	}
+
+	static void socialInvitationEntrySelected(Frame::entry_t& entry)
+	{
+		const int index = socialEntryIndex(entry);
+		if (index >= 0
+			&& index < static_cast<int>(socialMenu.view.invitations.size()))
+		{
+			socialMenu.selectedInvitationId =
+				socialMenu.view.invitations[index].invitationId;
+		}
+	}
+
+	static Button* socialFirstVisibleAction(
+		std::initializer_list<const char*> names)
+	{
+		for (const char* name : names)
+		{
+			if (Button* button = socialActionButton(name))
+			{
+				if (!button->isInvisible() && !button->isDisabled())
+				{
+					return button;
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	static void socialPlayerEntryClicked(Frame::entry_t& entry)
+	{
+		socialPlayerEntrySelected(entry);
+		if (Button* action = socialFirstVisibleAction({"social_invite"}))
+		{
+			entry.parent.deselect();
+			action->select();
+		}
+	}
+
+	static void socialPartyEntryClicked(Frame::entry_t& entry)
+	{
+		socialPartyEntrySelected(entry);
+		if (Button* action = socialFirstVisibleAction({
+			"social_promote", "social_kick", "social_leave",
+			"social_disband"}))
+		{
+			entry.parent.deselect();
+			action->select();
+		}
+	}
+
+	static void socialInvitationEntryClicked(Frame::entry_t& entry)
+	{
+		socialInvitationEntrySelected(entry);
+		if (Button* action = socialFirstVisibleAction({
+			"social_accept", "social_decline"}))
+		{
+			entry.parent.deselect();
+			action->select();
+		}
+	}
+
+	static const AutomatiaSocial::PlayerRow* selectedSocialPlayer()
+	{
+		for (const auto& row : socialMenu.view.players)
+		{
+			if (static_cast<int>(row.slot) == socialMenu.selectedPlayerSlot)
+			{
+				return &row;
+			}
+		}
+		return nullptr;
+	}
+
+	static const AutomatiaSocial::PartyMemberRow* selectedSocialMember()
+	{
+		for (const auto& row : socialMenu.view.members)
+		{
+			if (AutomatiaSocial::durableSelectionKey(row.identity)
+				== socialMenu.selectedMemberKey)
+			{
+				return &row;
+			}
+		}
+		return nullptr;
+	}
+
+	static const AutomatiaSocial::InvitationRow* selectedSocialInvitation()
+	{
+		for (const auto& row : socialMenu.view.invitations)
+		{
+			if (row.invitationId == socialMenu.selectedInvitationId)
+			{
+				return &row;
+			}
+		}
+		return nullptr;
+	}
+
+	static bool socialActionSelection(
+		const AutomatiaSocial::Action action,
+		AutomatiaSocial::ActionSelection& selection)
+	{
+		selection = {};
+		if (!socialMenu.serviceAvailable || !socialMenu.view.synchronized)
+		{
+			return false;
+		}
+		switch (action)
+		{
+			case AutomatiaSocial::Action::Create:
+				return socialMenu.view.canCreate;
+			case AutomatiaSocial::Action::Invite:
+				if (const auto* player = selectedSocialPlayer())
+				{
+					selection.playerSlot = player->slot;
+					return player->inviteEligible;
+				}
+				return false;
+			case AutomatiaSocial::Action::Accept:
+			case AutomatiaSocial::Action::Decline:
+				if (const auto* invitation = selectedSocialInvitation())
+				{
+					selection.invitationId = invitation->invitationId;
+					selection.invitationPartyId = invitation->partyId;
+					return true;
+				}
+				return false;
+			case AutomatiaSocial::Action::Leave:
+				return socialMenu.view.canLeave;
+			case AutomatiaSocial::Action::Kick:
+			case AutomatiaSocial::Action::Promote:
+				if (const auto* member = selectedSocialMember())
+				{
+					selection.memberIdentity = member->identity;
+					selection.hasMemberIdentity = true;
+					return action == AutomatiaSocial::Action::Kick
+						? member->canKick : member->canPromote;
+				}
+				return false;
+			case AutomatiaSocial::Action::Disband:
+				return socialMenu.view.canDisband;
+			default:
+				return false;
+		}
+	}
+
+	static bool socialStoredActionStillAllowed(
+		const AutomatiaSocial::Action action,
+		const AutomatiaSocial::ActionSelection& selection)
+	{
+		if (!socialMenu.serviceAvailable || !socialMenu.view.synchronized)
+		{
+			return false;
+		}
+		switch (action)
+		{
+			case AutomatiaSocial::Action::Create:
+				return socialMenu.view.canCreate;
+			case AutomatiaSocial::Action::Invite:
+				for (const auto& row : socialMenu.view.players)
+				{
+					if (row.slot == selection.playerSlot)
+						return row.inviteEligible;
+				}
+				return false;
+			case AutomatiaSocial::Action::Accept:
+			case AutomatiaSocial::Action::Decline:
+				for (const auto& row : socialMenu.view.invitations)
+				{
+					if (row.invitationId == selection.invitationId
+						&& row.partyId == selection.invitationPartyId)
+					{
+						return true;
+					}
+				}
+				return false;
+			case AutomatiaSocial::Action::Leave:
+				return socialMenu.view.canLeave;
+			case AutomatiaSocial::Action::Kick:
+			case AutomatiaSocial::Action::Promote:
+				for (const auto& row : socialMenu.view.members)
+				{
+					if (row.identity == selection.memberIdentity)
+					{
+						return action == AutomatiaSocial::Action::Kick
+							? row.canKick : row.canPromote;
+					}
+				}
+				return false;
+			case AutomatiaSocial::Action::Disband:
+				return socialMenu.view.canDisband;
+			default:
+				return false;
+		}
+	}
+
+	static void focusSocialAction(const AutomatiaSocial::Action action)
+	{
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return;
+		}
+		const char* name = "back_button";
+		switch (action)
+		{
+			case AutomatiaSocial::Action::Create: name = "social_create"; break;
+			case AutomatiaSocial::Action::Invite: name = "social_invite"; break;
+			case AutomatiaSocial::Action::Accept: name = "social_accept"; break;
+			case AutomatiaSocial::Action::Decline: name = "social_decline"; break;
+			case AutomatiaSocial::Action::Leave: name = "social_leave"; break;
+			case AutomatiaSocial::Action::Kick: name = "social_kick"; break;
+			case AutomatiaSocial::Action::Promote: name = "social_promote"; break;
+			case AutomatiaSocial::Action::Disband: name = "social_disband"; break;
+			default: break;
+		}
+		if (Widget* widget = window->findWidget(name, true))
+		{
+			if (!widget->isInvisible())
+			{
+				widget->select();
+			}
+		}
+	}
+
+	static void submitSocialAction(
+		const AutomatiaSocial::Action action,
+		const AutomatiaSocial::ActionSelection* storedSelection = nullptr)
+	{
+		if (socialMenu.pendingRequestId != 0)
+		{
+			socialMenu.status = "Waiting for the server to finish the current request.";
+			socialMenu.statusError = false;
+			return;
+		}
+		AutomatiaSocial::ActionSelection selection;
+		if (storedSelection)
+		{
+			selection = *storedSelection;
+			if (!socialStoredActionStillAllowed(action, selection))
+			{
+				socialMenu.status =
+					"Party state changed. Please choose the action again.";
+				socialMenu.statusError = true;
+				return;
+			}
+		}
+		else if (!socialActionSelection(action, selection))
+		{
+			socialMenu.status =
+				"That party action is not currently available.";
+			socialMenu.statusError = true;
+			return;
+		}
+
+		++socialRequestCounter;
+		if (socialRequestCounter == 0)
+		{
+			++socialRequestCounter;
+		}
+		AutomatiaParty::Protocol::Request request;
+		if (!AutomatiaSocial::buildRequest(
+				action, socialMenu.actorSlot, socialRequestCounter,
+				socialMenu.partyState, selection, request))
+		{
+			socialMenu.status =
+				"The party request could not be prepared.";
+			socialMenu.statusError = true;
+			return;
+		}
+		if (!submitAutomatiaPartyRequestForLocalPlayer(
+				socialMenu.actorSlot, request))
+		{
+			socialMenu.status =
+				"The party request could not be sent.";
+			socialMenu.statusError = true;
+			return;
+		}
+		socialMenu.pendingRequestId = request.requestId;
+		socialMenu.pendingSinceTick = ticks;
+		socialMenu.pendingAction = action;
+		socialMenu.status = AutomatiaSocial::pendingMessage(action);
+		socialMenu.statusError = false;
+		focusSocialAction(action);
+	}
+
+	static void confirmSocialAction(
+		const AutomatiaSocial::Action action,
+		const char* promptText,
+		const char* confirmText)
+	{
+		AutomatiaSocial::ActionSelection selection;
+		if (!socialActionSelection(action, selection))
+		{
+			socialMenu.status =
+				"That party action is not currently available.";
+			socialMenu.statusError = true;
+			return;
+		}
+		socialMenu.confirmationAction = action;
+		socialMenu.confirmationSelection = selection;
+		Frame* prompt = binaryPrompt(
+			promptText, confirmText, "Cancel",
+			[](Button&)
+			{
+				const auto action = socialMenu.confirmationAction;
+				const auto selection = socialMenu.confirmationSelection;
+				closeBinary();
+				soundActivate();
+				submitSocialAction(action, &selection);
+			},
+			[](Button&)
+			{
+				const auto action = socialMenu.confirmationAction;
+				closeBinary();
+				soundCancel();
+				focusSocialAction(action);
+			}, true, false);
+		if (prompt)
+		{
+			if (Button* cancel = prompt->findButton("cancel"))
+			{
+				cancel->select();
+			}
+		}
+	}
+
+	static void populateSocialLists()
+	{
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return;
+		}
+
+		Frame* playersList = window->findFrame("social_players_list");
+		Frame* partyList = window->findFrame("social_party_list");
+		Frame* invitationsList =
+			window->findFrame("social_invitations_list");
+		if (!playersList || !partyList || !invitationsList)
+		{
+			return;
+		}
+
+		playersList->setActivation(nullptr);
+		playersList->clearEntries();
+		int selectedPlayerIndex = -1;
+		for (std::size_t index = 0;
+			index < socialMenu.view.players.size(); ++index)
+		{
+			const auto& row = socialMenu.view.players[index];
+			const std::string entryName =
+				"social_player_" + std::to_string(row.slot);
+			Frame::entry_t* entry = playersList->addEntry(
+				entryName.c_str(), false);
+			entry->text = row.displayName + "\n  Online | "
+				+ AutomatiaSocial::relationshipLabel(row.relationship);
+			entry->color = row.relationship
+				== AutomatiaSocial::PlayerRelationship::You
+					? makeColor(230, 183, 20, 255)
+					: row.relationship
+						== AutomatiaSocial::PlayerRelationship::InYourParty
+							? makeColor(106, 192, 159, 255)
+							: makeColor(210, 210, 210, 255);
+			entry->selected = socialPlayerEntrySelected;
+			entry->highlight = socialPlayerEntrySelected;
+			entry->click = socialPlayerEntryClicked;
+			entry->ctrlClick = socialPlayerEntryClicked;
+			if (socialMenu.selectedPlayerSlot == row.slot)
+			{
+				selectedPlayerIndex = static_cast<int>(index);
+			}
+		}
+		if (selectedPlayerIndex < 0 && !socialMenu.view.players.empty())
+		{
+			selectedPlayerIndex = 0;
+			for (std::size_t index = 0;
+				index < socialMenu.view.players.size(); ++index)
+			{
+				if (socialMenu.view.players[index].relationship
+					!= AutomatiaSocial::PlayerRelationship::You)
+				{
+					selectedPlayerIndex = static_cast<int>(index);
+					break;
+				}
+			}
+			socialMenu.selectedPlayerSlot =
+				socialMenu.view.players[selectedPlayerIndex].slot;
+		}
+		playersList->setActualSize(SDL_Rect{0, 0,
+			playersList->getSize().w,
+			std::max(playersList->getSize().h,
+				static_cast<int>(socialMenu.view.players.size()) * 46)});
+		playersList->setSelection(selectedPlayerIndex);
+
+		partyList->setActivation(nullptr);
+		partyList->clearEntries();
+		int selectedMemberIndex = -1;
+		for (std::size_t index = 0;
+			index < socialMenu.view.members.size(); ++index)
+		{
+			const auto& row = socialMenu.view.members[index];
+			const std::string key =
+				AutomatiaSocial::durableSelectionKey(row.identity);
+			Frame::entry_t* entry = partyList->addEntry(
+				("social_member_" + std::to_string(index)).c_str(), false);
+			std::string flags = row.online ? "Online" : "Offline";
+			if (row.leader)
+			{
+				flags += " | Leader";
+			}
+			if (row.localPlayer)
+			{
+				flags += " | You";
+			}
+			entry->text = (row.leader ? "* " : "  ")
+				+ row.displayName + "\n  " + flags;
+			entry->color = row.online
+				? (row.leader ? makeColor(230, 183, 20, 255)
+					: makeColor(210, 210, 210, 255))
+				: makeColor(125, 125, 125, 255);
+			entry->selected = socialPartyEntrySelected;
+			entry->highlight = socialPartyEntrySelected;
+			entry->click = socialPartyEntryClicked;
+			entry->ctrlClick = socialPartyEntryClicked;
+			if (socialMenu.selectedMemberKey == key)
+			{
+				selectedMemberIndex = static_cast<int>(index);
+			}
+		}
+		if (selectedMemberIndex < 0 && !socialMenu.view.members.empty())
+		{
+			selectedMemberIndex = 0;
+			socialMenu.selectedMemberKey =
+				AutomatiaSocial::durableSelectionKey(
+					socialMenu.view.members[0].identity);
+		}
+		partyList->setActualSize(SDL_Rect{0, 0,
+			partyList->getSize().w,
+			std::max(partyList->getSize().h,
+				static_cast<int>(socialMenu.view.members.size()) * 46)});
+		partyList->setSelection(selectedMemberIndex);
+
+		invitationsList->setActivation(nullptr);
+		invitationsList->clearEntries();
+		int selectedInvitationIndex = -1;
+		for (std::size_t index = 0;
+			index < socialMenu.view.invitations.size(); ++index)
+		{
+			const auto& row = socialMenu.view.invitations[index];
+			Frame::entry_t* entry = invitationsList->addEntry(
+				("social_invitation_" + std::to_string(
+					row.invitationId)).c_str(), false);
+			entry->text = row.inviterDisplayName
+				+ "\n  Party invitation";
+			entry->color = makeColor(203, 171, 101, 255);
+			entry->selected = socialInvitationEntrySelected;
+			entry->highlight = socialInvitationEntrySelected;
+			entry->click = socialInvitationEntryClicked;
+			entry->ctrlClick = socialInvitationEntryClicked;
+			if (socialMenu.selectedInvitationId == row.invitationId)
+			{
+				selectedInvitationIndex = static_cast<int>(index);
+			}
+		}
+		if (selectedInvitationIndex < 0
+			&& !socialMenu.view.invitations.empty())
+		{
+			selectedInvitationIndex = 0;
+			socialMenu.selectedInvitationId =
+				socialMenu.view.invitations[0].invitationId;
+		}
+		invitationsList->setActualSize(SDL_Rect{0, 0,
+			invitationsList->getSize().w,
+			std::max(invitationsList->getSize().h,
+				static_cast<int>(socialMenu.view.invitations.size()) * 46)});
+		invitationsList->setSelection(selectedInvitationIndex);
+	}
+
+	static void arrangeVisiblePartyButtons(
+		Frame& panel,
+		const std::vector<Button*>& visibleButtons)
+	{
+		Frame* partyList = panel.findFrame("social_party_list");
+		if (visibleButtons.empty())
+		{
+			if (partyList)
+			{
+				partyList->setWidgetDown(socialMenu.compact
+					? "back_button" : "social_invitations_list");
+			}
+			return;
+		}
+		if (partyList)
+		{
+			partyList->setWidgetDown(visibleButtons.front()->getName());
+		}
+		constexpr int gap = 6;
+		const int available = panel.getSize().w - 32
+			- gap * (static_cast<int>(visibleButtons.size()) - 1);
+		const int width = available
+			/ static_cast<int>(visibleButtons.size());
+		int x = 16;
+		for (std::size_t index = 0; index < visibleButtons.size(); ++index)
+		{
+			Button* button = visibleButtons[index];
+			button->setSize(SDL_Rect{
+				x, panel.getSize().h - 56, width, 44});
+			button->setWidgetUp("social_party_list");
+			button->setWidgetDown(socialMenu.compact
+				? "back_button" : "social_invitations_list");
+			button->setWidgetLeft(index == 0
+				? visibleButtons.back()->getName()
+				: visibleButtons[index - 1]->getName());
+			button->setWidgetRight(index + 1 == visibleButtons.size()
+				? visibleButtons.front()->getName()
+				: visibleButtons[index + 1]->getName());
+			x += width + gap;
+		}
+	}
+
+	static void applySocialPanelVisibility()
+	{
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return;
+		}
+		Frame* playersPanel = window->findFrame("social_players_panel");
+		Frame* partyPanel = window->findFrame("social_party_panel");
+		Frame* invitationsPanel =
+			window->findFrame("social_invitations_panel");
+		Button* playersTab = window->findButton("social_tab_players");
+		Button* partyTab = window->findButton("social_tab_party");
+		Button* invitationsTab =
+			window->findButton("social_tab_invitations");
+		if (!playersPanel || !partyPanel || !invitationsPanel)
+		{
+			return;
+		}
+		if (!socialMenu.compact)
+		{
+			playersPanel->setInvisible(false);
+			partyPanel->setInvisible(false);
+			invitationsPanel->setInvisible(false);
+		}
+		else
+		{
+			playersPanel->setInvisible(
+				socialMenu.compactTab != SocialCompactTab::Players);
+			partyPanel->setInvisible(
+				socialMenu.compactTab != SocialCompactTab::Party);
+			invitationsPanel->setInvisible(
+				socialMenu.compactTab != SocialCompactTab::Invitations);
+		}
+		for (Button* tab : {playersTab, partyTab, invitationsTab})
+		{
+			if (tab)
+			{
+				tab->setInvisible(!socialMenu.compact);
+				tab->setDisabled(!socialMenu.compact);
+			}
+		}
+		if (playersTab)
+			playersTab->setPressed(
+				socialMenu.compactTab == SocialCompactTab::Players);
+		if (partyTab)
+			partyTab->setPressed(
+				socialMenu.compactTab == SocialCompactTab::Party);
+		if (invitationsTab)
+			invitationsTab->setPressed(
+				socialMenu.compactTab == SocialCompactTab::Invitations);
+	}
+
+	static void updateSocialControls()
+	{
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return;
+		}
+		const bool idle = socialMenu.pendingRequestId == 0;
+		const auto* player = selectedSocialPlayer();
+		const auto* member = selectedSocialMember();
+		const auto* invitation = selectedSocialInvitation();
+
+		Button* invite = socialActionButton("social_invite");
+		const bool showInvite = player
+			&& player->relationship
+				== AutomatiaSocial::PlayerRelationship::Connected;
+		socialSetButtonState(invite, showInvite,
+			idle && player && player->inviteEligible);
+
+		Button* create = socialActionButton("social_create");
+		Button* promote = socialActionButton("social_promote");
+		Button* kick = socialActionButton("social_kick");
+		Button* leave = socialActionButton("social_leave");
+		Button* disband = socialActionButton("social_disband");
+		socialSetButtonState(create, socialMenu.view.canCreate,
+			idle && socialMenu.view.canCreate);
+		socialSetButtonState(promote,
+			member && member->canPromote,
+			idle && member && member->canPromote);
+		socialSetButtonState(kick,
+			member && member->canKick,
+			idle && member && member->canKick);
+		socialSetButtonState(leave, socialMenu.view.canLeave,
+			idle && socialMenu.view.canLeave);
+		socialSetButtonState(disband, socialMenu.view.canDisband,
+			idle && socialMenu.view.canDisband);
+
+		Button* accept = socialActionButton("social_accept");
+		Button* decline = socialActionButton("social_decline");
+		socialSetButtonState(accept, invitation != nullptr,
+			idle && invitation != nullptr);
+		socialSetButtonState(decline, invitation != nullptr,
+			idle && invitation != nullptr);
+
+		if (Button* tab = window->findButton("social_tab_players"))
+		{
+			tab->setText(("PLAYERS ("
+				+ std::to_string(socialMenu.view.players.size())
+				+ ")").c_str());
+		}
+		if (Button* tab = window->findButton("social_tab_party"))
+		{
+			tab->setText(("YOUR PARTY ("
+				+ std::to_string(socialMenu.view.members.size())
+				+ ")").c_str());
+		}
+		if (Button* tab = window->findButton("social_tab_invitations"))
+		{
+			tab->setText(("INVITATIONS ("
+				+ std::to_string(socialMenu.view.invitations.size())
+				+ ")").c_str());
+		}
+
+		if (Frame* panel = window->findFrame("social_party_panel"))
+		{
+			std::vector<Button*> visible;
+			for (Button* button : {create, promote, kick, leave, disband})
+			{
+				if (button && !button->isInvisible())
+				{
+					visible.push_back(button);
+				}
+			}
+			arrangeVisiblePartyButtons(*panel, visible);
+		}
+
+		if (invite)
+		{
+			invite->setWidgetUp("social_players_list");
+			invite->setWidgetRight("social_party_list");
+			invite->setWidgetDown(socialMenu.compact
+				? "back_button" : "social_invitations_list");
+		}
+		if (Frame* list = window->findFrame("social_players_list"))
+		{
+			list->setWidgetDown(invite && !invite->isInvisible()
+				&& !invite->isDisabled()
+				? invite->getName()
+				: socialMenu.compact
+					? "back_button" : "social_invitations_list");
+		}
+		if (accept && decline)
+		{
+			accept->setWidgetUp("social_invitations_list");
+			decline->setWidgetUp("social_invitations_list");
+			accept->setWidgetRight("social_decline");
+			decline->setWidgetLeft("social_accept");
+		}
+		if (Frame* list = window->findFrame("social_invitations_list"))
+		{
+			list->setWidgetDown(accept && !accept->isInvisible()
+				&& !accept->isDisabled()
+				? accept->getName() : "back_button");
+		}
+
+		if (Frame* panel = window->findFrame("social_players_panel"))
+		{
+			if (Field* title = panel->findField(
+				"social_players_panel_title"))
+			{
+				title->setText(("PLAYERS ("
+					+ std::to_string(socialMenu.view.players.size())
+					+ ")").c_str());
+			}
+			if (Field* empty = panel->findField("social_players_empty"))
+			{
+				empty->setInvisible(!socialMenu.view.players.empty());
+				empty->setText(socialMenu.view.synchronized
+					? "No connected players are available."
+					: "Waiting for the connected-player roster...");
+			}
+		}
+		if (Frame* panel = window->findFrame("social_party_panel"))
+		{
+			if (Field* title = panel->findField(
+				"social_party_panel_title"))
+			{
+				title->setText(("YOUR PARTY ("
+					+ std::to_string(socialMenu.view.members.size())
+					+ ")").c_str());
+			}
+			if (Field* empty = panel->findField("social_party_empty"))
+			{
+				empty->setInvisible(!socialMenu.view.members.empty());
+				empty->setText(!socialMenu.view.synchronized
+					? "Waiting for authoritative party state..."
+					: "You are not in a party.\nCreate one, then invite a connected player.");
+			}
+		}
+		if (Frame* panel = window->findFrame("social_invitations_panel"))
+		{
+			if (Field* title = panel->findField(
+				"social_invitations_panel_title"))
+			{
+				title->setText(("INVITATIONS ("
+					+ std::to_string(socialMenu.view.invitations.size())
+					+ ")").c_str());
+			}
+			if (Field* empty = panel->findField(
+				"social_invitations_empty"))
+			{
+				empty->setInvisible(!socialMenu.view.invitations.empty());
+				empty->setText(socialMenu.view.synchronized
+					? "No incoming invitations."
+					: "Waiting for authoritative invitations...");
+			}
+		}
+
+		if (Field* status = window->findField("social_status"))
+		{
+			std::string text = socialMenu.status;
+			if (text.empty())
+			{
+				if (!socialMenu.serviceAvailable)
+				{
+					text = "Party service is unavailable for this session.";
+				}
+				else if (!socialMenu.view.synchronized)
+				{
+					text = "Waiting for authoritative party state...";
+				}
+				else
+				{
+					text = "Party state is synchronized with the server.";
+				}
+			}
+			status->setText(text.c_str());
+			status->setColor(socialMenu.statusError
+				? makeColor(224, 92, 92, 255)
+				: makeColor(106, 192, 159, 255));
+		}
+		applySocialPanelVisibility();
+
+		if (main_menu_frame->findFrame("binary_prompt"))
+		{
+			return;
+		}
+		Widget* selected = main_menu_frame->findSelectedWidget(getMenuOwner());
+		if (selected && selected->isChildOf(*window)
+			&& (selected->isDisabled() || selected->isInvisible()))
+		{
+			selected->deselect();
+			selected = nullptr;
+		}
+		if (!selected)
+		{
+			if (socialMenu.compact)
+			{
+				const char* listName = socialMenu.compactTab
+					== SocialCompactTab::Players ? "social_players_list"
+					: socialMenu.compactTab == SocialCompactTab::Party
+						? "social_party_list"
+						: "social_invitations_list";
+				if (Frame* list = window->findFrame(listName))
+				{
+					list->select();
+				}
+			}
+			else if (Frame* list = window->findFrame("social_players_list"))
+			{
+				list->select();
+			}
+		}
+	}
+
+	static void refreshSocialMenu(Widget& widget)
+	{
+		socialMenu.serviceAvailable =
+			copyAutomatiaPartySnapshotForLocalPlayer(
+				socialMenu.actorSlot,
+				socialMenu.partyState,
+				socialMenu.invitationList);
+		if (socialMenu.serviceAvailable)
+		{
+			socialMenu.view = AutomatiaSocial::buildViewModel(
+				socialMenu.actorSlot,
+				connectedPlayersForSocial(),
+				socialMenu.partyState,
+				socialMenu.invitationList,
+				MAXPLAYERS);
+		}
+		else
+		{
+			socialMenu.partyState = {};
+			socialMenu.invitationList = {};
+			socialMenu.view = {};
+		}
+
+		AutomatiaParty::Protocol::Result result;
+		while (clientTakeAutomatiaPartyResult(result))
+		{
+			if (socialMenu.pendingRequestId == 0
+				|| result.requestId == socialMenu.pendingRequestId)
+			{
+				socialMenu.status =
+					AutomatiaSocial::resultMessage(result);
+				socialMenu.statusError = result.status
+					!= AutomatiaParty::OperationStatus::Success;
+				if (result.requestId == socialMenu.pendingRequestId)
+				{
+					socialMenu.pendingRequestId = 0;
+				}
+			}
+			else
+			{
+				printlog(
+					"[Party UI] Ignored stale result %u while waiting for %u.",
+					result.requestId, socialMenu.pendingRequestId);
+			}
+		}
+		if (socialMenu.pendingRequestId != 0
+			&& ticks - socialMenu.pendingSinceTick
+				> 15U * TICKS_PER_SECOND)
+		{
+			socialMenu.pendingRequestId = 0;
+			socialMenu.status =
+				"The server did not answer the party request in time.";
+			socialMenu.statusError = true;
+		}
+
+		const std::string fingerprint =
+			socialViewFingerprint(socialMenu.view);
+		if (fingerprint != socialMenu.renderedFingerprint)
+		{
+			socialMenu.renderedFingerprint = fingerprint;
+			populateSocialLists();
+		}
+		updateSocialControls();
+		widget.setHideSelectors(!inputs.hasController(widget.getOwner()));
+	}
+
+	static void selectSocialCompactTab(const SocialCompactTab tab)
+	{
+		socialMenu.compactTab = tab;
+		applySocialPanelVisibility();
+		Frame* window = socialWindow();
+		if (!window)
+		{
+			return;
+		}
+		const char* listName = tab == SocialCompactTab::Players
+			? "social_players_list"
+			: tab == SocialCompactTab::Party
+				? "social_party_list" : "social_invitations_list";
+		if (Frame* list = window->findFrame(listName))
+		{
+			list->select();
+		}
+	}
+
+	static void closeSocialMenu(Button&)
+	{
+		soundCancel();
+		if (Frame* window = socialWindow())
+		{
+			Frame* dimmer = static_cast<Frame*>(window->getParent());
+			dimmer->removeSelf();
+		}
+		if (main_menu_frame)
+		{
+			if (Frame* buttons = main_menu_frame->findFrame("buttons"))
+			{
+				if (Button* social = buttons->findButton("Social"))
+				{
+					social->select();
+				}
+			}
+		}
+	}
+
+	static void mainSocial(Button&)
+	{
+		if (!main_menu_frame || socialWindow() || multiplayer == SINGLE)
+		{
+			return;
+		}
+		soundActivate();
+		const int actor = socialLocalPlayerSlot();
+		if (socialMenu.actorSlot != actor)
+		{
+			socialMenu.pendingRequestId = 0;
+			socialMenu.status.clear();
+		}
+		socialMenu.actorSlot = actor;
+		socialMenu.selectedPlayerSlot = -1;
+		socialMenu.selectedMemberKey.clear();
+		socialMenu.selectedInvitationId =
+			AutomatiaParty::INVALID_INVITATION_ID;
+		socialMenu.renderedFingerprint.clear();
+		if (socialMenu.pendingRequestId == 0)
+		{
+			socialMenu.status.clear();
+		}
+		socialMenu.statusError = false;
+
+		Frame* dimmer = main_menu_frame->addFrame("dimmer");
+		dimmer->setSize(SDL_Rect{0, 0,
+			Frame::virtualScreenX, Frame::virtualScreenY});
+		dimmer->setActualSize(dimmer->getSize());
+		dimmer->setBorder(0);
+		dimmer->setColor(makeColor(0, 0, 0, 128));
+
+		const int cardWidth = std::max(1,
+			std::min(1120, Frame::virtualScreenX - 32));
+		const int cardHeight = std::max(1,
+			std::min(620, Frame::virtualScreenY - 24));
+		socialMenu.compact = cardWidth < 980 || cardHeight < 580;
+		socialMenu.compactTab = SocialCompactTab::Players;
+
+		Frame* window = dimmer->addFrame("social");
+		window->setSize(SDL_Rect{
+			(Frame::virtualScreenX - cardWidth) / 2,
+			(Frame::virtualScreenY - cardHeight) / 2,
+			cardWidth, cardHeight});
+		window->setActualSize(SDL_Rect{0, 0, cardWidth, cardHeight});
+		window->setBorder(0);
+		window->setColor(makeColor(21, 22, 27, 255));
+		window->setTickCallback(refreshSocialMenu);
+		createGenericWindowDecorations(*window);
+		sizeWindowDecorations(*window, window->getActualSize());
+
+		Button* back = createBackWidget(window, closeSocialMenu,
+			SDL_Rect{12, 12, 0, 0});
+		back->setWidgetSearchParent("social");
+
+		Field* title = window->addField("social_title", 32);
+		title->setSize(SDL_Rect{cardWidth / 2 - 160, 12, 320, 28});
+		title->setFont(banner_font);
+		title->setJustify(Field::justify_t::CENTER);
+		title->setColor(makeColor(230, 183, 20, 255));
+		title->setText("SOCIAL");
+
+		Field* subtitle = window->addField("social_subtitle", 96);
+		subtitle->setSize(SDL_Rect{cardWidth / 2 - 240, 38, 480, 20});
+		subtitle->setFont(smallfont_no_outline);
+		subtitle->setJustify(Field::justify_t::CENTER);
+		subtitle->setColor(makeColor(170, 134, 102, 255));
+		subtitle->setText("Connected players and your persistent party");
+
+		const int statusHeight = 42;
+		const int statusY = cardHeight - statusHeight - 8;
+		Field* status = window->addField("social_status", 256);
+		status->setSize(SDL_Rect{20, statusY, cardWidth - 40, statusHeight});
+		status->setFont(smallfont_outline);
+		status->setJustify(Field::justify_t::CENTER);
+		status->setBackgroundColor(makeColor(12, 14, 18, 230));
+
+		SDL_Rect playersRect;
+		SDL_Rect partyRect;
+		SDL_Rect invitationsRect;
+		if (socialMenu.compact)
+		{
+			const int tabsY = 62;
+			const int tabWidth = (cardWidth - 32) / 3;
+			const char* tabNames[] = {
+				"social_tab_players", "social_tab_party",
+				"social_tab_invitations"};
+			const char* tabLabels[] = {"PLAYERS", "YOUR PARTY", "INVITATIONS"};
+			for (int index = 0; index < 3; ++index)
+			{
+				Button* tab = window->addButton(tabNames[index]);
+				tab->setSize(SDL_Rect{
+					16 + index * tabWidth, tabsY,
+					index == 2 ? cardWidth - 32 - 2 * tabWidth : tabWidth,
+					38});
+				tab->setBorder(2);
+				tab->setStyle(Button::STYLE_RADIO);
+				tab->setColor(makeColor(47, 39, 31, 255));
+				tab->setHighlightColor(makeColor(92, 68, 36, 255));
+				tab->setTextColor(uint32ColorWhite);
+				tab->setTextHighlightColor(makeColor(230, 183, 20, 255));
+				tab->setFont(smallfont_outline);
+				tab->setText(tabLabels[index]);
+				tab->setWidgetSearchParent("social");
+				tab->setWidgetBack("back_button");
+				tab->setWidgetLeft(tabNames[(index + 2) % 3]);
+				tab->setWidgetRight(tabNames[(index + 1) % 3]);
+				tab->setWidgetDown(index == 0 ? "social_players_list"
+					: index == 1 ? "social_party_list"
+						: "social_invitations_list");
+				tab->setCallback(index == 0
+					? [](Button&) { soundActivate(); selectSocialCompactTab(
+						SocialCompactTab::Players); }
+					: index == 1
+						? [](Button&) { soundActivate(); selectSocialCompactTab(
+							SocialCompactTab::Party); }
+						: [](Button&) { soundActivate(); selectSocialCompactTab(
+							SocialCompactTab::Invitations); });
+			}
+			playersRect = SDL_Rect{16, 104,
+				cardWidth - 32, statusY - 112};
+			partyRect = playersRect;
+			invitationsRect = playersRect;
+		}
+		else
+		{
+			const int contentY = 66;
+			const int contentHeight = statusY - contentY - 8;
+			const int gap = 12;
+			const int contentWidth = cardWidth - 40;
+			const int playersWidth = contentWidth * 48 / 100;
+			const int rightWidth = contentWidth - playersWidth - gap;
+			const int partyHeight = contentHeight * 58 / 100;
+			playersRect = SDL_Rect{20, contentY,
+				playersWidth, contentHeight};
+			partyRect = SDL_Rect{20 + playersWidth + gap, contentY,
+				rightWidth, partyHeight};
+			invitationsRect = SDL_Rect{
+				partyRect.x, contentY + partyHeight + gap,
+				rightWidth, contentHeight - partyHeight - gap};
+		}
+
+		Frame* playersPanel = addSocialPanel(*window,
+			"social_players_panel", "PLAYERS", playersRect,
+			"social_players_list", "social_players_empty");
+		Frame* partyPanel = addSocialPanel(*window,
+			"social_party_panel", "YOUR PARTY", partyRect,
+			"social_party_list", "social_party_empty");
+		Frame* invitationsPanel = addSocialPanel(*window,
+			"social_invitations_panel", "INVITATIONS", invitationsRect,
+			"social_invitations_list", "social_invitations_empty");
+
+		Button* invite = addSocialActionButton(*playersPanel,
+			"social_invite", "Invite to Party",
+			[](Button&) { soundActivate(); submitSocialAction(
+				AutomatiaSocial::Action::Invite); });
+		invite->setSize(SDL_Rect{
+			16, playersRect.h - 56, playersRect.w - 32, 44});
+
+		addSocialActionButton(*partyPanel,
+			"social_create", "Create Party",
+			[](Button&) { soundActivate(); submitSocialAction(
+				AutomatiaSocial::Action::Create); });
+		addSocialActionButton(*partyPanel,
+			"social_promote", "Transfer Leader",
+			[](Button&)
+			{
+				const auto* member = selectedSocialMember();
+				if (!member) return;
+				const std::string prompt = "Transfer party leadership to "
+					+ member->displayName + "?";
+				confirmSocialAction(AutomatiaSocial::Action::Promote,
+					prompt.c_str(), "Transfer");
+			});
+		addSocialActionButton(*partyPanel,
+			"social_kick", "Kick",
+			[](Button&)
+			{
+				const auto* member = selectedSocialMember();
+				if (!member) return;
+				const std::string prompt = "Remove " + member->displayName
+					+ " from the party?";
+				confirmSocialAction(AutomatiaSocial::Action::Kick,
+					prompt.c_str(), "Kick");
+			}, true);
+		addSocialActionButton(*partyPanel,
+			"social_leave", "Leave Party",
+			[](Button&)
+			{
+				confirmSocialAction(AutomatiaSocial::Action::Leave,
+					"Leave this party?\nA two-member party may dissolve.",
+					"Leave");
+			}, true);
+		addSocialActionButton(*partyPanel,
+			"social_disband", "Disband",
+			[](Button&)
+			{
+				confirmSocialAction(AutomatiaSocial::Action::Disband,
+					"Disband the entire party?\nAll members will become partyless.",
+					"Disband");
+			}, true);
+
+		Button* accept = addSocialActionButton(*invitationsPanel,
+			"social_accept", "Accept",
+			[](Button&) { soundActivate(); submitSocialAction(
+				AutomatiaSocial::Action::Accept); });
+		Button* decline = addSocialActionButton(*invitationsPanel,
+			"social_decline", "Decline",
+			[](Button&) { soundActivate(); submitSocialAction(
+				AutomatiaSocial::Action::Decline); }, true);
+		const int invitationButtonWidth =
+			(invitationsRect.w - 38) / 2;
+		accept->setSize(SDL_Rect{16, invitationsRect.h - 56,
+			invitationButtonWidth, 44});
+		decline->setSize(SDL_Rect{22 + invitationButtonWidth,
+			invitationsRect.h - 56, invitationButtonWidth, 44});
+
+		if (Frame* list = window->findFrame("social_players_list"))
+		{
+			list->setWidgetRight("social_party_list");
+			list->setWidgetDown("social_invite");
+			if (socialMenu.compact)
+			{
+				list->setWidgetUp("social_tab_players");
+				list->addWidgetAction(
+					"MenuPageLeft", "social_tab_invitations");
+				list->addWidgetAction(
+					"MenuPageRight", "social_tab_party");
+			}
+		}
+		if (Frame* list = window->findFrame("social_party_list"))
+		{
+			list->setWidgetLeft("social_players_list");
+			list->setWidgetDown("social_leave");
+			if (socialMenu.compact)
+			{
+				list->setWidgetUp("social_tab_party");
+				list->addWidgetAction(
+					"MenuPageLeft", "social_tab_players");
+				list->addWidgetAction(
+					"MenuPageRight", "social_tab_invitations");
+			}
+		}
+		if (Frame* list = window->findFrame("social_invitations_list"))
+		{
+			list->setWidgetLeft("social_players_list");
+			list->setWidgetDown("social_accept");
+			if (socialMenu.compact)
+			{
+				list->setWidgetUp("social_tab_invitations");
+				list->addWidgetAction(
+					"MenuPageLeft", "social_tab_party");
+				list->addWidgetAction(
+					"MenuPageRight", "social_tab_players");
+			}
+		}
+
+		if (socialMenu.compact)
+		{
+			for (Button* button : {invite})
+			{
+				button->addWidgetAction(
+					"MenuPageLeft", "social_tab_invitations");
+				button->addWidgetAction(
+					"MenuPageRight", "social_tab_party");
+			}
+			for (const char* name : {
+				"social_create", "social_promote", "social_kick",
+				"social_leave", "social_disband"})
+			{
+				if (Button* button = socialActionButton(name))
+				{
+					button->addWidgetAction(
+						"MenuPageLeft", "social_tab_players");
+					button->addWidgetAction(
+						"MenuPageRight", "social_tab_invitations");
+				}
+			}
+			for (Button* button : {accept, decline})
+			{
+				button->addWidgetAction(
+					"MenuPageLeft", "social_tab_party");
+				button->addWidgetAction(
+					"MenuPageRight", "social_tab_players");
+			}
+		}
+
+		applySocialPanelVisibility();
+		refreshSocialMenu(*window);
+		if (Frame* list = window->findFrame("social_players_list"))
+		{
+			list->select();
+		}
+	}
+
 /******************************************************************************/
 
 
@@ -28729,8 +30371,12 @@ failed:
 //		        {"Achievements", Language::get(5764), archivesAchievements},
 //#endif
 #endif
-		        {"Settings", Language::get(5765), mainSettings},
 		        });
+			if (multiplayer != SINGLE)
+			{
+				options.push_back({"Social", "SOCIAL", mainSocial});
+			}
+			options.push_back({"Settings", Language::get(5765), mainSettings});
 			if ( gameModeManager.currentMode != GameModeManager_t::GameModes::GAME_MODE_TUTORIAL
 				&& gameModeManager.currentMode != GameModeManager_t::GameModes::GAME_MODE_TUTORIAL_INIT ) {
 			    options.insert(options.end(), {

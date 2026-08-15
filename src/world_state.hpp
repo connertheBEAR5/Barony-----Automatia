@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "party_manager.hpp"
 #include "world_instance.hpp"
 
 #include <cstdint>
@@ -127,6 +128,8 @@ public:
     std::size_t instanceCount() const;
     std::vector<std::string> occupiedLoadedInstanceKeys() const;
     std::vector<MapInstanceSummary> instanceSummaries() const;
+    AutomatiaParty::PartyManager& partyManager();
+    const AutomatiaParty::PartyManager& partyManager() const;
     void clear();
 
 private:
@@ -134,6 +137,7 @@ private:
     std::unordered_map<const map_t*, std::string> loadedMaps;
     std::unordered_map<std::string, std::uint64_t> revisionCounters;
     std::unordered_set<map_t*> ownedMapStorage;
+    AutomatiaParty::PartyManager persistentPartyManager;
     std::string activeKey;
     bool detachedGeneratedLoadInProgress = false;
 };

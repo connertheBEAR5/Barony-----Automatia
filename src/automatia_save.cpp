@@ -8,6 +8,7 @@
 
 #include "automatia_save.hpp"
 
+#include "party_manager.hpp"
 #include "world_instance.hpp"
 
 #include <cerrno>
@@ -166,7 +167,10 @@ Json makeEmptyWorldSave(const std::string& sessionId)
         {"active_instance", ""},
         {"map_instances", Json::array()},
         {"players", Json::array()},
-        {"party", Json::object()},
+        {"party", Json{
+            {"next_id", 1},
+            {"parties", Json::array()}
+        }},
         {"quests", Json::object()},
         {"dialogue", Json::object()},
         {"world_flags", Json::array()},
@@ -203,6 +207,13 @@ Result validate(const Json& document)
     {
         return failure("world save session ID is missing or unsafe");
     }
+    if (document.contains("save_transaction_id")
+        && (!document["save_transaction_id"].is_string()
+            || !safeTextId(
+                document["save_transaction_id"].get<std::string>(), 128)))
+    {
+        return failure("world save transaction ID is unsafe");
+    }
     if (!document.contains("map_instances")
         || !document["map_instances"].is_array()
         || document["map_instances"].size() > 4096)
@@ -219,6 +230,20 @@ Result validate(const Json& document)
         || !document["active_instance"].is_string())
     {
         return failure("world save active instance is invalid");
+    }
+
+    if (version >= 2)
+    {
+        if (!document.contains("party"))
+        {
+            return failure("world save party state is missing");
+        }
+        std::string partyError;
+        if (!AutomatiaParty::PartyManager::validatePersistentJson(
+                document["party"], partyError))
+        {
+            return failure("world save party state is invalid: " + partyError);
+        }
     }
 
     std::unordered_set<std::string> mapKeys;
@@ -442,7 +467,11 @@ Result writeAtomic(const std::filesystem::path& path, const Json& document)
 
     std::filesystem::path temporaryPath = path;
     temporaryPath += ".tmp";
+#ifdef _WIN32
+    std::FILE* file = _wfopen(temporaryPath.c_str(), L"wb");
+#else
     std::FILE* file = std::fopen(temporaryPath.string().c_str(), "wb");
+#endif
     if (!file)
     {
         return failure("unable to open temporary world save");

@@ -643,6 +643,7 @@ void finishClientPersistentWorldSnapshot();
 bool writeAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,
+    const std::string& saveTransactionId,
     std::string& error
 );
 bool serializeAutomatiaPersistentWorldSnapshot(
@@ -678,6 +679,7 @@ void restoreAutomatiaPersistentMinimapForLocalPlayer();
 bool loadAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,
+    const std::string& saveTransactionId,
     std::string& error
 );
 void applyAutomatiaSavedPlayerPlacements();

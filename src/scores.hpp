@@ -10,6 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #pragma once
+#include "automatia_identity.hpp"
 #include "monster.hpp"
 #include "json.hpp"
 #include "player.hpp"
@@ -812,6 +813,17 @@ struct SaveGameInfo {
 };
 
 extern std::string automatiaReconnectTokens[MAXPLAYERS];
+
+/*
+ * Resolves the exact durable identity used by Automatia character saves.
+ * Runtime player slots are intentionally not part of this identity.
+ */
+bool resolveAutomatiaDurablePlayerIdentity(
+    int player,
+    CharacterSaveMode mode,
+    AutomatiaParty::DurablePlayerIdentity& identity,
+    std::string& error
+);
 
 int saveGame(int saveIndex = savegameCurrentFileIndex);
 int loadGame(int player, const SaveGameInfo& info);

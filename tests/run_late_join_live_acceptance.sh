@@ -9,7 +9,7 @@ usage:
   run_late_join_live_acceptance.sh <output-dir> <save-slot> <port> new
   run_late_join_live_acceptance.sh <output-dir> <save-slot> <port> returning <player-slot>
 
-The output directory must be inside the maindev worktree and contain the
+The output directory must be inside the repository worktree and contain the
 prepared Barony output/save fixture. The runner redirects ~/.barony into that
 directory, starts the FMOD headless LAN server, executes the UDP live probe,
 requests diagnostic status, and shuts the server down cleanly.
@@ -24,7 +24,20 @@ fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/.." && pwd)
-build_dir="$repo_root/build"
+build_dir=${BARONY_LIVE_BUILD_DIR:-"$repo_root/build"}
+if [[ ! -d $build_dir ]]
+then
+	echo "live build directory does not exist: $build_dir" >&2
+	exit 2
+fi
+build_dir=$(cd -- "$build_dir" && pwd)
+data_dir=${BARONY_LIVE_DATA_DIR:-$build_dir}
+if [[ ! -d $data_dir ]]
+then
+	echo "live data directory does not exist: $data_dir" >&2
+	exit 2
+fi
+data_dir=$(cd -- "$data_dir" && pwd)
 output_dir=$(realpath -e -- "$1")
 save_slot=$2
 port=$3
@@ -55,9 +68,9 @@ then
 fi
 if [[ $join_mode == returning ]]
 then
-	if [[ $# -ne 5 || ! $5 =~ ^[0-9]+$ || $5 -lt 1 || $5 -gt 15 ]]
+	if [[ $# -ne 5 || ! $5 =~ ^[0-9]+$ || $5 -lt 1 || $5 -ge 15 ]]
 	then
-		echo "returning mode requires a player slot from 1 through 15" >&2
+		echo "returning mode requires a player slot from 1 through 14" >&2
 		exit 2
 	fi
 	player_slot=$5
@@ -72,7 +85,7 @@ probe="$build_dir/late_join_live_probe"
 save_file="$output_dir/savegames/host/savegame${save_slot}_mp.baronysave"
 if [[ ! -x $barony || ! -x $probe ]]
 then
-	echo "build/barony and build/late_join_live_probe must exist" >&2
+	echo "$build_dir/barony and late_join_live_probe must exist" >&2
 	exit 2
 fi
 if [[ ! -f $save_file ]]
@@ -82,7 +95,7 @@ then
 fi
 if ! command -v bwrap >/dev/null 2>&1
 then
-	echo "bubblewrap is required to keep runtime writes inside maindev" >&2
+	echo "bubblewrap is required to isolate runtime writes" >&2
 	exit 2
 fi
 
@@ -147,20 +160,21 @@ cleanup()
 trap cleanup EXIT INT TERM
 
 (
-	cd "$build_dir"
+	cd "$data_dir"
 	exec bwrap \
 		--ro-bind / / \
 		--bind "$output_dir" /home/conner/.barony \
 		--dev-bind /dev /dev \
 		--proc /proc \
 		--tmpfs /tmp \
-		./barony \
+		"$barony" \
 		--headless \
 		--LAN \
 		"--port=$port" \
 		--server-name=AutomatiaLateJoinAcceptance \
 		--autostart \
 		--late-join \
+		--character-save=local \
 		"--save=$save_slot"
 ) <&3 >"$runner_log" 2>&1 &
 server_pid=$!

@@ -1257,6 +1257,16 @@ void WorldState::refreshActiveContext()
     captureLegacySimulationContext(*instance);
 }
 
+AutomatiaParty::PartyManager& WorldState::partyManager()
+{
+    return persistentPartyManager;
+}
+
+const AutomatiaParty::PartyManager& WorldState::partyManager() const
+{
+    return persistentPartyManager;
+}
+
 void WorldState::clear()
 {
     /*
@@ -1327,6 +1337,7 @@ void WorldState::clear()
     instances.clear();
     loadedMaps.clear();
     revisionCounters.clear();
+    persistentPartyManager.clear();
     activeKey.clear();
     detachedGeneratedLoadInProgress = false;
 }

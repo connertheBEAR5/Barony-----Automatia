@@ -12979,6 +12979,42 @@ void Player::MessageZone_t::createChatbox()
         messages->setHollow(true);
         messages->setInheritParentFrameOpacity(false);
 
+		auto channelButton = chatMainFrame->addButton(
+			"chat channel selector");
+		channelButton->setOwner(player.playernum);
+		channelButton->setText("GLOBAL");
+		channelButton->setFont("fonts/pixelmix.ttf#16#2");
+		channelButton->setBackground(
+			"*#images/ui/HUD/HUD_Button_Base_Small_00.png");
+		channelButton->setBackgroundActivated(
+			"*#images/ui/HUD/HUD_Button_Base_SmallPress_00.png");
+		channelButton->setBackgroundHighlighted(
+			"*#images/ui/HUD/HUD_Button_Base_SmallHigh_00.png");
+		channelButton->setSize(SDL_Rect{ 8, 0, 108, 28 });
+		channelButton->setHideGlyphs(true);
+		channelButton->setHideKeyboardGlyphs(true);
+		channelButton->setHideSelectors(true);
+		channelButton->setColor(makeColor(255, 255, 255, 255));
+		channelButton->setHighlightColor(
+			makeColor(255, 255, 255, 255));
+		channelButton->setTooltip(
+			"Chat channel (Tab / Page Left / Page Right)");
+		channelButton->setInvisible(true);
+		channelButton->setDisabled(true);
+		channelButton->setCallback([](Button& button) {
+			const int owner = button.getOwner();
+			if (!command || multiplayer == SINGLE || owner < 0
+				|| owner >= MAXPLAYERS || !players[owner]
+				|| !players[owner]->isLocalPlayer())
+			{
+				return;
+			}
+			players[owner]->messageZone.chatChannel =
+				AutomatiaPartyChat::toggleChannel(
+					players[owner]->messageZone.chatChannel);
+			Player::soundActivate();
+		});
+
         static const char* bigfont = "fonts/pixelmix.ttf#16#2";
         SDL_Rect entryPos{ 0, 0, messages->getSize().w, messages->getSize().h };
         for ( int i = 0; i < MESSAGE_MAX_ENTRIES; ++i )
@@ -13019,6 +13055,45 @@ void Player::MessageZone_t::processChatbox()
     }
 
     Frame* messageBoxFrame = chatFrame->findFrame("message box");
+	Button* channelButton = chatFrame->findButton("chat channel selector");
+	if (channelButton)
+	{
+		const bool channelVisible = command && !intro
+			&& multiplayer != SINGLE && player.playernum == clientnum
+			&& player.isLocalPlayer();
+		auto virtualMouse = inputs.getVirtualMouse(player.playernum);
+		if (channelVisible && !chatChannelSelectorActive)
+		{
+			chatChannelSelectorActive = true;
+			chatChannelSelectorPriorCursor = virtualMouse->draw_cursor;
+			chatChannelSelectorManagedCursor =
+				inputs.bPlayerUsingKeyboardControl(player.playernum);
+			if (chatChannelSelectorManagedCursor)
+			{
+				virtualMouse->draw_cursor = true;
+			}
+		}
+		else if (!channelVisible && chatChannelSelectorActive)
+		{
+			if (chatChannelSelectorManagedCursor)
+			{
+				virtualMouse->draw_cursor =
+					chatChannelSelectorPriorCursor;
+			}
+			chatChannelSelectorActive = false;
+			chatChannelSelectorManagedCursor = false;
+		}
+		channelButton->setInvisible(!channelVisible);
+		channelButton->setDisabled(!channelVisible);
+		const std::string channelLabel = std::string("< ")
+			+ AutomatiaPartyChat::channelDisplayName(chatChannel) + " >";
+		channelButton->setText(channelLabel.c_str());
+		channelButton->setFont(useBigFont
+			? "fonts/pixelmix.ttf#16#2"
+			: "fonts/pixel_maz_multiline.ttf#16#2");
+		channelButton->setSize(SDL_Rect{
+			8, player.camera_virtualHeight() - 196, 108, 28 });
+	}
     messageBoxFrame->setDisabled(gamePaused || (!player.shootmode && playercount > 2));
     if (messageBoxFrame->isDisabled()) {
         return;
@@ -13269,6 +13344,22 @@ void Player::MessageZone_t::processChatbox()
     }
 
     messageBoxFrame->setSize(messageBoxSize);
+	if (channelButton && !channelButton->isInvisible())
+	{
+		channelButton->setFont(useBigFont
+			? "fonts/pixelmix.ttf#16#2"
+			: "fonts/pixel_maz_multiline.ttf#16#2");
+		int inputY = player.camera_virtualHeight() - 192;
+		if (actualAlignment == ALIGN_LEFT_BOTTOM)
+		{
+			inputY = messageBoxSize.y + messageBoxSize.h + 4;
+			if (!useBigFont)
+			{
+				inputY -= 4;
+			}
+		}
+		channelButton->setSize(SDL_Rect{ 8, inputY - 4, 108, 28 });
+	}
 }
 
 ConsoleVariable<bool> shareMinimap("/shareminimap", true);
@@ -37831,7 +37922,20 @@ static void drawConsoleCommandBuffer() {
         }
     }
     auto text = Text::get(buf, font, 0xffffffff, makeColor(0, 0, 0, 255));
-    const int printx = players[commandPlayer]->camera_virtualx1() + 8;
+	int printx = players[commandPlayer]->camera_virtualx1() + 8;
+	if (!intro && multiplayer != SINGLE
+		&& players[commandPlayer]->messageZone.chatFrame)
+	{
+		if (Button* channelButton =
+			players[commandPlayer]->messageZone.chatFrame->findButton(
+				"chat channel selector"))
+		{
+			if (!channelButton->isInvisible())
+			{
+				printx += 116;
+			}
+		}
+	}
     int printy = players[commandPlayer]->camera_virtualy2() - 192;
     if ( players[commandPlayer]->messageZone.actualAlignment == Player::MessageZone_t::ALIGN_LEFT_BOTTOM 
         && players[commandPlayer]->messageZone.chatFrame )

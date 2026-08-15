@@ -1618,23 +1618,23 @@ bool EOSFuncs::HandleReceivedMessagesAndIgnore(EOS_ProductUserId* remoteIdReturn
 	}
 }
 
-void EOSFuncs::SendMessageP2P(EOS_ProductUserId RemoteId, const void* data, int len)
+bool EOSFuncs::SendMessageP2P(EOS_ProductUserId RemoteId, const void* data, int len)
 {
 	if (!EOSFuncs::Helpers_t::productIdIsValid(RemoteId))
 	{
 		logError("SendMessageP2P: Invalid remote Id: %s", EOSFuncs::Helpers_t::productIdToString(RemoteId));
-		return;
+		return false;
 	}
 
 	if (!CurrentUserInfo.isValid())
 	{
 		logError("SendMessageP2P: Invalid local user Id: %s", CurrentUserInfo.getProductUserIdStr());
-		return;
+		return false;
 	}
 
 	if (!EOS.PlatformHandle)
 	{
-		return;
+		return false;
 	}
 
 	EOS_HP2P P2PHandle = EOS_Platform_GetP2PInterface(PlatformHandle);
@@ -1659,7 +1659,9 @@ void EOSFuncs::SendMessageP2P(EOS_ProductUserId RemoteId, const void* data, int 
 	if (Result != EOS_EResult::EOS_Success)
 	{
 		logError("SendMessageP2P: error while sending data, code: %d", static_cast<int>(Result));
+		return false;
 	}
+	return true;
 }
 
 void EOSFuncs::LobbyData_t::setLobbyAttributesFromGame(HostUpdateLobbyTypes updateType)

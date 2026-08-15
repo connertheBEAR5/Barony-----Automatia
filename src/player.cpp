@@ -6087,6 +6087,10 @@ const bool Player::usingCommand() const
 {
 	if ( command )
 	{
+		if (multiplayer != SINGLE)
+		{
+			return playernum == clientnum;
+		}
 		return inputs.bPlayerUsingKeyboardControl(playernum);
 	}
 	return false;

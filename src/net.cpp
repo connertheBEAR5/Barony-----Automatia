@@ -39,6 +39,8 @@
 #include "world_state.hpp"
 #include "world_packet_scope.hpp"
 #include "late_join_protocol.hpp"
+#include "party_chat.hpp"
+#include "party_protocol.hpp"
 #include "lan_discovery.hpp"
 #include "scores.hpp"
 #include "colors.hpp"
@@ -54,6 +56,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <deque>
 #include <future>
 #include <limits>
 #include <random>
@@ -94,6 +97,15 @@ namespace
 	static bool g_lateJoinReturningPlayer[MAXPLAYERS] = { false };
 	static bool g_lateJoinClientHandshake[MAXPLAYERS] = { false };
 	static bool g_processingRuntimeJoin = false;
+	static AutomatiaParty::Protocol::RecipientSnapshotState
+		g_clientPartySnapshot;
+	static std::deque<AutomatiaParty::Protocol::Result>
+		g_clientPartyResults;
+	static std::uint64_t g_partySyncSequences[MAXPLAYERS] = {};
+	static std::uint64_t g_partyTickEpoch = 0;
+	static Uint32 g_partyLastObservedTick = 0;
+	static bool g_partyTickInitialized = false;
+	static Uint32 g_partyLastMaintenanceTick = 0;
 	static Uint32 g_clientLateJoinLastProgressTick = 0;
 	static Uint32 g_clientProvisionalEntityUid = 0x70000000U;
 	static bool g_resendingScopedSafePacket = false;
@@ -640,6 +652,177 @@ namespace
 		return g_currentPacketSenderHostIndex == playerIndex - 1;
 	}
 
+	static int currentPacketAuthenticatedRemotePlayer()
+	{
+		for (int player = 1; player < MAXPLAYERS; ++player)
+		{
+			if (currentPacketSenderMatchesPlayer(player))
+			{
+				return player;
+			}
+		}
+		return -1;
+	}
+
+	static bool currentClientPacketSenderMatchesServer()
+	{
+		if (g_clientLateJoinReplayingPackets)
+		{
+			// These records were authenticated as part of the server's bounded
+			// catch-up stream before being replayed locally.
+			return true;
+		}
+		if (directConnect)
+		{
+			return net_packet
+				&& net_packet->address.host == net_server.host
+				&& net_packet->address.port == net_server.port;
+		}
+		return g_currentPacketSenderHostIndex == 0;
+	}
+
+#ifdef USE_EOS
+	static int authenticatedEosPacketSenderHostIndex(
+		const EOS_ProductUserId sender)
+	{
+		if (!sender)
+		{
+			return -1;
+		}
+		// On a client, host index zero is the server and is stored separately
+		// from the indexed peer list.
+		if (multiplayer == CLIENT
+			&& EOSFuncs::Helpers_t::isMatchingProductIds(
+				sender, EOS.P2PConnectionInfo.getPeerIdFromIndex(0)))
+		{
+			return 0;
+		}
+		// Do not use getIndexFromPeerId() for authentication: that legacy
+		// lookup returns zero when an ID is absent. Resolve only through an
+		// exact reverse mapping so an unindexed peer cannot be mistaken for
+		// runtime player 1.
+		for (int candidate = 0; candidate < MAXPLAYERS; ++candidate)
+		{
+			const EOS_ProductUserId indexedPeer =
+				EOS.P2PConnectionInfo.getPeerIdFromIndex(candidate);
+			if (indexedPeer
+				&& EOSFuncs::Helpers_t::isMatchingProductIds(
+					sender, indexedPeer))
+			{
+				return candidate;
+			}
+		}
+		return -1;
+	}
+#endif
+
+	static bool currentPacketSenderMatchesReliableRecipient(
+		const packetsend_t* pendingPacket)
+	{
+		if (!pendingPacket || !pendingPacket->packet || !net_packet)
+		{
+			return false;
+		}
+		if (multiplayer == SERVER)
+		{
+			if (pendingPacket->hostnum < 0
+				|| pendingPacket->hostnum >= MAXPLAYERS - 1)
+			{
+				return false;
+			}
+			if (directConnect)
+			{
+				return net_packet->address.host
+						== pendingPacket->packet->address.host
+					&& net_packet->address.port
+						== pendingPacket->packet->address.port;
+			}
+			return g_currentPacketSenderHostIndex == pendingPacket->hostnum;
+		}
+		return multiplayer == CLIENT
+			&& pendingPacket->hostnum == 0
+			&& currentClientPacketSenderMatchesServer();
+	}
+
+	static bool isAutomatiaAuthenticatedServerPayload(
+		const Uint8* data,
+		const std::size_t size)
+	{
+		if (!data || size < 4)
+		{
+			return false;
+		}
+		static constexpr char authenticatedPackets[][4] = {
+			// All displayed chat is authored or relayed by the server. This
+			// also prevents a P2P peer forging a Party-chat display packet.
+			{'M', 'S', 'G', 'S'},
+			{'P', 'T', 'Y', 'S'}, {'P', 'T', 'Y', 'I'},
+			{'P', 'T', 'Y', 'R'},
+			// Party snapshots can also arrive inside the bounded late-join
+			// stream. Authenticate every server-to-client envelope needed to
+			// establish and deliver that stream before replay trusts it.
+			{'L', 'J', 'B', 'G'}, {'L', 'J', 'C', 'H'},
+			{'L', 'J', 'D', 'N'}, {'L', 'J', 'O', 'K'},
+			{'L', 'J', 'C', 'B'}, {'L', 'J', 'C', 'C'},
+			{'L', 'J', 'C', 'E'}, {'L', 'J', 'A', 'B'}
+		};
+		for (const auto& tag : authenticatedPackets)
+		{
+			if (memcmp(data, tag, sizeof(tag)) == 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool incomingPacketRequiresAuthenticatedServer()
+	{
+		if (!net_packet || !net_packet->data || net_packet->len < 4)
+		{
+			return false;
+		}
+		const std::size_t size = static_cast<std::size_t>(net_packet->len);
+		if (isAutomatiaAuthenticatedServerPayload(net_packet->data, size))
+		{
+			return true;
+		}
+		return size >= 13 && memcmp(net_packet->data, "SAFE", 4) == 0
+			&& isAutomatiaAuthenticatedServerPayload(
+				net_packet->data + 9, size - 9);
+	}
+
+	static std::uint64_t serverAutomatiaPartyTick()
+	{
+		if (!g_partyTickInitialized)
+		{
+			g_partyTickInitialized = true;
+			g_partyLastObservedTick = ticks;
+		}
+		else if (ticks < g_partyLastObservedTick)
+		{
+			g_partyTickEpoch += std::uint64_t{1} << 32U;
+		}
+		g_partyLastObservedTick = ticks;
+		return g_partyTickEpoch + ticks;
+	}
+
+	static std::uint64_t nextAutomatiaPartySyncSequence(
+		const int playerIndex)
+	{
+		if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+		{
+			return 0;
+		}
+		std::uint64_t& sequence = g_partySyncSequences[playerIndex];
+		++sequence;
+		if (sequence == 0)
+		{
+			++sequence;
+		}
+		return sequence;
+	}
+
 	static void logServerRosterState(const char* reason)
 	{
 		if (multiplayer != SERVER)
@@ -1056,6 +1239,125 @@ namespace
 bool clientAutomatiaPlayerSlotShouldHaveActor(int playerIndex)
 {
 	return clientPlayerSlotMayOwnVisibleActor(playerIndex);
+}
+
+static bool serverBindAutomatiaPartyIdentity(
+	int playerIndex,
+	const char* reason);
+static bool serverRouteAutomatiaPartyChat(
+	int senderSlot,
+	const std::string& message);
+static void serverUnbindAutomatiaPartyIdentity(
+	int playerIndex,
+	const char* reason,
+	bool synchronize = true);
+static void serverSynchronizeAllAutomatiaPartyRecipients();
+static bool appendAutomatiaPartyRecordsToLateJoinCatchup(int playerIndex);
+static void serverMaintainAutomatiaPartyBindings();
+
+bool clientSendAutomatiaPartyRequest(
+	const AutomatiaParty::Protocol::Request& requestedOperation)
+{
+	if (multiplayer != CLIENT || !net_packet || !net_sock
+		|| clientnum <= 0 || clientnum >= MAXPLAYERS
+		|| client_disconnected[clientnum])
+	{
+		return false;
+	}
+	AutomatiaParty::Protocol::Request request = requestedOperation;
+	request.actorSlot = static_cast<std::uint8_t>(clientnum);
+	const std::vector<std::uint8_t> packet =
+		AutomatiaParty::Protocol::encodeRequest(request);
+	if (packet.empty() || packet.size() > NET_PACKET_SIZE - 9U)
+	{
+		return false;
+	}
+	memcpy(net_packet->data, packet.data(), packet.size());
+	net_packet->len = static_cast<int>(packet.size());
+	net_packet->address.host = net_server.host;
+	net_packet->address.port = net_server.port;
+	return sendPacketSafe(net_sock, -1, net_packet, 0) != 0;
+}
+
+bool submitAutomatiaPartyChat(
+	const int localPlayer,
+	const std::string& message)
+{
+	if (multiplayer == CLIENT)
+	{
+		if (!net_packet || !net_sock || localPlayer != clientnum
+			|| clientnum <= 0 || clientnum >= MAXPLAYERS
+			|| client_disconnected[clientnum])
+		{
+			return false;
+		}
+		AutomatiaPartyChat::Request request;
+		request.channel = AutomatiaPartyChat::Channel::Party;
+		request.senderSlot = static_cast<std::uint8_t>(clientnum);
+		request.message = message;
+		const std::vector<std::uint8_t> packet =
+			AutomatiaPartyChat::encodeRequest(request);
+		if (packet.empty() || packet.size() > NET_PACKET_SIZE - 9U)
+		{
+			return false;
+		}
+		memcpy(net_packet->data, packet.data(), packet.size());
+		net_packet->len = static_cast<int>(packet.size());
+		net_packet->address.host = net_server.host;
+		net_packet->address.port = net_server.port;
+		return sendPacketSafe(net_sock, -1, net_packet, 0) != 0;
+	}
+	if (multiplayer != SERVER || localPlayer < 0
+		|| localPlayer >= MAXPLAYERS || !players[localPlayer]
+		|| !players[localPlayer]->isLocalPlayer()
+		|| (headless && localPlayer == 0))
+	{
+		return false;
+	}
+	if (!worldState.partyManager().onlineIdentityFor(localPlayer)
+		&& !serverBindAutomatiaPartyIdentity(
+			localPlayer, "local Party chat"))
+	{
+		return false;
+	}
+	return serverRouteAutomatiaPartyChat(localPlayer, message);
+}
+
+const AutomatiaParty::Protocol::PartyState& clientAutomatiaPartyState()
+{
+	return g_clientPartySnapshot.partyState();
+}
+
+const AutomatiaParty::Protocol::InvitationList&
+clientAutomatiaPartyInvitations()
+{
+	return g_clientPartySnapshot.invitationList();
+}
+
+bool clientTakeAutomatiaPartyResult(
+	AutomatiaParty::Protocol::Result& result)
+{
+	if (g_clientPartyResults.empty())
+	{
+		return false;
+	}
+	result = g_clientPartyResults.front();
+	g_clientPartyResults.pop_front();
+	return true;
+}
+
+void clientResetAutomatiaPartyState()
+{
+	g_clientPartySnapshot.reset();
+	g_clientPartyResults.clear();
+}
+
+void setLobbyPacketSenderHostIndex(const int senderHostIndex)
+{
+	g_currentPacketSenderHostIndex =
+		senderHostIndex >= 0 && senderHostIndex < MAXPLAYERS
+			? senderHostIndex
+			: -1;
 }
 
 static std::vector<std::uint8_t> makeCharacterSaveBeginRecord(
@@ -2310,6 +2612,7 @@ void disconnectAutomatiaRemotePlayer(
     {
         (void)captureAutomatiaCharacterSaveRuntimeState(player);
     }
+	serverUnbindAutomatiaPartyIdentity(player, reason, true);
 
     client_disconnected[player] = true;
     losingConnection[player] = false;
@@ -2393,6 +2696,8 @@ static bool clientApplyLateJoinCharacterRestoreBeforeMapLoad()
 	std::vector<std::vector<std::uint8_t>> deferredPackets;
 	deferredPackets.reserve(g_clientLateJoinCatchupPackets.size());
 	bool sawCharacterRestore = false;
+	bool sawPartyState = false;
+	bool sawPartyInvitations = false;
 	const int savedLength = net_packet->len;
 	const IPaddress savedAddress = net_packet->address;
 	std::vector<Uint8> savedPacket(
@@ -2410,12 +2715,20 @@ static bool clientApplyLateJoinCharacterRestoreBeforeMapLoad()
 			&& (memcmp(packet.data(), "CSBG", 4) == 0
 				|| memcmp(packet.data(), "CSCH", 4) == 0
 				|| memcmp(packet.data(), "CSED", 4) == 0);
-		if (!characterRestorePacket)
+		const bool partyStatePacket = packet.size() >= 4
+			&& memcmp(packet.data(), "PTYS", 4) == 0;
+		const bool partyInvitationPacket = packet.size() >= 4
+			&& memcmp(packet.data(), "PTYI", 4) == 0;
+		if (!characterRestorePacket
+			&& !partyStatePacket && !partyInvitationPacket)
 		{
 			deferredPackets.push_back(packet);
 			continue;
 		}
-		sawCharacterRestore = true;
+		sawCharacterRestore = sawCharacterRestore || characterRestorePacket;
+		sawPartyState = sawPartyState || partyStatePacket;
+		sawPartyInvitations =
+			sawPartyInvitations || partyInvitationPacket;
 		if (packet.size() > NET_PACKET_SIZE)
 		{
 			printlog(
@@ -2438,10 +2751,15 @@ static bool clientApplyLateJoinCharacterRestoreBeforeMapLoad()
 	g_clientLateJoinReplayingPackets = wasReplaying;
 
 	if (!restorePacketsValid
-		|| (sawCharacterRestore && !g_clientCharacterRestoreApplied))
+		|| (sawCharacterRestore && !g_clientCharacterRestoreApplied)
+		|| !sawPartyState || !sawPartyInvitations
+		|| static_cast<int>(
+			g_clientPartySnapshot.partyState().recipientSlot) != clientnum
+		|| static_cast<int>(
+			g_clientPartySnapshot.invitationList().recipientSlot) != clientnum)
 	{
 		printlog(
-			"[Character Save] Client could not apply the saved character before map creation.");
+			"[Late Join] Client could not apply required character/party state before map creation.");
 		g_clientCharacterRestoreAssembler.reset();
 		g_clientLateJoinSpawnAuthorized = false;
 		return false;
@@ -2640,6 +2958,7 @@ void clientResetLateJoinPacketDeferral()
 void clientBeginLateJoinPacketDeferral(Uint32 transferId, Uint64 revision)
 {
 	clientResetLateJoinPacketDeferral();
+	clientResetAutomatiaPartyState();
 	g_clientAutomatiaFollowerRosterUIDs.clear();
 	g_clientAutomatiaFollowerHUDStates.clear();
 	g_clientAutomatiaFollowerRosterRetryTicks = 0;
@@ -2761,11 +3080,18 @@ void clientNoteLateJoinProgress()
 
 bool clientDeferLateJoinMapPacket(const Uint8* data, std::size_t size)
 {
+	const bool recipientPartySnapshot = data && size >= 4
+		&& (memcmp(data, "PTYS", 4) == 0
+			|| memcmp(data, "PTYI", 4) == 0);
 	if (!g_clientLateJoinPacketDeferral || g_clientLateJoinReplayingPackets
-		|| !packetUsesActiveMapScope(data, size))
+		|| (!packetUsesActiveMapScope(data, size)
+			&& !recipientPartySnapshot))
 	{
 		return false;
 	}
+	// Party state is session-global, but its two-record atomic snapshot must
+	// not race ahead of the initial pair embedded in late-join catch-up. Stage
+	// live PTYS/PTYI updates until that initial pair and map are committed.
 	if (!g_clientLateJoinLivePackets.append(data, size))
 	{
 		printlog("[Late Join] Client live-packet deferral limit exceeded.");
@@ -2979,8 +3305,10 @@ int sendPacket(UDPsocket sock, int channel, UDPpacket* packet, int hostnum, bool
 		else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY )
 		{
 #if defined USE_EOS
-			EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(hostnum), (char*)packet->data, packet->len);
-			return 0;
+			return EOS.SendMessageP2P(
+				EOS.P2PConnectionInfo.getPeerIdFromIndex(hostnum),
+				(char*)packet->data,
+				packet->len);
 #endif
 		}
 		return 0;
@@ -3117,8 +3445,10 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		else if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_CROSSPLAY )
 		{
 #if defined USE_EOS
-			EOS.SendMessageP2P(EOS.P2PConnectionInfo.getPeerIdFromIndex(hostnum), packetsend->packet->data, packetsend->packet->len);
-			return 0;
+			return EOS.SendMessageP2P(
+				EOS.P2PConnectionInfo.getPeerIdFromIndex(hostnum),
+				packetsend->packet->data,
+				packetsend->packet->len);
 #endif
 		}
 		return 0;
@@ -3478,8 +3808,633 @@ static bool queueLateJoinRecordForPlayer(
     net_packet->len = static_cast<int>(record.size());
     net_packet->address.host = net_clients[playerIndex - 1].host;
     net_packet->address.port = net_clients[playerIndex - 1].port;
-    sendPacketSafe(net_sock, -1, net_packet, playerIndex - 1);
-    return true;
+    return sendPacketSafe(
+        net_sock, -1, net_packet, playerIndex - 1) != 0;
+}
+
+static bool buildAutomatiaPartyRecordsForPlayer(
+	const int playerIndex,
+	std::vector<std::uint8_t>& partyRecord,
+	std::vector<std::uint8_t>& invitationRecord)
+{
+	partyRecord.clear();
+	invitationRecord.clear();
+	if (playerIndex < 0 || playerIndex >= MAXPLAYERS)
+	{
+		return false;
+	}
+	const std::uint64_t syncSequence =
+		nextAutomatiaPartySyncSequence(playerIndex);
+	if (syncSequence == 0)
+	{
+		return false;
+	}
+
+	AutomatiaParty::Protocol::PartyState state;
+	AutomatiaParty::Protocol::InvitationList invitationList;
+	state.recipientSlot = static_cast<std::uint8_t>(playerIndex);
+	state.syncSequence = syncSequence;
+	invitationList.recipientSlot =
+		static_cast<std::uint8_t>(playerIndex);
+	invitationList.syncSequence = syncSequence;
+	const AutomatiaParty::PartyManager& manager =
+		worldState.partyManager();
+	const AutomatiaParty::DurablePlayerIdentity* recipientIdentity =
+		manager.onlineIdentityFor(playerIndex);
+	if (recipientIdentity)
+	{
+		if (const AutomatiaParty::Party* party =
+			manager.findPartyForPlayer(*recipientIdentity))
+		{
+			state.partyId = party->id;
+			state.revision = party->revision;
+			for (std::size_t index = 0;
+				index < party->members.size(); ++index)
+			{
+				const AutomatiaParty::DurablePlayerIdentity& member =
+					party->members[index];
+				if (member == party->leader)
+				{
+					state.leaderIndex = static_cast<std::uint8_t>(index);
+				}
+				const int onlineSlot = manager.onlineSlotFor(member);
+				state.members.push_back({
+					member,
+					onlineSlot >= 0 && onlineSlot < 0xff
+						? static_cast<std::uint8_t>(onlineSlot)
+						: AutomatiaParty::Protocol::NO_PLAYER_SLOT
+				});
+			}
+		}
+	}
+	partyRecord = AutomatiaParty::Protocol::encodePartyState(state);
+	if (recipientIdentity)
+	{
+		for (const AutomatiaParty::Invitation& invitation :
+			manager.invitationsFor(*recipientIdentity))
+		{
+			invitationList.invitations.push_back({
+				invitation.id,
+				invitation.partyId,
+				invitation.expiresAtTick,
+				invitation.inviter
+			});
+		}
+	}
+	invitationRecord =
+		AutomatiaParty::Protocol::encodeInvitationList(invitationList);
+	return !partyRecord.empty() && !invitationRecord.empty();
+}
+
+static bool sendAutomatiaPartyRecordsToLivePlayer(const int playerIndex)
+{
+	if (!serverPlayerCanReceiveGameplayUpdates(playerIndex))
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> partyRecord;
+	std::vector<std::uint8_t> invitationRecord;
+	return buildAutomatiaPartyRecordsForPlayer(
+			playerIndex, partyRecord, invitationRecord)
+		&& queueLateJoinRecordForPlayer(playerIndex, partyRecord)
+		&& queueLateJoinRecordForPlayer(playerIndex, invitationRecord);
+}
+
+static void serverSynchronizeAllAutomatiaPartyRecipients()
+{
+	if (multiplayer != SERVER)
+	{
+		return;
+	}
+	for (const AutomatiaParty::DurablePlayerIdentity& identity :
+		worldState.partyManager().onlineIdentities())
+	{
+		const int playerIndex =
+			worldState.partyManager().onlineSlotFor(identity);
+		if (playerIndex <= 0)
+		{
+			continue;
+		}
+		const LateJoinSnapshotTransaction::Phase phase =
+			g_lateJoinTransactions[playerIndex].phase();
+		const bool snapshotTransferActive =
+			phase == LateJoinSnapshotTransaction::Phase::Receiving
+			|| phase == LateJoinSnapshotTransaction::Phase::Complete;
+		const bool canSynchronize = snapshotTransferActive
+			|| serverPlayerCanReceiveGameplayUpdates(playerIndex);
+		if (canSynchronize
+			&& !(snapshotTransferActive
+				? appendAutomatiaPartyRecordsToLateJoinCatchup(playerIndex)
+				: sendAutomatiaPartyRecordsToLivePlayer(playerIndex)))
+		{
+			printlog(
+				"[Party] Could not synchronize recipient player %d.",
+				playerIndex);
+		}
+	}
+}
+
+static bool appendAutomatiaPartyRecordsToLateJoinCatchup(
+	const int playerIndex)
+{
+	std::vector<std::uint8_t> partyRecord;
+	std::vector<std::uint8_t> invitationRecord;
+	return buildAutomatiaPartyRecordsForPlayer(
+			playerIndex, partyRecord, invitationRecord)
+		&& g_lateJoinCatchupBuffers[playerIndex].append(
+			partyRecord.data(), partyRecord.size())
+		&& g_lateJoinCatchupBuffers[playerIndex].append(
+			invitationRecord.data(), invitationRecord.size());
+}
+
+static bool serverBindAutomatiaPartyIdentity(
+	const int playerIndex,
+	const char* reason)
+{
+	if (multiplayer != SERVER
+		|| playerIndex < 0 || playerIndex >= MAXPLAYERS
+		|| !players[playerIndex] || !stats[playerIndex]
+		|| (playerIndex > 0 && client_disconnected[playerIndex])
+		|| (headless && playerIndex == 0))
+	{
+		return false;
+	}
+	/*
+	 * Parties need a durable identity even when per-character save files are
+	 * disabled. An explicit character-save mode remains the identity policy
+	 * for persistent servers. Ordinary Steam lobby peers use Steam IDs; LAN,
+	 * other transports, and additional local split-screen players use the
+	 * existing normalized local-name identity.
+	 * This keeps the composite identity semantics intact without making party
+	 * availability depend on an unrelated persistence toggle.
+	 */
+	CharacterSaveMode identityMode = characterSaveMode;
+	if (identityMode == CharacterSaveMode::NONE)
+	{
+#ifdef STEAMWORKS
+		identityMode = !directConnect
+			&& LobbyHandler.getP2PType()
+				== LobbyHandler_t::LobbyServiceType::LOBBY_STEAM
+			&& (playerIndex == 0
+				|| !players[playerIndex]->isLocalPlayer())
+			? CharacterSaveMode::STEAM
+			: CharacterSaveMode::LOCAL;
+#else
+		identityMode = CharacterSaveMode::LOCAL;
+#endif
+	}
+	AutomatiaParty::DurablePlayerIdentity identity;
+	std::string error;
+	if (!resolveAutomatiaDurablePlayerIdentity(
+			playerIndex, identityMode, identity, error))
+	{
+		printlog(
+			"[Party] Could not resolve player %d durable identity (%s): %s.",
+			playerIndex,
+			reason ? reason : "binding",
+			error.c_str());
+		return false;
+	}
+	AutomatiaParty::PartyManager& manager = worldState.partyManager();
+	if (const AutomatiaParty::DurablePlayerIdentity* existing =
+		manager.onlineIdentityFor(playerIndex))
+	{
+		if (*existing == identity)
+		{
+			return true;
+		}
+		manager.unbindOnlinePlayer(playerIndex);
+	}
+	if (!manager.bindOnlinePlayer(identity, playerIndex, error))
+	{
+		printlog(
+			"[Party] Rejected player %d durable identity binding (%s): %s.",
+			playerIndex,
+			reason ? reason : "binding",
+			error.c_str());
+		return false;
+	}
+	printlog(
+		"[Party] Bound %s identity '%s' to runtime player %d (%s), party %llu.",
+		AutomatiaParty::durableIdentityKindName(identity.kind),
+		identity.value.c_str(),
+		playerIndex,
+		reason ? reason : "binding",
+		static_cast<unsigned long long>(manager.partyIdForPlayer(identity)));
+	serverSynchronizeAllAutomatiaPartyRecipients();
+	return true;
+}
+
+static bool serverRouteAutomatiaPartyChat(
+	const int senderSlot,
+	const std::string& message)
+{
+	if (multiplayer != SERVER || senderSlot < 0
+		|| senderSlot >= MAXPLAYERS || !players[senderSlot]
+		|| !stats[senderSlot]
+		|| !AutomatiaPartyChat::isValidMessage(message))
+	{
+		return false;
+	}
+	const AutomatiaPartyChat::RecipientSelection selection =
+		AutomatiaPartyChat::selectAuthoritativeRecipients(
+			worldState.partyManager(), senderSlot, MAXPLAYERS);
+	if (selection.status
+		== AutomatiaPartyChat::RecipientStatus::NotInParty)
+	{
+		messagePlayer(
+			senderSlot, MESSAGE_CHAT,
+			"You are not currently in a party.");
+		return true;
+	}
+	if (selection.status
+		!= AutomatiaPartyChat::RecipientStatus::Ready)
+	{
+		printlog(
+			"[Party Chat] Rejected unbound sender in runtime slot %d.",
+			senderSlot);
+		return false;
+	}
+
+	char shortName[32] = {};
+	stringCopy(
+		shortName, stats[senderSlot]->name,
+		sizeof(shortName), 22);
+	const std::string formatted =
+		AutomatiaPartyChat::formatPartyMessage(shortName, message);
+	const Uint32 partyColor = makeColorRGB(96, 224, 160);
+	bool delivered = false;
+	bool printedForLocalPlayer = false;
+	for (const int recipient : selection.onlineSlots)
+	{
+		if (recipient < 0 || recipient >= MAXPLAYERS
+			|| !players[recipient]
+			|| (headless && recipient == 0)
+			|| (recipient > 0 && client_disconnected[recipient]))
+		{
+			continue;
+		}
+		const bool localRecipient = players[recipient]->isLocalPlayer();
+		const bool printed = messagePlayerColor(
+			recipient, MESSAGE_CHAT, partyColor,
+			"%s", formatted.c_str());
+		delivered = true;
+		printedForLocalPlayer = printedForLocalPlayer
+			|| (localRecipient && printed);
+	}
+	if (printedForLocalPlayer)
+	{
+		playSound(Message::CHAT_MESSAGE_SFX, 64);
+	}
+	printlog(
+		"[Party Chat] Routed authenticated player %d message to %zu online member(s).",
+		senderSlot, selection.onlineSlots.size());
+	return delivered;
+}
+
+static void serverUnbindAutomatiaPartyIdentity(
+	const int playerIndex,
+	const char* reason,
+	const bool synchronize)
+{
+	AutomatiaParty::PartyManager& manager = worldState.partyManager();
+	const AutomatiaParty::DurablePlayerIdentity* existing =
+		manager.onlineIdentityFor(playerIndex);
+	if (!existing)
+	{
+		return;
+	}
+	const AutomatiaParty::DurablePlayerIdentity identity = *existing;
+	manager.unbindOnlinePlayer(playerIndex);
+	printlog(
+		"[Party] Unbound runtime player %d from '%s' (%s); durable membership unchanged.",
+		playerIndex,
+		identity.value.c_str(),
+		reason ? reason : "disconnect");
+	if (synchronize)
+	{
+		serverSynchronizeAllAutomatiaPartyRecipients();
+	}
+}
+
+static void serverMaintainAutomatiaPartyBindings()
+{
+	if (multiplayer != SERVER || intro)
+	{
+		return;
+	}
+	AutomatiaParty::PartyManager& manager = worldState.partyManager();
+	for (int playerIndex = 0; playerIndex < MAXPLAYERS; ++playerIndex)
+	{
+		const LateJoinSnapshotTransaction::Phase phase =
+			g_lateJoinTransactions[playerIndex].phase();
+		const bool identityFinalizedDuringTransfer =
+			phase == LateJoinSnapshotTransaction::Phase::Receiving
+			|| phase == LateJoinSnapshotTransaction::Phase::Complete;
+		const bool eligible = players[playerIndex] && stats[playerIndex]
+			&& !(headless && playerIndex == 0)
+			&& (playerIndex == 0
+				? !client_disconnected[playerIndex]
+				: !client_disconnected[playerIndex]
+					&& (serverPlayerCanReceiveGameplayUpdates(playerIndex)
+						|| identityFinalizedDuringTransfer));
+		if (!eligible)
+		{
+			serverUnbindAutomatiaPartyIdentity(
+				playerIndex, "lifecycle maintenance", false);
+			continue;
+		}
+		(void)serverBindAutomatiaPartyIdentity(
+			playerIndex, "lifecycle maintenance");
+	}
+	if (ticks - g_partyLastMaintenanceTick >= TICKS_PER_SECOND)
+	{
+		g_partyLastMaintenanceTick = ticks;
+		if (!manager.expireInvitations(serverAutomatiaPartyTick()).empty())
+		{
+			printlog("[Party] Expired one or more pending invitations.");
+			serverSynchronizeAllAutomatiaPartyRecipients();
+		}
+	}
+}
+
+static const AutomatiaParty::Invitation* findAutomatiaInvitationFor(
+	const AutomatiaParty::DurablePlayerIdentity& actor,
+	const AutomatiaParty::InvitationID invitationId,
+	AutomatiaParty::Invitation& storage)
+{
+	for (const AutomatiaParty::Invitation& invitation :
+		worldState.partyManager().invitationsFor(actor))
+	{
+		if (invitation.id == invitationId)
+		{
+			storage = invitation;
+			return &storage;
+		}
+	}
+	return nullptr;
+}
+
+static AutomatiaParty::OperationResult executeAutomatiaPartyRequest(
+	const AutomatiaParty::Protocol::Request& request,
+	const AutomatiaParty::DurablePlayerIdentity& actor,
+	const std::uint64_t partyTick)
+{
+	using namespace AutomatiaParty;
+	PartyManager& manager = worldState.partyManager();
+	const PartyID actorPartyId = manager.partyIdForPlayer(actor);
+	const auto invalidParty = []()
+	{
+		return OperationResult{
+			OperationStatus::InvalidParty, INVALID_PARTY_ID, 0, 0};
+	};
+	const auto noTarget = [&request]()
+	{
+		return request.targetSlot == Protocol::NO_PLAYER_SLOT
+			&& !request.hasTargetIdentity;
+	};
+
+	switch (request.operation)
+	{
+		case Protocol::RequestOperation::Create:
+			if (request.claimedPartyId != INVALID_PARTY_ID
+				|| request.invitationId != INVALID_INVITATION_ID
+				|| !noTarget())
+			{
+				return invalidParty();
+			}
+			return manager.createParty(actor);
+
+		case Protocol::RequestOperation::Invite:
+		{
+			if (request.claimedPartyId == INVALID_PARTY_ID
+				|| request.claimedPartyId != actorPartyId
+				|| request.invitationId != INVALID_INVITATION_ID
+				|| request.targetSlot == Protocol::NO_PLAYER_SLOT
+				|| request.targetSlot >= MAXPLAYERS
+				|| request.hasTargetIdentity)
+			{
+				return invalidParty();
+			}
+			const DurablePlayerIdentity* target =
+				manager.onlineIdentityFor(request.targetSlot);
+			if (!target)
+			{
+				return {OperationStatus::InvalidIdentity,
+					actorPartyId, 0, 0};
+			}
+			return manager.invitePlayer(
+				actor, *target, partyTick,
+				60ULL * TICKS_PER_SECOND,
+				MAXPLAYERS);
+		}
+
+		case Protocol::RequestOperation::Accept:
+		case Protocol::RequestOperation::Decline:
+		{
+			Invitation invitation;
+			if (request.invitationId == INVALID_INVITATION_ID
+				|| !noTarget()
+				|| !findAutomatiaInvitationFor(
+					actor, request.invitationId, invitation)
+				|| request.claimedPartyId != invitation.partyId)
+			{
+				return {OperationStatus::InvalidInvitation,
+					INVALID_PARTY_ID, request.invitationId, 0};
+			}
+			return request.operation == Protocol::RequestOperation::Accept
+				? manager.acceptInvitation(
+					actor, request.invitationId, partyTick, MAXPLAYERS)
+				: manager.declineInvitation(
+					actor, request.invitationId, partyTick);
+		}
+
+		case Protocol::RequestOperation::Leave:
+		case Protocol::RequestOperation::Disband:
+			if (request.claimedPartyId == INVALID_PARTY_ID
+				|| request.claimedPartyId != actorPartyId
+				|| request.invitationId != INVALID_INVITATION_ID
+				|| !noTarget())
+			{
+				return invalidParty();
+			}
+			return request.operation == Protocol::RequestOperation::Leave
+				? manager.leaveParty(actor)
+				: manager.disbandParty(actor);
+
+		case Protocol::RequestOperation::Kick:
+		case Protocol::RequestOperation::Promote:
+			if (request.claimedPartyId == INVALID_PARTY_ID
+				|| request.claimedPartyId != actorPartyId
+				|| request.invitationId != INVALID_INVITATION_ID
+				|| request.targetSlot != Protocol::NO_PLAYER_SLOT
+				|| !request.hasTargetIdentity)
+			{
+				return invalidParty();
+			}
+			return request.operation == Protocol::RequestOperation::Kick
+				? manager.kickMember(actor, request.targetIdentity)
+				: manager.promoteLeader(actor, request.targetIdentity);
+		default:
+			return invalidParty();
+	}
+}
+
+bool copyAutomatiaPartySnapshotForLocalPlayer(
+	const int localPlayerSlot,
+	AutomatiaParty::Protocol::PartyState& partyState,
+	AutomatiaParty::Protocol::InvitationList& invitationList)
+{
+	using namespace AutomatiaParty;
+	using namespace AutomatiaParty::Protocol;
+
+	partyState = {};
+	invitationList = {};
+	if (localPlayerSlot < 0 || localPlayerSlot >= MAXPLAYERS)
+	{
+		return false;
+	}
+	if (multiplayer == CLIENT)
+	{
+		if (localPlayerSlot != clientnum)
+		{
+			return false;
+		}
+		partyState = clientAutomatiaPartyState();
+		invitationList = clientAutomatiaPartyInvitations();
+		return true;
+	}
+	if (multiplayer != SERVER
+		|| headless
+		|| !players[localPlayerSlot]
+		|| !stats[localPlayerSlot]
+		|| !players[localPlayerSlot]->isLocalPlayer()
+		|| (localPlayerSlot > 0 && client_disconnected[localPlayerSlot]))
+	{
+		return false;
+	}
+	if (!worldState.partyManager().onlineIdentityFor(localPlayerSlot)
+		&& !serverBindAutomatiaPartyIdentity(
+			localPlayerSlot, "local Social snapshot"))
+	{
+		return false;
+	}
+
+	const PartyManager& manager = worldState.partyManager();
+	const DurablePlayerIdentity* recipient =
+		manager.onlineIdentityFor(localPlayerSlot);
+	if (!recipient)
+	{
+		return false;
+	}
+	const std::uint64_t sequence = std::max<std::uint64_t>(
+		1, g_partySyncSequences[localPlayerSlot]);
+	partyState.recipientSlot =
+		static_cast<std::uint8_t>(localPlayerSlot);
+	partyState.syncSequence = sequence;
+	invitationList.recipientSlot =
+		static_cast<std::uint8_t>(localPlayerSlot);
+	invitationList.syncSequence = sequence;
+	if (const Party* party = manager.findPartyForPlayer(*recipient))
+	{
+		partyState.partyId = party->id;
+		partyState.revision = party->revision;
+		for (std::size_t index = 0; index < party->members.size(); ++index)
+		{
+			const DurablePlayerIdentity& member = party->members[index];
+			if (member == party->leader)
+			{
+				partyState.leaderIndex = static_cast<std::uint8_t>(index);
+			}
+			const int onlineSlot = manager.onlineSlotFor(member);
+			partyState.members.push_back({
+				member,
+				onlineSlot >= 0 && onlineSlot < 0xff
+					? static_cast<std::uint8_t>(onlineSlot)
+					: Protocol::NO_PLAYER_SLOT
+			});
+		}
+	}
+	for (const Invitation& invitation : manager.invitationsFor(*recipient))
+	{
+		invitationList.invitations.push_back({
+			invitation.id,
+			invitation.partyId,
+			invitation.expiresAtTick,
+			invitation.inviter
+		});
+	}
+	return true;
+}
+
+bool submitAutomatiaPartyRequestForLocalPlayer(
+	const int localPlayerSlot,
+	const AutomatiaParty::Protocol::Request& requestedOperation)
+{
+	using namespace AutomatiaParty;
+	using namespace AutomatiaParty::Protocol;
+
+	if (multiplayer == CLIENT)
+	{
+		return localPlayerSlot == clientnum
+			&& clientSendAutomatiaPartyRequest(requestedOperation);
+	}
+	if (multiplayer != SERVER
+		|| localPlayerSlot < 0 || localPlayerSlot >= MAXPLAYERS
+		|| headless
+		|| !players[localPlayerSlot]
+		|| !stats[localPlayerSlot]
+		|| !players[localPlayerSlot]->isLocalPlayer()
+		|| (localPlayerSlot > 0 && client_disconnected[localPlayerSlot]))
+	{
+		return false;
+	}
+	if (!worldState.partyManager().onlineIdentityFor(localPlayerSlot)
+		&& !serverBindAutomatiaPartyIdentity(
+			localPlayerSlot, "local Social request"))
+	{
+		return false;
+	}
+	const DurablePlayerIdentity* actor =
+		worldState.partyManager().onlineIdentityFor(localPlayerSlot);
+	if (!actor)
+	{
+		return false;
+	}
+
+	Request request = requestedOperation;
+	request.actorSlot = static_cast<std::uint8_t>(localPlayerSlot);
+	const std::uint64_t partyTick = serverAutomatiaPartyTick();
+	const bool expiredInvitations =
+		!worldState.partyManager().expireInvitations(partyTick).empty();
+	const OperationResult operationResult =
+		executeAutomatiaPartyRequest(request, *actor, partyTick);
+	Result response;
+	response.operation = request.operation;
+	response.status = operationResult.status;
+	response.requestId = request.requestId;
+	response.partyId = operationResult.partyId;
+	response.invitationId = operationResult.invitationId;
+	response.revision = operationResult.revision;
+	constexpr std::size_t maximumQueuedResults = 64;
+	if (g_clientPartyResults.size() >= maximumQueuedResults)
+	{
+		g_clientPartyResults.pop_front();
+	}
+	g_clientPartyResults.push_back(response);
+	printlog(
+		"[Party] Local player %d request %u (%u) -> %s, party %llu.",
+		localPlayerSlot,
+		request.requestId,
+		static_cast<unsigned>(request.operation),
+		operationStatusName(operationResult.status),
+		static_cast<unsigned long long>(operationResult.partyId));
+	if (expiredInvitations || operationResult
+		|| operationResult.status == OperationStatus::InvitationExpired)
+	{
+		serverSynchronizeAllAutomatiaPartyRecipients();
+	}
+	return true;
 }
 
 static void abortServerLateJoinPlayer(int playerIndex, Uint8 reason)
@@ -3496,6 +4451,8 @@ static void abortServerLateJoinPlayer(int playerIndex, Uint8 reason)
 	abort.reason = reason ? reason : 1;
 	queueLateJoinRecordForPlayer(
 		playerIndex, LateJoinProtocol::encodeAbort(abort));
+	serverUnbindAutomatiaPartyIdentity(
+		playerIndex, "late-join abort", true);
 	worldState.removePlayer(playerIndex);
 	client_disconnected[playerIndex] = true;
 	resetServerLateJoinPlayer(playerIndex);
@@ -3564,6 +4521,18 @@ static bool startServerLateJoinSnapshotTransfer(int playerIndex)
     {
         return false;
     }
+
+	if (!appendAutomatiaPartyRecordsToLateJoinCatchup(playerIndex))
+	{
+		printlog(
+			"[Party] Could not queue recipient state for late-joining player %d.",
+			playerIndex);
+		resetServerLateJoinPlayer(playerIndex);
+		return false;
+	}
+	printlog(
+		"[Party] Queued recipient-specific party state for late-joining player %d.",
+		playerIndex);
 
     if (!g_lateJoinCharacterRestorePayload[playerIndex].empty())
     {
@@ -6879,6 +7848,82 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+	{'PTYS', [](){
+		AutomatiaParty::Protocol::PartyState state;
+		if (!AutomatiaParty::Protocol::decodePartyState(
+				net_packet ? net_packet->data : nullptr,
+				net_packet ? static_cast<std::size_t>(net_packet->len) : 0,
+				state)
+			|| static_cast<int>(state.recipientSlot) != clientnum)
+		{
+			printlog("[Party] Client rejected malformed or misaddressed PTYS state.");
+			return;
+		}
+		const AutomatiaParty::Protocol::SnapshotStageResult staged =
+			g_clientPartySnapshot.stagePartyState(std::move(state));
+		if (staged == AutomatiaParty::Protocol::SnapshotStageResult::Rejected)
+		{
+			printlog("[Party] Client rejected a conflicting PTYS snapshot.");
+		}
+		else if (staged == AutomatiaParty::Protocol::SnapshotStageResult::Committed)
+		{
+			const auto& committed = g_clientPartySnapshot.partyState();
+			printlog(
+				"[Party] Client committed party sync %llu: party %llu revision %llu with %zu member(s).",
+				static_cast<unsigned long long>(committed.syncSequence),
+				static_cast<unsigned long long>(committed.partyId),
+				static_cast<unsigned long long>(committed.revision),
+				committed.members.size());
+		}
+	}},
+	{'PTYI', [](){
+		AutomatiaParty::Protocol::InvitationList invitations;
+		if (!AutomatiaParty::Protocol::decodeInvitationList(
+				net_packet ? net_packet->data : nullptr,
+				net_packet ? static_cast<std::size_t>(net_packet->len) : 0,
+				invitations)
+			|| static_cast<int>(invitations.recipientSlot) != clientnum)
+		{
+			printlog("[Party] Client rejected malformed or misaddressed PTYI state.");
+			return;
+		}
+		const AutomatiaParty::Protocol::SnapshotStageResult staged =
+			g_clientPartySnapshot.stageInvitationList(std::move(invitations));
+		if (staged == AutomatiaParty::Protocol::SnapshotStageResult::Rejected)
+		{
+			printlog("[Party] Client rejected a conflicting PTYI snapshot.");
+		}
+		else if (staged == AutomatiaParty::Protocol::SnapshotStageResult::Committed)
+		{
+			printlog(
+				"[Party] Client committed party sync %llu with %zu pending invitation(s).",
+				static_cast<unsigned long long>(
+					g_clientPartySnapshot.committedSequence()),
+				g_clientPartySnapshot.invitationList().invitations.size());
+		}
+	}},
+	{'PTYR', [](){
+		AutomatiaParty::Protocol::Result result;
+		if (!AutomatiaParty::Protocol::decodeResult(
+				net_packet ? net_packet->data : nullptr,
+				net_packet ? static_cast<std::size_t>(net_packet->len) : 0,
+				result))
+		{
+			printlog("[Party] Client rejected malformed PTYR result.");
+			return;
+		}
+		constexpr std::size_t maximumQueuedResults = 64;
+		if (g_clientPartyResults.size() >= maximumQueuedResults)
+		{
+			g_clientPartyResults.pop_front();
+		}
+		g_clientPartyResults.push_back(result);
+		printlog(
+			"[Party] Request %u completed with %s (party %llu).",
+			result.requestId,
+			AutomatiaParty::operationStatusName(result.status),
+			static_cast<unsigned long long>(result.partyId));
+	}},
     {'CSAK', [](){
         if (!net_packet || net_packet->len != 10
             || static_cast<int>(net_packet->data[4]) != clientnum)
@@ -10313,6 +11358,14 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// textbox message
 	{'MSGS', [](){
+		if (!net_packet || net_packet->len < 13
+			|| !memchr(
+				&net_packet->data[12], '\0',
+				static_cast<std::size_t>(net_packet->len - 12)))
+		{
+			printlog("[NET]: client rejected a truncated MSGS packet.");
+			return;
+		}
 		Uint32 color = SDLNet_Read32(&net_packet->data[4]);
 		MessageType type = (MessageType)SDLNet_Read32(&net_packet->data[8]);
 		const char* msg = (const char*)(&net_packet->data[12]);
@@ -13572,6 +14625,13 @@ void clientHandlePacket()
         printlog("[NET]: ignored truncated client packet");
         return;
     }
+	if (incomingPacketRequiresAuthenticatedServer()
+		&& !currentClientPacketSenderMatchesServer())
+	{
+		printlog(
+			"[Automatia] Client rejected party/late-join state not sent by its server.");
+		return;
+	}
 	if (handleSafePacket())
 	{
 		return;
@@ -13859,9 +14919,19 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 			DebugStats.handlePacketStartLoop = true;
 		}
 
-		while (packet = net_handler->getGamePacket())
-		{
-			memcpy(net_packet->data, packet->data(), packet->len());
+			while (packet = net_handler->getGamePacket())
+			{
+				g_currentPacketSenderHostIndex = packet->senderHostIndex();
+				if (!net_packet || !packet->data()
+					|| packet->len() < 4
+					|| packet->len() > NET_PACKET_SIZE)
+				{
+					printlog("[NET]: client discarded an invalid-size P2P packet");
+					delete packet;
+					g_currentPacketSenderHostIndex = -1;
+					continue;
+				}
+				memcpy(net_packet->data, packet->data(), packet->len());
 			net_packet->len = packet->len();
 
 			clientHandlePacket(); //Uses net_packet.
@@ -13871,7 +14941,8 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 				DebugStats.messagesT2WhileLoop = std::chrono::high_resolution_clock::now();
 				DebugStats.handlePacketStartLoop = false;
 			}
-			delete packet;
+				delete packet;
+				g_currentPacketSenderHostIndex = -1;
 			if ( !net_handler )
 			{
 				break;
@@ -13915,6 +14986,120 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+	{'PCHT', [](){
+		AutomatiaPartyChat::Request request;
+		if (!AutomatiaPartyChat::decodeRequest(
+				net_packet ? net_packet->data : nullptr,
+				net_packet
+					? static_cast<std::size_t>(net_packet->len) : 0,
+				request))
+		{
+			printlog(
+				"[Party Chat] Server rejected a malformed PCHT request.");
+			return;
+		}
+		const int authenticatedPlayer =
+			currentPacketAuthenticatedRemotePlayer();
+		if (authenticatedPlayer <= 0
+			|| authenticatedPlayer >= MAXPLAYERS)
+		{
+			printlog(
+				"[Party Chat] Server rejected a packet without an authenticated remote sender.");
+			return;
+		}
+		if (!AutomatiaPartyChat::requestClaimsAuthenticatedSender(
+				request, authenticatedPlayer, MAXPLAYERS)
+			|| client_disconnected[authenticatedPlayer]
+			|| !serverPlayerCanReceiveGameplayUpdates(authenticatedPlayer))
+		{
+			printlog(
+				"[Party Chat] Server rejected a sender-slot claim from transport player %d.",
+				authenticatedPlayer);
+			return;
+		}
+		client_keepalive[authenticatedPlayer] = ticks;
+		if (!worldState.partyManager().onlineIdentityFor(authenticatedPlayer)
+			&& !serverBindAutomatiaPartyIdentity(
+				authenticatedPlayer, "Party chat authentication"))
+		{
+			printlog(
+				"[Party Chat] Server rejected unbound player %d.",
+				authenticatedPlayer);
+			return;
+		}
+		(void)serverRouteAutomatiaPartyChat(
+			authenticatedPlayer, request.message);
+	}},
+	{'PTYQ', [](){
+		AutomatiaParty::Protocol::Request request;
+		if (!AutomatiaParty::Protocol::decodeRequest(
+				net_packet ? net_packet->data : nullptr,
+				net_packet ? static_cast<std::size_t>(net_packet->len) : 0,
+				request))
+		{
+			printlog("[Party] Server rejected malformed PTYQ request.");
+			return;
+		}
+		const int player = static_cast<int>(request.actorSlot);
+		if (player <= 0 || player >= MAXPLAYERS
+			|| client_disconnected[player]
+			|| !currentPacketSenderMatchesPlayer(player)
+			|| !serverPlayerCanReceiveGameplayUpdates(player))
+		{
+			printlog(
+				"[Party] Server rejected unauthenticated request claiming player %d.",
+				player);
+			return;
+		}
+		if (!worldState.partyManager().onlineIdentityFor(player)
+			&& !serverBindAutomatiaPartyIdentity(
+				player, "party request authentication"))
+		{
+			printlog(
+				"[Party] Server rejected request from unbound player %d.",
+				player);
+			return;
+		}
+		const AutomatiaParty::DurablePlayerIdentity* actor =
+			worldState.partyManager().onlineIdentityFor(player);
+		if (!actor)
+		{
+			return;
+		}
+		const std::uint64_t partyTick = serverAutomatiaPartyTick();
+		const bool expiredInvitations =
+			!worldState.partyManager().expireInvitations(partyTick).empty();
+		const AutomatiaParty::OperationResult operationResult =
+			executeAutomatiaPartyRequest(request, *actor, partyTick);
+		AutomatiaParty::Protocol::Result response;
+		response.operation = request.operation;
+		response.status = operationResult.status;
+		response.requestId = request.requestId;
+		response.partyId = operationResult.partyId;
+		response.invitationId = operationResult.invitationId;
+		response.revision = operationResult.revision;
+		const std::vector<std::uint8_t> responsePacket =
+			AutomatiaParty::Protocol::encodeResult(response);
+		if (!queueLateJoinRecordForPlayer(player, responsePacket))
+		{
+			printlog(
+				"[Party] Server could not send request result to player %d.",
+				player);
+		}
+		printlog(
+			"[Party] Player %d request %u (%u) -> %s, party %llu.",
+			player,
+			request.requestId,
+			static_cast<unsigned>(request.operation),
+			AutomatiaParty::operationStatusName(operationResult.status),
+			static_cast<unsigned long long>(operationResult.partyId));
+		if (expiredInvitations || operationResult
+			|| operationResult.status
+				== AutomatiaParty::OperationStatus::InvitationExpired)
+		{
+			serverSynchronizeAllAutomatiaPartyRecipients();
+		}
+	}},
 	{'MMBG', [](){
 		if (!net_packet || net_packet->len < 25)
 		{
@@ -14263,6 +15448,8 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
+		serverUnbindAutomatiaPartyIdentity(
+			playerIndex, "runtime slot allocation", true);
 
 		const bool returningPlayer =
 			requestedSlot != 0 && clientSaveKey != 0;
@@ -14395,6 +15582,17 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		if (net_packet->data[5] == 0)
 		{
 			g_lateJoinLastProgressTick[player] = ticks;
+			return;
+		}
+
+		if (!serverBindAutomatiaPartyIdentity(
+				player, "Ready identity finalization")
+			&& characterSaveMode != CharacterSaveMode::NONE)
+		{
+			printlog(
+				"[Party] Aborting Ready player %d because its durable identity could not be bound.",
+				player);
+			abortServerLateJoinPlayer(player, 4);
 			return;
 		}
 
@@ -15733,12 +16931,29 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 	// message
 	{'MSGS', [](){
-		const int pnum =
-			decodeGameplayPacketPlayerIndex(
-				net_packet->data[4]
-			);
-		if ( pnum < 0 )
+		if (!net_packet || net_packet->len < 10)
 		{
+			printlog("[NET]: server rejected a truncated MSGS packet.");
+			return;
+		}
+		const int pnum = static_cast<int>(net_packet->data[4]);
+		if (pnum <= 0 || pnum >= MAXPLAYERS
+			|| !currentPacketSenderMatchesPlayer(pnum))
+		{
+			printlog(
+				"[NET]: server rejected an unauthenticated MSGS sender claim.");
+			return;
+		}
+		const void* terminator = memchr(
+			&net_packet->data[9], '\0',
+			static_cast<std::size_t>(net_packet->len - 9));
+		if (!terminator
+			|| static_cast<const Uint8*>(terminator)
+				!= &net_packet->data[net_packet->len - 1]
+			|| static_cast<std::size_t>(net_packet->len - 10)
+				> AutomatiaPartyChat::MAX_MESSAGE_BYTES)
+		{
+			printlog("[NET]: server rejected a malformed MSGS message.");
 			return;
 		}
 		client_keepalive[pnum] = ticks;
@@ -15750,7 +16965,7 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 		char fmt[1024];
 		const int len = snprintf(fmt, sizeof(fmt), "%s: %s", shortname, (char*)(&net_packet->data[9]));
-		messagePlayerColor(clientnum, type, color, fmt);
+		messagePlayerColor(clientnum, type, color, "%s", fmt);
 
 		playSound(Message::CHAT_MESSAGE_SFX, 64);
 
@@ -18557,6 +19772,15 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 		while ( packet = net_handler->getGamePacket() )
 		{
 			g_currentPacketSenderHostIndex = packet->senderHostIndex();
+			if (!net_packet || !packet->data()
+				|| packet->len() < 4
+				|| packet->len() > NET_PACKET_SIZE)
+			{
+				printlog("[NET]: server discarded an invalid-size P2P packet");
+				delete packet;
+				g_currentPacketSenderHostIndex = -1;
+				continue;
+			}
 			memcpy(net_packet->data, packet->data(), packet->len());
 			net_packet->len = packet->len();
 
@@ -18633,6 +19857,7 @@ void serverHandleMessages(Uint32 framerateBreakInterval)
 			abortServerLateJoinPlayer(player, 1);
 		}
 	}
+	serverMaintainAutomatiaPartyBindings();
 	if ( !initialInstanceKey.empty()
 		&& worldState.activeIdentity()
 		&& worldState.activeIdentity()->key() != initialInstanceKey )
@@ -18661,15 +19886,29 @@ bool handleSafePacket()
 	node_t* node;
 	int c, j;
 
+	if (!net_packet || !net_packet->data || net_packet->len < 4)
+	{
+		printlog("[NET]: ignored packet too short for a reliable-envelope tag");
+		return true;
+	}
+
 	// safe packet
 	Uint32 packetId = SDLNet_Read32(&net_packet->data[0]);
+	if (multiplayer == CLIENT
+		&& incomingPacketRequiresAuthenticatedServer()
+		&& !currentClientPacketSenderMatchesServer())
+	{
+		printlog(
+			"[Automatia] Client rejected party/late-join state not sent by its server.");
+		return true;
+	}
 	if (packetId == 'SAFE')
 	{
-        if ( net_packet->len < 9 )
-        {
-            printlog("[NET]: ignored truncated SAFE packet");
-            return true;
-        }
+	        if ( net_packet->len < 13 )
+	        {
+	            printlog("[NET]: ignored SAFE packet with a truncated payload");
+	            return true;
+	        }
         if ( net_packet->data[4] > MAXPLAYERS )
         {
             printlog(
@@ -18682,6 +19921,15 @@ bool handleSafePacket()
 		{
 			int receivedPacketNum = SDLNet_Read32(&net_packet->data[5]);
 			Uint8 fromClientnum = net_packet->data[4];
+			if (multiplayer == SERVER
+				&& (fromClientnum == 0
+					|| !currentPacketSenderMatchesPlayer(fromClientnum)))
+			{
+				printlog(
+					"[NET]: rejected SAFE packet whose claimed sender %u does not match its transport endpoint",
+					static_cast<unsigned>(fromClientnum));
+				return true;
+			}
 
 			if ( ticks > (60 * TICKS_PER_SECOND) && (ticks % (TICKS_PER_SECOND / 2) == 0) )
 			{
@@ -18714,6 +19962,7 @@ bool handleSafePacket()
 			safePacketsReceivedMap[fromClientnum].insert(std::make_pair(receivedPacketNum, ticks));
 
 			// send an ack
+			const IPaddress receivedAddress = net_packet->address;
 			j = net_packet->data[4];
 			net_packet->data[4] = clientnum;
 			strcpy((char*)net_packet->data, "GOTP");
@@ -18743,6 +19992,7 @@ bool handleSafePacket()
 					sendPacket(net_sock, -1, net_packet, j - 1);
 				}
 			}
+			net_packet->address = receivedAddress;
 			net_packet->len = c - 9;
 			Uint8 bytedata[NET_PACKET_SIZE];
 			memcpy(&bytedata, net_packet->data + 9, net_packet->len);
@@ -18781,17 +20031,25 @@ bool handleSafePacket()
 	// they got the safe packet
 	else if (packetId == 'GOTP')
 	{
-        if ( net_packet->len < 9 )
-        {
-            printlog("[NET]: ignored truncated GOTP packet");
-            return true;
-        }
+	        if ( net_packet->len != 9 )
+	        {
+	            printlog("[NET]: ignored malformed GOTP packet");
+	            return true;
+	        }
 		for ( node = safePacketsSent.first; node != NULL; node = node->next )
 		{
 			packetsend_t* packet = (packetsend_t*)node->element;
 			if ( packet->num == SDLNet_Read32(&net_packet->data[5]) )
 			{
-				list_RemoveNode(node);
+				if (currentPacketSenderMatchesReliableRecipient(packet))
+				{
+					list_RemoveNode(node);
+				}
+				else
+				{
+					printlog(
+						"[NET]: rejected reliable-packet acknowledgement from the wrong transport endpoint");
+				}
 				break;
 			}
 		}
@@ -18814,6 +20072,7 @@ void closeNetworkInterfaces()
 	printlog("closing network interfaces...\n");
 
 	receivedclientnum = false;
+	g_currentPacketSenderHostIndex = -1;
 	g_clientLateJoinAssembler.reset();
 	g_clientLateJoinBegin = LateJoinProtocol::Begin{};
 	g_clientLateJoinSpawnAuthorized = false;
@@ -18829,6 +20088,13 @@ void closeNetworkInterfaces()
 	g_clientAuthoritativeVisiblePlayerMaskValid = false;
 	clientConnectedToDedicatedServer = false;
 	clientServerCharacterSaveMode = CharacterSaveMode::NONE;
+	clientResetAutomatiaPartyState();
+	worldState.partyManager().clearOnlineBindings();
+	std::fill(
+		std::begin(g_partySyncSequences),
+		std::end(g_partySyncSequences),
+		std::uint64_t{0});
+	g_partyLastMaintenanceTick = 0;
 	resetClientPersistentMinimapSync();
 	for (int c = 1; c < MAXPLAYERS; ++c)
 	{
@@ -19092,7 +20358,7 @@ int EOSPacketThread(void* data)
 				packets.push(new SteamPacketWrapper(
 					packet,
 					packetlen,
-					EOS.P2PConnectionInfo.getIndexFromPeerId(remoteId)
+					authenticatedEosPacketSenderHostIndex(remoteId)
 				));
 				packet = nullptr;
 			}

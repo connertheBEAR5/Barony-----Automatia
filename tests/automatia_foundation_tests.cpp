@@ -137,10 +137,17 @@ static bool testPacketScope()
 	const std::array<std::uint8_t, 4> shop = {'S', 'H', 'O', 'P'};
 	const std::array<std::uint8_t, 4> summon = {'S', 'U', 'M', 'M'};
 	const std::array<std::uint8_t, 4> equip = {'E', 'Q', 'U', 'I'};
-	const std::array<std::uint8_t, 4> ensemble = {'E', 'N', 'S', 'M'};
+    const std::array<std::uint8_t, 4> ensemble = {'E', 'N', 'S', 'M'};
+    const std::array<std::uint8_t, 4> partyRequest = {'P', 'T', 'Y', 'Q'};
+    const std::array<std::uint8_t, 4> partyResult = {'P', 'T', 'Y', 'R'};
+    const std::array<std::uint8_t, 4> partyState = {'P', 'T', 'Y', 'S'};
+    const std::array<std::uint8_t, 4> partyInvites = {'P', 'T', 'Y', 'I'};
     std::array<std::uint8_t, 13> safeEntity{};
     std::memcpy(safeEntity.data(), "SAFE", 4);
     std::memcpy(safeEntity.data() + 9, "ENTF", 4);
+    std::array<std::uint8_t, 13> safeParty{};
+    std::memcpy(safeParty.data(), "SAFE", 4);
+    std::memcpy(safeParty.data() + 9, "PTYS", 4);
 
     EXPECT(packetUsesActiveMapScope(entity.data(), entity.size()));
     EXPECT(packetUsesActiveMapScope(tile.data(), tile.size()));
@@ -173,6 +180,11 @@ static bool testPacketScope()
     EXPECT(!packetUsesActiveMapScope(latencyResponse.data(), latencyResponse.size()));
     EXPECT(!packetUsesActiveMapScope(discovery.data(), discovery.size()));
     EXPECT(!packetUsesActiveMapScope(preferences.data(), preferences.size()));
+    EXPECT(!packetUsesActiveMapScope(partyRequest.data(), partyRequest.size()));
+    EXPECT(!packetUsesActiveMapScope(partyResult.data(), partyResult.size()));
+    EXPECT(!packetUsesActiveMapScope(partyState.data(), partyState.size()));
+    EXPECT(!packetUsesActiveMapScope(partyInvites.data(), partyInvites.size()));
+    EXPECT(!packetUsesActiveMapScope(safeParty.data(), safeParty.size()));
     EXPECT(!packetUsesActiveMapScope(nullptr, 0));
     return true;
 }
@@ -629,6 +641,16 @@ static bool testAtomicWorldSave()
 	document["dialogue"] = Json{{"npc:7", Json{{"current_node", 3}}}};
 
     EXPECT(AutomatiaSave::validate(document).ok);
+    EXPECT(document["schema_version"] == 2);
+    EXPECT(document["party"]["next_id"] == 1);
+
+    Json versionOne = document;
+    versionOne["schema_version"] = 1;
+    versionOne.erase("party");
+    EXPECT(AutomatiaSave::validate(versionOne).ok);
+    Json missingParty = document;
+    missingParty.erase("party");
+    EXPECT(!AutomatiaSave::validate(missingParty));
 
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path directory =

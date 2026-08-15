@@ -9,6 +9,7 @@
 #include "late_join_protocol.hpp"
 #include "late_join_state.hpp"
 #include "lan_discovery.hpp"
+#include "party_protocol.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -23,6 +24,7 @@
 #include <sys/socket.h>
 #include <unordered_set>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace
@@ -104,21 +106,25 @@ std::vector<std::uint8_t> makeJoin(const std::string& version,
 bool validRuntimeHelo(const std::vector<std::uint8_t>& packet,
     std::uint8_t& player)
 {
-    if (packet.size() < 9 || std::memcmp(packet.data(), "HELO", 4) != 0)
+    if (packet.size() < 10 || std::memcmp(packet.data(), "HELO", 4) != 0
+        || packet[packet.size() - 2] != 1 || packet.back() > 2)
     {
         return false;
     }
     const std::uint32_t assigned = LateJoinProtocol::read32(packet.data(), 4);
-    if (assigned == 0 || assigned >= 16 || packet.back() != 1)
-    {
-        return false;
-    }
-    constexpr std::size_t playerCount = 15;
     constexpr std::size_t lobbyPlayerBytes = 38;
     constexpr std::size_t savedPlayerBytes = 98;
-    const std::size_t playerPayload = packet.size() - 9;
-    if (playerPayload != playerCount * lobbyPlayerBytes
-        && playerPayload != playerCount * savedPlayerBytes)
+    const std::size_t playerPayload = packet.size() - 10;
+    std::size_t playerCount = 0;
+    if (playerPayload % lobbyPlayerBytes == 0)
+    {
+        playerCount = playerPayload / lobbyPlayerBytes;
+    }
+    else if (playerPayload % savedPlayerBytes == 0)
+    {
+        playerCount = playerPayload / savedPlayerBytes;
+    }
+    if (assigned == 0 || playerCount == 0 || assigned >= playerCount)
     {
         return false;
     }
@@ -129,15 +135,20 @@ bool validRuntimeHelo(const std::vector<std::uint8_t>& packet,
 bool validRuntimeStart(const std::vector<std::uint8_t>& packet,
     bool expectedReturning, std::string& mapFile)
 {
-    if (packet.size() < 29 || std::memcmp(packet.data(), "STRT", 4) != 0
+    if (packet.size() < 28 || std::memcmp(packet.data(), "STRT", 4) != 0
         || packet[12] != (expectedReturning ? 1 : 0)
-        || packet[17] != 1 || packet[18] == 0)
+        || packet[17] < 1 || packet[17] > 4 || packet[18] == 0)
     {
         return false;
     }
     const std::size_t mapLength = packet[18];
     const std::size_t metadataOffset = 19 + mapLength;
-    if (packet.size() != metadataOffset + 9 || packet[metadataOffset + 8] > 1)
+    const std::size_t versionBytes = packet[17] >= 2 ? 24 : 0;
+    const std::size_t transformationBytes = packet[17] >= 3 ? 8 : 0;
+    const std::size_t visiblePlayerMaskBytes = packet[17] >= 4 ? 4 : 0;
+    if (packet.size() != metadataOffset + 9 + versionBytes
+            + transformationBytes + visiblePlayerMaskBytes
+        || packet[metadataOffset + 8] > 1)
     {
         return false;
     }
@@ -218,7 +229,7 @@ int main(int argc, char** argv)
             return true;
         };
         std::uint32_t slot = 0;
-        if (!parse32(argv[3], slot) || slot == 0 || slot >= 16
+        if (!parse32(argv[3], slot) || slot == 0 || slot >= 15
             || !parse32(argv[4], mapSeed)
             || !parse32(argv[5], gameKey) || gameKey == 0
             || !parse32(argv[6], lobbyKey) || lobbyKey == 0
@@ -357,7 +368,7 @@ int main(int argc, char** argv)
             {
                 const std::uint32_t assigned =
                     LateJoinProtocol::read32(inner.data(), 4);
-                if (assigned > 0 && assigned < 16)
+                if (assigned > 0 && assigned < 15)
                 {
                     acknowledgementPlayer = static_cast<std::uint8_t>(assigned);
                 }
@@ -370,7 +381,7 @@ int main(int argc, char** argv)
             {
                 const std::uint32_t assigned =
                     LateJoinProtocol::read32(inner.data() + 12, 4);
-                if (assigned > 0 && assigned < 16)
+                if (assigned > 0 && assigned < 15)
                 {
                     acknowledgementPlayer =
                         static_cast<std::uint8_t>(assigned);
@@ -647,6 +658,49 @@ int main(int argc, char** argv)
 					catchupAssembler.snapshot(), packets))
 			{
 				std::cerr << "invalid LJCE\n";
+				close(socketHandle);
+				return 1;
+			}
+			AutomatiaParty::Protocol::RecipientSnapshotState partySnapshot;
+			for (const std::vector<std::uint8_t>& record : packets)
+			{
+				if (record.size() >= 4
+					&& std::memcmp(record.data(), "PTYS", 4) == 0)
+				{
+					AutomatiaParty::Protocol::PartyState state;
+					if (!AutomatiaParty::Protocol::decodePartyState(
+							record.data(), record.size(), state)
+						|| state.recipientSlot != player
+						|| partySnapshot.stagePartyState(std::move(state))
+							== AutomatiaParty::Protocol::SnapshotStageResult::Rejected)
+					{
+						std::cerr << "invalid party state in late-join catch-up\n";
+						close(socketHandle);
+						return 1;
+					}
+				}
+				else if (record.size() >= 4
+					&& std::memcmp(record.data(), "PTYI", 4) == 0)
+				{
+					AutomatiaParty::Protocol::InvitationList invitations;
+					if (!AutomatiaParty::Protocol::decodeInvitationList(
+							record.data(), record.size(), invitations)
+						|| invitations.recipientSlot != player
+						|| partySnapshot.stageInvitationList(
+								std::move(invitations))
+							== AutomatiaParty::Protocol::SnapshotStageResult::Rejected)
+					{
+						std::cerr << "invalid invitation state in late-join catch-up\n";
+						close(socketHandle);
+						return 1;
+					}
+				}
+			}
+			if (partySnapshot.committedSequence() == 0
+				|| partySnapshot.partyState().recipientSlot != player
+				|| partySnapshot.invitationList().recipientSlot != player)
+			{
+				std::cerr << "late-join catch-up omitted recipient party records\n";
 				close(socketHandle);
 				return 1;
 			}

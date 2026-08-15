@@ -10,6 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "main.hpp"
+#include "automatia_identity.hpp"
 #include "automatia_world_save.hpp"
 #include "files.hpp"
 #include "game.hpp"
@@ -43,18 +44,24 @@
 #include <ctime>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <random>
 #include <sstream>
 
 namespace
 {
     constexpr const char* AUTOMATIA_WORLD_SAVE_SUFFIX =
         ".automatia-world.json";
+    constexpr const char* AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY =
+        "automatia_world_save_transaction";
+    constexpr const char* AUTOMATIA_WORLD_SAVE_TRANSACTION_DOCUMENT_KEY =
+        "save_transaction_id";
 
     std::string savedStableItemId(const Item* item)
     {
@@ -107,15 +114,102 @@ namespace
         return -1;
     }
 
+    bool characterWorldSaveTransaction(
+        const SaveGameInfo& characterSave,
+        std::string& transactionId)
+    {
+        transactionId.clear();
+        bool found = false;
+        for (const auto& entry : characterSave.additional_data)
+        {
+            if (entry.first != AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY)
+            {
+                continue;
+            }
+            if (found || entry.second.empty() || entry.second.size() > 128)
+            {
+                transactionId.clear();
+                return false;
+            }
+            found = true;
+            transactionId = entry.second;
+        }
+        return found;
+    }
+
+    bool characterSaveRequiresWorldSave(const SaveGameInfo& characterSave)
+    {
+        return std::any_of(
+            characterSave.additional_data.begin(),
+            characterSave.additional_data.end(),
+            [](const auto& entry)
+            {
+                return entry.first == AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY;
+            });
+    }
+
     bool worldSaveMatchesCharacterSave(
         const AutomatiaSave::Json& worldDocument,
         const SaveGameInfo& characterSave
     )
     {
-        return worldDocument.contains("session_id")
-            && worldDocument["session_id"].is_string()
-            && worldDocument["session_id"].get<std::string>()
-                == std::to_string(characterSave.gamekey);
+        if (!worldDocument.contains("session_id")
+            || !worldDocument["session_id"].is_string()
+            || worldDocument["session_id"].get<std::string>()
+                != std::to_string(characterSave.gamekey))
+        {
+            return false;
+        }
+
+        std::string characterTransaction;
+        const bool characterHasTransaction =
+            characterWorldSaveTransaction(
+                characterSave, characterTransaction);
+        if (characterSaveRequiresWorldSave(characterSave)
+            && !characterHasTransaction)
+        {
+            return false;
+        }
+        const bool worldHasTransaction = worldDocument.contains(
+            AUTOMATIA_WORLD_SAVE_TRANSACTION_DOCUMENT_KEY);
+        if (characterHasTransaction != worldHasTransaction)
+        {
+            return false;
+        }
+        return !worldHasTransaction
+            || (worldDocument[
+                    AUTOMATIA_WORLD_SAVE_TRANSACTION_DOCUMENT_KEY].is_string()
+                && !characterTransaction.empty()
+                && worldDocument[
+                    AUTOMATIA_WORLD_SAVE_TRANSACTION_DOCUMENT_KEY]
+                        .get<std::string>() == characterTransaction);
+    }
+
+    std::string generateWorldSaveTransactionId()
+    {
+        static std::atomic<std::uint64_t> counter{0};
+        std::uint64_t high = static_cast<std::uint64_t>(
+            std::chrono::high_resolution_clock::now()
+                .time_since_epoch().count());
+        std::uint64_t low = ++counter;
+        try
+        {
+            std::random_device source;
+            high ^= static_cast<std::uint64_t>(source()) << 32U;
+            high ^= static_cast<std::uint64_t>(source());
+            low ^= static_cast<std::uint64_t>(source()) << 32U;
+            low ^= static_cast<std::uint64_t>(source());
+        }
+        catch (const std::exception&)
+        {
+            // The time/counter pair remains process-unique if the platform's
+            // random source is unavailable.
+        }
+        std::ostringstream output;
+        output << std::hex << std::setfill('0')
+            << std::setw(16) << high
+            << std::setw(16) << low;
+        return output.str();
     }
 
 
@@ -172,31 +266,6 @@ namespace
     AutomatiaCharacterRuntimeState
         automatiaCharacterRuntimeState[MAXPLAYERS];
 
-    std::string trimAndLowerCharacterIdentity(const char* text)
-    {
-        std::string result = text ? text : "";
-        const auto isSpace = [](unsigned char character)
-        {
-            return std::isspace(character) != 0;
-        };
-        while (!result.empty()
-            && isSpace(static_cast<unsigned char>(result.front())))
-        {
-            result.erase(result.begin());
-        }
-        while (!result.empty()
-            && isSpace(static_cast<unsigned char>(result.back())))
-        {
-            result.pop_back();
-        }
-        for (char& character : result)
-        {
-            character = static_cast<char>(
-                std::tolower(static_cast<unsigned char>(character)));
-        }
-        return result;
-    }
-
     std::string hexadecimalCharacterIdentity(const std::string& identity)
     {
         static constexpr char hex[] = "0123456789abcdef";
@@ -238,7 +307,8 @@ namespace
         }
         if (mode == CharacterSaveMode::LOCAL)
         {
-            identity = trimAndLowerCharacterIdentity(stats[player]->name);
+            identity = AutomatiaParty::normalizeLocalCharacterIdentity(
+                stats[player]->name);
             if (identity.empty())
             {
                 error = "character name is empty";
@@ -256,7 +326,9 @@ namespace
                     static_cast<CSteamID*>(steamIDRemote[player - 1])
                         ->ConvertToUint64());
             }
-            else if (multiplayer == CLIENT && SteamUser())
+            else if ((multiplayer == CLIENT
+                    || (multiplayer == SERVER && player == 0))
+                && SteamUser())
             {
                 identity = std::to_string(
                     SteamUser()->GetSteamID().ConvertToUint64());
@@ -998,6 +1070,43 @@ namespace
         }
         return true;
     }
+}
+
+bool resolveAutomatiaDurablePlayerIdentity(
+    const int player,
+    const CharacterSaveMode mode,
+    AutomatiaParty::DurablePlayerIdentity& durableIdentity,
+    std::string& error
+)
+{
+    durableIdentity = {};
+    std::string value;
+    if (!characterIdentityForPlayer(player, mode, value, error))
+    {
+        return false;
+    }
+    switch (mode)
+    {
+        case CharacterSaveMode::LOCAL:
+            durableIdentity.kind =
+                AutomatiaParty::DurableIdentityKind::LocalName;
+            break;
+        case CharacterSaveMode::STEAM:
+            durableIdentity.kind =
+                AutomatiaParty::DurableIdentityKind::SteamId;
+            break;
+        default:
+            error = "character save mode does not provide durable identity";
+            return false;
+    }
+    durableIdentity.value = std::move(value);
+    if (!durableIdentity.isValid())
+    {
+        durableIdentity = {};
+        error = "resolved character identity is unsafe or non-canonical";
+        return false;
+    }
+    return true;
 }
 
 bool captureAutomatiaCharacterSaveRuntimeState(int player)
@@ -3655,6 +3764,10 @@ bool saveGameExists(bool singleplayer, int saveIndex)
                 return false;
             }
         }
+        else if ( worldPathError || characterSaveRequiresWorldSave(info) )
+        {
+            return false;
+        }
 
 		return true;
 	}
@@ -3693,6 +3806,12 @@ SaveGameInfo getSaveGameInfo(bool singleplayer, int saveIndex)
             result = false;
             info.game_version = -1;
         }
+    }
+    else if ( result
+        && (worldPathError || characterSaveRequiresWorldSave(info)) )
+    {
+        result = false;
+        info.game_version = -1;
     }
 
 	/*
@@ -7263,6 +7382,43 @@ int saveGame(int saveIndex) {
 		return 1;
 	}
 
+    std::string worldSaveTransactionId;
+    if ( multiplayer != CLIENT )
+    {
+        worldSaveTransactionId = generateWorldSaveTransactionId();
+        std::string previousWorldSaveTransactionId;
+        const bool replacedWorldSaveTransaction = findCharacterMetadata(
+            info,
+            AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY,
+            previousWorldSaveTransactionId);
+        setCharacterMetadata(
+            info,
+            AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY,
+            worldSaveTransactionId);
+        if ( info.game_version >= 410 )
+        {
+            /*
+             * populateFromSession() seeds the save hash with the save time
+             * before hashing the serialized fields. Preserve that seed and
+             * apply only the additional_data delta for this marker. Rehashing
+             * from zero makes every otherwise-valid save fail its integrity
+             * check on reload.
+             */
+            if ( replacedWorldSaveTransaction )
+            {
+                info.hash -= djb2Hash(const_cast<char*>(
+                    previousWorldSaveTransactionId.c_str()));
+            }
+            else
+            {
+                info.hash += djb2Hash(const_cast<char*>(
+                    AUTOMATIA_WORLD_SAVE_TRANSACTION_KEY));
+            }
+            info.hash += djb2Hash(const_cast<char*>(
+                worldSaveTransactionId.c_str()));
+        }
+    }
+
 	static ConsoleVariable<bool> cvar_saveText("/save_text_format", true);
 
 	char path[PATH_MAX] = "";
@@ -7287,6 +7443,7 @@ int saveGame(int saveIndex) {
         if ( !writeAutomatiaPersistentWorldSave(
                 worldPath.string().c_str(),
                 std::to_string(uniqueGameKey),
+                worldSaveTransactionId,
                 worldError
             ) )
         {
@@ -7606,10 +7763,19 @@ int loadGame(int player, const SaveGameInfo& info) {
         std::error_code worldPathError;
         if ( std::filesystem::exists(worldPath, worldPathError) )
         {
+            std::string saveTransactionId;
+            if ( characterSaveRequiresWorldSave(info)
+                && !characterWorldSaveTransaction(info, saveTransactionId) )
+            {
+                printlog(
+                    "loadGame() failed: invalid Automatia save transaction metadata");
+                return 1;
+            }
             std::string worldError;
             if ( !loadAutomatiaPersistentWorldSave(
                     worldPath.string().c_str(),
                     std::to_string(info.gamekey),
+                    saveTransactionId,
                     worldError
                 ) )
             {
@@ -7619,6 +7785,12 @@ int loadGame(int player, const SaveGameInfo& info) {
                 );
                 return 1;
             }
+        }
+        else if ( worldPathError || characterSaveRequiresWorldSave(info) )
+        {
+            printlog(
+                "loadGame() failed: matching Automatia world save is missing");
+            return 1;
         }
     }
 
@@ -8687,7 +8859,7 @@ bool storeAutomatiaCharacterTransferPayload(
         return false;
     }
     if (characterSaveMode == CharacterSaveMode::LOCAL
-        && trimAndLowerCharacterIdentity(
+        && AutomatiaParty::normalizeLocalCharacterIdentity(
             info.players[0].stats.name.c_str()) != identity)
     {
         error = "received character name does not match the joined identity";

@@ -848,7 +848,7 @@ public:
 
 	bool HandleReceivedMessages(EOS_ProductUserId* remoteIdReturn);
 	bool HandleReceivedMessagesAndIgnore(EOS_ProductUserId* remoteIdReturn); // function to empty the packet queue on main lobby.
-	void SendMessageP2P(EOS_ProductUserId RemoteId, const void* data, int len);
+	bool SendMessageP2P(EOS_ProductUserId RemoteId, const void* data, int len);
 	bool serialize(void* file);
 	void readFromFile();
 	void readFromCmdLineArgs();

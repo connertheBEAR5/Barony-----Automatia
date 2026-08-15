@@ -12,6 +12,8 @@
 #pragma once
 
 #include "late_join_state.hpp"
+#include "party_chat.hpp"
+#include "party_protocol.hpp"
 
 #include "game.hpp"
 #include <cstddef>
@@ -125,6 +127,50 @@ void disconnectAutomatiaRemotePlayer(
     int player,
     const char* reason,
     bool notifyOtherClients = true);
+
+/*
+ * Party transport is session-global and recipient-specific. These backend
+ * entry points intentionally expose no social UI.
+ */
+bool clientSendAutomatiaPartyRequest(
+    const AutomatiaParty::Protocol::Request& request);
+const AutomatiaParty::Protocol::PartyState& clientAutomatiaPartyState();
+const AutomatiaParty::Protocol::InvitationList&
+    clientAutomatiaPartyInvitations();
+bool clientTakeAutomatiaPartyResult(
+    AutomatiaParty::Protocol::Result& result);
+void clientResetAutomatiaPartyState();
+
+/*
+ * Submits Party chat through the server-authoritative route. Remote clients
+ * emit a bounded PCHT request; a listen-server local player enters the same
+ * PartyManager recipient-resolution path without fabricating a network peer.
+ */
+bool submitAutomatiaPartyChat(
+    int localPlayer,
+    const std::string& message);
+
+/*
+ * Social UI facade. Remote clients still travel through authenticated PTYQ;
+ * a listen-server's local player executes through the same validator and
+ * reads the same WorldState-owned authority without creating a loopback
+ * packet or a second client-side source of truth.
+ */
+bool submitAutomatiaPartyRequestForLocalPlayer(
+    int localPlayerSlot,
+    const AutomatiaParty::Protocol::Request& request);
+bool copyAutomatiaPartySnapshotForLocalPlayer(
+    int localPlayerSlot,
+    AutomatiaParty::Protocol::PartyState& partyState,
+    AutomatiaParty::Protocol::InvitationList& invitationList);
+
+/*
+ * The lobby receive loop uses the platform APIs directly instead of
+ * NetHandler, so it must publish the authenticated P2P sender while a packet
+ * is dispatched. Direct-connect packets continue to authenticate by their
+ * UDP endpoint.
+ */
+void setLobbyPacketSenderHostIndex(int senderHostIndex);
 
 // server/game flags
 extern Uint32 svFlags;
