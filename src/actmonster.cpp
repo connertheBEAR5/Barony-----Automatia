@@ -6442,7 +6442,7 @@ bool makeFollower(int monsterclicked, bool ringconflict, char namesays[64],
         // ... and a nametag
 		if (!monsterNameIsGeneric(*myStats) || myStats->type == SLIME) {
 			if (monsterclicked == clientnum || splitscreen) {
-				Entity* nametag = newEntity(-1, 1, map.entities, nullptr);
+				Entity* nametag = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my);
 				nametag->x = my->x;
 				nametag->y = my->y;
 				nametag->z = my->z - 6;
@@ -7316,6 +7316,13 @@ void actMonster(Entity* my)
 			case MONSTER_UNUSED_8: break;
 			default: printlog("Unknown monster, can't init!"); break;
 			}
+			for ( Entity* bodypart : my->bodyparts )
+			{
+				if ( bodypart )
+				{
+					bodypart->inheritSpatialContextFrom(my);
+				}
+			}
 		}
 		else if (MONSTER_INIT)
 		{
@@ -7451,6 +7458,14 @@ void actMonster(Entity* my)
 					{
 						automatiaApplyInfiniteDungeonMonsterScaling(my);
 					}
+		}
+
+		for ( Entity* bodypart : my->bodyparts )
+		{
+			if ( bodypart )
+			{
+				bodypart->inheritSpatialContextFrom(my);
+			}
 		}
 
 		MONSTER_INIT = 2;
@@ -8288,30 +8303,35 @@ void actMonster(Entity* my)
 		entity = dropItemMonster(myStats->helmet, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->helmet = NULL;
 		entity = dropItemMonster(myStats->breastplate, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->breastplate = NULL;
 		entity = dropItemMonster(myStats->gloves, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->gloves = NULL;
 		entity = dropItemMonster(myStats->shoes, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->shoes = NULL;
 		entity = dropItemMonster(myStats->shield, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->shield = NULL;
@@ -8322,6 +8342,7 @@ void actMonster(Entity* my)
 				entity = dropItemMonster(myStats->weapon, my, myStats);
 				if ( entity )
 				{
+					entity->inheritSpatialContextFrom(my);
 					entity->flags[USERFLAG1] = true;
 				}
 			}
@@ -8342,24 +8363,28 @@ void actMonster(Entity* my)
 		entity = dropItemMonster(myStats->cloak, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->cloak = NULL;
 		entity = dropItemMonster(myStats->amulet, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->amulet = NULL;
 		entity = dropItemMonster(myStats->ring, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->ring = NULL;
 		entity = dropItemMonster(myStats->mask, my, myStats);
 		if ( entity )
 		{
+			entity->inheritSpatialContextFrom(my);
 			entity->flags[USERFLAG1] = true;
 		}
 		myStats->mask = NULL;
@@ -8404,6 +8429,7 @@ void actMonster(Entity* my)
 									Entity* trap = item_ToolBeartrap(item, my);
 									if ( trap )
 									{
+										trap->inheritSpatialContextFrom(my);
 										trap->x = my->x;
 										trap->y = my->y;
 									}
@@ -8422,6 +8448,7 @@ void actMonster(Entity* my)
 				entity = dropItemMonster(item, my, myStats); // returns nullptr on "undroppables"
 				if ( entity )
 				{
+					entity->inheritSpatialContextFrom(my);
 					entity->flags[USERFLAG1] = true;    // makes items passable, improves performance
 				}
 				if ( wasQuiver )
@@ -8511,7 +8538,7 @@ void actMonster(Entity* my)
 		}
 		if ( myStats->GOLD > 0 && myStats->monsterNoDropItems == 0 )
 		{
-			entity = newEntity(myStats->GOLD < 5 ? 1379 : 130, 0, map.entities, nullptr); // 130 = goldbag model
+			entity = newEntityWithSpatialContext(myStats->GOLD < 5 ? 1379 : 130, 0, map.entities, nullptr, my); // 130 = goldbag model
 			entity->sizex = 4;
 			entity->sizey = 4;
 			entity->x = my->x;
@@ -8758,6 +8785,7 @@ void actMonster(Entity* my)
 			Entity* monster = summonMonster(REVENANT_SKULL, x, y, false);
 			if ( monster )
 			{
+				monster->inheritSpatialContextFrom(my);
 				if ( Stat* monsterStats = monster->getStats() )
 				{
 					monster->setEffect(EFF_STUNNED, true, 20, false);
@@ -13169,6 +13197,7 @@ timeToGoAgain:
 				{
 					if ( Entity* summon = summonMonster(creature, ((int)(my->x / 16)) * 16 + 8, ((int)(my->y / 16)) * 16 + 8) )
 					{
+						summon->inheritSpatialContextFrom(my);
 						if ( Stat* summonStats = summon->getStats() )
 						{
 							summonStats->monsterNoDropItems = 1;
@@ -13194,6 +13223,7 @@ timeToGoAgain:
 				}
 				if ( Entity* summon = summonMonster(creature, ((int)(my->x / 16)) * 16 + 8, ((int)(my->y / 16)) * 16 + 8) )
 				{
+					summon->inheritSpatialContextFrom(my);
 					if ( Stat* summonStats = summon->getStats() )
 					{
 						summonStats->monsterNoDropItems = 1;
@@ -13778,7 +13808,7 @@ timeToGoAgain:
 					{
 						continue;
 					}
-					Entity* entity = newEntity(245, 1, map.entities, nullptr); // boulder
+					Entity* entity = newEntityWithSpatialContext(245, 1, map.entities, nullptr, my); // boulder
 					entity->parent = my->getUID();
 					if ( angle == 0 )
 					{
@@ -13864,7 +13894,7 @@ timeToGoAgain:
 					{
 						continue;
 					}
-					Entity* entity = newEntity(245, 1, map.entities, nullptr); // boulder
+					Entity* entity = newEntityWithSpatialContext(245, 1, map.entities, nullptr, my); // boulder
 					entity->parent = my->getUID();
 					if ( angle == 0 )
 					{
@@ -13945,7 +13975,7 @@ timeToGoAgain:
 				my->yaw = oyaw;
 				for ( c = 0; c < 12; ++c )
 				{
-					Entity* entity = newEntity(245, 1, map.entities, nullptr); // boulder
+					Entity* entity = newEntityWithSpatialContext(245, 1, map.entities, nullptr, my); // boulder
 					entity->parent = my->getUID();
 					if ( angle == 0 )
 					{
@@ -15857,7 +15887,7 @@ bool forceFollower(Entity& leader, Entity& follower)
         // ... and a nametag
 		if (!monsterNameIsGeneric(*followerStats) || followerStats->type == SLIME) {
 			if (player == clientnum || splitscreen) {
-				Entity* nametag = newEntity(-1, 1, map.entities, nullptr);
+				Entity* nametag = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, &follower);
 				nametag->x = follower.x;
 				nametag->y = follower.y;
 				nametag->z = follower.z - 6;
@@ -19167,6 +19197,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 								Entity* dropped = dropItemMonster(item, this, myStats, item->count);
 								if ( dropped )
 								{
+									dropped->inheritSpatialContextFrom(this);
 									c = 0;
 									droppedSomething = true;
 								}
@@ -19202,6 +19233,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					}
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(this);
 						confirmDropped = true;
 						dropped->itemOriginalOwner = owner;
 					}
@@ -19218,6 +19250,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					}
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(this);
 						confirmDropped = true;
 						dropped->itemOriginalOwner = owner;
 					}
@@ -19234,6 +19267,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					}
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(this);
 						confirmDropped = true;
 						dropped->itemOriginalOwner = owner;
 					}
@@ -19250,6 +19284,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					}
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(this);
 						confirmDropped = true;
 						dropped->itemOriginalOwner = owner;
 					}
@@ -19266,6 +19301,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					}
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(this);
 						confirmDropped = true;
 						dropped->itemOriginalOwner = owner;
 					}
@@ -19285,6 +19321,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 						}
 						if ( dropped )
 						{
+							dropped->inheritSpatialContextFrom(this);
 							confirmDropped = true;
 							dropped->itemOriginalOwner = owner;
 						}
@@ -19301,6 +19338,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 						}
 						if ( dropped )
 						{
+							dropped->inheritSpatialContextFrom(this);
 							confirmDropped = true;
 							dropped->itemOriginalOwner = owner;
 						}
@@ -19337,6 +19375,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 				}
 				if ( dropped )
 				{
+					dropped->inheritSpatialContextFrom(this);
 					dropped->itemOriginalOwner = owner;
 					if ( dropWeaponOnly )
 					{

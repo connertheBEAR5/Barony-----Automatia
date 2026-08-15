@@ -6930,7 +6930,7 @@ void actMagicMissile(Entity* my)   //TODO: Verify this function.
 						}
 					}
 
-					Entity* entity = newEntity(spell->ID == SPELL_SHADE_BOLT ? 1801 : 1802, 1, map.entities, nullptr); // black magic ball
+					Entity* entity = newEntityWithSpatialContext(spell->ID == SPELL_SHADE_BOLT ? 1801 : 1802, 1, map.entities, nullptr, my); // black magic ball
 					entity->parent = lightParent; // who to follow
 					entity->x = spawnx;
 					entity->y = spawny;
@@ -7489,7 +7489,7 @@ void createEnsembleTargetParticleCircling(Entity* parent)
 	if ( !parent ) { return; }
 
 	// world particle
-	Entity* entity = newEntity(198, 1, map.entities, nullptr);
+	Entity* entity = newEntityWithSpatialContext(198, 1, map.entities, nullptr, parent);
 	entity->yaw = (local_rng.rand() % 3) * 2 * PI / 3;
 	entity->x = parent->x;
 	entity->y = parent->y;
@@ -7535,7 +7535,7 @@ void createEnsembleHUDParticleCircling(Entity* parent)
 		|| parent->behavior == &actDeathGhost )
 	{
 		// create overdraw HUD particle
-		Entity* entity = newEntity(198, 1, map.entities, nullptr);
+		Entity* entity = newEntityWithSpatialContext(198, 1, map.entities, nullptr, parent);
 		float x = 6 * 10;
 		float y = 0.1;
 		float z = 7;
@@ -7622,7 +7622,7 @@ void actHUDMagicParticleCircling(Entity* my)
 	{
 		Entity* entity;
 
-		entity = newEntity(my->sprite, 1, map.entities, nullptr); //Particle entity.
+		entity = newEntityWithSpatialContext(my->sprite, 1, map.entities, nullptr, my); //Particle entity.
 
 		entity->x = my->x + (local_rng.rand() % 50 - 25) / 200.f;
 		entity->y = my->y + (local_rng.rand() % 50 - 25) / 200.f;
@@ -7679,7 +7679,7 @@ void actMagicParticleCircling2(Entity* my)
 	{
 		Entity* entity;
 
-		entity = newEntity(my->sprite, 1, map.entities, nullptr); //Particle entity.
+		entity = newEntityWithSpatialContext(my->sprite, 1, map.entities, nullptr, my); //Particle entity.
 
 		entity->x = my->x + (local_rng.rand() % 50 - 25) / 200.f;
 		entity->y = my->y + (local_rng.rand() % 50 - 25) / 200.f;
@@ -7716,7 +7716,7 @@ Entity* spawnMagicParticle(Entity* parentent)
 	}
 	Entity* entity;
 
-	entity = newEntity(parentent->sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(parentent->sprite, 1, map.entities, nullptr, parentent); //Particle entity.
 
 	entity->x = parentent->x + (local_rng.rand() % 50 - 25) / 20.f;
 	entity->y = parentent->y + (local_rng.rand() % 50 - 25) / 20.f;
@@ -7755,7 +7755,7 @@ Entity* spawnMagicParticleCustom(Entity* parentent, int sprite, real_t scale, re
 	}
 	Entity* entity;
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parentent); //Particle entity.
 
 	int size = 50 / spreadReduce;
 	entity->x = parentent->x + (local_rng.rand() % size - size / 2) / 20.f;
@@ -7844,7 +7844,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 		return;
 	}
 
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -7866,7 +7866,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 
 	real_t tmp = entity->yaw;
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -7886,7 +7886,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 		*cvar_magic_fx_light_bonus, 0.f);
 	entity->setUID(-3);
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -7906,7 +7906,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 		*cvar_magic_fx_light_bonus, 0.f);
 	entity->setUID(-3);
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -7926,7 +7926,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 		*cvar_magic_fx_light_bonus, 0.f);
 	entity->setUID(-3);
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -7946,7 +7946,7 @@ void createParticleCircling(Entity* parent, int duration, int sprite)
 		*cvar_magic_fx_light_bonus, 0.f);
 	entity->setUID(-3);
 
-	entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = parent->x;
@@ -8010,7 +8010,7 @@ void createParticleDot(Entity* parent)
 	}
 	for ( int c = 0; c < 50; c++ )
 	{
-		Entity* entity = newEntity(576, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(576, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = parent->x + (-4 + local_rng.rand() % 9);
@@ -8036,7 +8036,7 @@ void createParticleDot(Entity* parent)
 Entity* createParticleBolas(Entity* parent, int sprite, int duration, Item* item)
 {
 	if ( !parent ) { return nullptr; }
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->parent = parent->getUID();
@@ -8084,7 +8084,7 @@ Entity* createParticleAestheticOrbit(Entity* parent, int sprite, int duration, i
 			return nullptr;
 		}
 	}
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->actmagicOrbitDist = 6;
@@ -8125,7 +8125,7 @@ void createParticleRock(Entity* parent, int sprite, bool light)
 	}
 	for ( int c = 0; c < 5; c++ )
 	{
-		Entity* entity = newEntity(sprite != -1 ? sprite : 78, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite != -1 ? sprite : 78, 1, map.entities, nullptr, parent); //Particle entity.
 		if ( entity->sprite == 1336 )
 		{
 			entity->sprite = 1336 + local_rng.rand() % 3;
@@ -8166,7 +8166,7 @@ void createParticleShatteredGem(real_t x, real_t y, real_t z, int sprite, Entity
 {
 	for ( int c = 0; c < 5; c++ )
 	{
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		if ( parent )
@@ -8296,7 +8296,7 @@ void actParticleBolas(Entity* my)
 	{
 		if ( multiplayer != CLIENT && my->skill[10] > 0 && my->skill[12] >= 0 ) // not cursed
 		{
-			Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+			Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 			entity->flags[INVISIBLE] = true;
 			entity->flags[UPDATENEEDED] = true;
 			entity->flags[PASSABLE] = true;
@@ -10138,13 +10138,13 @@ void actParticleTest(Entity* my)
 	}
 }
 
-void createParticleErupt(real_t x, real_t y, int sprite)
+static void createParticleEruptSpatial(real_t x, real_t y, int sprite, const Entity* spatialSource)
 {
 	real_t yaw = 0;
 	int numParticles = 8;
 	for ( int c = 0; c < 8; c++ )
 	{
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, spatialSource); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = x;
@@ -10172,6 +10172,11 @@ void createParticleErupt(real_t x, real_t y, int sprite)
 	}
 }
 
+void createParticleErupt(real_t x, real_t y, int sprite)
+{
+	createParticleEruptSpatial(x, y, sprite, nullptr);
+}
+
 void createParticleErupt(Entity* parent, int sprite)
 {
 	if ( !parent )
@@ -10179,7 +10184,7 @@ void createParticleErupt(Entity* parent, int sprite)
 		return;
 	}
 
-	createParticleErupt(parent->x, parent->y, sprite);
+	createParticleEruptSpatial(parent->x, parent->y, sprite, parent);
 }
 
 Entity* createParticleSapCenter(Entity* parent, Entity* target, int spell, int sprite, int endSprite)
@@ -10189,7 +10194,7 @@ Entity* createParticleSapCenter(Entity* parent, Entity* target, int spell, int s
 		return nullptr;
 	}
 	// spawns the invisible 'center' of the magic particle
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	entity->x = target->x;
@@ -10286,7 +10291,7 @@ void createParticleSap(Entity* parent)
 				}
 			}
 		}
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = parent->x;
@@ -10413,7 +10418,7 @@ void createParticleDropRising(Entity* parent, int sprite, double scale)
 	for ( int c = 0; c < 50; c++ )
 	{
 		// shoot drops to the sky
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = parent->x - 4 + local_rng.rand() % 9;
@@ -10441,7 +10446,7 @@ void createParticleDropRising(Entity* parent, int sprite, double scale)
 
 Entity* createParticleTimer(Entity* parent, int duration, int sprite)
 {
-	Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Timer entity.
+	Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, parent); //Timer entity.
 	entity->sizex = 1;
 	entity->sizey = 1;
 	if ( parent )
@@ -11113,6 +11118,7 @@ void actParticleTimer(Entity* my)
 				Entity* monster = summonMonster(static_cast<Monster>(my->particleTimerVariable1), my->x, my->y, forceLocation);
 				if ( monster )
 				{
+					monster->inheritSpatialContextFrom(my);
 					if ( my->actmagicFromSpellbook == 2 )
 					{
 						applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
@@ -11467,7 +11473,7 @@ void actParticleTimer(Entity* my)
 				// shoot drops to the sky
 				if ( parent && my->particleTimerCountdownSprite != 0 )
 				{
-					Entity* entity = newEntity(my->particleTimerCountdownSprite, 1, map.entities, nullptr); //Particle entity.
+					Entity* entity = newEntityWithSpatialContext(my->particleTimerCountdownSprite, 1, map.entities, nullptr, parent); //Particle entity.
 					entity->sizex = 1;
 					entity->sizey = 1;
 					entity->x = parent->x - 4 + local_rng.rand() % 9;
@@ -11609,7 +11615,7 @@ void actParticleTimer(Entity* my)
 					if ( multiplayer != CLIENT && my->ticks % 2 == 0 )
 					{
 						// damage frames
-						entity = newEntity(my->particleTimerCountdownSprite, 1, map.entities, nullptr);
+						entity = newEntityWithSpatialContext(my->particleTimerCountdownSprite, 1, map.entities, nullptr, parent);
 						entity->behavior = &actMagicMissile;
 					}
 					else
@@ -11618,6 +11624,7 @@ void actParticleTimer(Entity* my)
 					}
 					if ( entity )
 					{
+						entity->inheritSpatialContextFrom(parent);
 						entity->sprite = my->particleTimerCountdownSprite;
 						entity->x = parent->x;
 						entity->y = parent->y;
@@ -12958,6 +12965,7 @@ void actParticleTimer(Entity* my)
 								}
 							}
 							Entity* fx = createFloorMagic(data.effectType, 1757, my->x + data.x, my->y + data.y, -8.5, data.yaw, TICKS_PER_SECOND / 8);
+							fx->inheritSpatialContextFrom(my);
 							fx->parent = my->getUID();
 							if ( my->actmagicSpellbookBonus > 0 )
 							{
@@ -13391,6 +13399,7 @@ void actParticleTimer(Entity* my)
 				{
 					Entity* fx = createFloorMagic(ParticleTimerEffect_t::EffectType::EFFECT_ROOTS_SELF,
 						1765, my->x, my->y, 7.5, my->yaw, PARTICLE_LIFE);
+						fx->inheritSpatialContextFrom(my);
 					//playSoundEntity(fx, data.sfx, 64);
 					fx->parent = my->getUID();
 					fx->actmagicNoParticle = 1;
@@ -13405,6 +13414,7 @@ void actParticleTimer(Entity* my)
 				{
 					Entity* fx = createFloorMagic(ParticleTimerEffect_t::EffectType::EFFECT_ROOTS_SELF_SUSTAIN,
 						1765, my->x, my->y, 7.5, my->yaw, PARTICLE_LIFE);
+						fx->inheritSpatialContextFrom(my);
 					//playSoundEntity(fx, data.sfx, 64);
 					fx->parent = my->getUID();
 					fx->actmagicNoParticle = 1;
@@ -13451,6 +13461,7 @@ void actParticleTimer(Entity* my)
 				{
 					Entity* fx = createFloorMagic(ParticleTimerEffect_t::EffectType::EFFECT_ROOTS_TILE,
 						1765, my->x, my->y, 7.5, my->yaw, PARTICLE_LIFE);
+						fx->inheritSpatialContextFrom(my);
 					//playSoundEntity(fx, data.sfx, 64);
 					fx->parent = my->getUID();
 					fx->actmagicNoParticle = 1;
@@ -13465,6 +13476,7 @@ void actParticleTimer(Entity* my)
 				{
 					Entity* fx = createFloorMagic(ParticleTimerEffect_t::EffectType::EFFECT_ROOTS_TILE_VOID,
 						2199, my->x, my->y, 7.5, my->yaw, PARTICLE_LIFE);
+						fx->inheritSpatialContextFrom(my);
 					//playSoundEntity(fx, data.sfx, 64);
 					fx->parent = my->getUID();
 					fx->actmagicNoParticle = 1;
@@ -13479,6 +13491,7 @@ void actParticleTimer(Entity* my)
 				{
 					Entity* fx = createFloorMagic(ParticleTimerEffect_t::EffectType::EFFECT_ROOTS_PATH,
 						1765, my->x, my->y, 7.5, my->yaw, PARTICLE_LIFE);
+						fx->inheritSpatialContextFrom(my);
 					//playSoundEntity(fx, data.sfx, 64);
 					fx->parent = my->getUID();
 					fx->actmagicNoParticle = 1;
@@ -13498,7 +13511,7 @@ void actParticleTimer(Entity* my)
 					{
 						if ( map.tiles[mapIndex] )
 						{
-							Entity* entity = newEntity(1869, 1, map.entities, nullptr); //Gib entity.
+							Entity* entity = newEntityWithSpatialContext(1869, 1, map.entities, nullptr, my); //Gib entity.
 							entity->x = my->x;
 							entity->y = my->y;
 							entity->z = 7.0;
@@ -13559,7 +13572,7 @@ void actParticleTimer(Entity* my)
 					{
 						if ( map.tiles[mapIndex] )
 						{
-							Entity* entity = newEntity(1869, 1, map.entities, nullptr); //Gib entity.
+							Entity* entity = newEntityWithSpatialContext(1869, 1, map.entities, nullptr, my); //Gib entity.
 							entity->x = my->x;
 							entity->y = my->y;
 							entity->z = 7.0;
@@ -13698,6 +13711,7 @@ void actParticleTimer(Entity* my)
 							if ( freeSpot )
 							{
 								Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 4.0, data.yaw, PARTICLE_LIFE);
+								fx->inheritSpatialContextFrom(my);
 								fx->sizex = 8;
 								fx->sizey = 8;
 								fx->parent = my->getUID();
@@ -13762,6 +13776,7 @@ void actParticleTimer(Entity* my)
 							if ( freeSpot )
 							{
 								Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 4.0, data.yaw, PARTICLE_LIFE);
+								fx->inheritSpatialContextFrom(my);
 								fx->sizex = 8;
 								fx->sizey = 8;
 								fx->parent = my->getUID();
@@ -13789,11 +13804,12 @@ void actParticleTimer(Entity* my)
 						auto& data = findEffect->second;
 						if ( data.effectType == ParticleTimerEffect_t::EFFECT_TEST_1 )
 						{
-							createParticleErupt(data.x, data.y, 592);
+							createParticleEruptSpatial(data.x, data.y, 592, my);
 						}
 						else if ( data.effectType == ParticleTimerEffect_t::EFFECT_ICE_WAVE )
 						{
 							Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 4.0, data.yaw, PARTICLE_LIFE + 3 * TICKS_PER_SECOND);
+							fx->inheritSpatialContextFrom(my);
 							fx->sizex = 4;
 							fx->sizey = 4;
 							fx->parent = my->getUID();
@@ -13821,6 +13837,7 @@ void actParticleTimer(Entity* my)
 									&& !swimmingtiles[map.tiles[mapIndex] && !lavatiles[map.tiles[mapIndex]]] )
 								{
 									Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 7.8, data.yaw, PARTICLE_LIFE + 3 * TICKS_PER_SECOND);
+									fx->inheritSpatialContextFrom(my);
 									fx->parent = my->getUID();
 									if ( my->actmagicSpellbookBonus > 0 )
 									{
@@ -13863,6 +13880,7 @@ void actParticleTimer(Entity* my)
 						else if ( data.effectType == ParticleTimerEffect_t::EFFECT_LIGHTNING_BOLT )
 						{
 							Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, -8.5, data.yaw, TICKS_PER_SECOND / 8);
+							fx->inheritSpatialContextFrom(my);
 							fx->scalex = 1.0;
 							fx->scaley = 1.0;
 							fx->scalez = 1.0;
@@ -13924,6 +13942,7 @@ void actParticleTimer(Entity* my)
 						else if ( data.effectType == ParticleTimerEffect_t::EFFECT_TEST_3 )
 						{
 							Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 7.5, my->yaw, PARTICLE_LIFE + 3 * TICKS_PER_SECOND);
+							fx->inheritSpatialContextFrom(my);
 							if ( data.sfx )
 							{
 								playSoundEntity(fx, data.sfx, 64);
@@ -13937,6 +13956,7 @@ void actParticleTimer(Entity* my)
 							|| data.effectType == ParticleTimerEffect_t::EFFECT_ROOTS_PATH )
 						{
 							Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 7.5, my->yaw, PARTICLE_LIFE);
+							fx->inheritSpatialContextFrom(my);
 							if ( data.sfx )
 							{
 								playSoundEntity(fx, data.sfx, 64);
@@ -13950,9 +13970,18 @@ void actParticleTimer(Entity* my)
 						{
 							real_t offset = PI * (local_rng.rand() % 360) / 180.0;// -((my->ticks % 50) / 50.0) * 2 * PI;
 							int lifetime = PARTICLE_LIFE / 10;
-							createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 0.0, lifetime + 1 * TICKS_PER_SECOND);
-							createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 2 * PI / 3, lifetime + 1 * TICKS_PER_SECOND);
-							createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 4 * PI / 3, lifetime + 1 * TICKS_PER_SECOND);
+							if ( Entity* vortex = createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 0.0, lifetime + 1 * TICKS_PER_SECOND) )
+							{
+								vortex->inheritSpatialContextFrom(my);
+							}
+							if ( Entity* vortex = createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 2 * PI / 3, lifetime + 1 * TICKS_PER_SECOND) )
+							{
+								vortex->inheritSpatialContextFrom(my);
+							}
+							if ( Entity* vortex = createVortexMagic(my->particleTimerCountdownSprite, my->x, my->y, 7.5, offset + 4 * PI / 3, lifetime + 1 * TICKS_PER_SECOND) )
+							{
+								vortex->inheritSpatialContextFrom(my);
+							}
 						}
 					}
 				}
@@ -14161,8 +14190,9 @@ void actParticleSapCenter(Entity* my)
 						Stat* myStats = parent->getStats();
 						if ( myStats && myStats->type == INCUBUS && myStats->getAttribute("special_npc") == "johann" )
 						{
-							if ( dropItemMonster(item, parent, parent->getStats(), item->count) )
+							if ( Entity* dropped = dropItemMonster(item, parent, parent->getStats(), item->count) )
 							{
+								dropped->inheritSpatialContextFrom(parent);
 								parent->monsterSpecialState = INCUBUS_TELEPORT_STEAL;
 								parent->monsterSpecialTimer = 100 + local_rng.rand() % MONSTER_SPECIAL_COOLDOWN_INCUBUS_TELEPORT_RANDOM;
 								item = nullptr;
@@ -14337,6 +14367,7 @@ void actParticleSapCenter(Entity* my)
 					Entity* monster = summonMonster(creature, my->skill[8], my->skill[9]);
 					if ( monster )
 					{
+						monster->inheritSpatialContextFrom(caster);
 						if ( my->actmagicFromSpellbook == 2 )
 						{
 							applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
@@ -14395,6 +14426,7 @@ void actParticleSapCenter(Entity* my)
 								Entity* monster = summonMonster(creature, my->skill[8], my->skill[9]);
 								if ( monster )
 								{
+									monster->inheritSpatialContextFrom(caster);
 									if ( my->actmagicFromSpellbook == 2 )
 									{
 										applyMagicGrimoireSummonBonus(monster, my->actmagicSpellbookBonus / 100.0);
@@ -14475,7 +14507,7 @@ void actParticleSapCenter(Entity* my)
 		}
 		else if ( my->skill[6] == SPELL_STEAL_WEAPON )
 		{
-			Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+			Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 			entity->flags[INVISIBLE] = true;
 			entity->flags[UPDATENEEDED] = true;
 			entity->x = my->x;
@@ -14512,7 +14544,7 @@ void actParticleSapCenter(Entity* my)
 			if ( dist < 4 || (abs(my->fskill[5]) < 0.001 && abs(my->fskill[4]) < 0.001) )
 			{
 				// reached goal, or goal not set then spawn the item.
-				Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+				Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 				entity->flags[INVISIBLE] = true;
 				entity->flags[UPDATENEEDED] = true;
 				entity->x = my->x;
@@ -14572,7 +14604,7 @@ void createParticleExplosionCharge(Entity* parent, int sprite, int particleCount
 	for ( int c = 0; c < particleCount; c++ )
 	{
 		// shoot drops to the sky
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = parent->x - 3 + local_rng.rand() % 7;
@@ -14616,7 +14648,7 @@ void createParticleExplosionCharge(Entity* parent, int sprite, int particleCount
 	for ( int c = 0; c < 128; c++ )
 	{
 		// shoot drops to the sky
-		Entity* entity = newEntity(670, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(670, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->yaw = 0 + c * arc;
@@ -14909,7 +14941,7 @@ Entity* castStationaryOrbitingMagicMissile(Entity* parent, int spellID, real_t c
 	spell_t* spell = getSpellFromID(spellID);
 	if ( !parent )
 	{
-		Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, parent); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = centerx;
@@ -14985,7 +15017,7 @@ Entity* castStationaryOrbitingMagicMissile(Entity* parent, int spellID, real_t c
 
 void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uint32 uid)
 {
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, uidToEntity(uid)); //Particle entity.
 	//entity->sizex = 1;
 	//entity->sizey = 1;
 	entity->x = x;
@@ -15014,7 +15046,7 @@ void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uin
 	// boosty boost
 	for ( int c = 0; c < 10; c++ )
 	{
-		entity = newEntity(174, 1, map.entities, nullptr); //Particle entity.
+		entity = newEntityWithSpatialContext(174, 1, map.entities, nullptr, uidToEntity(uid)); //Particle entity.
 		entity->x = x - 4 + local_rng.rand() % 9;
 		entity->y = y - 4 + local_rng.rand() % 9;
 		entity->z = z - 0 + local_rng.rand() % 11;
@@ -15090,7 +15122,7 @@ void actParticleShadowTag(Entity* my)
 		int numParticles = 8;
 		for ( int c = 0; c < 8; c++ )
 		{
-			Entity* entity = newEntity(871, 1, map.entities, nullptr); //Particle entity.
+			Entity* entity = newEntityWithSpatialContext(871, 1, map.entities, nullptr, my); //Particle entity.
 			entity->sizex = 1;
 			entity->sizey = 1;
 			entity->x = my->x;
@@ -15252,7 +15284,7 @@ void actParticleShadowTag(Entity* my)
 			int numParticles = 8;
 			for ( int c = 0; c < 8; c++ )
 			{
-				Entity* entity = newEntity(871, 1, map.entities, nullptr); //Particle entity.
+				Entity* entity = newEntityWithSpatialContext(871, 1, map.entities, nullptr, my); //Particle entity.
 				entity->sizex = 1;
 				entity->sizey = 1;
 				entity->x = my->x;
@@ -15289,7 +15321,7 @@ void createParticleShadowTag(Entity* parent, Uint32 casterUid, int duration)
 	{
 		return;
 	}
-	Entity* entity = newEntity(870, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(870, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->parent = parent->getUID();
 	entity->x = parent->x;
 	entity->y = parent->y;
@@ -15717,7 +15749,7 @@ Entity* createParticleSpellPinpointTarget(Entity* parent, Uint32 casterUid, int 
 	{
 		return nullptr;
 	}
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parent); //Particle entity.
 	entity->parent = parent->getUID();
 	entity->x = parent->x;
 	entity->y = parent->y;
@@ -15779,7 +15811,7 @@ void createParticleCharmMonster(Entity* parent)
 	{
 		return;
 	}
-	Entity* entity = newEntity(685, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(685, 1, map.entities, nullptr, parent); //Particle entity.
 	//entity->sizex = 1;
 	//entity->sizey = 1;
 	entity->parent = parent->getUID();
@@ -15813,7 +15845,7 @@ void actParticleCharmMonster(Entity* my)
 		int numParticles = 8;
 		for ( int c = 0; c < 8; c++ )
 		{
-			Entity* entity = newEntity(576, 1, map.entities, nullptr); //Particle entity.
+			Entity* entity = newEntityWithSpatialContext(576, 1, map.entities, nullptr, my); //Particle entity.
 			entity->sizex = 1;
 			entity->sizey = 1;
 			entity->x = my->x;
@@ -15971,7 +16003,7 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 				int i = numRocks + local_rng.rand() % randRocks;
 				for ( int c = 0; c < i; c++ )
 				{
-					Entity* rock = newEntity(-1, 1, map.entities, nullptr); //Rock entity.
+					Entity* rock = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, projectile ? projectile : parent); //Rock entity.
 					rock->flags[INVISIBLE] = true;
 					rock->flags[UPDATENEEDED] = true;
 					rock->x = hit.mapx * 16 + 4 + local_rng.rand() % 8;
@@ -16091,7 +16123,7 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 		// spawn several rock items //TODO: This should really be its own function.
 		for ( int c = 0; c < i; c++ )
 		{
-			Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Rock entity.
+			Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, projectile ? projectile : parent); //Rock entity.
 			entity->flags[INVISIBLE] = true;
 			entity->flags[UPDATENEEDED] = true;
 			entity->x = hit.entity->x - 4 + local_rng.rand() % 8;
@@ -16152,6 +16184,7 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 			}
 			if ( monster )
 			{
+				monster->inheritSpatialContextFrom(projectile ? projectile : parent);
 				monster->seedEntityRNG(monsterSpawnSeed);
 				for ( int c = 0; c < MAXPLAYERS; c++ )
 				{
@@ -16174,7 +16207,7 @@ Entity* createParticleCastingIndicator(Entity* parent, real_t x, real_t y, real_
 		uid = parent->getUID();
 	}
 
-	Entity* entity = newEntity(222, 1, map.entities, nullptr); //Sprite entity.
+	Entity* entity = newEntityWithSpatialContext(222, 1, map.entities, nullptr, parent); //Sprite entity.
 	entity->x = x;
 	entity->y = y;
 	entity->z = 7.470;
@@ -16725,7 +16758,7 @@ Entity* createParticleAOEIndicator(Entity* parent, real_t x, real_t y, real_t z,
 		uid = parent->getUID();
 	}
 
-	Entity* entity = newEntity(222, 1, map.entities, nullptr); //Sprite entity.
+	Entity* entity = newEntityWithSpatialContext(222, 1, map.entities, nullptr, parent); //Sprite entity.
 	entity->x = x;
 	entity->y = y;
 	entity->z = z + 7.49;
@@ -17004,7 +17037,7 @@ void actParticleRoot(Entity* my)
 
 			if ( false )
 			{
-				Entity* entity = newEntity(227, 1, map.entities, nullptr); //Sprite entity.
+				Entity* entity = newEntityWithSpatialContext(227, 1, map.entities, nullptr, my); //Sprite entity.
 				entity->x = my->x;
 				entity->y = my->y;
 				entity->z = 6.0;
@@ -17028,7 +17061,7 @@ void actParticleRoot(Entity* my)
 
 			if ( false )
 			{
-				Entity* entity = newEntity(233, 1, map.entities, nullptr); //Sprite entity.
+				Entity* entity = newEntityWithSpatialContext(233, 1, map.entities, nullptr, my); //Sprite entity.
 				entity->x = my->x;
 				entity->y = my->y;
 				entity->z = 6.0;
@@ -17254,6 +17287,7 @@ void actParticleFloorMagic(Entity* my)
 				}
 				Entity* root = createParticleRoot(sprite, my->x + dist * cos(yaw), my->y + dist * sin(yaw),
 					7.5, rng.rand() % 360 * (PI / 180.0), PARTICLE_LIFE);
+					root->inheritSpatialContextFrom(my);
 				root->focalz = -0.5;
 				int roll = rng.rand() % 8;
 				real_t angle = (pick / (float)numLocations) * PI + ((roll) / 8.0) * PI;
@@ -17309,6 +17343,7 @@ void actParticleFloorMagic(Entity* my)
 				}*/
 				Entity* root = createParticleRoot(1766, my->x + dist * cos(yaw), my->y + dist * sin(yaw),
 					7.5, rng.rand() % 360 * (PI / 180.0), PARTICLE_LIFE);
+					root->inheritSpatialContextFrom(my);
 				root->focalz = -0.5;
 				int roll = rng.rand() % 8;
 				real_t angle = (pick / (float)numLocations) * PI + ((roll) / 8.0) * PI;
@@ -17329,6 +17364,7 @@ void actParticleFloorMagic(Entity* my)
 				real_t dist = 40.0 * (0.25 + (0.75 * i / 16.0));
 				Entity* root = createParticleRoot(1766, my->x + dist * cos(yawOffset), my->y + dist * sin(yawOffset),
 					7.5, local_rng.rand() % 360 * (PI / 180.0), PARTICLE_LIFE);
+					root->inheritSpatialContextFrom(my);
 				root->focalz = -0.5;
 				real_t xoffset = 8.0 * sin(angle);
 				xoffset += 2.0 * (local_rng.rand() % 16) / 16.0;
@@ -17390,6 +17426,7 @@ void actParticleFloorMagic(Entity* my)
 					float yaw = locations[pick];
 					Entity* root = createParticleRoot(1766, my->x + dist * cos(yaw), my->y + dist * sin(yaw),
 						7.5, rng.rand() % 360 * (PI / 180.0), PARTICLE_LIFE);
+						root->inheritSpatialContextFrom(my);
 					root->focalz = -0.5;
 					int roll = rng.rand() % 8;
 					real_t angle = (pick / (float)numLocations) * PI + ((roll) / 8.0) * PI;
@@ -18181,7 +18218,7 @@ void actParticleFloorMagic(Entity* my)
 		{
 			if ( my->ticks % 10 == 0 || my->ticks == 1 )
 			{
-				Entity* entity = newEntity(227, 1, map.entities, nullptr); //Sprite entity.
+				Entity* entity = newEntityWithSpatialContext(227, 1, map.entities, nullptr, my); //Sprite entity.
 
 				int cycle = (my->ticks / 10) % 5;
 				if ( cycle > 0 )
@@ -18217,7 +18254,7 @@ void actParticleFloorMagic(Entity* my)
 		{
 			if ( my->ticks % 10 == 0 || my->ticks == 1 )
 			{
-				Entity* entity = newEntity(248, 1, map.entities, nullptr); //Sprite entity.
+				Entity* entity = newEntityWithSpatialContext(248, 1, map.entities, nullptr, my); //Sprite entity.
 
 				int cycle = (my->ticks / 10) % 5;
 				if ( cycle > 0 )
@@ -18373,11 +18410,11 @@ Entity* createParticleWave(ParticleTimerEffect_t::EffectType particleType, int s
 	return entity;
 }
 
-void createParticleDemesneDoor(real_t x, real_t y, real_t dir)
+static void createParticleDemesneDoorSpatial(real_t x, real_t y, real_t dir, const Entity* spatialSource)
 {
 	for ( int c = 0; c <= 8; c++ )
 	{
-		Entity* entity = newEntity(576, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(576, 1, map.entities, nullptr, spatialSource); //Particle entity.
 		entity->sizex = 1;
 		entity->sizey = 1;
 		entity->x = x + (-4.0 + c) * cos(dir + PI / 2);
@@ -18404,11 +18441,16 @@ void createParticleDemesneDoor(real_t x, real_t y, real_t dir)
 	}
 }
 
+void createParticleDemesneDoor(real_t x, real_t y, real_t dir)
+{
+	createParticleDemesneDoorSpatial(x, y, dir, nullptr);
+}
+
 void actParticleDemesneDoor(Entity* my)
 {
 	if ( PARTICLE_LIFE < 0 )
 	{
-		createParticleDemesneDoor(my->x, my->y, my->yaw);
+		createParticleDemesneDoorSpatial(my->x, my->y, my->yaw, my);
 		serverSpawnMiscParticlesAtLocation(my->x, my->y, my->yaw * 256.0, PARTICLE_EFFECT_DEMESNE_DOOR, 0);
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
@@ -18427,7 +18469,7 @@ void actParticleDemesneDoor(Entity* my)
 	if ( my->skill[1] == 0 )
 	{
 		my->skill[1] = 1;
-		createParticleDemesneDoor(my->x, my->y, my->yaw);
+		createParticleDemesneDoorSpatial(my->x, my->y, my->yaw, my);
 	}
 
 	my->ditheringOverride = 4;
@@ -18531,7 +18573,7 @@ void actParticleDemesneDoor(Entity* my)
 				messagePlayer(caster->isEntityPlayer(), MESSAGE_WORLD, Language::get(6690));
 			}
 
-			createParticleDemesneDoor(my->x, my->y, my->yaw);
+			createParticleDemesneDoorSpatial(my->x, my->y, my->yaw, my);
 			serverSpawnMiscParticlesAtLocation(my->x, my->y, my->yaw * 256.0, PARTICLE_EFFECT_DEMESNE_DOOR, 0);
 			my->removeLightField();
 			list_RemoveNode(my->mynode);
@@ -18949,7 +18991,7 @@ void actParticleWave(Entity* my)
 			{
 				for ( int i = 0; i < 10; ++i )
 				{
-					Entity* entity = newEntity(16, 1, map.entities, nullptr); //Sprite entity.
+					Entity* entity = newEntityWithSpatialContext(16, 1, map.entities, nullptr, my); //Sprite entity.
 					entity->behavior = &actFlame;
 					entity->x = my->x;
 					entity->y = my->y;
@@ -19371,7 +19413,7 @@ Entity* createTunnelPortal(real_t x, real_t y, int duration, int dir, Entity* ca
 		return nullptr;
 	}
 
-	Entity* portal = newEntity(1810, 1, map.entities, nullptr);
+	Entity* portal = newEntityWithSpatialContext(1810, 1, map.entities, nullptr, caster);
 	const real_t wallDist = 0.5;
 	if ( dir == 1 )
 	{
@@ -19441,7 +19483,7 @@ Entity* createWindMagic(Uint32 casterUID, int x, int y, int duration, int dir, i
 		fx->y = fx->y * 16.0 - 0.001;
 	}
 
-	Entity* wind = newEntity(-1, 1, map.entities, nullptr);
+	Entity* wind = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, caster);
 	wind->behavior = &actWind;
 	wind->yaw = (dir - 1) * PI / 2;
 	if ( dir == 1 )
@@ -19815,7 +19857,7 @@ Entity* createRadiusMagic(int spellID, Entity* caster, real_t x, real_t y, real_
 		return nullptr;
 	}
 
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Sprite entity.
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, caster); //Sprite entity.
 	entity->x = x;
 	entity->y = y;
 	entity->z = 7.5;
@@ -19841,7 +19883,7 @@ Entity* createRadiusMagic(int spellID, Entity* caster, real_t x, real_t y, real_
 
 Entity* createMagicRadiusBadge(Entity& parent)
 {
-	Entity* entity = newEntity(parent.sprite, 1, map.entities, nullptr); //Particle entity.
+	Entity* entity = newEntityWithSpatialContext(parent.sprite, 1, map.entities, nullptr, &parent); //Particle entity.
 	entity->parent = parent.getUID();
 	entity->x = parent.x;
 	entity->y = parent.y;
@@ -21122,7 +21164,7 @@ Entity* createSpellExplosionArea(int spellID, Entity* caster, real_t x, real_t y
 				fx->vel_z = -0.1 + (local_rng.rand() % 10) * -.025;
 				fx->actmagicOrbitDist = rad;
 			}
-			//Entity* entity = newEntity(233, 1, map.entities, nullptr); //Sprite entity.
+			//Entity* entity = newEntityWithSpatialContext(233, 1, map.entities, nullptr, my); //Sprite entity.
 			//entity->z = 6.0;
 			//entity->ditheringDisabled = true;
 			//entity->flags[SPRITE] = true;
@@ -21384,7 +21426,7 @@ void actParticleShatterEarth(Entity* my)
 			{
 				if ( my->skill[1] == SPELL_SHATTER_EARTH )
 				{
-					Entity* entity = newEntity(245, 1, map.entities, nullptr); // boulder
+					Entity* entity = newEntityWithSpatialContext(245, 1, map.entities, nullptr, my); // boulder
 					entity->parent = my->getUID();
 					entity->x = static_cast<int>(my->x / 16) * 16.0 + 8.0;
 					entity->y = static_cast<int>(my->y / 16) * 16.0 + 8.0;
@@ -21419,6 +21461,7 @@ void actParticleShatterEarth(Entity* my)
 					if ( auto monster = summonMonsterNoSmoke(EARTH_ELEMENTAL, static_cast<int>(my->x / 16) * 16.0 + 8.0,
 						static_cast<int>(my->y / 16) * 16.0 + 8.0) )
 					{
+						monster->inheritSpatialContextFrom(caster ? caster : my);
 						if ( caster )
 						{
 							if ( forceFollower(*caster, *monster) )
@@ -21468,7 +21511,7 @@ void actParticleShatterEarth(Entity* my)
 		{
 			for ( int i = 0; i < 8; ++i )
 			{
-				Entity* entity = newEntity(78, 1, map.entities, nullptr); //rubble
+				Entity* entity = newEntityWithSpatialContext(78, 1, map.entities, nullptr, my); //rubble
 				entity->yaw = i * PI / 4;
 				entity->x = my->x + 4.0 * cos(entity->yaw);
 				entity->y = my->y + 4.0 * sin(entity->yaw);
@@ -21675,7 +21718,7 @@ void createParticleShatterEarth(Entity* my, Entity* caster, real_t _x, real_t _y
 	}
 
 	{
-		Entity* entity = newEntity(1869, 1, map.entities, nullptr); //rubble
+		Entity* entity = newEntityWithSpatialContext(1869, 1, map.entities, nullptr, my ? my : caster); //rubble
 		entity->x = x * 16.0 + 8.0;
 		entity->y = y * 16.0 + 8.0;
 
@@ -21708,7 +21751,7 @@ void createParticleShatterEarth(Entity* my, Entity* caster, real_t _x, real_t _y
 	}
 
 	{
-		Entity* entity = newEntity(1868, 1, map.entities, nullptr); //boulder hole
+		Entity* entity = newEntityWithSpatialContext(1868, 1, map.entities, nullptr, my ? my : caster); //boulder hole
 		entity->x = x * 16.0 + 8.0;
 		entity->y = y * 16.0 + 8.0;
 

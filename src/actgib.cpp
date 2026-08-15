@@ -603,7 +603,7 @@ void actFociGib(Entity* my)
 						}
 
 						Uint32 targetUid = entity->getUID();
-						if ( Entity* entity = newEntity(my->sprite, 1, map.entities, nullptr) )
+						if ( Entity* entity = newEntityWithSpatialContext(my->sprite, 1, map.entities, nullptr, my) )
 						{
 							entity->behavior = &actMagicMissile;
 							entity->x = my->x;
@@ -1048,7 +1048,7 @@ Entity* spawnGib(Entity* parentent, int customGibSprite)
 		}
 	}
 
-	entity = newEntity(gibsprite, 1, map.entities, nullptr); //Gib entity.
+	entity = newEntityWithSpatialContext(gibsprite, 1, map.entities, nullptr, parentent); //Gib entity.
 	if ( !entity )
 	{
 		return nullptr;
@@ -1084,7 +1084,7 @@ Entity* spawnGib(Entity* parentent, int customGibSprite)
 
 Entity* spawnFociGib(real_t x, real_t y, real_t z, real_t dir, real_t velocityBonus, Uint32 parentUid, int sprite, Uint32 seed)
 {
-	Entity* my = newEntity(sprite, 1, map.entities, nullptr); //Gib entity.
+	Entity* my = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, uidToEntity(parentUid)); //Gib entity.
 	if ( !my )
 	{
 		return nullptr;
@@ -1384,7 +1384,7 @@ Entity* spawnDamageGib(Entity* parentent, Sint32 dmgAmount, int gibDmgType, int 
 		return nullptr;
 	}
 
-	Entity* entity = newEntity(displayType == DamageGibDisplayType::DMG_GIB_SPRITE ? dmgAmount : -1, 1, map.entities, nullptr);
+	Entity* entity = newEntityWithSpatialContext(displayType == DamageGibDisplayType::DMG_GIB_SPRITE ? dmgAmount : -1, 1, map.entities, nullptr, parentent);
 	if ( !entity )
 	{
 		return nullptr;
@@ -1625,7 +1625,7 @@ void spawnGreasePuddleSpawner(Entity* caster, real_t x, real_t y, int duration)
 				}
 			}
 		}
-		Entity* entity = newEntity(1786, 1, map.entities, nullptr); //Blood/gib entity.
+		Entity* entity = newEntityWithSpatialContext(1786, 1, map.entities, nullptr, caster); //Blood/gib entity.
 		real_t x = ox * 16.0 + 8.0;
 		real_t y = oy * 16.0 + 8.0;
 		entity->x = x;
@@ -1654,7 +1654,7 @@ void spawnGreasePuddle(Entity* parent, real_t x, real_t y, int duration, int loc
 	int oy = y / 16;
 	if ( ox >= 0 && ox < map.width && oy >= 0 && oy < map.height )
 	{
-		Entity* entity = newEntity(1784, 1, map.entities, nullptr); //Blood/gib entity.
+		Entity* entity = newEntityWithSpatialContext(1784, 1, map.entities, nullptr, parent); //Blood/gib entity.
 		real_t x = ox * 16.0 + 8.0;
 		real_t y = oy * 16.0 + 8.0;
 
@@ -2299,7 +2299,7 @@ void actLeafPile(Entity* my)
 		}
 		for ( int i = 0; i < 3; ++i )
 		{
-			Entity* leaf = newEntity(1912, 1, map.entities, nullptr); //Gib entity.
+			Entity* leaf = newEntityWithSpatialContext(1912, 1, map.entities, nullptr, my); //Gib entity.
 			if ( leaf != NULL )
 			{
 				leaf->x = my->x;
@@ -2696,7 +2696,7 @@ Entity* spawnMiscPuddle(Entity* parentent, real_t x, real_t y, int sprite, bool 
 			return nullptr;
 		}
 
-		Entity* puddle = newEntity(sprite, 1, map.entities, nullptr); //Gib entity.
+		Entity* puddle = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, parentent); //Gib entity.
 		if ( puddle != NULL )
 		{
 			puddle->x = x;

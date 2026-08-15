@@ -1155,7 +1155,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					return nullptr;
 				}
             }
-			Entity* entity = newEntity(174, 1, map.entities, nullptr); // black magic ball
+			Entity* entity = newEntityWithSpatialContext(174, 1, map.entities, nullptr, caster); // black magic ball
 			entity->parent = caster->getUID();
 			entity->x = caster->x;
 			entity->y = caster->y;
@@ -1225,7 +1225,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					}
 				}
 			}
-			Entity* entity = newEntity(1800, 1, map.entities, nullptr); // black magic ball
+			Entity* entity = newEntityWithSpatialContext(1800, 1, map.entities, nullptr, caster); // black magic ball
 			entity->parent = caster->getUID();
 			entity->x = caster->x;
 			entity->y = caster->y;
@@ -2555,7 +2555,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 						int pickDonation = local_rng.discrete(chances.data(), chances.size());
 
-						Entity* item = newEntity(-1, 1, map.entities, nullptr); //Rock entity.
+						Entity* item = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, entity); //Rock entity.
 						item->flags[INVISIBLE] = true;
 						item->flags[UPDATENEEDED] = true;
 						item->x = entity->x;
@@ -3911,6 +3911,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 							1733, castSpellProps->target_x, castSpellProps->target_y, 2.75,
 							-PI / 2 + tangent - PI / 3 + i * PI / 3,
 							duration, light);
+							wave->inheritSpatialContextFrom(caster);
 						real_t grouping = 13.75;
 						wave->x -= grouping * cos(tangent);
 						wave->y -= grouping * sin(tangent);
@@ -3960,6 +3961,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					Entity* wave = createParticleWave(ParticleTimerEffect_t::EFFECT_KINETIC_FIELD,
 						1739, castSpellProps->target_x, castSpellProps->target_y, 6.25,
 						PI / 2 + tangent, duration, true);
+						wave->inheritSpatialContextFrom(caster);
 					wave->skill[1] = 12; // frames
 					wave->skill[5] = 4; // frame time
 					wave->ditheringOverride = 6;
@@ -4001,6 +4003,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					Entity* wave = createParticleWave(ParticleTimerEffect_t::EFFECT_CHRONOMIC_FIELD,
 						1857, castSpellProps->target_x, castSpellProps->target_y, 5.25,
 						PI / 2 + tangent, duration, true);
+						wave->inheritSpatialContextFrom(caster);
 					wave->skill[1] = 8; // frames
 					wave->skill[5] = 4; // frame time
 					wave->ditheringOverride = 6;
@@ -5015,6 +5018,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 								{
 									if ( Entity* dropped = dropItemMonster(item, target, nullptr, item->count) )
 									{
+										dropped->inheritSpatialContextFrom(target);
 										anyDrop = true;
 										dropped->yaw = local_rng.rand() % 360 * PI / 180;
 										dropped->vel_x = (0.5 + .005 * (local_rng.rand() % 11)) * cos(dropped->yaw);
@@ -5384,6 +5388,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 								{
 									if ( Entity* dropped = dropItemMonster(itemPool[pick].item, target, nullptr, itemPool[pick].item->count) )
 									{
+										dropped->inheritSpatialContextFrom(target);
 										dropped->yaw = local_rng.rand() % 360 * PI / 180;
 										dropped->vel_x = (0.5 + .005 * (local_rng.rand() % 11)) * cos(dropped->yaw);
 										dropped->vel_y = (0.5 + .005 * (local_rng.rand() % 11)) * sin(dropped->yaw);
@@ -5411,6 +5416,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 									{
 										if ( Entity* monster = summonMonster(toSpawn, target->x, target->y) )
 										{
+											monster->inheritSpatialContextFrom(target);
 											monster->seedEntityRNG(rng.rand());
 											monster->monsterAcquireAttackTarget(*caster, MONSTER_STATE_PATH, true);
 											if ( toSpawn == SHADOW )
@@ -5724,6 +5730,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 								{
 									if ( Entity* dropped = dropItemMonster(*slot, target, targetStats, (*slot)->count) )
 									{
+										dropped->inheritSpatialContextFrom(target);
 										effect = true;
 
 										dropped->itemDelayMonsterPickingUp = element->duration;
@@ -7660,6 +7667,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					Entity* dropped = dropItemMonster(item, caster, nullptr, item->count);
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(caster);
 						dropped->yaw = caster->yaw;
 						dropped->vel_x = (1.5 + .025 * (local_rng.rand() % 11)) * cos(caster->yaw);
 						dropped->vel_y = (1.5 + .025 * (local_rng.rand() % 11)) * sin(caster->yaw);
@@ -8250,7 +8258,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		Entity* missileEntity = nullptr;
 		if ( propulsion == PROPULSION_MISSILE )
 		{
-			missileEntity = newEntity(168, 1, map.entities, nullptr); // red magic ball
+			missileEntity = newEntityWithSpatialContext(168, 1, map.entities, nullptr, caster); // red magic ball
 			missileEntity->parent = caster->getUID();
 			missileEntity->x = caster->x;
 			missileEntity->y = caster->y;
@@ -8646,7 +8654,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				traveltime = 20;
 			}
 
-			missileEntity = newEntity(168, 1, map.entities, nullptr); // red magic ball
+			missileEntity = newEntityWithSpatialContext(168, 1, map.entities, nullptr, caster); // red magic ball
 			missileEntity->parent = caster->getUID();
 			missileEntity->x = caster->x;
 			missileEntity->y = caster->y;
@@ -8687,7 +8695,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 			result = missileEntity;
 
-			Entity* entity1 = newEntity(168, 1, map.entities, nullptr); // red magic ball
+			Entity* entity1 = newEntityWithSpatialContext(168, 1, map.entities, nullptr, caster); // red magic ball
 			entity1->parent = caster->getUID();
 			entity1->x = caster->x;
 			entity1->y = caster->y;
@@ -8724,7 +8732,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			node->deconstructor = &spellDeconstructor;
 			node->size = sizeof(spell_t);
 
-			Entity* entity2 = newEntity(168, 1, map.entities, nullptr); // red magic ball
+			Entity* entity2 = newEntityWithSpatialContext(168, 1, map.entities, nullptr, caster); // red magic ball
 			entity2->parent = caster->getUID();
 			entity2->x = caster->x;
 			entity2->y = caster->y;

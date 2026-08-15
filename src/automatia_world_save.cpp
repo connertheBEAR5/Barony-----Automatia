@@ -27,6 +27,19 @@ Json captureWorldState(const std::string& sessionId, const WorldState& world)
         {
             occupants.push_back(playerIndex);
         }
+        Json playableFloors = Json::array();
+        if (summary.playableFloors.empty())
+        {
+            playableFloors.push_back(DEFAULT_PLAYABLE_FLOOR);
+        }
+        else
+        {
+            for (const PlayableFloorId floor : summary.playableFloors)
+            {
+                playableFloors.push_back(floor);
+            }
+        }
+
         document["map_instances"].push_back(Json{
             {"map_file", summary.identity.mapFile},
             {"instance_id", summary.identity.instanceId},
@@ -44,6 +57,7 @@ Json captureWorldState(const std::string& sessionId, const WorldState& world)
             {"secret_level", summary.secretLevel},
             {"dark_map", summary.darkMap},
             {"players_present", std::move(occupants)},
+            {"playable_floors", std::move(playableFloors)},
             {"persistent_state", Json::object()}
         });
     }

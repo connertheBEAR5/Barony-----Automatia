@@ -11270,6 +11270,9 @@ if ( multiplayer != CLIENT )
             continue;
         }
 
+        restoredMonster->playableFloor = savedState.playableFloor;
+        restoredMonster->spatialRevision = 0;
+
         restoredMonster->persistentID =
             dynamicPersistentID;
 
@@ -17359,6 +17362,7 @@ static bool processAutomatiaTransition(
 			printlog("[World State] Warning: unable to transfer one follower for player %d.", player);
 			continue;
 		}
+		follower->inheritSpatialContextFrom(destinationEntity);
 		/*
 		 * summonMonster() creates a fresh Stat and leaves MONSTER_INIT at 0.
 		 * The copied follower Stat already contains the authoritative inventory
@@ -20224,6 +20228,7 @@ void gameLogic(void)
 								Entity* monster = summonMonster(tempStats->type, players[c]->entity->x, players[c]->entity->y);
 								if (monster)
 								{
+									monster->inheritSpatialContextFrom(players[c]->entity);
 									if ( node == gyrobotNode )
 									{
 										gyrobotEntity = monster;

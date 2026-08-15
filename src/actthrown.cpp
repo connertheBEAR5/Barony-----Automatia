@@ -741,7 +741,7 @@ void actThrown(Entity* my)
 							}
 						}
 					}
-					Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+					Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 					entity->flags[INVISIBLE] = true;
 					entity->flags[UPDATENEEDED] = true;
 					entity->flags[PASSABLE] = true;
@@ -947,7 +947,7 @@ void actThrown(Entity* my)
 					{
 						if ( Item* item = newItemFromEntity(my, true) )
 						{
-							Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+							Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 							entity->flags[INVISIBLE] = true;
 							entity->flags[UPDATENEEDED] = true;
 							entity->flags[PASSABLE] = true;
@@ -1919,7 +1919,7 @@ void actThrown(Entity* my)
 						&& item->type != GREASE_BALL && item->type != DUST_BALL 
 						&& item->type != SLOP_BALL )
 					{
-						Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+						Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 						entity->flags[INVISIBLE] = true;
 						entity->flags[UPDATENEEDED] = true;
 						entity->flags[PASSABLE] = true;
@@ -2541,7 +2541,7 @@ void actThrown(Entity* my)
 			}
 			if ( dropItem )
 			{
-				Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+				Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 				entity->flags[INVISIBLE] = true;
 				entity->flags[UPDATENEEDED] = true;
 				entity->flags[PASSABLE] = true;

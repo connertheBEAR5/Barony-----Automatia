@@ -4,8 +4,9 @@
     File: playable_z.hpp
     Desc: Typed data foundation for discrete playable floors.
 
-    Stage Z1 deliberately does not change collision, rendering, pathfinding,
-    or interaction policy. Existing maps and entities remain on floor Z0.
+    Stage Z2A adds discrete-floor spatial-index and entity-collision isolation.
+    Rendering, floor-specific tile access, pathfinding, and transitions remain
+    later Z2/Z3 work. Legacy content continues to occupy floor Z0.
 
 -------------------------------------------------------------------------------*/
 

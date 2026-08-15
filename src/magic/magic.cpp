@@ -1958,6 +1958,11 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 			summonedEntity = summonMonster(monsterSummonType, target->x, target->y, true);
 		}
 
+		if ( summonedEntity )
+		{
+			summonedEntity->inheritSpatialContextFrom(target);
+		}
+
 		if ( !summonedEntity )
 		{
 			if ( parent && parent->behavior == &actPlayer && customMonster == NOTHING )
@@ -2187,6 +2192,7 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 					Entity* dropped = dropItemMonster(targetStats->breastplate, target, targetStats);
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(target);
 						dropped->flags[USERFLAG1] = true;
 					}
 				}
@@ -2227,6 +2233,7 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 						Entity* dropped = dropItemMonster(targetStats->helmet, target, targetStats);
 						if ( dropped )
 						{
+							dropped->inheritSpatialContextFrom(target);
 							dropped->flags[USERFLAG1] = true;
 						}
 					}
@@ -2272,6 +2279,7 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 					Entity* dropped = dropItemMonster(targetStats->gloves, target, targetStats);
 					if ( dropped )
 					{
+						dropped->inheritSpatialContextFrom(target);
 						dropped->flags[USERFLAG1] = true;
 					}
 				}
@@ -2303,47 +2311,56 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 				dropped = dropItemMonster(targetStats->weapon, target, targetStats);
 				if ( dropped )
 				{
+					dropped->inheritSpatialContextFrom(target);
 					dropped->flags[USERFLAG1] = true;
 				}
 			}
 			dropped = dropItemMonster(targetStats->shield, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->breastplate, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->shoes, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->gloves, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->ring, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->amulet, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->cloak, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 			dropped = dropItemMonster(targetStats->helmet, target, targetStats);
 			if ( dropped )
 			{
+				dropped->inheritSpatialContextFrom(target);
 				dropped->flags[USERFLAG1] = true;
 			}
 		}
@@ -2936,6 +2953,7 @@ bool spellEffectDemonIllusion(Entity& my, spellElement_t& element, Entity* paren
 				Entity* monster = summonMonster(INCUBUS, tx * 16.0 + 8, ty * 16.0 + 8, true);
 				if ( monster )
 				{
+					monster->inheritSpatialContextFrom(parent);
 					spawnExplosion(monster->x, monster->y, -1);
 					playSoundEntity(monster, 171, 128);
 					//playSoundEntity(&my, 178, 128);
@@ -3082,6 +3100,7 @@ Entity* spellEffectHologram(Entity& caster, spellElement_t& element, real_t x, r
 
 			if ( monster )
 			{
+				monster->inheritSpatialContextFrom(&caster);
 				playSoundEntity(monster, 166, 128);
 				//playSoundEntity(&my, 178, 128);
 				createParticleErupt(monster, 983);
@@ -3141,6 +3160,7 @@ Entity* spellEffectAdorcise(Entity& caster, spellElement_t& element, real_t x, r
 
 			if ( monster )
 			{
+				monster->inheritSpatialContextFrom(&caster);
 				playSoundEntity(monster, 171, 128);
 				//playSoundEntity(&my, 178, 128);
 				createParticleErupt(monster, 983);
@@ -3353,6 +3373,7 @@ Entity* spellEffectFlameSprite(Entity& caster, spellElement_t& element, real_t x
 
 			if ( monster )
 			{
+				monster->inheritSpatialContextFrom(&caster);
 				playSoundEntity(monster, 164, 128);
 				//playSoundEntity(&my, 178, 128);
 				//createParticleErupt(monster, 983);
@@ -4125,7 +4146,7 @@ Entity* spellEffectDemesneDoor(Entity& caster, Entity& target)
 		}
 	}
 
-	Entity* door = newEntity(1809, 1, map.entities, nullptr);
+	Entity* door = newEntityWithSpatialContext(1809, 1, map.entities, nullptr, &caster);
 	door->x = target.x;
 	door->y = target.y;
 	door->parent = caster.getUID();

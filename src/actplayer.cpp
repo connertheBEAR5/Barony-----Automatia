@@ -737,7 +737,7 @@ void Player::Ghost_t::handleAttack()
 			// boosty boost
 			for ( int i = 0; i < 3 && castingHeldDuration == 1; ++i )
 			{
-				Entity* entity = newEntity(1245, 1, map.entities, nullptr);
+				Entity* entity = newEntityWithSpatialContext(1245, 1, map.entities, nullptr, my);
 				entity->yaw = i * 2 * PI / 3;
 				entity->x = x;
 				entity->y = y;
@@ -819,7 +819,7 @@ void Player::Ghost_t::handleAttack()
 			{
 				Uint32 animTick = castingHeldDuration >= castLoopDuration ? castLoopDuration : castingHeldDuration;
 
-				Entity* entity = newEntity(1243, 1, map.entities, nullptr); //Particle entity.
+				Entity* entity = newEntityWithSpatialContext(1243, 1, map.entities, nullptr, my); //Particle entity.
 				entity->x = x - 0.01 * (5 + local_rng.rand() % 11);
 				entity->y = y - 0.01 * (5 + local_rng.rand() % 11);
 				entity->z = z - 0.01 * (10 + local_rng.rand() % 21);
@@ -1647,6 +1647,10 @@ Entity* Player::Ghost_t::respawn()
 		return nullptr;
 	}
 
+	const SpatialSpawnContext respawnSpatialContext = player.ghost.my
+		? player.ghost.my->spatialSpawnContext()
+		: SpatialSpawnContext{};
+
 	if ( player.ghost.my )
 	{
 		player.ghost.setActive(false);
@@ -1656,7 +1660,7 @@ Entity* Player::Ghost_t::respawn()
 
 	if ( multiplayer != CLIENT )
 	{
-		Entity* entity = newEntity(113, 1, map.entities, nullptr); //Player entity.
+		Entity* entity = newEntityWithSpatialContext(113, 1, map.entities, nullptr, respawnSpatialContext); //Player entity.
 		entity->x = spawnX * 16.0 + 8;
 		entity->y = spawnY * 16.0 + 8;
 		entity->z = -1;
@@ -1780,7 +1784,11 @@ void spawnPlayerXP(real_t x, real_t y, int player, int xpAmount)
 	std::set<int> okspots;
 
 	int sprite = 211; // Player::Ghost_t::getSpriteForPlayer(player);
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Ghost entity.
+	const Entity* spatialSource = players[player]->entity
+		? players[player]->entity
+		: players[player]->ghost.my;
+	Entity* entity = newEntityWithSpatialContext(
+		sprite, 1, map.entities, nullptr, spatialSource); //Ghost entity.
 	entity->flags[PASSABLE] = true;
 	//entity->flags[INVISIBLE] = true;
 	entity->flags[NOUPDATE] = true;
@@ -1887,7 +1895,8 @@ Entity* Player::Ghost_t::spawnGhost()
 	if ( multiplayer != CLIENT )
 	{
 		int sprite = Player::Ghost_t::getSpriteForPlayer(player.playernum);
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Ghost entity.
+		Entity* entity = newEntityWithSpatialContext(
+			sprite, 1, map.entities, nullptr, players[player.playernum]->entity); //Ghost entity.
 		entity->x = spawnX * 16.0 + 8;
 		entity->y = spawnY * 16.0 + 8;
 		entity->z = -4;
@@ -2298,7 +2307,7 @@ void actDeathGhost(Entity* my)
 		GHOSTCAM_INIT = 1;
 
 		// body model
-		Entity* entity = newEntity(my->sprite, 1, map.entities, nullptr);
+		Entity* entity = newEntityWithSpatialContext(my->sprite, 1, map.entities, nullptr, my);
 		entity->behavior = &actDeathGhostLimb;
 		entity->sizex = 4;
 		entity->sizey = 4;
@@ -2314,7 +2323,7 @@ void actDeathGhost(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// eyes model
-		entity = newEntity(1237, 1, map.entities, nullptr);
+		entity = newEntityWithSpatialContext(1237, 1, map.entities, nullptr, my);
 		entity->behavior = &actDeathGhostLimb;
 		entity->sizex = 4;
 		entity->sizey = 4;
@@ -2330,7 +2339,7 @@ void actDeathGhost(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// nametag (for voice)
-		Entity* nametag = newEntity(-1, 1, map.entities, nullptr);
+		Entity* nametag = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my);
 		nametag->x = my->x;
 		nametag->y = my->y;
 		nametag->z = my->z - 6;
@@ -2357,7 +2366,7 @@ void actDeathGhost(Entity* my)
 		}
 
 		// extra cosmetic limbs
-		entity = newEntity(-1, 1, map.entities, nullptr);
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my);
 		entity->behavior = &actDeathGhostLimb;
 		entity->sizex = 4;
 		entity->sizey = 4;
@@ -6059,6 +6068,7 @@ void playerDebugTests(Entity* my)
 								Entity* monster = summonMonster(SLIME, ox * 16 + 8, oy * 16 + 8);
 								if ( monster )
 								{
+									monster->inheritSpatialContextFrom(entity);
 									auto& rng = entity->entity_rng ? *entity->entity_rng : local_rng;
 									monster->seedEntityRNG(rng.getU32());
 									slimeSetType(monster, monster->getStats(), true, &rng);
@@ -6468,7 +6478,7 @@ void actPlayer(Entity* my)
 		}
 		else if ( *cvar_pbaoe == 13 )
 		{
-			Entity* leaf = newEntity(1912, 1, map.entities, nullptr); //Gib entity.
+			Entity* leaf = newEntityWithSpatialContext(1912, 1, map.entities, nullptr, my); //Gib entity.
 			if ( leaf != NULL )
 			{
 				leaf->x = my->x + 40.0 * cos(my->yaw);
@@ -6504,7 +6514,7 @@ void actPlayer(Entity* my)
 		else if ( *cvar_pbaoe == 14 )
 		{
 			spawnLeafPile(my->x + 40.0 * cos(my->yaw), my->y + 40.0 * sin(my->yaw), true);
-			//Entity* leaf = newEntity(1913, 1, map.entities, nullptr); //Gib entity.
+			//Entity* leaf = newEntityWithSpatialContext(1913, 1, map.entities, nullptr, my); //Gib entity.
 			//if ( leaf != NULL )
 			//{
 			//	leaf->x = my->x + 40.0 * cos(my->yaw);
@@ -7088,7 +7098,7 @@ void actPlayer(Entity* my)
 				{
 					for ( int i = 0; i < 3; ++i )
 					{
-						Entity* entity = newEntity(576, 1, map.entities, nullptr);
+						Entity* entity = newEntityWithSpatialContext(576, 1, map.entities, nullptr, my);
 						entity->yaw = i * 2 * PI / 3;
 						entity->x = my->x;
 						entity->y = my->y;
@@ -7316,7 +7326,7 @@ void actPlayer(Entity* my)
 
 		//for ( int i = 0; i < 8; ++i )
 		//{
-		//	Entity* entity = newEntity(i >= 4 ? 224 : 223, 1, map.entities, nullptr); //Sprite entity.
+		//	Entity* entity = newEntityWithSpatialContext(i >= 4 ? 224 : 223, 1, map.entities, nullptr, my); //Sprite entity.
 		//	entity->x = my->x + 16.0 * cos(my->yaw);
 		//	entity->y = my->y + 16.0 * sin(my->yaw);
 		//	entity->z = 7.499;
@@ -7590,7 +7600,7 @@ void actPlayer(Entity* my)
 		players[PLAYER_NUM]->compendiumProgress.playerEquipSlotTime.clear();
 		players[PLAYER_NUM]->compendiumProgress.allyTimeSpent.clear();
 
-		Entity* nametag = newEntity(-1, 1, map.entities, nullptr);
+		Entity* nametag = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my);
 		nametag->x = my->x;
 		nametag->y = my->y;
 		nametag->z = my->z - 6;
@@ -7618,7 +7628,7 @@ void actPlayer(Entity* my)
 				my->flags[UPDATENEEDED] = false;
 			}
 
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7635,7 +7645,7 @@ void actPlayer(Entity* my)
 			// magic hands
 
 			//Left hand.
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7645,7 +7655,7 @@ void actPlayer(Entity* my)
 			entity->focalz = -4;
 			players[PLAYER_NUM]->hud.magicLeftHand = entity;
 			//Right hand.
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7657,7 +7667,7 @@ void actPlayer(Entity* my)
 			my->bodyparts.push_back(entity);
 
 			// hud shield
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7667,7 +7677,7 @@ void actPlayer(Entity* my)
 			my->bodyparts.push_back(entity);
 
 			// hud additional limb
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7677,7 +7687,7 @@ void actPlayer(Entity* my)
 			my->bodyparts.push_back(entity);
 
 			// hud additional limb 2
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7687,7 +7697,7 @@ void actPlayer(Entity* my)
 			my->bodyparts.push_back(entity);
 
 			// hud magic rangefinder
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = false;
 			entity->flags[NOUPDATE] = true;
@@ -7698,7 +7708,7 @@ void actPlayer(Entity* my)
 			my->bodyparts.push_back(entity);
 
 			// hud additional 2 limb
-			entity = newEntity(-1, 1, map.entities, nullptr); //HUD entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
 			entity->flags[PASSABLE] = true;
 			entity->flags[OVERDRAW] = true;
 			entity->flags[NOUPDATE] = true;
@@ -7716,7 +7726,7 @@ void actPlayer(Entity* my)
 		}
 
 		// torso
-		entity = newEntity(spriteTorso, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(spriteTorso, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7736,7 +7746,7 @@ void actPlayer(Entity* my)
 		entity->setDefaultPlayerModel(PLAYER_NUM, playerRace, LIMB_HUMANOID_TORSO, my->sprite);
 
 		// right leg
-		entity = newEntity(spriteLegRight, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(spriteLegRight, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7756,7 +7766,7 @@ void actPlayer(Entity* my)
 		entity->setDefaultPlayerModel(PLAYER_NUM, playerRace, LIMB_HUMANOID_RIGHTLEG, my->sprite);
 
 		// left leg
-		entity = newEntity(spriteLegLeft, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(spriteLegLeft, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7776,7 +7786,7 @@ void actPlayer(Entity* my)
 		entity->setDefaultPlayerModel(PLAYER_NUM, playerRace, LIMB_HUMANOID_LEFTLEG, my->sprite);
 
 		// right arm
-		entity = newEntity(spriteArmRight, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(spriteArmRight, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7796,7 +7806,7 @@ void actPlayer(Entity* my)
 		entity->setDefaultPlayerModel(PLAYER_NUM, playerRace, LIMB_HUMANOID_RIGHTARM, my->sprite);
 
 		// left arm
-		entity = newEntity(spriteArmLeft, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(spriteArmLeft, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7816,7 +7826,7 @@ void actPlayer(Entity* my)
 		entity->setDefaultPlayerModel(PLAYER_NUM, playerRace, LIMB_HUMANOID_LEFTARM, my->sprite);
 
 		// world weapon
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7836,7 +7846,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// shield
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7858,7 +7868,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// cloak
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->scalex = 1.01;
@@ -7881,7 +7891,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// helmet
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->scalex = 1.01;
@@ -7904,7 +7914,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// mask
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->scalex = .99;
@@ -7927,7 +7937,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// additional limb 1
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7947,7 +7957,7 @@ void actPlayer(Entity* my)
 		my->bodyparts.push_back(entity);
 
 		// additional limb 2
-		entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+		entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->skill[2] = PLAYER_NUM;
@@ -7969,7 +7979,7 @@ void actPlayer(Entity* my)
 		// additional limb 3 - 18.
 		for ( int c = 0; c < 8; ++c )
 		{
-			entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 			entity->sizex = 1;
 			entity->sizey = 1;
 			entity->skill[2] = PLAYER_NUM;
@@ -7989,7 +7999,7 @@ void actPlayer(Entity* my)
 			node->size = sizeof(Entity*);
 			my->bodyparts.push_back(entity);
 
-			entity = newEntity(-1, 1, map.entities, nullptr); //Limb entity.
+			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Limb entity.
 			entity->sizex = 1;
 			entity->sizey = 1;
 			entity->skill[2] = PLAYER_NUM;
@@ -11108,7 +11118,7 @@ void actPlayer(Entity* my)
 						if ( players[PLAYER_NUM]->isLocalPlayer() )
 						{
 							// deathcam
-							entity = newEntity(-1, 1, map.entities, nullptr); //Deathcam entity.
+							entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Deathcam entity.
 							entity->x = my->x;
 							entity->y = my->y;
 							entity->z = -2;
@@ -11364,7 +11374,7 @@ void actPlayer(Entity* my)
 								|| (stats[PLAYER_NUM]->type == AUTOMATON && my->playerCreatedDeathCam == 0) )
 							{
 								// deathcam
-								entity = newEntity(-1, 1, map.entities, nullptr); //Deathcam entity.
+								entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Deathcam entity.
 								entity->x = my->x;
 								entity->y = my->y;
 								entity->z = -2;
@@ -11479,7 +11489,7 @@ void actPlayer(Entity* my)
 										int c = item->count;
 										for ( c = item->count; c > 0; c-- )
 										{
-											entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+											entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 											entity->flags[INVISIBLE] = true;
 											entity->flags[UPDATENEEDED] = true;
 											entity->x = my->x;
@@ -11543,7 +11553,7 @@ void actPlayer(Entity* my)
 										int c = item->count;
 										for ( c = item->count; c > 0; c-- )
 										{
-											entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+											entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //Item entity.
 											entity->flags[INVISIBLE] = true;
 											entity->flags[UPDATENEEDED] = true;
 											entity->x = my->x;

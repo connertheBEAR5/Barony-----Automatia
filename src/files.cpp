@@ -15,6 +15,9 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <list>
 #include <string>
@@ -22,6 +25,9 @@
 #include <future>
 #include <set>
 #include <limits>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include "light.hpp"
 #include "files.hpp"
 #include "engine/audio/sound.hpp"

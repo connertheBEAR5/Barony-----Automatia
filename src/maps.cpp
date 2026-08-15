@@ -1075,10 +1075,47 @@ bool mapTileDiggable(const int x, const int y)
 	return true;
 }
 
+static void proceduralSubRoomMapDeconstructor(void* data)
+{
+	if ( data == nullptr )
+	{
+		return;
+	}
+
+	map_t* subRoomMap = static_cast<map_t*>(data);
+	if ( subRoomMap->tiles != nullptr )
+	{
+		free(subRoomMap->tiles);
+		subRoomMap->tiles = nullptr;
+	}
+	if ( subRoomMap->creatures != nullptr )
+	{
+		list_FreeAll(subRoomMap->creatures);
+		delete subRoomMap->creatures;
+		subRoomMap->creatures = nullptr;
+	}
+	if ( subRoomMap->entities != nullptr )
+	{
+		list_FreeAll(subRoomMap->entities);
+		free(subRoomMap->entities);
+		subRoomMap->entities = nullptr;
+	}
+	if ( subRoomMap->worldUI != nullptr )
+	{
+		list_FreeAll(subRoomMap->worldUI);
+		delete subRoomMap->worldUI;
+		subRoomMap->worldUI = nullptr;
+	}
+
+	// map_t now owns non-trivial C++ state (including PlayableFloorTable).
+	// delete is required so those members and map_t::~map_t() are destroyed.
+	delete subRoomMap;
+}
+
 bool loadSubRoomData(std::string fullMapPath, list_t* mapList)
 {
 	// allocate memory for the next subroom and attempt to load it
-	map_t* subRoomMap = (map_t*)malloc(sizeof(map_t));
+	map_t* subRoomMap = new map_t();
 	subRoomMap->tiles = nullptr;
 	subRoomMap->entities = (list_t*)malloc(sizeof(list_t));
 	subRoomMap->entities->first = nullptr;
@@ -1093,7 +1130,7 @@ bool loadSubRoomData(std::string fullMapPath, list_t* mapList)
 	int checkMapHash = -1;
 	if ( fullMapPath.empty() || loadMap(fullMapPath.c_str(), subRoomMap, subRoomMap->entities, subRoomMap->creatures, &checkMapHash) == -1 )
 	{
-		mapDeconstructor((void*)subRoomMap);
+		proceduralSubRoomMapDeconstructor((void*)subRoomMap);
 		return false; // failed to load level
 	}
 	if ( !verifyMapHash(fullMapPath.c_str(), checkMapHash) )
@@ -1113,7 +1150,7 @@ bool loadSubRoomData(std::string fullMapPath, list_t* mapList)
 
 	node = list_AddNodeLast(subRoomList);
 	node->element = subRoomMap;
-	node->deconstructor = &mapDeconstructor;
+	node->deconstructor = &proceduralSubRoomMapDeconstructor;
 
 	// more nodes are created to record the exit points on the sublevel
 	for ( int y = 0; y < subRoomMap->height; y++ )

@@ -485,6 +485,86 @@ bool testOneFloorCollisionAndSpatialIndex()
     return true;
 }
 
+bool testPlayableFloorCollisionIsolation()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    PlayableFloorData upperFloor;
+    upperFloor.id = 1;
+    upperFloor.tiles.resize(
+        static_cast<std::size_t>(map.width)
+            * static_cast<std::size_t>(map.height) * MAPLAYERS,
+        0);
+    for (std::size_t x = 0; x < map.width; ++x)
+    {
+        for (std::size_t y = 0; y < map.height; ++y)
+        {
+            upperFloor.tiles[tileIndex(x, y, FLOORLAYER, map.height)] = 1;
+        }
+    }
+    EXPECT(map.playableFloors.addFloor(std::move(upperFloor)));
+
+    Entity* lower = newEntity(0, 1, map.entities, nullptr);
+    Entity* upper = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(lower != nullptr);
+    EXPECT(upper != nullptr);
+    lower->x = 24;
+    lower->y = 24;
+    lower->sizex = 2;
+    lower->sizey = 2;
+    upper->x = 24;
+    upper->y = 24;
+    upper->sizex = 2;
+    upper->sizey = 2;
+
+    EXPECT(TileEntityList.addEntity(*lower) != nullptr);
+    EXPECT(TileEntityList.addEntity(*upper) != nullptr);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1)) == 2);
+    EXPECT(entityInsideEntity(lower, upper));
+    EXPECT(entityDist(lower, upper) == 0.0);
+    EXPECT(checkObstacle(24, 24, lower, nullptr, true, false, false) == 1);
+
+    EXPECT(upper->spatialRevision == 0);
+    EXPECT(upper->setPlayableFloor(1));
+    EXPECT(upper->playableFloor == 1);
+    EXPECT(upper->spatialRevision == 1);
+    EXPECT(!upper->setPlayableFloor(1));
+    EXPECT(upper->spatialRevision == 1);
+
+    list_t* lowerTile = TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR);
+    list_t* upperTile = TileEntityList.getTileList(1, 1, 1);
+    EXPECT(lowerTile != nullptr);
+    EXPECT(upperTile != nullptr);
+    EXPECT(list_Size(lowerTile) == 1);
+    EXPECT(list_Size(upperTile) == 1);
+
+    EXPECT(!entityInsideEntity(lower, upper));
+    EXPECT(std::isinf(entityDist(lower, upper)));
+    EXPECT(checkObstacle(24, 24, lower, nullptr, true, false, false) == 0);
+    EXPECT(checkObstacle(24, 24, upper, nullptr, true, false, false) == 0);
+
+    auto lowerLists = TileEntityList.getEntitiesWithinRadiusAroundEntity(lower, 0);
+    auto upperLists = TileEntityList.getEntitiesWithinRadiusAroundEntity(upper, 0);
+    EXPECT(lowerLists.size() == 1);
+    EXPECT(upperLists.size() == 1);
+    EXPECT(list_Size(lowerLists.front()) == 1);
+    EXPECT(list_Size(upperLists.front()) == 1);
+    EXPECT(lowerLists.front()->first->element == lower);
+    EXPECT(upperLists.front()->first->element == upper);
+
+    // Runtime floor changes must reindex the entity and advance the routing
+    // revision so stale floor-local updates can be rejected in later Z2 work.
+    EXPECT(upper->setPlayableFloor(DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(upper->spatialRevision == 2);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1)) == 2);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, 1)) == 0);
+    EXPECT(entityInsideEntity(lower, upper));
+    EXPECT(entityDist(lower, upper) == 0.0);
+    EXPECT(checkObstacle(24, 24, lower, nullptr, true, false, false) == 1);
+    return true;
+}
+
 bool testLocalElevationAndRuntimeSpawns()
 {
     multiplayer = CLIENT;
@@ -516,16 +596,16 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(explicitContext->playableFloor == -2);
     EXPECT(explicitContext->spatialRevision == 19);
 
-    // The Stage-Z1 spawn API is floor-aware, while legacy spawn helpers are
-    // characterized below and will be migrated to it before Z2 isolation.
-    parent->playableFloor = DEFAULT_PLAYABLE_FLOOR;
-    parent->spatialRevision = 0;
-
+    // Parent-aware runtime spawns must inherit the complete spatial context.
+    // Coordinate-only/network reconstruction helpers remain explicit Z0 seams
+    // until their packets/APIs gain a playable-floor field in Z2.
     Entity* clientGib = spawnGibClient(12, 34, -7, 5);
     EXPECT(clientGib != nullptr);
     EXPECT(clientGib->x == 12.0);
     EXPECT(clientGib->y == 34.0);
     EXPECT(clientGib->z == -7.0);
+    EXPECT(clientGib->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(clientGib->spatialRevision == 0);
 
     Entity* gib = spawnGib(parent, 5);
     EXPECT(gib != nullptr);
@@ -533,18 +613,24 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(gib->y == parent->y);
     EXPECT(gib->z >= 8.0);
     EXPECT(gib->z <= parent->z - 4.0);
+    EXPECT(gib->playableFloor == parent->playableFloor);
+    EXPECT(gib->spatialRevision == parent->spatialRevision);
 
     Entity* particle = spawnMagicParticleCustom(parent, 245, 1.0, 10.0);
     EXPECT(particle != nullptr);
     EXPECT(std::fabs(particle->z - parent->z) <= 0.11);
     EXPECT(std::fabs(particle->x - parent->x) <= 0.11);
     EXPECT(std::fabs(particle->y - parent->y) <= 0.11);
+    EXPECT(particle->playableFloor == parent->playableFloor);
+    EXPECT(particle->spatialRevision == parent->spatialRevision);
 
     Entity* summon = summonMonsterNoSmoke(RAT, 48, 64, true);
     EXPECT(summon != nullptr);
     EXPECT(summon->x == 48.0);
     EXPECT(summon->y == 64.0);
     EXPECT(summon->z == 6.0);
+    EXPECT(summon->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(summon->spatialRevision == 0);
 
     Entity* arrow = newEntity(166, 1, map.entities, nullptr);
     EXPECT(arrow != nullptr);
@@ -678,6 +764,7 @@ int runPlayableZRuntimeCharacterization()
     const bool passed =
         testLmpCompatibilityAndRoundTrip(temporary)
         && testOneFloorCollisionAndSpatialIndex()
+        && testPlayableFloorCollisionIsolation()
         && testLocalElevationAndRuntimeSpawns()
         && testPersistentMinimapAndPlacement();
     clearGlobalMapHarness();
@@ -689,9 +776,10 @@ int runPlayableZRuntimeCharacterization()
     if (passed)
     {
         std::cout
-            << "Stage 4C/Z1 playable-Z data foundation passed: legacy floor Z0, "
-            << "local Entity::z, LMP V3.2/V4.0-V4.9, floor metadata, "
-            << "schema-3 minimap separation, placement, and spawn context.\n";
+            << "Stage 4D/Z2A playable-Z floor isolation passed: legacy floor Z0, "
+            << "local Entity::z, LMP V3.2/V4.0-V4.9, floor-separated "
+            << "TileEntityList, entity collision/distance isolation, runtime "
+            << "floor reindexing, schema-3 minimap, placement, and spawn context.\n";
     }
     return passed ? 0 : 1;
 }

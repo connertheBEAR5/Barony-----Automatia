@@ -683,7 +683,7 @@ void actItem(Entity* my)
 						else
 						{
 							bool oldCount = list_Size(&monsterInteracting->getStats()->inventory);
-							Entity* copyOfItem = newEntity(-1, 1, map.entities, nullptr);
+							Entity* copyOfItem = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my);
 							copyOfItem->x = my->x;
 							copyOfItem->y = my->y;
 							copyOfItem->flags[PASSABLE] = true;
@@ -701,6 +701,7 @@ void actItem(Entity* my)
 									Entity* dropped = dropItemMonster(toDrop, monsterInteracting, monsterInteracting->getStats(), toDrop->count);
 									if ( dropped )
 									{
+										dropped->inheritSpatialContextFrom(monsterInteracting);
 										dropped->vel_x = 0.0;
 										dropped->vel_y = 0.0;
 									}

@@ -170,6 +170,10 @@ public:
 
 	Uint32 getUID() const {return uid;}
 	void setUID(Uint32 new_uid);
+	// Changes discrete playable-floor identity at runtime. If the entity is
+	// currently in TileEntityList, the spatial index is moved atomically to
+	// the new floor and spatialRevision advances as a stale-packet barrier.
+	bool setPlayableFloor(PlayableFloorId newPlayableFloor);
 	SpatialSpawnContext spatialSpawnContext() const
 	{
 		return SpatialSpawnContext{playableFloor, spatialRevision};

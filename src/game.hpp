@@ -14,6 +14,8 @@
 #include <vector>
 #include <chrono>
 #include <string>
+#include <memory>
+#include <unordered_map>
 #ifdef STEAMWORKS
 #include <steam/steam_api.h>
 #include "steam.hpp"
@@ -1114,15 +1116,37 @@ class TileEntityListHandler
 {
 private:
 	static const int kMaxMapDimension = 256;
+	struct AdditionalFloorGrid
+	{
+		// Nonzero floors use sparse tile buckets so an empty 256x256 grid is not
+		// allocated for every possible playable floor. list_t addresses remain
+		// stable because each occupied bucket owns its list separately.
+		std::unordered_map<int, std::unique_ptr<list_t>> tiles;
+
+		~AdditionalFloorGrid();
+
+		AdditionalFloorGrid() = default;
+		AdditionalFloorGrid(const AdditionalFloorGrid&) = delete;
+		AdditionalFloorGrid& operator=(const AdditionalFloorGrid&) = delete;
+	};
+
+	std::unordered_map<PlayableFloorId, std::unique_ptr<AdditionalFloorGrid>> additionalFloorGrids;
+	list_t* getTileListForFloor(int x, int y, PlayableFloorId playableFloor, bool createFloor);
 public:
+	// Legacy public grid remains the Z0 compatibility grid. Nonzero playable
+	// floors are stored in additionalFloorGrids and must be accessed through
+	// the floor-aware helpers below.
 	list_t gridEntities[kMaxMapDimension][kMaxMapDimension];
 
 	void clearTile(int x, int y);
+	void clearTile(int x, int y, PlayableFloorId playableFloor);
 	void emptyGridEntities();
 	list_t* getTileList(int x, int y);
+	list_t* getTileList(int x, int y, PlayableFloorId playableFloor);
 	node_t* addEntity(Entity& entity);
 	node_t* updateEntity(Entity& entity);
 	std::vector<list_t*> getEntitiesWithinRadius(int u, int v, int radius);
+	std::vector<list_t*> getEntitiesWithinRadius(int u, int v, int radius, PlayableFloorId playableFloor);
 	std::vector<list_t*> getEntitiesWithinRadiusAroundEntity(Entity* entity, int radius);
 
 	TileEntityListHandler()
@@ -1139,13 +1163,7 @@ public:
 
 	~TileEntityListHandler()
 	{
-		for ( int i = 0; i < kMaxMapDimension; ++i )
-		{
-			for ( int j = 0; j < kMaxMapDimension; ++j )
-			{
-				clearTile(i, j);
-			}
-		}
+		emptyGridEntities();
 	};
 };
 extern TileEntityListHandler TileEntityList;

@@ -123,6 +123,8 @@ bool testOneFloorCollisionContracts()
         collision, "real_t entityDist(Entity* my, Entity* your)",
         "Entity* entityClicked");
     EXPECT(!distance.empty());
+    EXPECT(contains(distance, "my->playableFloor != your->playableFloor"));
+    EXPECT(contains(distance, "std::numeric_limits<real_t>::infinity()"));
     EXPECT(contains(distance, "dx = my->x - your->x;"));
     EXPECT(contains(distance, "dy = my->y - your->y;"));
     EXPECT(!contains(distance, "->z"));
@@ -131,6 +133,7 @@ bool testOneFloorCollisionContracts()
         collision, "bool entityInsideEntity(Entity* entity1, Entity* entity2)",
         "bool entityInsideSomething");
     EXPECT(!overlap.empty());
+    EXPECT(contains(overlap, "entity1->playableFloor != entity2->playableFloor"));
     EXPECT(contains(overlap, "entity1->x"));
     EXPECT(contains(overlap, "entity1->y"));
     EXPECT(!contains(overlap, "->z"));
@@ -431,11 +434,15 @@ bool testPersistenceAndSpawnSourceContracts()
     const std::string game = readFile(sourcePath("src/game.cpp"));
     const std::string gib = readFile(sourcePath("src/actgib.cpp"));
     const std::string magic = readFile(sourcePath("src/magic/actmagic.cpp"));
+    const std::string spellCasting = readFile(sourcePath("src/magic/castSpell.cpp"));
+    const std::string magicCore = readFile(sourcePath("src/magic/magic.cpp"));
     const std::string monster = readFile(sourcePath("src/actmonster.cpp"));
     const std::string item = readFile(sourcePath("src/actitem.cpp"));
     EXPECT(!game.empty());
     EXPECT(!gib.empty());
     EXPECT(!magic.empty());
+    EXPECT(!spellCasting.empty());
+    EXPECT(!magicCore.empty());
     EXPECT(!monster.empty());
     EXPECT(!item.empty());
 
@@ -456,12 +463,25 @@ bool testPersistenceAndSpawnSourceContracts()
 
     EXPECT(contains(gib, "entity->z = z;"));
     EXPECT(contains(gib, "parentent->z - 4"));
+    EXPECT(contains(gib, "newEntityWithSpatialContext"));
     EXPECT(contains(magic, "entity->z = parentent->z"));
+    EXPECT(contains(magic, "newEntityWithSpatialContext"));
+    EXPECT(contains(magic, "inheritSpatialContextFrom"));
+    EXPECT(contains(magic, "dropped->inheritSpatialContextFrom(parent);"));
+    EXPECT(contains(spellCasting, "dropped->inheritSpatialContextFrom(target);"));
+    EXPECT(contains(spellCasting, "dropped->inheritSpatialContextFrom(caster);"));
+    EXPECT(contains(magicCore, "dropped->inheritSpatialContextFrom(target);"));
     EXPECT(contains(monster, "entity->z = 6;"));
+    EXPECT(contains(monster, "entity->inheritSpatialContextFrom(my);"));
+    EXPECT(contains(monster, "dropped->inheritSpatialContextFrom(this);"));
     EXPECT(contains(item, "my->z += ITEM_VELZ;"));
+    EXPECT(contains(item, "newEntityWithSpatialContext"));
+    EXPECT(contains(item, "dropped->inheritSpatialContextFrom(monsterInteracting);"));
 
     const std::string player = readFile(sourcePath("src/actplayer.cpp"));
     EXPECT(contains(player, "bodypart->z = my->z;"));
+    EXPECT(contains(player, "newEntityWithSpatialContext"));
+    EXPECT(contains(player, "inheritSpatialContextFrom"));
     return true;
 }
 
@@ -474,6 +494,7 @@ bool testPlayableZDataFoundationContract()
     const std::string files = readFile(sourcePath("src/files.cpp"));
     const std::string game = readFile(sourcePath("src/game.cpp"));
     const std::string worldState = readFile(sourcePath("src/world_state.hpp"));
+    const std::string worldSave = readFile(sourcePath("src/automatia_world_save.cpp"));
     const std::string collision = readFile(sourcePath("src/collision.cpp"));
 
     EXPECT(!playableZ.empty());
@@ -490,18 +511,22 @@ bool testPlayableZDataFoundationContract()
     EXPECT(contains(entityHeader, "SpatialSpawnContext spatialSpawnContext() const"));
     EXPECT(contains(entityShared, "newEntityWithSpatialContext"));
     EXPECT(contains(worldState, "std::vector<PlayableFloorId> playableFloors"));
+    EXPECT(contains(worldSave, "{\"playable_floors\", std::move(playableFloors)}"));
 
     EXPECT(contains(files, "BARONY LMPV4.9"));
     EXPECT(contains(files, "loadPlayableZExtension"));
     EXPECT(contains(files, "savePlayableZExtension"));
     EXPECT(AutomatiaSave::CURRENT_SCHEMA_VERSION == 3);
 
-    // Z1 is data-only: legacy gameplay collision remains deliberately X/Y.
+    // Z2A begins real floor isolation while preserving local continuous z.
     const std::string distance = section(
         collision, "real_t entityDist(Entity* my, Entity* your)",
         "Entity* entityClicked");
     EXPECT(!distance.empty());
-    EXPECT(!contains(distance, "playableFloor"));
+    EXPECT(contains(distance, "playableFloor"));
+    EXPECT(contains(entityHeader, "bool setPlayableFloor(PlayableFloorId newPlayableFloor);"));
+    EXPECT(contains(readFile(sourcePath("src/game.hpp")), "additionalFloorGrids"));
+    EXPECT(contains(readFile(sourcePath("src/game.hpp")), "getTileList(int x, int y, PlayableFloorId playableFloor)"));
     EXPECT(contains(files, "Stage Z1 keeps nonzero floors data-only until Z2 isolation"));
     return true;
 }

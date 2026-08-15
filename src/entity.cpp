@@ -69,6 +69,28 @@ void Entity::setUID(Uint32 new_uid)
     uid = new_uid;
 }
 
+bool Entity::setPlayableFloor(const PlayableFloorId newPlayableFloor)
+{
+    if (playableFloor == newPlayableFloor)
+    {
+        return false;
+    }
+
+    playableFloor = newPlayableFloor;
+    ++spatialRevision;
+    if (spatialRevision == 0)
+    {
+        // Reserve zero for freshly-created/legacy entities.
+        ++spatialRevision;
+    }
+
+    if (myTileListNode)
+    {
+        TileEntityList.updateEntity(*this);
+    }
+    return true;
+}
+
 /*-------------------------------------------------------------------------------
 
 Entity::~Entity)
@@ -10020,7 +10042,7 @@ list_t* checkTileForEntity(int x, int y)
 	{
 		return nullptr; // invalid grid reference!
 	}
-	return &TileEntityList.gridEntities[x][y];
+	return TileEntityList.getTileList(x, y);
 
 //	list_t* return_val = NULL;
 //
@@ -17378,9 +17400,9 @@ Teleports the given entity within a radius of a target entity.
 
 -------------------------------------------------------------------------------*/
 
-bool teleportCoordHasTrap(const int x, const int y)
+bool teleportCoordHasTrap(const int x, const int y, const PlayableFloorId playableFloor)
 {
-	std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0);
+	std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0, playableFloor);
 	for ( auto it = entLists.begin(); it != entLists.end(); ++it )
 	{
 		list_t* currentList = *it;
@@ -17502,11 +17524,11 @@ bool Entity::teleportAroundEntity(Entity* target, int dist, int effectType)
 						real_t yawDifference = (PI - abs(abs(tangent - targetYaw) - PI)) * 2;
 						if ( yawDifference >= 0 && yawDifference <= PI ) // 180 degree arc
 						{
-							spotsBehindMonster.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy)));
+							spotsBehindMonster.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy, playableFloor)));
 						}
 						else
 						{
-							goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy)));
+							goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy, playableFloor)));
 						}
 					}
 					// restore coordinates.
@@ -17564,7 +17586,7 @@ bool Entity::teleportAroundEntity(Entity* target, int dist, int effectType)
 							}
 							else
 							{
-								onTrap = teleportCoordHasTrap(ix, iy);
+								onTrap = teleportCoordHasTrap(ix, iy, playableFloor);
 							}
 							if ( !onTrap )
 							{
@@ -17628,7 +17650,7 @@ bool Entity::teleportAroundEntity(Entity* target, int dist, int effectType)
 										lineTraceTarget(this, this->x, this->y, tangent, 64 * dist, LINETRACE_TELEKINESIS, false, tmpTarget);
 										if ( hit.entity == tmpTarget )
 										{
-											goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy)));
+											goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy, playableFloor)));
 											numlocations++;
 										}
 
@@ -17654,7 +17676,7 @@ bool Entity::teleportAroundEntity(Entity* target, int dist, int effectType)
 								}
 								else
 								{
-									goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy)));
+									goodspots.push_back(Coord_t(ix, iy, teleportCoordHasTrap(ix, iy, playableFloor)));
 								}
 								numlocations++;
 							}
@@ -28633,105 +28655,197 @@ bool monsterNameIsGeneric(Stat& monsterStats)
 	return false;
 }
 
+TileEntityListHandler::AdditionalFloorGrid::~AdditionalFloorGrid()
+{
+    for (auto& tile : tiles)
+    {
+        if (tile.second)
+        {
+            list_FreeAll(tile.second.get());
+        }
+    }
+}
+
+list_t* TileEntityListHandler::getTileListForFloor(
+    const int x,
+    const int y,
+    const PlayableFloorId playableFloor,
+    const bool createFloor)
+{
+    if (x < 0 || x >= kMaxMapDimension || y < 0 || y >= kMaxMapDimension)
+    {
+        return nullptr;
+    }
+
+    if (playableFloor == DEFAULT_PLAYABLE_FLOOR)
+    {
+        return &gridEntities[x][y];
+    }
+
+    auto floorIt = additionalFloorGrids.find(playableFloor);
+    if (floorIt == additionalFloorGrids.end())
+    {
+        if (!createFloor)
+        {
+            return nullptr;
+        }
+        floorIt = additionalFloorGrids.emplace(
+            playableFloor,
+            std::unique_ptr<AdditionalFloorGrid>(new AdditionalFloorGrid())).first;
+    }
+
+    const int index = y + x * kMaxMapDimension;
+    auto tileIt = floorIt->second->tiles.find(index);
+    if (tileIt == floorIt->second->tiles.end())
+    {
+        if (!createFloor)
+        {
+            return nullptr;
+        }
+        std::unique_ptr<list_t> tile(new list_t{});
+        tile->first = nullptr;
+        tile->last = nullptr;
+        tileIt = floorIt->second->tiles.emplace(index, std::move(tile)).first;
+    }
+    return tileIt->second.get();
+}
+
 node_t* TileEntityListHandler::addEntity(Entity& entity)
 {
-	if ( entity.myTileListNode )
-	{
-		return nullptr;
-	}
+    if (entity.myTileListNode)
+    {
+        return nullptr;
+    }
 
-	if ( static_cast<Sint32>(entity.getUID()) <= -3 )
-	{
-		return nullptr;
-	}
+    if (static_cast<Sint32>(entity.getUID()) <= -3)
+    {
+        return nullptr;
+    }
 
-	int x = (static_cast<int>(entity.x) >> 4);
-	int y = (static_cast<int>(entity.y) >> 4);
-	if ( x >= 0 && x < kMaxMapDimension && y >= 0 && y < kMaxMapDimension )
-	{
-		//messagePlayer(0, "added at %d, %d", x, y);
-		entity.myTileListNode = list_AddNodeLast(&TileEntityList.gridEntities[x][y]);
-		entity.myTileListNode->element = &entity;
-		entity.myTileListNode->deconstructor = &emptyDeconstructor;
-		entity.myTileListNode->size = sizeof(Entity);
-		return entity.myTileListNode;
-	}
+    const int x = (static_cast<int>(entity.x) >> 4);
+    const int y = (static_cast<int>(entity.y) >> 4);
+    list_t* tileList = getTileListForFloor(x, y, entity.playableFloor, true);
+    if (!tileList)
+    {
+        return nullptr;
+    }
 
-	return nullptr;
+    entity.myTileListNode = list_AddNodeLast(tileList);
+    entity.myTileListNode->element = &entity;
+    entity.myTileListNode->deconstructor = &emptyDeconstructor;
+    entity.myTileListNode->size = sizeof(Entity);
+    return entity.myTileListNode;
 }
 
 node_t* TileEntityListHandler::updateEntity(Entity& entity)
 {
-	if ( !entity.myTileListNode )
-	{
-		return nullptr;
-	}
+    if (!entity.myTileListNode)
+    {
+        return nullptr;
+    }
 
-	int x = (static_cast<int>(entity.x) >> 4);
-	int y = (static_cast<int>(entity.y) >> 4);
-	if ( x >= 0 && x < kMaxMapDimension && y >= 0 && y < kMaxMapDimension )
-	{
-		list_RemoveNode(entity.myTileListNode);
-		entity.myTileListNode = list_AddNodeLast(&TileEntityList.gridEntities[x][y]);
-		entity.myTileListNode->element = &entity;
-		entity.myTileListNode->deconstructor = &emptyDeconstructor;
-		entity.myTileListNode->size = sizeof(Entity);
-		return entity.myTileListNode;
-	}
+    const int x = (static_cast<int>(entity.x) >> 4);
+    const int y = (static_cast<int>(entity.y) >> 4);
+    list_t* tileList = getTileListForFloor(x, y, entity.playableFloor, true);
+    if (!tileList)
+    {
+        list_RemoveNode(entity.myTileListNode);
+        entity.myTileListNode = nullptr;
+        return nullptr;
+    }
 
-	return nullptr;
+    list_RemoveNode(entity.myTileListNode);
+    entity.myTileListNode = list_AddNodeLast(tileList);
+    entity.myTileListNode->element = &entity;
+    entity.myTileListNode->deconstructor = &emptyDeconstructor;
+    entity.myTileListNode->size = sizeof(Entity);
+    return entity.myTileListNode;
 }
 
-void TileEntityListHandler::clearTile(int x, int y)
+void TileEntityListHandler::clearTile(const int x, const int y)
 {
-	list_FreeAll(&gridEntities[x][y]);
+    clearTile(x, y, DEFAULT_PLAYABLE_FLOOR);
+}
+
+void TileEntityListHandler::clearTile(
+    const int x,
+    const int y,
+    const PlayableFloorId playableFloor)
+{
+    list_t* tileList = getTileListForFloor(x, y, playableFloor, false);
+    if (tileList)
+    {
+        list_FreeAll(tileList);
+    }
 }
 
 void TileEntityListHandler::emptyGridEntities()
 {
-	for ( int i = 0; i < kMaxMapDimension; ++i )
-	{
-		for ( int j = 0; j < kMaxMapDimension; ++j )
-		{
-			clearTile(i, j);
-		}
-	}
+    for (int i = 0; i < kMaxMapDimension; ++i)
+    {
+        for (int j = 0; j < kMaxMapDimension; ++j)
+        {
+            list_FreeAll(&gridEntities[i][j]);
+        }
+    }
+    additionalFloorGrids.clear();
 }
 
-list_t* TileEntityListHandler::getTileList(int x, int y)
+list_t* TileEntityListHandler::getTileList(const int x, const int y)
 {
-	if ( x >= 0 && x < kMaxMapDimension && y >= 0 && y < kMaxMapDimension )
-	{
-		return &gridEntities[x][y];
-	}
-	return nullptr;
+    return getTileListForFloor(x, y, DEFAULT_PLAYABLE_FLOOR, false);
+}
+
+list_t* TileEntityListHandler::getTileList(
+    const int x,
+    const int y,
+    const PlayableFloorId playableFloor)
+{
+    return getTileListForFloor(x, y, playableFloor, false);
 }
 
 /* returns list of entities within a radius, e.g 1 radius is a 3x3 area around given center. */
-std::vector<list_t*> TileEntityListHandler::getEntitiesWithinRadius(int u, int v, int radius)
+std::vector<list_t*> TileEntityListHandler::getEntitiesWithinRadius(
+    const int u,
+    const int v,
+    const int radius)
 {
-	std::vector<list_t*> return_val;
-	for ( int i = u - radius; i <= u + radius; ++i )
-	{
-		for ( int j = v - radius; j <= v + radius; ++j )
-		{
-			list_t* list = getTileList(i, j);
-			if ( list )
-			{
-				return_val.push_back(list);
-			}
-		}
-	}
+    return getEntitiesWithinRadius(u, v, radius, DEFAULT_PLAYABLE_FLOOR);
+}
 
-	return return_val;
+std::vector<list_t*> TileEntityListHandler::getEntitiesWithinRadius(
+    const int u,
+    const int v,
+    const int radius,
+    const PlayableFloorId playableFloor)
+{
+    std::vector<list_t*> returnValue;
+    for (int i = u - radius; i <= u + radius; ++i)
+    {
+        for (int j = v - radius; j <= v + radius; ++j)
+        {
+            list_t* list = getTileListForFloor(i, j, playableFloor, false);
+            if (list)
+            {
+                returnValue.push_back(list);
+            }
+        }
+    }
+    return returnValue;
 }
 
 /* returns list of entities within a radius around entity, e.g 1 radius is a 3x3 area around entity. */
-std::vector<list_t*> TileEntityListHandler::getEntitiesWithinRadiusAroundEntity(Entity* entity, int radius)
+std::vector<list_t*> TileEntityListHandler::getEntitiesWithinRadiusAroundEntity(
+    Entity* entity,
+    const int radius)
 {
-	int u = static_cast<int>(entity->x) >> 4;
-	int v = static_cast<int>(entity->y) >> 4;
-	return getEntitiesWithinRadius(u, v, radius);
+    if (!entity)
+    {
+        return {};
+    }
+    const int u = static_cast<int>(entity->x) >> 4;
+    const int v = static_cast<int>(entity->y) >> 4;
+    return getEntitiesWithinRadius(u, v, radius, entity->playableFloor);
 }
 
 void Entity::setHumanoidLimbOffset(Entity* limb, Monster race, int limbType)

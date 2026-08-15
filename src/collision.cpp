@@ -30,6 +30,7 @@
 #include "ui/MainMenu.hpp"
 #include "interface/consolecommand.hpp"
 #include "ui/GameUI.hpp"
+#include <limits>
 
 /*-------------------------------------------------------------------------------
 
@@ -41,6 +42,14 @@
 
 real_t entityDist(Entity* my, Entity* your)
 {
+	if (!my || !your)
+	{
+		return std::numeric_limits<real_t>::infinity();
+	}
+	if (my->playableFloor != your->playableFloor)
+	{
+		return std::numeric_limits<real_t>::infinity();
+	}
 	real_t dx, dy;
 	dx = my->x - your->x;
 	dy = my->y - your->y;
@@ -434,6 +443,7 @@ bool entityInsideTile(Entity* entity, int x, int y, int z, bool checkSafeTiles)
 bool entityInsideEntity(Entity* entity1, Entity* entity2)
 {
 	if ( !entity1 || !entity2 ) { return false; }
+	if ( entity1->playableFloor != entity2->playableFloor ) { return false; }
 	if ( entity1->x + entity1->sizex > entity2->x - entity2->sizex )
 	{
 		if ( entity1->x - entity1->sizex < entity2->x + entity2->sizex )
@@ -1188,7 +1198,11 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 	}
 	else
 	{
-		entLists = TileEntityList.getEntitiesWithinRadius(static_cast<int>(tx) >> 4, static_cast<int>(ty) >> 4, 2);
+		entLists = TileEntityList.getEntitiesWithinRadius(
+			static_cast<int>(tx) >> 4,
+			static_cast<int>(ty) >> 4,
+			2,
+			my->playableFloor);
 	}
 
 	Monster type = NOTHING;
@@ -1203,6 +1217,10 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 		for ( node = currentList->first; node != nullptr; node = node->next )
 		{
 			entity = (Entity*)node->element;
+			if (!entity || entity->playableFloor != my->playableFloor)
+			{
+				continue;
+			}
 			if ( entity == my || my->parent == entity->getUID() )
 			{
 				continue;
@@ -1887,7 +1905,10 @@ Entity* findEntityInLine( Entity* my, real_t x1, real_t y1, real_t angle, int en
 			{
 				for ( int iy = std::max(0, originy - 1); iy < map.height; ++iy )
 				{
-					entLists.push_back(&TileEntityList.gridEntities[ix][iy]);
+					if (list_t* tileList = TileEntityList.getTileList(ix, iy, my->playableFloor))
+					{
+						entLists.push_back(tileList);
+					}
 				}
 			}
 		}
@@ -1905,7 +1926,10 @@ Entity* findEntityInLine( Entity* my, real_t x1, real_t y1, real_t angle, int en
 			{
 				for ( int iy = std::max(0, originy - 1); iy < map.height; ++iy )
 				{
-					entLists.push_back(&TileEntityList.gridEntities[ix][iy]);
+					if (list_t* tileList = TileEntityList.getTileList(ix, iy, my->playableFloor))
+					{
+						entLists.push_back(tileList);
+					}
 				}
 			}
 		}
@@ -1923,7 +1947,10 @@ Entity* findEntityInLine( Entity* my, real_t x1, real_t y1, real_t angle, int en
 			{
 				for ( int iy = std::min(static_cast<int>(map.height) - 1, originy + 1); iy >= 0; --iy )
 				{
-					entLists.push_back(&TileEntityList.gridEntities[ix][iy]);
+					if (list_t* tileList = TileEntityList.getTileList(ix, iy, my->playableFloor))
+					{
+						entLists.push_back(tileList);
+					}
 				}
 			}
 		}
@@ -1941,7 +1968,10 @@ Entity* findEntityInLine( Entity* my, real_t x1, real_t y1, real_t angle, int en
 			{
 				for ( int iy = std::min(static_cast<int>(map.height) - 1, originy + 1); iy >= 0; --iy )
 				{
-					entLists.push_back(&TileEntityList.gridEntities[ix][iy]);
+					if (list_t* tileList = TileEntityList.getTileList(ix, iy, my->playableFloor))
+					{
+						entLists.push_back(tileList);
+					}
 				}
 			}
 		}
@@ -1987,6 +2017,10 @@ Entity* findEntityInLine( Entity* my, real_t x1, real_t y1, real_t angle, int en
 		for ( node = currentList->first; node != nullptr; node = node->next )
 		{
 			Entity* entity = (Entity*)node->element;
+			if (!entity || entity->playableFloor != my->playableFloor)
+			{
+				continue;
+			}
 			if ( (entity != target && target != nullptr) || entity->flags[PASSABLE] || entity == my
 				|| ((entities & LINETRACE_IGNORE_ENTITIES) && 
 						( (!entity->flags[BLOCKSIGHT] && entity->behavior != &actMonster) 
@@ -2706,6 +2740,9 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 	Entity* entity = nullptr;
 	Stat* stats = nullptr;
 	bool levitating = false;
+	const PlayableFloorId queryFloor = my
+		? my->playableFloor
+		: (target ? target->playableFloor : DEFAULT_PLAYABLE_FLOOR);
 
 	// get levitation status
 	if ( my != NULL && (stats = my->getStats()) != NULL )
@@ -2765,7 +2802,7 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 					for ( node = currentList->first; node != nullptr; node = node->next )
 					{
 						entity = (Entity*)node->element;
-						if ( !entity ) { continue; }
+						if ( !entity || entity->playableFloor != queryFloor ) { continue; }
 						if ( entity->flags[PASSABLE]
 							|| entity == my
 							|| entity == target
@@ -2788,7 +2825,11 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 			}
 			else
 			{
-				std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(static_cast<int>(x) >> 4, static_cast<int>(y) >> 4, 2);
+				std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(
+					static_cast<int>(x) >> 4,
+					static_cast<int>(y) >> 4,
+					2,
+					queryFloor);
 				for ( std::vector<list_t*>::iterator it = entLists.begin(); it != entLists.end(); ++it )
 				{
 					list_t* currentList = *it;
@@ -2796,7 +2837,7 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 					{
 						entity = (Entity*)node->element;
 						//++entCheck;
-						if ( !entity ) { continue; }
+						if ( !entity || entity->playableFloor != queryFloor ) { continue; }
 						if ( entity->flags[PASSABLE] || entity == my || entity == target 
 							|| entity->behavior == &actDoor
 							|| (entity->behavior == &actIronDoor && entity->doorLocked == 0) )

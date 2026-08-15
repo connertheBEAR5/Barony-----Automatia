@@ -9420,6 +9420,7 @@ int restoreAutomatiaCharacterFollowers(
             {
                 continue;
             }
+            monster->inheritSpatialContextFrom(players[player]->entity);
             if (node == gyrobotNode)
             {
                 gyrobotEntity = monster;
