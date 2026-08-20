@@ -6,6 +6,7 @@
 #include "../src/files.hpp"
 #include "../src/magic/magic.hpp"
 #include "../src/monster.hpp"
+#include "../src/light.hpp"
 
 #include <array>
 #include <chrono>
@@ -64,6 +65,13 @@ void clearGlobalMapHarness()
     list_FreeAll(&stageEntities);
     list_FreeAll(&stageCreatures);
     list_FreeAll(&stageWorldUI);
+    list_FreeAll(&light_l);
+    clearAdditionalPlayableFloorLightmaps();
+    for (int index = 0; index < MAXPLAYERS + 1; ++index)
+    {
+        lightmaps[index].clear();
+        lightmapsSmoothed[index].clear();
+    }
     TileEntityList.emptyGridEntities();
     list_FreeAll(&entitiesdeleted);
     map.entities_map.clear();
@@ -290,6 +298,9 @@ bool verifySyntheticMap(
     EXPECT(entity->z == (editorVersion >= 41 ? expectedSerializedZ : 0.0));
     EXPECT(entity->persistentID == (editorVersion >= 45 ? 314 : 0));
     EXPECT(entity->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    // Pre-V4.9 maps may use Entity::z as local model elevation. They must never
+    // be promoted to an upper gameplay floor merely because z is negative.
+    EXPECT(entity->authoredMapLayer == 0);
     EXPECT(entity->spatialRevision == 0);
     EXPECT(loaded.playableFloors.floors.size() == 1);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
@@ -299,7 +310,7 @@ bool verifySyntheticMap(
 
 bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
 {
-    constexpr real_t fixtureZ = -3.625;
+    constexpr real_t fixtureZ = -32.0;
     for (int editorVersion = 40; editorVersion <= 48; ++editorVersion)
     {
         const std::string filename =
@@ -349,13 +360,46 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(map.playableFloors.addFloor(std::move(upperFloor)));
 
     Entity* saved = newEntity(0, 1, map.entities, nullptr);
+    Entity* lowerTransition = newEntity(0, 1, map.entities, nullptr);
     EXPECT(saved != nullptr);
+    EXPECT(lowerTransition != nullptr);
     saved->persistentID = 77;
+    saved->authoredMapLayer = 3;
     saved->x = 21.75;
     saved->y = 14.5;
     saved->z = fixtureZ;
     saved->playableFloor = 2;
     saved->spatialRevision = 41;
+    saved->playableFloorTransitionEnabled = true;
+    saved->playableFloorTransitionDestination = DEFAULT_PLAYABLE_FLOOR;
+    saved->playableFloorTransitionTargetPersistentID = 78;
+
+    lowerTransition->persistentID = 78;
+    lowerTransition->authoredMapLayer = 1;
+    lowerTransition->x = 8.0;
+    lowerTransition->y = 8.0;
+    lowerTransition->z = fixtureZ;
+    lowerTransition->playableFloorTransitionEnabled = true;
+    lowerTransition->playableFloorTransitionDestination = 2;
+    lowerTransition->playableFloorTransitionTargetPersistentID = 77;
+    // Z3.3 layer-authored stair metadata coexists with legacy ZTRN data and
+    // must survive save/load without requiring any editor-side pairing pass.
+    lowerTransition->verticalLayerTransitionDelta = 1;
+    lowerTransition->verticalLayerTransitionModel = 161;
+    lowerTransition->verticalLayerTransitionRotation = 6;
+    lowerTransition->floorDecorationHeightOffset = 12;
+    lowerTransition->floorDecorationXOffset = 4;
+    lowerTransition->floorDecorationYOffset = -8;
+    lowerTransition->floorDecorationDestroyIfNoWall = 4;
+    lowerTransition->skill[8] = static_cast<Sint32>(0x52494154); // "TAIR"
+    lowerTransition->skill[9] = static_cast<Sint32>(0x00000053); // "S"
+    saved->verticalLayerTransitionDelta = -1;
+    saved->verticalLayerTransitionModel = 253;
+    saved->verticalLayerTransitionRotation = 2;
+    saved->floorDecorationHeightOffset = -4;
+    saved->floorDecorationXOffset = -3;
+    saved->floorDecorationYOffset = 7;
+    saved->floorDecorationDestroyIfNoWall = -1;
     EXPECT(saveMap("stage4b_roundtrip") == 0);
 
     std::ifstream output(
@@ -374,19 +418,58 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
         &loaded,
         &entities,
         &creatures,
-        nullptr) == 1);
+        nullptr) == 2);
     EXPECT(loaded.numLayers == MAPLAYERS);
-    EXPECT(list_Size(&entities) == 1);
-    Entity* restored = static_cast<Entity*>(entities.first->element);
+    EXPECT(list_Size(&entities) == 2);
+    Entity* restored = nullptr;
+    Entity* restoredLowerTransition = nullptr;
+    for (node_t* node = entities.first; node; node = node->next)
+    {
+        Entity* candidate = static_cast<Entity*>(node->element);
+        if (candidate && candidate->persistentID == 77)
+        {
+            restored = candidate;
+        }
+        else if (candidate && candidate->persistentID == 78)
+        {
+            restoredLowerTransition = candidate;
+        }
+    }
     EXPECT(restored != nullptr);
+    EXPECT(restoredLowerTransition != nullptr);
     // Existing LMP x/y are integral even though runtime coordinates are real_t.
     EXPECT(restored->x == 21.0);
     EXPECT(restored->y == 14.0);
     EXPECT(restored->z == fixtureZ);
     EXPECT(restored->persistentID == 77);
+    EXPECT(restored->authoredMapLayer == 3);
     EXPECT(restored->playableFloor == 2);
     // spatialRevision is runtime routing state, not authored LMP state.
     EXPECT(restored->spatialRevision == 0);
+    EXPECT(restored->playableFloorTransitionEnabled);
+    EXPECT(restored->playableFloorTransitionDestination == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(restored->playableFloorTransitionTargetPersistentID == 78);
+    EXPECT(restored->verticalLayerTransitionDelta == -1);
+    EXPECT(restored->verticalLayerTransitionModel == 253);
+    EXPECT(restored->verticalLayerTransitionRotation == 2);
+    EXPECT(restored->floorDecorationHeightOffset == -4);
+    EXPECT(restored->floorDecorationXOffset == -3);
+    EXPECT(restored->floorDecorationYOffset == 7);
+    EXPECT(restored->floorDecorationDestroyIfNoWall == -1);
+    EXPECT(restoredLowerTransition->authoredMapLayer == 1);
+    EXPECT(restoredLowerTransition->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(restoredLowerTransition->playableFloorTransitionEnabled);
+    EXPECT(restoredLowerTransition->playableFloorTransitionDestination == 2);
+    EXPECT(restoredLowerTransition->playableFloorTransitionTargetPersistentID == 77);
+    EXPECT(restoredLowerTransition->verticalLayerTransitionDelta == 1);
+    EXPECT(restoredLowerTransition->verticalLayerTransitionModel == 161);
+    EXPECT(restoredLowerTransition->verticalLayerTransitionRotation == 6);
+    EXPECT(restoredLowerTransition->floorDecorationHeightOffset == 12);
+    EXPECT(restoredLowerTransition->floorDecorationXOffset == 4);
+    EXPECT(restoredLowerTransition->floorDecorationYOffset == -8);
+    EXPECT(restoredLowerTransition->floorDecorationDestroyIfNoWall == 4);
+    EXPECT(restoredLowerTransition->skill[8] == static_cast<Sint32>(0x52494154));
+    EXPECT(restoredLowerTransition->skill[9] == static_cast<Sint32>(0x00000053));
     EXPECT(loaded.playableFloors.floors.size() == 2);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
     const PlayableFloorData* restoredUpper = loaded.playableFloors.find(2);
@@ -565,6 +648,153 @@ bool testPlayableFloorCollisionIsolation()
     return true;
 }
 
+bool testZ3TransitionPrimitive()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    PlayableFloorData upperFloor;
+    upperFloor.id = 1;
+    upperFloor.tiles.resize(
+        static_cast<std::size_t>(map.width)
+            * static_cast<std::size_t>(map.height) * MAPLAYERS,
+        0);
+    for (std::size_t x = 0; x < map.width; ++x)
+    {
+        for (std::size_t y = 0; y < map.height; ++y)
+        {
+            upperFloor.tiles[tileIndex(x, y, FLOORLAYER, map.height)] = 1;
+        }
+    }
+    EXPECT(map.playableFloors.addFloor(std::move(upperFloor)));
+
+    Entity* traveler = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(traveler != nullptr);
+    traveler->x = 24.0;
+    traveler->y = 24.0;
+    traveler->z = -2.0;
+    traveler->new_x = traveler->x;
+    traveler->new_y = traveler->y;
+    traveler->new_z = traveler->z;
+    EXPECT(TileEntityList.addEntity(*traveler) != nullptr);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 1);
+    EXPECT(list_Size(TileEntityList.getTileList(2, 1, 1)) == 0);
+
+    EXPECT(traveler->transitionToPlayableFloor(1, 40.0, 24.0, -2.0));
+    EXPECT(traveler->playableFloor == 1);
+    EXPECT(traveler->spatialRevision == 1);
+    EXPECT(traveler->x == 40.0);
+    EXPECT(traveler->y == 24.0);
+    EXPECT(traveler->z == -2.0);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 0);
+    EXPECT(list_Size(TileEntityList.getTileList(2, 1, 1)) == 1);
+
+    // A blocked destination must fail atomically without changing floor,
+    // revision, coordinates, or the spatial index.
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 99, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(!traveler->transitionToPlayableFloor(
+        DEFAULT_PLAYABLE_FLOOR, 24.0, 24.0, -2.0));
+    EXPECT(traveler->playableFloor == 1);
+    EXPECT(traveler->spatialRevision == 1);
+    EXPECT(traveler->x == 40.0);
+    EXPECT(list_Size(TileEntityList.getTileList(2, 1, 1)) == 1);
+
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 0, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(traveler->transitionToPlayableFloor(
+        DEFAULT_PLAYABLE_FLOOR, 24.0, 24.0, -2.0));
+    EXPECT(traveler->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(traveler->spatialRevision == 2);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 1);
+    EXPECT(list_Size(TileEntityList.getTileList(2, 1, 1)) == 0);
+    return true;
+}
+
+bool testPlayableFloorGeometryIsolation()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    EXPECT(map.tilesForPlayableFloor(DEFAULT_PLAYABLE_FLOOR) == map.tiles);
+    EXPECT(map.tilesForPlayableFloor(1) == nullptr);
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    EXPECT(map.tilesForPlayableFloor(1) != nullptr);
+    EXPECT(map.tilesForPlayableFloor(1) != map.tilesForPlayableFloor(DEFAULT_PLAYABLE_FLOOR));
+
+    // Z3.3B existing-layer model: playable floors are overlapping views of
+    // the authored map-layer stack. Z0's obstacle layer (authored layer 1)
+    // is exactly Z1's floor layer; Z1's obstacle layer is authored layer 2.
+    EXPECT(map.setTileAt(1, 1, FLOORLAYER, 1, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 77, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 0, 1));
+    EXPECT(map.tileAt(1, 1, FLOORLAYER, DEFAULT_PLAYABLE_FLOOR) == 1);
+    EXPECT(map.tileAt(1, 1, OBSTACLELAYER, DEFAULT_PLAYABLE_FLOOR) == 77);
+    EXPECT(map.tileAt(1, 1, FLOORLAYER, 1) == 77);
+    EXPECT(map.tileAt(1, 1, OBSTACLELAYER, 1) == 0);
+
+    // Writing through the Z1 floor view must update the same authored layer
+    // observed as Z0's obstacle layer. This overlap is the core stair model.
+    EXPECT(map.setTileAt(1, 1, FLOORLAYER, 66, 1));
+    EXPECT(map.tileAt(1, 1, FLOORLAYER, 1) == 66);
+    EXPECT(map.tileAt(1, 1, OBSTACLELAYER, DEFAULT_PLAYABLE_FLOOR) == 66);
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 77, DEFAULT_PLAYABLE_FLOOR));
+
+    Entity* lower = newEntity(0, 1, map.entities, nullptr);
+    Entity* upper = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(lower != nullptr);
+    EXPECT(upper != nullptr);
+    lower->x = upper->x = 24;
+    lower->y = upper->y = 24;
+    lower->sizex = upper->sizex = 2;
+    lower->sizey = upper->sizey = 2;
+    upper->setPlayableFloor(1);
+
+    EXPECT(checkObstacle(24, 24, lower, nullptr, true, true, false) == 1);
+    EXPECT(checkObstacle(24, 24, upper, nullptr, true, true, false) == 0);
+    EXPECT(entityInsideTile(lower, 1, 1, OBSTACLELAYER));
+    EXPECT(!entityInsideTile(upper, 1, 1, OBSTACLELAYER));
+
+    // Reverse the geometry without moving either entity. Each entity must
+    // immediately observe only its own playable floor's tile stack.
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 0, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 88, 1));
+    EXPECT(checkObstacle(24, 24, lower, nullptr, true, true, false) == 0);
+    EXPECT(checkObstacle(24, 24, upper, nullptr, true, true, false) == 1);
+    EXPECT(!entityInsideTile(lower, 1, 1, OBSTACLELAYER));
+    EXPECT(entityInsideTile(upper, 1, 1, OBSTACLELAYER));
+
+    // Tile attributes follow the same authored-layer overlap. A Z1 floor
+    // attribute is visible as a Z0 obstacle-layer attribute because both refer
+    // to authored layer 1, but it must not appear on Z0's authored layer 0.
+    map.setTileAttribute(1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, true, 1);
+    EXPECT(!map.tileHasAttribute(
+        1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY,
+        DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.tileHasAttribute(
+        1, 1, OBSTACLELAYER, map_t::TILE_ATTRIBUTE_SLIPPERY,
+        DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.tileHasAttribute(
+        1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, 1));
+
+    // Diggability must also consult the requested floor's obstacle tile and
+    // NODIG attribute rather than silently reading Z0.
+    EXPECT(map.setTileAt(2, 2, OBSTACLELAYER, 1, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(2, 2, OBSTACLELAYER, 1, 1));
+    map.setTileAttribute(2, 2, OBSTACLELAYER, map_t::TILE_ATTRIBUTE_NODIG, true, 1);
+    EXPECT(mapTileDiggable(2, 2, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(!mapTileDiggable(2, 2, 1));
+    map.setTileAttribute(2, 2, OBSTACLELAYER, map_t::TILE_ATTRIBUTE_NODIG, false, 1);
+    EXPECT(mapTileDiggable(2, 2, 1));
+
+    map.setTileAttribute(1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, false, 1);
+    EXPECT(!map.tileHasAttribute(
+        1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, 1));
+
+    // Missing nonzero geometry is explicit: no silent fallback to floor Z0.
+    EXPECT(map.tilesForPlayableFloor(2) == nullptr);
+    EXPECT(map.tileAt(1, 1, OBSTACLELAYER, 2) == 0);
+    return true;
+}
+
 bool testLocalElevationAndRuntimeSpawns()
 {
     multiplayer = CLIENT;
@@ -583,18 +813,24 @@ bool testLocalElevationAndRuntimeSpawns()
     parent->y = 48;
     parent->z = 20;
     parent->playableFloor = 3;
+    parent->authoredMapLayer = 0;
     parent->spatialRevision = 77;
+    EXPECT(parent->structuralMapLayer() == 3);
+    EXPECT(parent->worldRenderZ() == -28.0);
 
     Entity* inherited = newEntityWithSpatialContext(
         0, 1, map.entities, nullptr, parent);
     EXPECT(inherited != nullptr);
     EXPECT(inherited->playableFloor == 3);
     EXPECT(inherited->spatialRevision == 77);
+    EXPECT(inherited->authoredMapLayer == 3);
+    EXPECT(inherited->structuralMapLayer() == 3);
     Entity* explicitContext = newEntityWithSpatialContext(
         0, 1, map.entities, nullptr, SpatialSpawnContext{-2, 19});
     EXPECT(explicitContext != nullptr);
     EXPECT(explicitContext->playableFloor == -2);
     EXPECT(explicitContext->spatialRevision == 19);
+    EXPECT(explicitContext->authoredMapLayer == 0);
 
     // Parent-aware runtime spawns must inherit the complete spatial context.
     // Coordinate-only/network reconstruction helpers remain explicit Z0 seams
@@ -645,6 +881,173 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(arrow->vel_z == 0.75);
     EXPECT(arrow->z == 1.75);
     EXPECT(arrow->pitch > 0.0);
+    return true;
+}
+
+
+bool testZ34CStructuralLayersAndFalling()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    // A dynamic/runtime entity follows its current playable floor for world
+    // rendering even if its immutable editor-authored provenance was layer 0.
+    Entity* dynamic = nullptr;
+    {
+        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{2, 55, 2});
+        dynamic = newEntity(0, 1, map.entities, nullptr);
+    }
+    EXPECT(dynamic != nullptr);
+    EXPECT(dynamic->playableFloor == 2);
+    EXPECT(dynamic->authoredMapLayer == 2);
+    dynamic->z = 6.0;
+    EXPECT(dynamic->structuralMapLayer() == 2);
+    EXPECT(dynamic->worldRenderZ() == -26.0);
+
+    // Vertical stairs are boundary objects: a stair sourced from floor 1 is
+    // authored/rendered on layer 2 rather than being pulled down to floor 1.
+    Entity* stair = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(stair != nullptr);
+    stair->playableFloor = 1;
+    stair->authoredMapLayer = 2;
+    stair->verticalLayerTransitionDelta = -1;
+    stair->z = 7.5;
+    EXPECT(stair->structuralMapLayer() == 2);
+    EXPECT(stair->worldRenderZ() == -24.5);
+
+    // Default runtime lights inherit the same structural spawn layer. This is
+    // the path campfires and other behavior-created lights use upstairs.
+    EXPECT(map.ensurePlayableFloorGeometry(2, false));
+    auto& sharedLightmap = lightmapForPlayableFloor(0, 2, map.width, map.height);
+    std::fill(sharedLightmap.begin(), sharedLightmap.end(), vec4_t{});
+    light_t* structuralLight = nullptr;
+    {
+        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{2, 55, 2});
+        structuralLight = lightSphere(0, 1, 1, 2, 1.f, 1.f, 1.f, 0.f, 1.f);
+    }
+    EXPECT(structuralLight != nullptr);
+    EXPECT(structuralLight->playableFloor == 2);
+    EXPECT(structuralLight->layer == 2);
+    list_RemoveNode(structuralLight->node);
+
+    // Falling searches the original authored stack downward. With layers 1 and
+    // 2 empty, falling from floor 2 reaches floor 0 and crosses two blocks.
+    const std::size_t x = 1;
+    const std::size_t y = 1;
+    map.tiles[tileIndex(x, y, 1, map.height)] = 0;
+    map.tiles[tileIndex(x, y, 2, map.height)] = 0;
+    PlayableFloorId landingFloor = -1;
+    int floorsFallen = -1;
+    EXPECT(map.findLowerPlayableFloorLanding(
+        static_cast<int>(x), static_cast<int>(y), 2,
+        landingFloor, floorsFallen));
+    EXPECT(landingFloor == 0);
+    EXPECT(floorsFallen == 2);
+
+    // Add a valid layer-1 surface with empty layer-2 headroom: now it is the
+    // nearest landing and the fall is exactly one block.
+    map.tiles[tileIndex(x, y, 1, map.height)] = 71;
+    map.tiles[tileIndex(x, y, 2, map.height)] = 0;
+    EXPECT(map.ensurePlayableFloorGeometry(2, false));
+    EXPECT(map.findLowerPlayableFloorLanding(
+        static_cast<int>(x), static_cast<int>(y), 2,
+        landingFloor, floorsFallen));
+    EXPECT(landingFloor == 1);
+    EXPECT(floorsFallen == 1);
+
+    // If every lower authored surface is absent there is no stacked landing;
+    // actPlayer must retain the original bottomless-pit behavior.
+    map.tiles[tileIndex(x, y, 0, map.height)] = 0;
+    map.tiles[tileIndex(x, y, 1, map.height)] = 0;
+    EXPECT(!map.findLowerPlayableFloorLanding(
+        static_cast<int>(x), static_cast<int>(y), 2,
+        landingFloor, floorsFallen));
+    EXPECT(floorsFallen == 0);
+    return true;
+}
+
+bool testZ2CRuntimeFloorIsolation()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    // Z3.3B: a nonzero runtime floor can be derived from the existing authored
+    // layer stack. Floor 1 sees authored layer 1 as its floor and layer 2 as
+    // its obstacle layer; no second editor-owned geometry stack is required.
+    EXPECT(map.setTileAt(1, 1, 1, 71, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(1, 1, 2, 0, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    EXPECT(map.tileAt(1, 1, FLOORLAYER, 1) == 71);
+    EXPECT(map.tileAt(1, 1, OBSTACLELAYER, 1) == 0);
+    const PlayableFloorData* derivedFloor = map.playableFloors.find(1);
+    EXPECT(derivedFloor != nullptr);
+    EXPECT(derivedFloor->derivedFromMapLayers);
+
+    // The older explicit-copy compatibility path remains available, but the
+    // layer-authored stair path returns to the derived shared-world view.
+    EXPECT(map.ensurePlayableFloorGeometry(1, true));
+    const PlayableFloorData* explicitFloor = map.playableFloors.find(1);
+    EXPECT(explicitFloor != nullptr);
+    EXPECT(!explicitFloor->derivedFromMapLayers);
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    derivedFloor = map.playableFloors.find(1);
+    EXPECT(derivedFloor != nullptr);
+    EXPECT(derivedFloor->derivedFromMapLayers);
+
+    // Bare runtime spawns now inherit the scoped entity simulation context.
+    Entity* scopedEntity = nullptr;
+    {
+        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{1, 91});
+        scopedEntity = newEntity(0, 1, map.entities, nullptr);
+    }
+    EXPECT(scopedEntity != nullptr);
+    EXPECT(scopedEntity->playableFloor == 1);
+    EXPECT(scopedEntity->spatialRevision == 91);
+
+    Entity* legacyEntity = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(legacyEntity != nullptr);
+    EXPECT(legacyEntity->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(legacyEntity->spatialRevision == 0);
+    EXPECT(playableFloorsShareRuntimeScope(1, 1));
+    EXPECT(!playableFloorsShareRuntimeScope(0, 1));
+
+    // Z3.3C: layer-authored floors are one visible/lightable structure. Their
+    // collision scopes remain distinct, but their render light volume is shared.
+    EXPECT(map.setTileAt(2, 1, OBSTACLELAYER, 77, DEFAULT_PLAYABLE_FLOOR));
+    EXPECT(map.setTileAt(2, 1, OBSTACLELAYER, 0, 1));
+    auto& lowerLightmap = lightmapForPlayableFloor(0, 0, map.width, map.height);
+    auto& upperLightmap = lightmapForPlayableFloor(0, 1, map.width, map.height);
+    EXPECT(&lowerLightmap == &upperLightmap);
+    std::fill(lowerLightmap.begin(), lowerLightmap.end(), vec4_t{});
+
+    // A floor-1 light writes into the same shared volume. The light's existing
+    // layer coordinate is preserved; authored static lights already derive it
+    // from Entity::z while runtime-local lights remain backward compatible.
+    light_t* upperLight = lightSphereShadowOnPlayableFloor(
+        0, 1, 1, 1, 0, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
+    EXPECT(upperLight != nullptr);
+    EXPECT(upperLight->playableFloor == 1);
+    const std::size_t litIndex =
+        lightmapIndex3D(3, 1, 0, map.width, map.height);
+    EXPECT(upperLightmap[litIndex].x > 0.f);
+    EXPECT(lowerLightmap[litIndex].x > 0.f);
+
+    // A lower-floor light adds to that same volume rather than disappearing
+    // when the camera's collision slice moves upstairs. The sample used above
+    // sits behind the intentional floor-0 wall at (2,1), so a floor-0 shadowed
+    // light must NOT be expected to reach it. Sample the unobstructed source
+    // tile instead while keeping the wall-shadow characterization intact.
+    const std::size_t sharedLightIndex =
+        lightmapIndex3D(1, 1, 0, map.width, map.height);
+    const float beforeLowerLight = lowerLightmap[sharedLightIndex].x;
+    light_t* lowerLight = lightSphereShadowOnPlayableFloor(
+        0, 1, 1, 0, 0, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
+    EXPECT(lowerLight != nullptr);
+    EXPECT(lowerLightmap[sharedLightIndex].x > beforeLowerLight);
+    EXPECT(upperLightmap[sharedLightIndex].x == lowerLightmap[sharedLightIndex].x);
+
+    list_RemoveNode(lowerLight->node);
+    list_RemoveNode(upperLight->node);
     return true;
 }
 
@@ -765,7 +1168,11 @@ int runPlayableZRuntimeCharacterization()
         testLmpCompatibilityAndRoundTrip(temporary)
         && testOneFloorCollisionAndSpatialIndex()
         && testPlayableFloorCollisionIsolation()
+        && testZ3TransitionPrimitive()
+        && testPlayableFloorGeometryIsolation()
         && testLocalElevationAndRuntimeSpawns()
+        && testZ34CStructuralLayersAndFalling()
+        && testZ2CRuntimeFloorIsolation()
         && testPersistentMinimapAndPlacement();
     clearGlobalMapHarness();
     multiplayer = previousMultiplayer;
@@ -776,10 +1183,10 @@ int runPlayableZRuntimeCharacterization()
     if (passed)
     {
         std::cout
-            << "Stage 4D/Z2A playable-Z floor isolation passed: legacy floor Z0, "
-            << "local Entity::z, LMP V3.2/V4.0-V4.9, floor-separated "
-            << "TileEntityList, entity collision/distance isolation, runtime "
-            << "floor reindexing, schema-3 minimap, placement, and spawn context.\n";
+            << "Stage 4D/Z3.4C stacked-sprite/fall runtime passed: legacy Entity::z remains "
+            << "Z0-safe, ELYR authored-layer round-trip, structural runtime rendering/light "
+            << "context, floor-aware multipart spawns, lower-floor landing search, persistent "
+            << "Hermit ownership contracts, and same-map stacked stairs.\n";
     }
     return passed ? 0 : 1;
 }

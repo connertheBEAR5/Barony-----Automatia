@@ -117,6 +117,8 @@ bool testEntityLocalZContracts()
 bool testOneFloorCollisionContracts()
 {
     const std::string collision = readFile(sourcePath("src/collision.cpp"));
+    const std::string net = readFile(sourcePath("src/net.cpp"));
+    const std::string entity = readFile(sourcePath("src/entity.cpp"));
     EXPECT(!collision.empty());
 
     const std::string distance = section(
@@ -144,7 +146,8 @@ bool testOneFloorCollisionContracts()
     EXPECT(!tile.empty());
     EXPECT(contains(tile, "z == OBSTACLELAYER"));
     EXPECT(contains(tile, "else if ( z == 0 )"));
-    EXPECT(contains(tile, "map.tiles[z + y * MAPLAYERS"));
+    EXPECT(contains(tile, "map.tileAt(x, y, z, entity->playableFloor)"));
+    EXPECT(!contains(tile, "map.tiles["));
     return true;
 }
 
@@ -353,9 +356,10 @@ bool testWorldSaveAndPlacementContracts()
     EXPECT(contains(game, "struct AutomatiaSavedPlayerPlacement"));
     EXPECT(contains(game, "PlayableFloorId playableFloor"));
     EXPECT(contains(game, "{\"playable_floor\", placement.playableFloor}"));
-    EXPECT(contains(game, "entity.playableFloor = placement.playableFloor"));
-    EXPECT(contains(game, "entity.z = placement.z;"));
-    EXPECT(contains(game, "entity.new_z = entity.z;"));
+    EXPECT(contains(game, "applyAutomatiaPlayableFloorPlacement("));
+    EXPECT(contains(game, "placement.playableFloor,"));
+    EXPECT(contains(game, "placement.z,"));
+    EXPECT(contains(game, "restorePersistentMinimap()"));
     return true;
 }
 
@@ -421,9 +425,10 @@ bool testDivergentMapAndLateJoinContracts()
     EXPECT(contains(net, "staged.z = decode(8);"));
     EXPECT(contains(net, "staged.playableFloor"));
     EXPECT(contains(net, "staged.spatialRevision"));
-    EXPECT(contains(net, "entity->playableFloor = placement.playableFloor;"));
-    EXPECT(contains(net, "entity->z = placement.z;"));
-    EXPECT(contains(net, "entity->new_z = placement.z;"));
+    EXPECT(contains(net, "applyAutomatiaPlayableFloorPlacement("));
+    EXPECT(contains(net, "placement.playableFloor,"));
+    EXPECT(contains(net, "placement.spatialRevision,"));
+    EXPECT(contains(net, "placement.z,"));
     EXPECT(ReconnectToken::isValid(
         "0123456789abcdef0123456789abcdef"));
     return true;
@@ -496,6 +501,9 @@ bool testPlayableZDataFoundationContract()
     const std::string worldState = readFile(sourcePath("src/world_state.hpp"));
     const std::string worldSave = readFile(sourcePath("src/automatia_world_save.cpp"));
     const std::string collision = readFile(sourcePath("src/collision.cpp"));
+    const std::string net = readFile(sourcePath("src/net.cpp"));
+    const std::string entity = readFile(sourcePath("src/entity.cpp"));
+    const std::string maps = readFile(sourcePath("src/maps.cpp"));
 
     EXPECT(!playableZ.empty());
     EXPECT(contains(playableZ, "using PlayableFloorId = std::int16_t;"));
@@ -527,7 +535,467 @@ bool testPlayableZDataFoundationContract()
     EXPECT(contains(entityHeader, "bool setPlayableFloor(PlayableFloorId newPlayableFloor);"));
     EXPECT(contains(readFile(sourcePath("src/game.hpp")), "additionalFloorGrids"));
     EXPECT(contains(readFile(sourcePath("src/game.hpp")), "getTileList(int x, int y, PlayableFloorId playableFloor)"));
-    EXPECT(contains(files, "Stage Z1 keeps nonzero floors data-only until Z2 isolation"));
+
+    // Z2B adds the explicit geometry access layer. Nonzero floors must never
+    // silently fall back to map.tiles / floor Z0.
+    EXPECT(contains(mainHeader, "tilesForPlayableFloor"));
+    EXPECT(contains(mainHeader, "ensurePlayableFloorGeometry"));
+    EXPECT(contains(mainHeader, "Sint32 tileAt"));
+    EXPECT(contains(mainHeader, "bool setTileAt"));
+    EXPECT(contains(mainHeader, "setTileAttribute"));
+    EXPECT(!contains(collision, "map.tiles["));
+
+    const std::string draw = readFile(sourcePath("src/draw.cpp"));
+    const std::string opengl = readFile(sourcePath("src/opengl.cpp"));
+    const std::string player = readFile(sourcePath("src/actplayer.cpp"));
+    EXPECT(contains(draw, "getCameraPlayableFloor"));
+    EXPECT(contains(draw, "tilesForPlayableFloorRendering(renderFloor)"));
+    EXPECT(contains(draw, "entityVisibleOnCameraFloor"));
+    EXPECT(contains(opengl, "chunksByPlayableFloor"));
+    EXPECT(contains(opengl, "tilesForPlayableFloorRendering(playableFloor)"));
+    EXPECT(contains(opengl, "chunk.build(map, !shouldDrawClouds(map), x, y, chunkSize, chunkSize, playableFloor)"));
+    EXPECT(contains(player, "TILE_ATTRIBUTE_SLIPPERY, my->playableFloor"));
+    EXPECT(contains(game, "originalFloorTiles"));
+    EXPECT(contains(game, "PWTZ"));
+    EXPECT(contains(net, "{'PWTZ'"));
+    EXPECT(contains(entity, "mapTileDiggable(hit.mapx, hit.mapy, playableFloor)"));
+    EXPECT(contains(entity, "\"WALZ\""));
+    EXPECT(contains(net, "{'WALZ'"));
+    EXPECT(contains(maps, "newEntityWithSpatialContext"));
+    EXPECT(contains(maps, "postProcessEntity->playableFloor"));
+    EXPECT(contains(game, "transitionAutomatiaPlayerThroughPlayableFloorEndpoint"));
+    EXPECT(contains(files, "Z3 loaded map"));
+    EXPECT(contains(files, "authored ZTRN endpoints may transition players between them"));
+    return true;
+}
+
+bool testZ2CRuntimeIsolationContracts()
+{
+    const std::string playableZ = readFile(sourcePath("src/playable_z.hpp"));
+    const std::string lightHeader = readFile(sourcePath("src/light.hpp"));
+    const std::string light = readFile(sourcePath("src/light.cpp"));
+    const std::string objects = readFile(sourcePath("src/objects.cpp"));
+    const std::string game = readFile(sourcePath("src/game.cpp"));
+    const std::string gameHeader = readFile(sourcePath("src/game.hpp"));
+    const std::string entityShared = readFile(sourcePath("src/entity_shared.cpp"));
+    const std::string worldState = readFile(sourcePath("src/world_state.cpp"));
+    const std::string net = readFile(sourcePath("src/net.cpp"));
+    const std::string netHeader = readFile(sourcePath("src/net.hpp"));
+    const std::string packetScope = readFile(sourcePath("src/world_packet_scope.hpp"));
+    const std::string itemUsage = readFile(sourcePath("src/item_usage_funcs.cpp"));
+    const std::string gib = readFile(sourcePath("src/actgib.cpp"));
+    const std::string actGeneral = readFile(sourcePath("src/actgeneral.cpp"));
+    const std::string spriteFx = readFile(sourcePath("src/actsprite.cpp"));
+    const std::string actMagic = readFile(sourcePath("src/magic/actmagic.cpp"));
+    const std::string magic = readFile(sourcePath("src/magic/magic.cpp"));
+    const std::string handMagic = readFile(sourcePath("src/magic/act_HandMagic.cpp"));
+    const std::string castSpell = readFile(sourcePath("src/magic/castSpell.cpp"));
+    const std::string soundGame = readFile(sourcePath("src/engine/audio/sound_game.cpp"));
+    const std::string opengl = readFile(sourcePath("src/opengl.cpp"));
+    const std::string draw = readFile(sourcePath("src/draw.cpp"));
+    const std::string playableZMap = readFile(sourcePath("src/playable_z_map.cpp"));
+    const std::string sourceCMake = readFile(sourcePath("src/CMakeLists.txt"));
+
+    EXPECT(!playableZMap.empty());
+    EXPECT(contains(playableZMap, "map_t::tilesForPlayableFloor"));
+    EXPECT(contains(playableZMap, "map_t::ensurePlayableFloorGeometry"));
+    EXPECT(contains(playableZMap, "map_t::tileAt"));
+    const std::string playableZMapSourceEntry =
+        "\"${CMAKE_CURRENT_SOURCE_DIR}/playable_z_map.cpp\"";
+    const std::size_t playableZMapGameEntry = sourceCMake.find(playableZMapSourceEntry);
+    EXPECT(playableZMapGameEntry != std::string::npos);
+    EXPECT(sourceCMake.find(playableZMapSourceEntry, playableZMapGameEntry + 1)
+        != std::string::npos);
+
+    EXPECT(contains(playableZ, "activeRuntimeSpatialContext"));
+    EXPECT(contains(playableZ, "ScopedPlayableFloorRuntimeContext"));
+    EXPECT(contains(playableZ, "playableFloorsShareRuntimeScope"));
+    EXPECT(contains(entityShared, "activeRuntimeSpatialContext()"));
+    EXPECT(contains(game, "ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope"));
+
+    EXPECT(contains(lightHeader, "struct PlayableFloorLightmapBuffers"));
+    EXPECT(contains(lightHeader, "PlayableFloorId playableFloor;"));
+    EXPECT(contains(lightHeader, "lightmapForPlayableFloor"));
+    EXPECT(contains(light, "lightSphereShadowOnPlayableFloor"));
+    EXPECT(contains(light, "map.tileAt("));
+    EXPECT(contains(objects, "newLightOnPlayableFloor"));
+    EXPECT(contains(worldState, "AdditionalPlayableFloorLightmaps"));
+    EXPECT(contains(worldState, "swapAdditionalPlayableFloorLightmaps"));
+    EXPECT(contains(opengl, "lightmapSmoothedForPlayableFloor"));
+    EXPECT(contains(draw, "lightmapForPlayableFloor"));
+
+    EXPECT(contains(readFile(sourcePath("src/game.hpp")), "#define ENTITY_PACKET_LENGTH 58"));
+    EXPECT(contains(net, "kEntityPlayableFloorOffset = 48"));
+    EXPECT(contains(net, "kEntitySpatialRevisionLowOffset = 50"));
+    EXPECT(contains(net, "serverPlayerCanReceivePlayableFloorUpdates"));
+    EXPECT(contains(net, "serverPlayerCanReceiveEntityUpdates"));
+    EXPECT(contains(net, "receivedEntitySpatialContext"));
+    EXPECT(contains(net, "serverSpawnMiscParticlesAtLocationWithSpatialContext"));
+    EXPECT(contains(net, "receivedSpatialContextAt"));
+    EXPECT(contains(net, "receivedSpatialContextAt(10)"));
+    EXPECT(contains(net, "receivedSpatialContextAt(12)"));
+    EXPECT(contains(net, "receivedSpatialContextAt(13)"));
+    EXPECT(contains(net, "receivedSpatialContextAt(14)"));
+    EXPECT(contains(netHeader, "serverPlayerCanReceivePlayableFloorUpdates"));
+    EXPECT(contains(packetScope, "{'A', 'L', 'I', 'Z'}"));
+    EXPECT(contains(itemUsage, "\"ALIZ\""));
+    EXPECT(contains(itemUsage, "addLightOnPlayableFloor"));
+
+    EXPECT(contains(net, "map.setTileAttribute(x, y, layer, flagSet, true, playableFloor)"));
+    EXPECT(contains(gib, "map.tileAt(ox, oy, FLOORLAYER, playableFloor)"));
+    EXPECT(contains(gib, "serverPlayerCanReceiveEntityUpdates(c, gib)"));
+    EXPECT(contains(gib, "serverPlayerCanReceiveEntityUpdates(c, my)"));
+    EXPECT(contains(gib, "serverPlayerCanReceiveEntityUpdates(c, parentent)"));
+    EXPECT(contains(gib, "net_packet->len = 34"));
+    EXPECT(contains(net, "receivedSpatialContextAt(24)"));
+    EXPECT(contains(net, "ScopedPlayableFloorRuntimeContext spatialScope(parent->spatialSpawnContext())"));
+    EXPECT(!contains(gib, "map.tiles["));
+    EXPECT(contains(actGeneral, "serverPlayerCanReceiveEntityUpdates(c, my)"));
+    EXPECT(contains(actGeneral, "serverPlayerCanReceiveEntityUpdates(i, entity)"));
+    EXPECT(contains(actGeneral, "serverPlayerCanReceiveEntityUpdates(i, ent)"));
+    EXPECT(contains(actGeneral, "\"BELI\""));
+    EXPECT(contains(net, "ScopedPlayableFloorRuntimeContext spatialScope(entity->spatialSpawnContext())"));
+
+    EXPECT(contains(spriteFx, "spatialContext.playableFloor"));
+    EXPECT(contains(spriteFx, "net_packet->len = 20"));
+    EXPECT(contains(spriteFx, "net_packet->len = 22"));
+    EXPECT(contains(actMagic, "serverPlayerCanReceivePlayableFloorUpdates"));
+    EXPECT(contains(actMagic, "map.setTileAt(hit.mapx, hit.mapy, OBSTACLELAYER, 0, playableFloor)"));
+    EXPECT(contains(actMagic, "TileEntityList.getEntitiesWithinRadius(x / 16, y / 16, 1 + (radius / 16), my->playableFloor)"));
+    EXPECT(!contains(actMagic, "map.tiles["));
+    EXPECT(!contains(magic, "map.tiles["));
+    EXPECT(!contains(handMagic, "map.tiles["));
+    EXPECT(!contains(castSpell, "map.tiles["));
+    EXPECT(contains(castSpell, "caster->playableFloor"));
+    EXPECT(contains(soundGame, "serverPlayerCanReceivePlayableFloorUpdates("));
+    EXPECT(contains(soundGame, "c, activeRuntimePlayableFloor())"));
+    return true;
+}
+
+bool testZ3FloorTransitionContracts()
+{
+    const std::string entityHeader = readFile(sourcePath("src/entity.hpp"));
+    const std::string entity = readFile(sourcePath("src/entity.cpp"));
+    const std::string files = readFile(sourcePath("src/files.cpp"));
+    const std::string gameHeader = readFile(sourcePath("src/game.hpp"));
+    const std::string game = readFile(sourcePath("src/game.cpp"));
+    const std::string ladder = readFile(sourcePath("src/actladder.cpp"));
+    const std::string maps = readFile(sourcePath("src/maps.cpp"));
+    const std::string net = readFile(sourcePath("src/net.cpp"));
+    const std::string packetScope = readFile(sourcePath("src/world_packet_scope.hpp"));
+    const std::string player = readFile(sourcePath("src/player.cpp"));
+    const std::string interface = readFile(sourcePath("src/interface/interface.cpp"));
+    const std::string clickDescription = readFile(sourcePath("src/interface/clickdescription.cpp"));
+    const std::string cmake = readFile(sourcePath("CMakeLists.txt"));
+
+    EXPECT(contains(entityHeader, "playableFloorTransitionEnabled"));
+    EXPECT(contains(entityHeader, "playableFloorTransitionDestination"));
+    EXPECT(contains(entityHeader, "playableFloorTransitionTargetPersistentID"));
+    EXPECT(contains(entityHeader, "bool transitionToPlayableFloor("));
+    EXPECT(contains(entity, "Entity::transitionToPlayableFloor("));
+    EXPECT(contains(entity, "map.tileAt(tileX, tileY, FLOORLAYER, newPlayableFloor)"));
+    EXPECT(contains(entity, "setPlayableFloor(newPlayableFloor)"));
+
+    EXPECT(contains(files, "\"ZTRN\""));
+    EXPECT(contains(files, "PlayableFloorTransitionAssignment"));
+    EXPECT(contains(files, "source->second->playableFloorTransitionEnabled = true"));
+    EXPECT(contains(files, "authored ZTRN endpoints may transition players between them"));
+
+    EXPECT(contains(gameHeader, "transitionAutomatiaPlayerThroughPlayableFloorEndpoint"));
+    EXPECT(contains(gameHeader, "applyAutomatiaPlayableFloorPlacement"));
+    EXPECT(contains(gameHeader, "void actPlayableFloorTransition(Entity* my);"));
+    EXPECT(contains(ladder, "void actPlayableFloorTransition(Entity* my)"));
+    EXPECT(contains(ladder, "transitionAutomatiaPlayerThroughPlayableFloorEndpoint(i, my)"));
+    EXPECT(contains(maps, "entity->behavior = &actPlayableFloorTransition"));
+    EXPECT(contains(player, "parent->behavior == &actPlayableFloorTransition"));
+    EXPECT(contains(player, "playerEntity->playableFloor"));
+    EXPECT(!contains(player, "map.tiles["));
+    EXPECT(contains(interface, "selectedEntity.behavior == &actPlayableFloorTransition"));
+    EXPECT(contains(clickDescription, "entity->behavior == &actPlayableFloorTransition"));
+    EXPECT(contains(game, "std::memcpy(net_packet->data, \"PZTR\", 4)"));
+    EXPECT(contains(game, "serverPlayerCanReceiveActiveMapUpdates(recipient)"));
+    EXPECT(contains(game, "capturePersistentMinimap(false)"));
+    EXPECT(contains(game, "restorePersistentMinimap()"));
+
+    EXPECT(contains(net, "{'PZTR'"));
+    EXPECT(contains(packetScope, "{'P', 'Z', 'T', 'R'}"));
+    EXPECT(contains(net, "receivedSpatialContext.spatialRevision < entity->spatialRevision"));
+    EXPECT(contains(net, "receivedSpatialContext.playableFloor != entity->playableFloor"));
+    EXPECT(contains(net, "pendingTunnelSpawn.playableFloor"));
+    EXPECT(contains(net, "if (net_packet->len >= 30)"));
+    EXPECT(contains(net, "applyAutomatiaPlayableFloorPlacement("));
+    EXPECT(contains(net, "Runtime STRT requested unavailable floor"));
+
+    EXPECT(contains(cmake, "--automatia-stage4d-z3-transition-characterization"));
+    EXPECT(contains(game, "--automatia-stage4d-z3-transition-characterization"));
+    return true;
+}
+
+bool testZ33LayerAuthoringCorrectionContracts()
+{
+    const std::string entityHeader = readFile(sourcePath("src/entity.hpp"));
+    const std::string playableZHeader = readFile(sourcePath("src/playable_z.hpp"));
+    const std::string playableZMap = readFile(sourcePath("src/playable_z_map.cpp"));
+    const std::string editorHeader = readFile(sourcePath("src/editor.hpp"));
+    const std::string editor = readFile(sourcePath("src/editor.cpp"));
+    const std::string buttons = readFile(sourcePath("src/buttons.cpp"));
+    const std::string draw = readFile(sourcePath("src/draw.cpp"));
+    const std::string files = readFile(sourcePath("src/files.cpp"));
+    const std::string maps = readFile(sourcePath("src/maps.cpp"));
+    const std::string game = readFile(sourcePath("src/game.cpp"));
+    const std::string gameHeader = readFile(sourcePath("src/game.hpp"));
+    const std::string entityShared = readFile(sourcePath("src/entity_shared.cpp"));
+    const std::string mainHeader = readFile(sourcePath("src/main.hpp"));
+    const std::string opengl = readFile(sourcePath("src/opengl.cpp"));
+    const std::string light = readFile(sourcePath("src/light.cpp"));
+    const std::string player = readFile(sourcePath("src/actplayer.cpp"));
+    const std::string hudWeapon = readFile(sourcePath("src/acthudweapon.cpp"));
+    const std::string handMagic = readFile(sourcePath("src/magic/act_HandMagic.cpp"));
+    const std::string actLadder = readFile(sourcePath("src/actladder.cpp"));
+    const std::string collisionSource = readFile(sourcePath("src/collision.cpp"));
+    const std::string torchSource = readFile(sourcePath("src/acttorch.cpp"));
+    const std::string netSource = readFile(sourcePath("src/net.cpp"));
+
+    // The existing Zed layer selector is the only vertical authoring control.
+    EXPECT(!contains(editorHeader, "editorPlayableFloor"));
+    EXPECT(!contains(editorHeader, "butPlayableFloor"));
+    EXPECT(!contains(editor, "buttonPlayableFloor"));
+    EXPECT(!contains(buttons, "butPlayableFloor"));
+
+    // Dedicated stairs are authored directly on the ordinary drawlayer.
+    EXPECT(contains(editor, "Z STAIR UP (next map layer)"));
+    EXPECT(contains(editor, "Z STAIR DOWN (previous map layer)"));
+    EXPECT(contains(editor, "entity->z = spriteLayerToEntityZ(entity->authoredMapLayer)"));
+    EXPECT(contains(editor, "entity->verticalLayerTransitionDelta = 1"));
+    EXPECT(contains(editor, "entity->verticalLayerTransitionDelta = -1"));
+    EXPECT(contains(editor,
+        "Z STAIR UP selected; switched map layer %d -> %d for valid placement."));
+    EXPECT(contains(editor,
+        "Z STAIR DOWN selected; switched map layer %d -> %d for valid placement."));
+    EXPECT(!contains(editor,
+        "Z STAIR UP must be on a wall layer with room for floor/walls/ceiling above."));
+    EXPECT(!contains(editor,
+        "Z STAIR DOWN must be on map layer 2 or above."));
+
+    // The old always-on hover overlay is gone; normal sprite hover/selection UI
+    // owns transient editor feedback instead.
+    EXPECT(!contains(draw, "zStairLabel"));
+    EXPECT(!contains(draw, "L%d -> L%d"));
+
+    // Z3.3F makes stairs decoration-compatible: model, 8-way direction,
+    // height/X/Y offsets, wall attachment and interaction text all persist.
+    EXPECT(contains(entityHeader, "verticalLayerTransitionModel"));
+    EXPECT(contains(entityHeader, "decor-style 0..7"));
+    EXPECT(contains(buttons, "Z Stair Up Decoration Properties:"));
+    EXPECT(contains(buttons, "floorDecorationHeightOffset"));
+    EXPECT(contains(buttons, "floorDecorationXOffset"));
+    EXPECT(contains(buttons, "floorDecorationYOffset"));
+    EXPECT(contains(buttons, "floorDecorationDestroyIfNoWall"));
+    EXPECT(contains(buttons, "writeDecorationInteractTextFromSpriteProperties"));
+    EXPECT(contains(files, "decorationRecords"));
+    EXPECT(contains(files, "220U"));
+    EXPECT(contains(files, "interactText"));
+    EXPECT(contains(maps, "entity->z = 7.5 - entity->floorDecorationHeightOffset * 0.25"));
+    EXPECT(contains(maps, "entity->floorDecorationXOffset * 0.25"));
+    EXPECT(contains(maps, "stairRotation * (PI / 4.0)"));
+    EXPECT(contains(actLadder, "playableLayerStairHasRequiredWall"));
+    EXPECT(contains(actLadder, "playableLayerStairInteractText"));
+
+    // Nonzero gameplay floors are derived from the existing map-layer stack,
+    // not from a second editor-authored geometry stack.
+    EXPECT(contains(playableZHeader, "derivedFromMapLayers"));
+    EXPECT(contains(playableZMap, "authoredLayer = relativeLayer + playableFloor"));
+    EXPECT(contains(playableZMap, "authoredLayer = layer + playableFloor"));
+    EXPECT(contains(maps, "authoredMapLayer"));
+    EXPECT(contains(maps, "entity->verticalLayerTransitionDelta != 0"));
+    EXPECT(contains(maps, "static_cast<PlayableFloorId>(std::max(0, authoredMapLayer - 1))"));
+    EXPECT(contains(maps, "static_cast<PlayableFloorId>(authoredMapLayer)"));
+    EXPECT(contains(maps, "entity->z += 16.0 * static_cast<real_t>(authoredMapLayer)"));
+    EXPECT(contains(maps, "ScopedPlayableFloorRuntimeContext authoredFloorContext"));
+
+    // ZLDR stairs now perform a real one-layer transition without paired ZTRN
+    // endpoints while legacy ZTRN maps remain supported.
+    EXPECT(contains(files, "\"ZLDR\""));
+    EXPECT(contains(files, "\"ZTRN\""));
+    EXPECT(contains(game, "sourceEndpoint->verticalLayerTransitionDelta != 0"));
+    EXPECT(contains(game, "map.ensurePlayableFloorGeometry(destinationFloor, false)"));
+    EXPECT(contains(game, "stairExitDX[8] = { 1, 1, 0, -1, -1, -1, 0, 1 }"));
+    EXPECT(contains(game, "verticalLayerTransitionRotation"));
+    EXPECT(contains(game, "no safe adjacent landing tile"));
+    EXPECT(contains(game, "net_packet->len = 43"));
+    EXPECT(contains(game, "used authored layer stair"));
+    EXPECT(contains(maps, "entity->behavior = &actPlayableFloorTransition"));
+    EXPECT(contains(entityShared,
+        "entityNew->verticalLayerTransitionDelta = entityToCopy->verticalLayerTransitionDelta"));
+    EXPECT(contains(entityShared,
+        "entityNew->verticalLayerTransitionModel = entityToCopy->verticalLayerTransitionModel"));
+    EXPECT(contains(entityShared,
+        "entityNew->floorDecorationHeightOffset = entityToCopy->floorDecorationHeightOffset"));
+
+    // Z3.3C keeps the authored map stack continuous for rendering. Changing
+    // collision floors must not discard lower geometry, entities, or lights.
+    EXPECT(contains(mainHeader, "tilesForPlayableFloorRendering"));
+    EXPECT(contains(playableZMap, "playableFloorUsesAuthoredLayerStack"));
+    EXPECT(contains(playableZMap, "return tilesForPlayableFloor(playableFloor)"));
+    EXPECT(contains(draw, "tilesForPlayableFloorRendering"));
+    EXPECT(contains(opengl, "tilesForPlayableFloorRendering"));
+    EXPECT(contains(draw, "entity->playableFloor <= cameraFloor"));
+    EXPECT(contains(player, "playableFloorCameraOffset"));
+    EXPECT(contains(player, "-32.0 * static_cast<real_t>(my->playableFloor)"));
+    EXPECT(contains(light, "map.playableFloorUsesAuthoredLayerStack(playableFloor)"));
+
+    // Z3.3D/Z3.3E repairs the first real upstairs rendering regressions.
+    // Structural wall layers expose a walkable top cap. HUD entities calculate
+    // their local placement from the legacy camera-local Z while the OpenGL
+    // OVERDRAW transform continues to cancel the real world camera transform.
+    EXPECT(contains(opengl, "topExposed"));
+    EXPECT(contains(opengl, "const float topHeight = z * 32.f - 16.f"));
+    EXPECT(!contains(opengl, "authoredStackHudCameraZ"));
+    EXPECT(contains(draw, "getCameraHudLocalZ"));
+    EXPECT(contains(draw, "+ 32.0 * static_cast<real_t>(floor)"));
+    EXPECT(contains(hudWeapon, "getCameraHudLocalZ(HUDWEAPON_PLAYERNUM)"));
+    EXPECT(contains(hudWeapon, "getCameraHudLocalZ(HUDSHIELD_PLAYERNUM)"));
+    EXPECT(contains(handMagic, "getCameraHudLocalZ(HANDMAGIC_PLAYERNUM)"));
+
+    // Correctness first for upper authored floors: the old 2D occlusion solver
+    // may not erase cumulative lower geometry. Submit all layers upstairs and
+    // rely on the depth buffer until the later true 3D occlusion pass.
+    EXPECT(contains(draw, "authoredStackUpperFloor"));
+    EXPECT(contains(draw, "*disabled || authoredStackUpperFloor"));
+    EXPECT(contains(draw, "updateRendererVisibilityMap("));
+    EXPECT(contains(draw, "true"));
+
+    // Z3.4A gives every editor sprite an explicit structural layer identity.
+    // assignActions must never guess a floor from arbitrary legacy/runtime z.
+    EXPECT(contains(entityHeader, "authoredMapLayer"));
+    EXPECT(contains(files, "\"ELYR\""));
+    EXPECT(contains(files, "editorVersion >= 49"));
+    EXPECT(contains(files, "entity->authoredMapLayer = 0"));
+    EXPECT(contains(maps, "static_cast<int>(entity->authoredMapLayer)"));
+    EXPECT(!contains(section(maps, "void assignActions(", "int loadMainMenuMap("),
+        "std::round(-entity->z / 16.0)"));
+    EXPECT(contains(entityShared, "static_cast<Sint16>(source->structuralMapLayer())"));
+
+    // First broad sprite-runtime isolation pass: tile/entity neighborhood scans
+    // for mechanisms, wind and boulders stay on the owning playable floor.
+    const std::string mechanisms = readFile(sourcePath("src/mechanisms.cpp"));
+    const std::string boulder = readFile(sourcePath("src/actboulder.cpp"));
+    const std::string door = readFile(sourcePath("src/actdoor.cpp"));
+    const std::string gate = readFile(sourcePath("src/actgate.cpp"));
+    const std::string arrowTrap = readFile(sourcePath("src/actarrowtrap.cpp"));
+    const std::string bearTrap = readFile(sourcePath("src/actbeartrap.cpp"));
+    const std::string general = readFile(sourcePath("src/actgeneral.cpp"));
+    const std::string summonTrap = readFile(sourcePath("src/actsummontrap.cpp"));
+    const std::string magicTrap = readFile(sourcePath("src/actmagictrap.cpp"));
+    const std::string item = readFile(sourcePath("src/actitem.cpp"));
+    const std::string monster = readFile(sourcePath("src/actmonster.cpp"));
+    const std::string gold = readFile(sourcePath("src/actgold.cpp"));
+    const std::string arrow = readFile(sourcePath("src/actarrow.cpp"));
+    const std::string thrown = readFile(sourcePath("src/actthrown.cpp"));
+    const std::string pedestal = readFile(sourcePath("src/actpedestal.cpp"));
+    const std::string headstone = readFile(sourcePath("src/actheadstone.cpp"));
+    const std::string itemsSource = readFile(sourcePath("src/items.cpp"));
+    const std::string itemTool = readFile(sourcePath("src/item_tool.cpp"));
+    const std::string duck = readFile(sourcePath("src/monster_duck.cpp"));
+    EXPECT(contains(entityHeader, "checkTileForEntity(int x, int y, PlayableFloorId playableFloor)"));
+    EXPECT(contains(entityHeader, "getPowerablesOnTile(int x, int y, list_t** list, PlayableFloorId playableFloor)"));
+    EXPECT(contains(mechanisms, "getPowerablesOnTile(tx, ty, &return_val, playableFloor)"));
+    EXPECT(contains(mechanisms, "entity1->playableFloor != wind->playableFloor"));
+    EXPECT(contains(boulder, "map.tileAt(x, y, FLOORLAYER, my->playableFloor)"));
+    EXPECT(contains(door, "entity->playableFloor != my->playableFloor"));
+    EXPECT(contains(gate, "entity->playableFloor != playableFloor"));
+    EXPECT(contains(arrowTrap, "map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor)"));
+    EXPECT(contains(bearTrap, "entity->playableFloor != my->playableFloor"));
+    const std::string breakableFactory = section(
+        general, "Entity* Entity::createBreakableCollider(", "void actColliderDecoration(");
+    EXPECT(contains(breakableFactory, "parent->spatialSpawnContext()"));
+    EXPECT(contains(breakableFactory, "activeRuntimeSpatialContext()"));
+    EXPECT(contains(breakableFactory, "map.entities, nullptr, colliderContext"));
+    EXPECT(!contains(breakableFactory, "parent ? parent : this"));
+    EXPECT(contains(general, "FLOORLAYER, child->playableFloor"));
+    EXPECT(contains(summonTrap, "map.tileAt(x, y, FLOORLAYER, my->playableFloor)"));
+    EXPECT(contains(magicTrap, "map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor)"));
+    EXPECT(contains(item, "FLOORLAYER, my->playableFloor"));
+    EXPECT(contains(gold, "FLOORLAYER, my->playableFloor"));
+    EXPECT(contains(arrow, "const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, my->playableFloor)"));
+    EXPECT(contains(thrown, "const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, my->playableFloor)"));
+    EXPECT(!contains(thrown, "swimmingtiles[map.tiles[index]]"));
+    EXPECT(contains(magicTrap, "entity->playableFloor != playableFloor"));
+    const std::string daedalusInteract = section(
+        magicTrap, "void daedalusShrineInteract(", "void Entity::actDaedalusShrine()");
+    EXPECT(contains(daedalusInteract, "entity->playableFloor != my->playableFloor"));
+    EXPECT(!contains(daedalusInteract, "entity->playableFloor != playableFloor"));
+    EXPECT(contains(pedestal, "entity->playableFloor != playableFloor"));
+    EXPECT(contains(gold, "entity->playableFloor != my->playableFloor"));
+    EXPECT(contains(headstone, "entity->playableFloor != my->playableFloor"));
+
+    // Z3.4B restores the palette-selection behavior lost during Z3.4A and
+    // makes the Hermit's runtime duck participate in persistent-world state.
+    EXPECT(contains(gameHeader, "automatiaPersistentHermitDuckExists"));
+    EXPECT(contains(game, "monsterSavedDuckType"));
+    EXPECT(contains(game, "\"monster_duck_type\""));
+    EXPECT(contains(game, "savedState.monsterSavedDuckSpecialState"));
+    EXPECT(contains(game, "savedState.monsterSavedType == DUCK_SMALL"));
+    EXPECT(contains(game, "automatiaPersistentHermitDuckExists("));
+    EXPECT(contains(itemTool, "summon->persistentDynamicMonster = true"));
+    EXPECT(contains(itemsSource, "newEntityWithSpatialContext("));
+    EXPECT(contains(itemsSource, "players[player]->entity); // thrown duck inherits the player's floor"));
+    EXPECT(contains(player, "duckPersistedInWorld"));
+
+    // Z3.4C makes structural ownership universal instead of treating stairs as
+    // the only editor object that understands drawlayer. Every palette-created
+    // sprite records drawlayer explicitly; selection/copy/group tools use that
+    // identity rather than reverse-engineering it from model-height Z. Runtime
+    // action conversion removes serialized structural Z once and rendering adds
+    // the current structural layer back for ordinary entities.
+    EXPECT(contains(editor, "entity->authoredMapLayer = static_cast<Sint16>("));
+    EXPECT(contains(editor, "std::min(drawlayer, MAPLAYERS - 1)"));
+    EXPECT(contains(editor, "entityAuthoredSpriteLayer("));
+    EXPECT(!contains(editor, "entityZToSpriteLayer("));
+    EXPECT(contains(maps, "authoredMapLayer > 0 || entity->verticalLayerTransitionDelta != 0"));
+    EXPECT(contains(maps, "entity->playableFloor = authoredPlayableFloor;"));
+    EXPECT(contains(entityHeader, "int structuralMapLayer() const"));
+    EXPECT(contains(entityHeader, "return z - 16.0 * static_cast<real_t>(structuralMapLayer())"));
+    EXPECT(contains(opengl, "entity->worldRenderZ()"));
+    EXPECT(contains(opengl, "entityRenderZ(entity)"));
+    EXPECT(contains(playableZHeader, "activeRuntimeStructuralMapLayer"));
+    EXPECT(contains(light, "activeRuntimeStructuralMapLayer()"));
+    EXPECT(contains(torchSource, "my->structuralLightmapLayer()"));
+    EXPECT(contains(netSource, "context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor)"));
+
+    // The editor's 3D preview must honor authored sky/skybox state even when
+    // smooth lighting is disabled; otherwise Chunk::build synthesizes a false
+    // stone ceiling that the real game does not render.
+    EXPECT(contains(opengl, "const bool authoredSky = !strncmp(map.name, \"Hell\", 4) || map.skybox != 0"));
+    EXPECT(contains(opengl, "const bool skyVisible = authoredSky;"));
+    EXPECT(contains(opengl, "const bool skyVisible = authoredSky && smoothlighting;"));
+
+    // Persistent Hermit ducks keep a durable owner slot in addition to the
+    // transient entity UID. Old Z3.4B saves can still derive the owner from
+    // duck_type, while restored ducks rebind to players[owner]->entity.
+    EXPECT(contains(game, "monsterSavedDuckOwner"));
+    EXPECT(contains(game, "\"monster_duck_owner\""));
+    EXPECT(contains(itemTool, "setAttribute(\"duck_owner\""));
+    EXPECT(contains(duck, "resolveHermitDuckOwner"));
+    EXPECT(contains(duck, "players[owner]->entity"));
+    EXPECT(contains(duck, "leaderTemporarilyUnavailable"));
+    EXPECT(contains(duck, "leaderOnOtherPlayableFloor"));
+    EXPECT(contains(monster, "durableOwnerPlayer"));
+    EXPECT(contains(monster, "leader && leader->playableFloor != my->playableFloor"));
+
+    // Missing tiles on an authored upper floor can now be real ledges. Player
+    // collision permits the move only when a valid lower stacked landing exists;
+    // actPlayer then performs a floor transition and damage is proportional to
+    // the number of structural floors crossed. No lower landing preserves the
+    // original bottomless-pit death path.
+    EXPECT(contains(mainHeader, "findLowerPlayableFloorLanding"));
+    EXPECT(contains(playableZMap, "for ( int candidate = static_cast<int>(fromFloor) - 1"));
+    EXPECT(contains(collisionSource, "playerHasLowerStackedLanding"));
+    EXPECT(contains(gameHeader, "fallAutomatiaPlayerToLowerPlayableFloor"));
+    EXPECT(contains(game, "fallAutomatiaPlayerToLowerPlayableFloor("));
+    EXPECT(contains(game, "broadcastAutomatiaPlayerFloorPlacement(playerIndex)"));
+    EXPECT(contains(player, "const int fallDamage = std::max(1, floorsFallen)"));
+    EXPECT(contains(player, "KilledBy::BOTTOMLESS_PIT"));
     return true;
 }
 
@@ -543,6 +1011,9 @@ int main()
         && testDivergentMapAndLateJoinContracts()
         && testPersistenceAndSpawnSourceContracts()
         && testPlayableZDataFoundationContract()
+        && testZ2CRuntimeIsolationContracts()
+        && testZ3FloorTransitionContracts()
+        && testZ33LayerAuthoringCorrectionContracts()
         ? 0
         : 1;
 }

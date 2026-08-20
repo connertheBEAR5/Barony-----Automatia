@@ -774,6 +774,23 @@ enum class Kind : Uint8
     real_t monsterSavedRoll = 0.0;
 
     /*
+     * Hermit duck runtime state.
+     *
+     * DUCK_SMALL is a runtime monster created from TOOL_DUCK, so ordinary
+     * floor-item persistence cannot represent it. Preserve the item-derived
+     * appearance/owner metadata, remaining lifetime and current duck state
+     * alongside the normal monster snapshot.
+     */
+    Sint32 monsterSavedDuckType = -1;
+    // Durable Hermit owner slot. -1 keeps backward compatibility with Z3.4B
+    // saves, which can still derive the slot from monsterSavedDuckType.
+    Sint32 monsterSavedDuckOwner = -1;
+    Sint32 monsterSavedDuckTime = -1;
+    Sint32 monsterSavedDuckBless = 0;
+    Sint32 monsterSavedDuckRun = 0;
+    Sint32 monsterSavedDuckSpecialState = 0;
+
+    /*
     * Summoning-trap runtime state.
     *
     * These correspond to skill[0] through skill[9].
@@ -915,6 +932,13 @@ struct PersistentMapRemovalState
      * newest authored baseline.
      */
     std::vector<Sint32> originalTiles;
+
+    /*
+     * Stage Z2B: authored baselines for nonzero playable floors. Floor Z0
+     * stays in originalTiles for compatibility with the existing persistence
+     * code; every other floor owns an independent baseline here.
+     */
+    std::unordered_map<PlayableFloorId, std::vector<Sint32>> originalFloorTiles;
 
     Sint32 originalTileWidth = 0;
     Sint32 originalTileHeight = 0;
@@ -1096,6 +1120,59 @@ static std::unordered_map<
     std::string,
     PersistentMapRemovalState
 > persistentMapRemovalRegistry;
+
+bool automatiaPersistentHermitDuckExists(
+    const int playerIndex,
+    const int duckColor)
+{
+    if ( playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || duckColor < 0 )
+    {
+        return false;
+    }
+
+    for ( const auto& mapEntry : persistentMapRemovalRegistry )
+    {
+        const PersistentMapRemovalState& mapState = mapEntry.second;
+        for ( const Sint32 persistentID : mapState.dynamicMonsterIDs )
+        {
+            const auto stateIterator =
+                mapState.mechanismStates.find(persistentID);
+            if ( stateIterator == mapState.mechanismStates.end() )
+            {
+                continue;
+            }
+
+            const PersistentMechanismState& savedState =
+                stateIterator->second;
+            if ( savedState.kind
+                    != PersistentMechanismState::Kind::MonsterLivingState
+                || savedState.monsterSavedType != DUCK_SMALL
+                || savedState.monsterSavedDuckType < 0 )
+            {
+                continue;
+            }
+
+            const int variations =
+                std::max(1, items[TOOL_DUCK].variations);
+            const int normalizedAppearance =
+                savedState.monsterSavedDuckType % variations;
+            const int savedOwner =
+                savedState.monsterSavedDuckOwner >= 0
+                    ? savedState.monsterSavedDuckOwner % MAXPLAYERS
+                    : normalizedAppearance % MAXPLAYERS;
+            const int savedColor =
+                normalizedAppearance / MAXPLAYERS;
+            if ( savedOwner == playerIndex
+                && savedColor == duckColor )
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
 
 /*
  * Reserved positive-ID range for raw entities created by deterministic map
@@ -2465,6 +2542,12 @@ AutomatiaSave::Json saveMechanismState(
         {"monster_rotation", {
             state.monsterSavedYaw, state.monsterSavedPitch, state.monsterSavedRoll
         }},
+        {"monster_duck_type", state.monsterSavedDuckType},
+        {"monster_duck_owner", state.monsterSavedDuckOwner},
+        {"monster_duck_time", state.monsterSavedDuckTime},
+        {"monster_duck_bless", state.monsterSavedDuckBless},
+        {"monster_duck_run", state.monsterSavedDuckRun},
+        {"monster_duck_special_state", state.monsterSavedDuckSpecialState},
         {"summon_monster", state.summonTrapMonster},
         {"summon_count", state.summonTrapCount},
         {"summon_interval", state.summonTrapInterval},
@@ -2686,6 +2769,16 @@ bool restoreMechanismState(
         state.monsterSavedYaw,
         state.monsterSavedPitch,
         state.monsterSavedRoll
+    );
+    savedJsonInt(saved, "monster_duck_type", state.monsterSavedDuckType);
+    savedJsonInt(saved, "monster_duck_owner", state.monsterSavedDuckOwner);
+    savedJsonInt(saved, "monster_duck_time", state.monsterSavedDuckTime);
+    savedJsonInt(saved, "monster_duck_bless", state.monsterSavedDuckBless);
+    savedJsonInt(saved, "monster_duck_run", state.monsterSavedDuckRun);
+    savedJsonInt(
+        saved,
+        "monster_duck_special_state",
+        state.monsterSavedDuckSpecialState
     );
     savedJsonInt(saved, "summon_monster", state.summonTrapMonster);
     savedJsonInt(saved, "summon_count", state.summonTrapCount);
@@ -3806,7 +3899,8 @@ void applyAutomatiaSavedPlayerPlacements()
         }
         Entity& entity = *players[playerIndex]->entity;
         const bool playableFloorAvailable =
-            placement.playableFloor == DEFAULT_PLAYABLE_FLOOR;
+            map.playableFloors.hasFloor(placement.playableFloor)
+            && map.tilesForPlayableFloor(placement.playableFloor) != nullptr;
         bool savedTilePassable = false;
         if (playableFloorAvailable && placement.hasPosition
             && placement.x >= 0.0
@@ -3816,63 +3910,42 @@ void applyAutomatiaSavedPlayerPlacements()
         {
             const Sint32 tileX = static_cast<Sint32>(placement.x / 16.0);
             const Sint32 tileY = static_cast<Sint32>(placement.y / 16.0);
-            const std::size_t obstacleIndex =
-                OBSTACLELAYER
-                + tileY * MAPLAYERS
-                + tileX * MAPLAYERS * map.height;
-            savedTilePassable = map.tiles && map.tiles[obstacleIndex] == 0;
+            savedTilePassable =
+                map.tileAt(tileX, tileY, FLOORLAYER, placement.playableFloor) != 0
+                && map.tileAt(
+                    tileX, tileY, OBSTACLELAYER, placement.playableFloor) == 0;
         }
         if (placement.hasPosition
-            && savedTilePassable)
+            && savedTilePassable
+            && applyAutomatiaPlayableFloorPlacement(
+                playerIndex,
+                placement.playableFloor,
+                0,
+                placement.x,
+                placement.y,
+                placement.z,
+                placement.yaw,
+                placement.pitch,
+                placement.roll,
+                true))
         {
-            entity.playableFloor = placement.playableFloor;
-            entity.spatialRevision = 0;
-            entity.x = placement.x;
-            entity.y = placement.y;
-            entity.z = placement.z;
-            entity.yaw = placement.yaw;
-            entity.pitch = placement.pitch;
-            entity.roll = placement.roll;
-            entity.new_x = entity.x;
-            entity.new_y = entity.y;
-            entity.new_z = entity.z;
-            entity.new_yaw = entity.yaw;
-            entity.new_pitch = entity.pitch;
-            entity.new_roll = entity.roll;
-            entity.vel_x = 0.0;
-            entity.vel_y = 0.0;
-            entity.vel_z = 0.0;
-            entity.lerp_ox = entity.x;
-            entity.lerp_oy = entity.y;
-            entity.bNeedsRenderPositionInit = true;
-            for (Entity* bodypart : entity.bodyparts)
-            {
-                if (bodypart)
-                {
-                    bodypart->inheritSpatialContextFrom(&entity);
-                    bodypart->bNeedsRenderPositionInit = true;
-                }
-            }
-            players[playerIndex]->player_last_x = entity.x;
-            players[playerIndex]->player_last_y = entity.y;
             printlog(
                 "[Character Save] Server applied saved position for player %d "
-                "at %.2f, %.2f, %.2f in '%s'.",
+                "at %.2f, %.2f, %.2f on floor %d in '%s'.",
                 playerIndex,
                 entity.x,
                 entity.y,
                 entity.z,
+                static_cast<int>(entity.playableFloor),
                 activeIdentity->key().c_str());
         }
         else if (placement.hasPosition)
         {
-            entity.playableFloor = DEFAULT_PLAYABLE_FLOOR;
-            entity.spatialRevision = 0;
+            entity.setPlayableFloor(DEFAULT_PLAYABLE_FLOOR);
             if (!playableFloorAvailable)
             {
                 printlog(
-                    "[Playable Z] Saved player %d belongs to floor %d in '%s'; "
-                    "Z1 keeps nonzero floors data-only, so the safe Z0 Player Start is used.",
+                    "[Playable Z] Saved player %d belongs to unavailable floor %d in '%s'; using the safe Z0 Player Start fallback.",
                     playerIndex,
                     static_cast<int>(placement.playableFloor),
                     activeIdentity->key().c_str());
@@ -5880,6 +5953,668 @@ static void restorePersistentMinimap()
 void restoreAutomatiaPersistentMinimapForLocalPlayer()
 {
     restorePersistentMinimap();
+}
+
+namespace
+{
+void syncAutomatiaPlayerSpatialAttachments(
+    const int playerIndex,
+    Entity& playerEntity)
+{
+    for (Entity* bodypart : playerEntity.bodyparts)
+    {
+        if (!bodypart)
+        {
+            continue;
+        }
+        if (bodypart->playableFloor != playerEntity.playableFloor)
+        {
+            bodypart->setPlayableFloor(playerEntity.playableFloor);
+        }
+        bodypart->spatialRevision = playerEntity.spatialRevision;
+        bodypart->bNeedsRenderPositionInit = true;
+    }
+
+    // Nametags and a few local HUD helpers are parented to the player but are
+    // not present in every bodyparts vector. Only migrate NOUPDATE attachments;
+    // projectiles/spells keep their original floor and are intentionally not
+    // pulled through the stairs.
+    for (node_t* node = map.entities ? map.entities->first : nullptr;
+        node; node = node->next)
+    {
+        Entity* attached = static_cast<Entity*>(node->element);
+        if (!attached || attached == &playerEntity
+            || attached->parent != playerEntity.getUID()
+            || !attached->flags[NOUPDATE])
+        {
+            continue;
+        }
+        if (attached->playableFloor != playerEntity.playableFloor)
+        {
+            attached->setPlayableFloor(playerEntity.playableFloor);
+        }
+        attached->spatialRevision = playerEntity.spatialRevision;
+        attached->bNeedsRenderPositionInit = true;
+    }
+
+    if (playerIndex >= 0 && playerIndex < MAXPLAYERS && players[playerIndex])
+    {
+        players[playerIndex]->player_last_x = playerEntity.x;
+        players[playerIndex]->player_last_y = playerEntity.y;
+        selectedEntity[playerIndex] = nullptr;
+        client_selected[playerIndex] = nullptr;
+        inrange[playerIndex] = false;
+
+        view_t& view = players[playerIndex]->camera();
+        if (players[playerIndex]->isLocalPlayer())
+        {
+            view.x = playerEntity.x / 16.0;
+            view.y = playerEntity.y / 16.0;
+            view.ang = playerEntity.yaw;
+            view.vang = playerEntity.pitch;
+        }
+        if (view.vismap && map.width > 0 && map.height > 0)
+        {
+            std::memset(
+                view.vismap,
+                0,
+                sizeof(bool)
+                    * static_cast<std::size_t>(map.width)
+                    * static_cast<std::size_t>(map.height));
+        }
+    }
+}
+
+bool playableFloorPlacementTileIsSafe(
+    const PlayableFloorId playableFloor,
+    const real_t x,
+    const real_t y)
+{
+    if (!map.playableFloors.hasFloor(playableFloor)
+        || map.tilesForPlayableFloor(playableFloor) == nullptr
+        || !std::isfinite(static_cast<double>(x))
+        || !std::isfinite(static_cast<double>(y))
+        || x < 0.0 || y < 0.0
+        || x >= static_cast<real_t>(map.width) * 16.0
+        || y >= static_cast<real_t>(map.height) * 16.0)
+    {
+        return false;
+    }
+    const Sint32 tileX = static_cast<Sint32>(x / 16.0);
+    const Sint32 tileY = static_cast<Sint32>(y / 16.0);
+    return map.tileAt(tileX, tileY, FLOORLAYER, playableFloor) != 0
+        && map.tileAt(tileX, tileY, OBSTACLELAYER, playableFloor) == 0;
+}
+
+void broadcastAutomatiaPlayerFloorPlacement(const int playerIndex)
+{
+    if (multiplayer != SERVER || !net_packet || !net_packet->data
+        || playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !players[playerIndex] || !players[playerIndex]->entity)
+    {
+        return;
+    }
+
+    Entity* playerEntity = players[playerIndex]->entity;
+    for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+    {
+        if (client_disconnected[recipient]
+            || !serverPlayerCanReceiveActiveMapUpdates(recipient))
+        {
+            continue;
+        }
+        std::memcpy(net_packet->data, "PZTR", 4);
+        net_packet->data[4] = static_cast<Uint8>(playerIndex);
+        SDLNet_Write32(playerEntity->getUID(), &net_packet->data[5]);
+        SDLNet_Write16(
+            static_cast<Uint16>(playerEntity->playableFloor),
+            &net_packet->data[9]);
+        SDLNet_Write32(
+            static_cast<Uint32>(playerEntity->spatialRevision & 0xffffffffULL),
+            &net_packet->data[11]);
+        SDLNet_Write32(
+            static_cast<Uint32>(playerEntity->spatialRevision >> 32U),
+            &net_packet->data[15]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->x * 32.0),
+            &net_packet->data[19]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->y * 32.0),
+            &net_packet->data[23]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->z * 32.0),
+            &net_packet->data[27]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->yaw * 256.0),
+            &net_packet->data[31]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->pitch * 256.0),
+            &net_packet->data[35]);
+        SDLNet_Write32(
+            static_cast<Sint32>(playerEntity->roll * 256.0),
+            &net_packet->data[39]);
+        net_packet->len = 43;
+        net_packet->address.host = net_clients[recipient - 1].host;
+        net_packet->address.port = net_clients[recipient - 1].port;
+        sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
+    }
+}
+}
+
+bool applyAutomatiaPlayableFloorPlacement(
+    const int playerIndex,
+    const PlayableFloorId playableFloor,
+    const std::uint64_t spatialRevision,
+    const real_t x,
+    const real_t y,
+    const real_t z,
+    const real_t yaw,
+    const real_t pitch,
+    const real_t roll,
+    const bool requirePassable)
+{
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !players[playerIndex] || !players[playerIndex]->entity
+        || !std::isfinite(static_cast<double>(z))
+        || !std::isfinite(static_cast<double>(yaw))
+        || !std::isfinite(static_cast<double>(pitch))
+        || !std::isfinite(static_cast<double>(roll))
+        || (requirePassable
+            && !playableFloorPlacementTileIsSafe(playableFloor, x, y)))
+    {
+        return false;
+    }
+
+    Entity& entity = *players[playerIndex]->entity;
+    const bool floorChanged = entity.playableFloor != playableFloor;
+    if (spatialRevision != 0)
+    {
+        if (spatialRevision < entity.spatialRevision
+            || (floorChanged && spatialRevision <= entity.spatialRevision))
+        {
+            printlog(
+                "[Playable Z] Rejected stale floor placement for player %d: incoming floor=%d revision=%llu, current floor=%d revision=%llu.",
+                playerIndex,
+                static_cast<int>(playableFloor),
+                static_cast<unsigned long long>(spatialRevision),
+                static_cast<int>(entity.playableFloor),
+                static_cast<unsigned long long>(entity.spatialRevision));
+            return false;
+        }
+    }
+
+    const bool localPlayer = players[playerIndex]->isLocalPlayer();
+    if (floorChanged && localPlayer)
+    {
+        capturePersistentMinimap(false);
+    }
+
+    if (floorChanged)
+    {
+        if (!entity.transitionToPlayableFloor(playableFloor, x, y, z))
+        {
+            return false;
+        }
+    }
+    else
+    {
+        if (requirePassable && !playableFloorPlacementTileIsSafe(playableFloor, x, y))
+        {
+            return false;
+        }
+        entity.removeLightField();
+        entity.x = x;
+        entity.y = y;
+        entity.z = z;
+        entity.new_x = x;
+        entity.new_y = y;
+        entity.new_z = z;
+        entity.vel_x = 0.0;
+        entity.vel_y = 0.0;
+        entity.vel_z = 0.0;
+        entity.lerp_ox = x;
+        entity.lerp_oy = y;
+        entity.bNeedsRenderPositionInit = true;
+        if (entity.myTileListNode)
+        {
+            TileEntityList.updateEntity(entity);
+        }
+    }
+
+    if (spatialRevision != 0)
+    {
+        entity.spatialRevision = spatialRevision;
+    }
+    entity.yaw = yaw;
+    entity.pitch = pitch;
+    entity.roll = roll;
+    entity.new_yaw = yaw;
+    entity.new_pitch = pitch;
+    entity.new_roll = roll;
+
+    syncAutomatiaPlayerSpatialAttachments(playerIndex, entity);
+
+    if (floorChanged && localPlayer)
+    {
+        minimapPings[playerIndex].clear();
+        restorePersistentMinimap();
+    }
+
+    printlog(
+        "[Playable Z] Applied player %d floor placement: floor=%d revision=%llu x=%.2f y=%.2f z=%.2f.",
+        playerIndex,
+        static_cast<int>(entity.playableFloor),
+        static_cast<unsigned long long>(entity.spatialRevision),
+        entity.x, entity.y, entity.z);
+    return true;
+}
+
+bool fallAutomatiaPlayerToLowerPlayableFloor(
+    const int playerIndex,
+    int& floorsFallen)
+{
+    floorsFallen = 0;
+    if (multiplayer == CLIENT
+        || playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !players[playerIndex] || !players[playerIndex]->entity)
+    {
+        return false;
+    }
+
+    Entity* playerEntity = players[playerIndex]->entity;
+    if (playerEntity->playableFloor <= DEFAULT_PLAYABLE_FLOOR
+        || !map.playableFloorUsesAuthoredLayerStack(playerEntity->playableFloor))
+    {
+        return false;
+    }
+
+    const int tileX = std::clamp(
+        static_cast<int>(std::floor(playerEntity->x / 16.0)),
+        0, static_cast<int>(map.width) - 1);
+    const int tileY = std::clamp(
+        static_cast<int>(std::floor(playerEntity->y / 16.0)),
+        0, static_cast<int>(map.height) - 1);
+
+    PlayableFloorId landingFloor = DEFAULT_PLAYABLE_FLOOR;
+    if (!map.findLowerPlayableFloorLanding(
+            tileX, tileY, playerEntity->playableFloor,
+            landingFloor, floorsFallen)
+        || floorsFallen <= 0)
+    {
+        floorsFallen = 0;
+        return false;
+    }
+
+    if (!map.ensurePlayableFloorGeometry(landingFloor, false))
+    {
+        floorsFallen = 0;
+        return false;
+    }
+
+    const PlayableFloorId sourceFloor = playerEntity->playableFloor;
+    if (!applyAutomatiaPlayableFloorPlacement(
+            playerIndex, landingFloor, 0,
+            playerEntity->x, playerEntity->y, playerEntity->z,
+            playerEntity->yaw, playerEntity->pitch, playerEntity->roll, true))
+    {
+        floorsFallen = 0;
+        return false;
+    }
+
+    broadcastAutomatiaPlayerFloorPlacement(playerIndex);
+    printlog(
+        "[Playable Z] Player %d fell through authored floors: floor %d -> %d (%d floor%s).",
+        playerIndex,
+        static_cast<int>(sourceFloor),
+        static_cast<int>(landingFloor),
+        floorsFallen,
+        floorsFallen == 1 ? "" : "s");
+    return true;
+}
+
+bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(
+    const int playerIndex,
+    Entity* sourceEndpoint)
+{
+    /*
+     * Stage Z3.3B layer stair path. Unlike legacy ZTRN endpoints, ZLDR stairs
+     * need no paired entity and no separately-authored floor geometry. The
+     * source entity's authored map layer was converted into playableFloor by
+     * assignActions(); moving up/down shifts that view by exactly one layer.
+     */
+    if (sourceEndpoint
+        && sourceEndpoint->verticalLayerTransitionDelta != 0)
+    {
+        if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+            || (sourceEndpoint->verticalLayerTransitionDelta != -1
+                && sourceEndpoint->verticalLayerTransitionDelta != 1)
+            || !players[playerIndex]
+            || !players[playerIndex]->entity)
+        {
+            return false;
+        }
+
+        Entity* playerEntity = players[playerIndex]->entity;
+        if (playerEntity->playableFloor != sourceEndpoint->playableFloor)
+        {
+            return false;
+        }
+
+        const int destinationFloorRaw =
+            static_cast<int>(sourceEndpoint->playableFloor)
+            + static_cast<int>(sourceEndpoint->verticalLayerTransitionDelta);
+        const int highestPlayableFloor = MAPLAYERS - CEILINGLAYER - 1;
+        if (destinationFloorRaw < 0
+            || destinationFloorRaw > highestPlayableFloor)
+        {
+            printlog(
+                "[Playable Z] Layer stair on floor %d has out-of-range destination floor %d.",
+                static_cast<int>(sourceEndpoint->playableFloor),
+                destinationFloorRaw);
+            return false;
+        }
+        const PlayableFloorId destinationFloor =
+            static_cast<PlayableFloorId>(destinationFloorRaw);
+
+        if (!map.ensurePlayableFloorGeometry(destinationFloor, false))
+        {
+            printlog(
+                "[Playable Z] Could not derive floor %d from the authored map-layer stack.",
+                destinationFloorRaw);
+            return false;
+        }
+
+        /*
+         * A stair occupies an authored tile that may itself be solid on one of
+         * the two vertical interpretations. Landing on that exact tile would
+         * therefore reject many perfectly valid stair layouts. The authored
+         * cardinal facing chooses the preferred exit side, then we try the
+         * remaining adjacent sides before the stair tile itself. This keeps
+         * the transition deterministic while letting a ladder sit against the
+         * block that becomes the next floor.
+         */
+        static constexpr Sint32 stairExitDX[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+        static constexpr Sint32 stairExitDY[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+        const int stairRotation = std::clamp(
+            static_cast<int>(sourceEndpoint->verticalLayerTransitionRotation),
+            0,
+            7);
+        const int candidateRotations[8] = {
+            stairRotation,
+            (stairRotation + 4) & 7,
+            (stairRotation + 2) & 7,
+            (stairRotation + 6) & 7,
+            (stairRotation + 1) & 7,
+            (stairRotation + 7) & 7,
+            (stairRotation + 3) & 7,
+            (stairRotation + 5) & 7
+        };
+
+        const Sint32 stairTileX = static_cast<Sint32>(sourceEndpoint->x / 16.0);
+        const Sint32 stairTileY = static_cast<Sint32>(sourceEndpoint->y / 16.0);
+        real_t destinationX = sourceEndpoint->x;
+        real_t destinationY = sourceEndpoint->y;
+        bool foundDestination = false;
+        for (const int candidateRotation : candidateRotations)
+        {
+            const Sint32 candidateTileX =
+                stairTileX + stairExitDX[candidateRotation];
+            const Sint32 candidateTileY =
+                stairTileY + stairExitDY[candidateRotation];
+            const real_t candidateX =
+                static_cast<real_t>(candidateTileX * 16 + 8);
+            const real_t candidateY =
+                static_cast<real_t>(candidateTileY * 16 + 8);
+            if (playableFloorPlacementTileIsSafe(
+                    destinationFloor, candidateX, candidateY))
+            {
+                destinationX = candidateX;
+                destinationY = candidateY;
+                foundDestination = true;
+                break;
+            }
+        }
+
+        if (!foundDestination
+            && playableFloorPlacementTileIsSafe(
+                destinationFloor, sourceEndpoint->x, sourceEndpoint->y))
+        {
+            destinationX = sourceEndpoint->x;
+            destinationY = sourceEndpoint->y;
+            foundDestination = true;
+        }
+
+        if (!foundDestination)
+        {
+            printlog(
+                "[Playable Z] Layer stair destination blocked: floor=%d stairTile=(%d,%d) facing=%d; no safe adjacent landing tile; authored floor/wall layers=(%d,%d).",
+                destinationFloorRaw,
+                stairTileX,
+                stairTileY,
+                stairRotation,
+                destinationFloorRaw + FLOORLAYER,
+                destinationFloorRaw + OBSTACLELAYER);
+            return false;
+        }
+
+        if (!applyAutomatiaPlayableFloorPlacement(
+                playerIndex,
+                destinationFloor,
+                0,
+                destinationX,
+                destinationY,
+                playerEntity->z,
+                playerEntity->yaw,
+                playerEntity->pitch,
+                playerEntity->roll,
+                true))
+        {
+            return false;
+        }
+
+        playerEntity = players[playerIndex]->entity;
+        if (multiplayer == SERVER && net_packet && net_packet->data)
+        {
+            for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+            {
+                if (client_disconnected[recipient]
+                    || !serverPlayerCanReceiveActiveMapUpdates(recipient))
+                {
+                    continue;
+                }
+                std::memcpy(net_packet->data, "PZTR", 4);
+                net_packet->data[4] = static_cast<Uint8>(playerIndex);
+                SDLNet_Write32(playerEntity->getUID(), &net_packet->data[5]);
+                SDLNet_Write16(
+                    static_cast<Uint16>(playerEntity->playableFloor),
+                    &net_packet->data[9]);
+                SDLNet_Write32(
+                    static_cast<Uint32>(playerEntity->spatialRevision & 0xffffffffULL),
+                    &net_packet->data[11]);
+                SDLNet_Write32(
+                    static_cast<Uint32>(playerEntity->spatialRevision >> 32U),
+                    &net_packet->data[15]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->x * 32.0),
+                    &net_packet->data[19]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->y * 32.0),
+                    &net_packet->data[23]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->z * 32.0),
+                    &net_packet->data[27]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->yaw * 256.0),
+                    &net_packet->data[31]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->pitch * 256.0),
+                    &net_packet->data[35]);
+                SDLNet_Write32(
+                    static_cast<Sint32>(playerEntity->roll * 256.0),
+                    &net_packet->data[39]);
+                net_packet->len = 43;
+                net_packet->address.host = net_clients[recipient - 1].host;
+                net_packet->address.port = net_clients[recipient - 1].port;
+                sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
+            }
+        }
+
+        printlog(
+            "[Playable Z] Player %d used authored layer stair: floor %d -> %d landing tile=(%d,%d) facing=%d at (%.2f, %.2f).",
+            playerIndex,
+            static_cast<int>(sourceEndpoint->playableFloor),
+            destinationFloorRaw,
+            static_cast<int>(destinationX / 16.0),
+            static_cast<int>(destinationY / 16.0),
+            stairRotation,
+            destinationX,
+            destinationY);
+        return true;
+    }
+
+    if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+        || !sourceEndpoint
+        || !sourceEndpoint->playableFloorTransitionEnabled
+        || sourceEndpoint->persistentID <= 0
+        || sourceEndpoint->playableFloorTransitionTargetPersistentID <= 0
+        || sourceEndpoint->playableFloorTransitionDestination
+            == sourceEndpoint->playableFloor
+        || !players[playerIndex]
+        || !players[playerIndex]->entity)
+    {
+        return false;
+    }
+
+    Entity* playerEntity = players[playerIndex]->entity;
+    if (playerEntity->playableFloor != sourceEndpoint->playableFloor)
+    {
+        return false;
+    }
+
+    Entity* destinationEndpoint = nullptr;
+    for (node_t* node = map.entities ? map.entities->first : nullptr;
+        node; node = node->next)
+    {
+        Entity* candidate = static_cast<Entity*>(node->element);
+        if (candidate
+            && candidate->persistentID
+                == sourceEndpoint->playableFloorTransitionTargetPersistentID
+            && candidate->playableFloor
+                == sourceEndpoint->playableFloorTransitionDestination)
+        {
+            destinationEndpoint = candidate;
+            break;
+        }
+    }
+    if (!destinationEndpoint)
+    {
+        printlog(
+            "[Playable Z] Floor transition source ID %d could not resolve destination ID %d on floor %d.",
+            sourceEndpoint->persistentID,
+            sourceEndpoint->playableFloorTransitionTargetPersistentID,
+            static_cast<int>(sourceEndpoint->playableFloorTransitionDestination));
+        return false;
+    }
+
+    const PlayableFloorId sourceFloor = playerEntity->playableFloor;
+    const real_t relativeX = std::clamp(
+        playerEntity->x - sourceEndpoint->x,
+        static_cast<real_t>(-12.0),
+        static_cast<real_t>(12.0));
+    const real_t relativeY = std::clamp(
+        playerEntity->y - sourceEndpoint->y,
+        static_cast<real_t>(-12.0),
+        static_cast<real_t>(12.0));
+    real_t destinationX = destinationEndpoint->x + relativeX;
+    real_t destinationY = destinationEndpoint->y + relativeY;
+    if (!playableFloorPlacementTileIsSafe(
+            sourceEndpoint->playableFloorTransitionDestination,
+            destinationX, destinationY))
+    {
+        destinationX = destinationEndpoint->x;
+        destinationY = destinationEndpoint->y;
+    }
+
+    if (!applyAutomatiaPlayableFloorPlacement(
+            playerIndex,
+            sourceEndpoint->playableFloorTransitionDestination,
+            0,
+            destinationX,
+            destinationY,
+            playerEntity->z,
+            playerEntity->yaw,
+            playerEntity->pitch,
+            playerEntity->roll,
+            true))
+    {
+        printlog(
+            "[Playable Z] Player %d could not transition from floor %d endpoint ID %d to floor %d endpoint ID %d.",
+            playerIndex,
+            static_cast<int>(sourceFloor),
+            sourceEndpoint->persistentID,
+            static_cast<int>(sourceEndpoint->playableFloorTransitionDestination),
+            destinationEndpoint->persistentID);
+        return false;
+    }
+
+    playerEntity = players[playerIndex]->entity;
+    if (multiplayer == SERVER && net_packet && net_packet->data)
+    {
+        for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+        {
+            if (client_disconnected[recipient]
+                || !serverPlayerCanReceiveActiveMapUpdates(recipient))
+            {
+                continue;
+            }
+            std::memcpy(net_packet->data, "PZTR", 4);
+            net_packet->data[4] = static_cast<Uint8>(playerIndex);
+            SDLNet_Write32(playerEntity->getUID(), &net_packet->data[5]);
+            SDLNet_Write16(
+                static_cast<Uint16>(playerEntity->playableFloor),
+                &net_packet->data[9]);
+            SDLNet_Write32(
+                static_cast<Uint32>(
+                    playerEntity->spatialRevision & 0xffffffffULL),
+                &net_packet->data[11]);
+            SDLNet_Write32(
+                static_cast<Uint32>(playerEntity->spatialRevision >> 32U),
+                &net_packet->data[15]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->x * 32.0),
+                &net_packet->data[19]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->y * 32.0),
+                &net_packet->data[23]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->z * 32.0),
+                &net_packet->data[27]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->yaw * 256.0),
+                &net_packet->data[31]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->pitch * 256.0),
+                &net_packet->data[35]);
+            SDLNet_Write32(
+                static_cast<Sint32>(playerEntity->roll * 256.0),
+                &net_packet->data[39]);
+            net_packet->address.host = net_clients[recipient - 1].host;
+            net_packet->address.port = net_clients[recipient - 1].port;
+            net_packet->len = 43;
+            sendPacketSafe(
+                net_sock, -1, net_packet, recipient - 1);
+        }
+    }
+
+    printlog(
+        "[Playable Z] Player %d used transition ID %d: floor %d -> %d, target ID %d, revision=%llu.",
+        playerIndex,
+        sourceEndpoint->persistentID,
+        static_cast<int>(sourceFloor),
+        static_cast<int>(playerEntity->playableFloor),
+        destinationEndpoint->persistentID,
+        static_cast<unsigned long long>(playerEntity->spatialRevision));
+    return true;
 }
 
 bool exportAutomatiaPersistentMinimapSnapshotForFloor(
@@ -8050,6 +8785,7 @@ void beginClientPersistentWorldSnapshot(
 		* become the new baseline inside applyPersistentMapRemovals().
 		*/
 		state.originalTiles.clear();
+		state.originalFloorTiles.clear();
 		state.originalTileWidth = 0;
 		state.originalTileHeight = 0;
 		state.originalTileLayers = 0;
@@ -8887,6 +9623,18 @@ void receiveClientPersistentTileState(
     Sint32 tile
 )
 {
+    receiveClientPersistentTileState(
+        x, y, layer, tile, DEFAULT_PLAYABLE_FLOOR);
+}
+
+void receiveClientPersistentTileState(
+    Sint32 x,
+    Sint32 y,
+    Sint32 layer,
+    Sint32 tile,
+    PlayableFloorId playableFloor
+)
+{
     if ( multiplayer != CLIENT
         || !clientPersistentSnapshotReceiving
         || x < 0
@@ -8898,8 +9646,7 @@ void receiveClientPersistentTileState(
     }
 
     PersistentTileState state;
-    state.playableFloor = DEFAULT_PLAYABLE_FLOOR;
-
+    state.playableFloor = playableFloor;
     state.x = x;
     state.y = y;
     state.layer = layer;
@@ -8911,7 +9658,8 @@ void receiveClientPersistentTileState(
         makePersistentTileKey(
             x,
             y,
-            layer
+            layer,
+            playableFloor
         )
     ] = state;
 }
@@ -9088,47 +9836,34 @@ void sendPersistentWorldSnapshotToClient(
             const PersistentTileState& tileState =
                 tilePair.second;
 
-            if (tileState.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+            if ( tileState.playableFloor == DEFAULT_PLAYABLE_FLOOR )
             {
-                continue;
+                strcpy(
+                    reinterpret_cast<char*>(net_packet->data),
+                    "PWTL"
+                );
+                SDLNet_Write32(static_cast<Uint32>(tileState.x), &net_packet->data[4]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.y), &net_packet->data[8]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.layer), &net_packet->data[12]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.tile), &net_packet->data[16]);
+                net_packet->len = 20;
             }
-
-            strcpy(
-                reinterpret_cast<char*>(
-                    net_packet->data
-                ),
-                "PWTL"
-            );
-
-            SDLNet_Write32(
-                static_cast<Uint32>(
-                    tileState.x
-                ),
-                &net_packet->data[4]
-            );
-
-            SDLNet_Write32(
-                static_cast<Uint32>(
-                    tileState.y
-                ),
-                &net_packet->data[8]
-            );
-
-            SDLNet_Write32(
-                static_cast<Uint32>(
-                    tileState.layer
-                ),
-                &net_packet->data[12]
-            );
-
-            SDLNet_Write32(
-                static_cast<Uint32>(
-                    tileState.tile
-                ),
-                &net_packet->data[16]
-            );
-
-            net_packet->len = 20;
+            else
+            {
+                // PWTZ is the floor-qualified form of legacy PWTL.
+                strcpy(
+                    reinterpret_cast<char*>(net_packet->data),
+                    "PWTZ"
+                );
+                SDLNet_Write16(
+                    static_cast<Uint16>(tileState.playableFloor),
+                    &net_packet->data[4]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.x), &net_packet->data[6]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.y), &net_packet->data[10]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.layer), &net_packet->data[14]);
+                SDLNet_Write32(static_cast<Uint32>(tileState.tile), &net_packet->data[18]);
+                net_packet->len = 22;
+            }
 
             prepareClientAddress();
 
@@ -11034,6 +11769,22 @@ void applyPersistentMapRemovals()
         map.tiles,
         map.tiles + rawTileCount
     );
+    state.originalFloorTiles.clear();
+    for ( const PlayableFloorData& floor : map.playableFloors.floors )
+    {
+        if ( floor.id == DEFAULT_PLAYABLE_FLOOR )
+        {
+            continue;
+        }
+        const Sint32* floorTiles = map.tilesForPlayableFloor(floor.id);
+        if ( !floorTiles )
+        {
+            continue;
+        }
+        state.originalFloorTiles[floor.id].assign(
+            floorTiles,
+            floorTiles + rawTileCount);
+    }
 
     state.originalTileWidth =
         map.width;
@@ -11053,24 +11804,20 @@ void applyPersistentMapRemovals()
         const PersistentTileState& tileState =
             tilePair.second;
 
-        if (tileState.playableFloor != DEFAULT_PLAYABLE_FLOOR)
-        {
-            // Z1 stores the identity but does not expose nonzero floor gameplay.
-            continue;
-        }
-
         if ( tileState.x < 0
             || tileState.x >= map.width
             || tileState.y < 0
             || tileState.y >= map.height
             || tileState.layer < 0
-            || tileState.layer >= MAPLAYERS )
+            || tileState.layer >= MAPLAYERS
+            || map.tilesForPlayableFloor(tileState.playableFloor) == nullptr )
         {
             ++rejectedTileStates;
 
             printlog(
-                "[Persistent World] Ignored invalid tile override for '%s': x=%d y=%d layer=%d tile=%d.",
+                "[Persistent World] Ignored invalid tile override for '%s': floor=%d x=%d y=%d layer=%d tile=%d.",
                 mapKey.c_str(),
+                static_cast<int>(tileState.playableFloor),
                 tileState.x,
                 tileState.y,
                 tileState.layer,
@@ -11080,20 +11827,16 @@ void applyPersistentMapRemovals()
             continue;
         }
 
-        const size_t index =
-            static_cast<size_t>(
-                tileState.layer
-            )
-            + static_cast<size_t>(
-                tileState.y
-            ) * MAPLAYERS
-            + static_cast<size_t>(
-                tileState.x
-            ) * MAPLAYERS
-                * map.height;
-
-        map.tiles[index] =
-            tileState.tile;
+        if ( !map.setTileAt(
+                tileState.x,
+                tileState.y,
+                tileState.layer,
+                tileState.tile,
+                tileState.playableFloor) )
+        {
+            ++rejectedTileStates;
+            continue;
+        }
 
         ++appliedTileStates;
     }
@@ -11278,6 +12021,56 @@ if ( multiplayer != CLIENT )
 
         restoredMonster->persistentDynamicMonster =
             true;
+
+        /*
+         * DUCK_SMALL derives its visible model and owner from Stat
+         * attributes during initDuck(). Restore those attributes before the
+         * first species-initialization tick so a persisted Hermit duck comes
+         * back as the same duck instead of the default appearance.
+         */
+        if ( savedState.monsterSavedType == DUCK_SMALL )
+        {
+            if ( Stat* duckStats = restoredMonster->getStats() )
+            {
+                if ( savedState.monsterSavedDuckType >= 0 )
+                {
+                    duckStats->setAttribute(
+                        "duck_type",
+                        std::to_string(savedState.monsterSavedDuckType));
+                    if ( savedState.monsterSavedDuckOwner >= 0 )
+                    {
+                        duckStats->setAttribute(
+                            "duck_owner",
+                            std::to_string(savedState.monsterSavedDuckOwner));
+                    }
+                    resolveHermitDuckOwner(
+                        restoredMonster, duckStats, nullptr);
+                }
+                if ( savedState.monsterSavedDuckTime >= 0 )
+                {
+                    duckStats->setAttribute(
+                        "duck_time",
+                        std::to_string(savedState.monsterSavedDuckTime));
+                }
+                duckStats->setAttribute(
+                    "duck_bless",
+                    std::to_string(savedState.monsterSavedDuckBless));
+                if ( savedState.monsterSavedDuckRun != 0 )
+                {
+                    duckStats->setAttribute("duck_run", "1");
+                }
+                else
+                {
+                    duckStats->setAttribute("duck_run", "");
+                }
+                duckStats->setAttribute("skip_obituary", "1");
+                duckStats->MISC_FLAGS[STAT_FLAG_MONSTER_DISABLE_HC_SCALING] = 1;
+            }
+            restoredMonster->monsterSpecialState = std::clamp(
+                savedState.monsterSavedDuckSpecialState,
+                0,
+                DUCK_RETURN);
+        }
 
         /*
          * Set the stored transform immediately. The full persistent
@@ -11709,6 +12502,54 @@ if ( monsterStats->type != SHOPKEEPER )
         10
     );
 }
+
+    savedState.monsterSavedDuckType = -1;
+    savedState.monsterSavedDuckOwner = -1;
+    savedState.monsterSavedDuckTime = -1;
+    savedState.monsterSavedDuckBless = 0;
+    savedState.monsterSavedDuckRun = 0;
+    savedState.monsterSavedDuckSpecialState = 0;
+    if ( monsterStats->type == DUCK_SMALL )
+    {
+        auto readDuckAttribute =
+            [monsterStats](const char* key, const Sint32 fallback) -> Sint32
+            {
+                const std::string value = monsterStats->getAttribute(key);
+                if ( value.empty() )
+                {
+                    return fallback;
+                }
+                try
+                {
+                    return static_cast<Sint32>(std::stol(value));
+                }
+                catch ( ... )
+                {
+                    return fallback;
+                }
+            };
+
+        savedState.monsterSavedDuckType =
+            readDuckAttribute("duck_type", -1);
+        savedState.monsterSavedDuckOwner =
+            readDuckAttribute("duck_owner", -1);
+        if ( savedState.monsterSavedDuckOwner < 0
+            && savedState.monsterSavedDuckType >= 0 )
+        {
+            // Backward compatibility for Z3.4B ducks: TOOL_DUCK appearance
+            // encodes the owning player in appearance % MAXPLAYERS.
+            savedState.monsterSavedDuckOwner =
+                savedState.monsterSavedDuckType % MAXPLAYERS;
+        }
+        savedState.monsterSavedDuckTime =
+            readDuckAttribute("duck_time", -1);
+        savedState.monsterSavedDuckBless =
+            readDuckAttribute("duck_bless", 0);
+        savedState.monsterSavedDuckRun =
+            readDuckAttribute("duck_run", 0);
+        savedState.monsterSavedDuckSpecialState =
+            entity->monsterSpecialState;
+    }
 
     savedState.monsterSavedX =
         entity->x;
@@ -12293,6 +13134,21 @@ static void capturePersistentMechanismStates()
             map.tiles,
             map.tiles + currentTileCount
         );
+        mapState.originalFloorTiles.clear();
+        for ( const PlayableFloorData& floor : map.playableFloors.floors )
+        {
+            if ( floor.id == DEFAULT_PLAYABLE_FLOOR )
+            {
+                continue;
+            }
+            const Sint32* floorTiles = map.tilesForPlayableFloor(floor.id);
+            if ( floorTiles )
+            {
+                mapState.originalFloorTiles[floor.id].assign(
+                    floorTiles,
+                    floorTiles + currentTileCount);
+            }
+        }
 
         mapState.originalTileWidth =
             map.width;
@@ -12319,61 +13175,82 @@ static void capturePersistentMechanismStates()
             PersistentTileKeyHash
         > currentTileStates;
 
-        for ( Sint32 x = 0;
-            x < map.width;
-            ++x )
+        const auto captureFloorTileChanges = [&](
+            const PlayableFloorId playableFloor,
+            const Sint32* currentTiles,
+            std::vector<Sint32>& originalTiles)
         {
-            for ( Sint32 y = 0;
-                y < map.height;
-                ++y )
+            if ( !currentTiles || originalTiles.size() != currentTileCount )
             {
-                for ( Sint32 layer = 0;
-                    layer < MAPLAYERS;
-                    ++layer )
+                return false;
+            }
+            for ( Sint32 x = 0; x < map.width; ++x )
+            {
+                for ( Sint32 y = 0; y < map.height; ++y )
                 {
-                    const size_t index =
-                        static_cast<size_t>(layer)
-                        + static_cast<size_t>(y)
-                            * MAPLAYERS
-                        + static_cast<size_t>(x)
-                            * MAPLAYERS
-                            * map.height;
-
-                    const Sint32 currentTile =
-                        map.tiles[index];
-
-                    const Sint32 originalTile =
-                        mapState.originalTiles[index];
-
-                    if ( currentTile == originalTile )
+                    for ( Sint32 layer = 0; layer < MAPLAYERS; ++layer )
                     {
-                        continue;
+                        const size_t index =
+                            static_cast<size_t>(layer)
+                            + static_cast<size_t>(y) * MAPLAYERS
+                            + static_cast<size_t>(x) * MAPLAYERS * map.height;
+
+                        const Sint32 currentTile = currentTiles[index];
+                        const Sint32 originalTile = originalTiles[index];
+                        if ( currentTile == originalTile )
+                        {
+                            continue;
+                        }
+
+                        PersistentTileState tileState;
+                        tileState.playableFloor = playableFloor;
+                        tileState.x = x;
+                        tileState.y = y;
+                        tileState.layer = layer;
+                        tileState.tile = currentTile;
+                        currentTileStates[makePersistentTileKey(
+                            x, y, layer, playableFloor)] = tileState;
                     }
-
-                    PersistentTileState tileState;
-                    tileState.playableFloor = DEFAULT_PLAYABLE_FLOOR;
-
-                    tileState.x = x;
-                    tileState.y = y;
-                    tileState.layer = layer;
-                    tileState.tile = currentTile;
-
-                    currentTileStates[
-                        makePersistentTileKey(
-                            x,
-                            y,
-                            layer
-                        )
-                    ] = tileState;
                 }
             }
+            return true;
+        };
+
+        captureFloorTileChanges(
+            DEFAULT_PLAYABLE_FLOOR,
+            map.tilesForPlayableFloor(DEFAULT_PLAYABLE_FLOOR),
+            mapState.originalTiles);
+
+        for ( const PlayableFloorData& floor : map.playableFloors.floors )
+        {
+            if ( floor.id == DEFAULT_PLAYABLE_FLOOR )
+            {
+                continue;
+            }
+            const Sint32* currentTiles = map.tilesForPlayableFloor(floor.id);
+            if ( !currentTiles )
+            {
+                continue;
+            }
+            auto baseline = mapState.originalFloorTiles.find(floor.id);
+            if ( baseline == mapState.originalFloorTiles.end()
+                || baseline->second.size() != currentTileCount )
+            {
+                mapState.originalFloorTiles[floor.id].assign(
+                    currentTiles,
+                    currentTiles + currentTileCount);
+                continue;
+            }
+            captureFloorTileChanges(
+                floor.id,
+                currentTiles,
+                baseline->second);
         }
 
-        mapState.tileStates =
-            std::move(currentTileStates);
+        mapState.tileStates = std::move(currentTileStates);
 
         printlog(
-            "[Persistent World] Captured %zu changed tile value(s) for '%s'.",
+            "[Persistent World] Captured %zu changed floor-qualified tile value(s) for '%s'.",
             mapState.tileStates.size(),
             mapKey.c_str()
         );
@@ -15867,6 +16744,52 @@ bool applyPersistentMonsterLivingState(
             savedState
         );
 
+    /*
+     * Restore the runtime-only state of a persisted Hermit duck after
+     * initDuck() has built its normal bodyparts. The encoded duck type keeps
+     * the same color/owner, while the saved lifetime resumes where it stopped
+     * instead of resetting when the map is revisited.
+     */
+    if ( monsterStats->type == DUCK_SMALL )
+    {
+        if ( savedState.monsterSavedDuckType >= 0 )
+        {
+            monsterStats->setAttribute(
+                "duck_type",
+                std::to_string(savedState.monsterSavedDuckType));
+            if ( savedState.monsterSavedDuckOwner >= 0 )
+            {
+                monsterStats->setAttribute(
+                    "duck_owner",
+                    std::to_string(savedState.monsterSavedDuckOwner));
+            }
+            resolveHermitDuckOwner(
+                monsterEntity, monsterStats, nullptr);
+        }
+        if ( savedState.monsterSavedDuckTime >= 0 )
+        {
+            monsterStats->setAttribute(
+                "duck_time",
+                std::to_string(savedState.monsterSavedDuckTime));
+        }
+        monsterStats->setAttribute(
+            "duck_bless",
+            std::to_string(savedState.monsterSavedDuckBless));
+        monsterStats->setAttribute(
+            "duck_run",
+            savedState.monsterSavedDuckRun != 0 ? "1" : "");
+        monsterStats->setAttribute("skip_obituary", "1");
+        monsterStats->MISC_FLAGS[STAT_FLAG_MONSTER_DISABLE_HC_SCALING] = 1;
+        monsterEntity->monsterSpecialState = std::clamp(
+            savedState.monsterSavedDuckSpecialState,
+            0,
+            DUCK_RETURN);
+        if ( multiplayer == SERVER )
+        {
+            serverUpdateEntitySkill(monsterEntity, 33);
+        }
+    }
+
     const bool mechanicalCreature =
         monsterStats->type == AUTOMATON
         || monsterStats->type == SENTRYBOT
@@ -16470,14 +17393,6 @@ static bool placePlayerAtAutomatiaReturn(
     {
         return false;
     }
-    if (destination.returnPlacement.playableFloor != DEFAULT_PLAYABLE_FLOOR)
-    {
-        printlog(
-            "[Playable Z] Reverse return requested floor %d during Z1; "
-            "nonzero floor activation remains gated until Z2.",
-            static_cast<int>(destination.returnPlacement.playableFloor));
-        return false;
-    }
     const WorldInstanceIdentity* activeIdentity =
         worldState.activeIdentity();
     if (!activeIdentity
@@ -16535,7 +17450,9 @@ static bool placePlayerAtAutomatiaReturn(
         destination.returnPlacement.roll);
 
     bool placementPassable = false;
-    if (std::isfinite(static_cast<double>(x))
+    if (map.playableFloors.hasFloor(destination.returnPlacement.playableFloor)
+        && map.tilesForPlayableFloor(destination.returnPlacement.playableFloor) != nullptr
+        && std::isfinite(static_cast<double>(x))
         && std::isfinite(static_cast<double>(y))
         && std::isfinite(static_cast<double>(z))
         && std::isfinite(static_cast<double>(yaw))
@@ -16545,12 +17462,11 @@ static bool placePlayerAtAutomatiaReturn(
     {
         const Sint32 tileX = static_cast<Sint32>(x / 16.0);
         const Sint32 tileY = static_cast<Sint32>(y / 16.0);
-        const std::size_t obstacleIndex =
-            OBSTACLELAYER
-            + tileY * MAPLAYERS
-            + tileX * MAPLAYERS * map.height;
-        placementPassable = map.tiles
-            && map.tiles[obstacleIndex] == 0;
+        placementPassable = map.tileAt(
+            tileX,
+            tileY,
+            OBSTACLELAYER,
+            destination.returnPlacement.playableFloor) == 0;
     }
     if (!placementPassable)
     {
@@ -16562,36 +17478,18 @@ static bool placePlayerAtAutomatiaReturn(
         return false;
     }
 
-    Entity* playerEntity = players[playerIndex]->entity;
-    playerEntity->playableFloor = destination.returnPlacement.playableFloor;
-    playerEntity->spatialRevision = 0;
-    playerEntity->x = x;
-    playerEntity->y = y;
-    playerEntity->z = z;
-    playerEntity->yaw = yaw;
-    playerEntity->pitch = pitch;
-    playerEntity->roll = roll;
-    playerEntity->vel_x = 0.0;
-    playerEntity->vel_y = 0.0;
-    playerEntity->vel_z = 0.0;
-    playerEntity->new_x = x;
-    playerEntity->new_y = y;
-    playerEntity->new_z = z;
-    playerEntity->new_yaw = yaw;
-    playerEntity->new_pitch = pitch;
-    playerEntity->new_roll = roll;
-    playerEntity->lerp_ox = x;
-    playerEntity->lerp_oy = y;
-    playerEntity->bNeedsRenderPositionInit = true;
-    for (Entity* bodypart : playerEntity->bodyparts)
+    if (!applyAutomatiaPlayableFloorPlacement(
+            playerIndex,
+            destination.returnPlacement.playableFloor,
+            0,
+            x, y, z, yaw, pitch, roll, true))
     {
-        if (bodypart)
-        {
-            bodypart->bNeedsRenderPositionInit = true;
-        }
+        printlog(
+            "[Ladder Reverse] Return placement for player %d failed the Z3 floor transition transaction.",
+            playerIndex);
+        return false;
     }
-    players[playerIndex]->player_last_x = x;
-    players[playerIndex]->player_last_y = y;
+    Entity* playerEntity = players[playerIndex]->entity;
 
     if (multiplayer == SERVER
         && playerIndex > 0
@@ -16616,11 +17514,23 @@ static bool placePlayerAtAutomatiaReturn(
             static_cast<Sint32>(yaw * 256.0),
             &net_packet->data[16]
         );
+        SDLNet_Write16(
+            static_cast<Uint16>(playerEntity->playableFloor),
+            &net_packet->data[20]
+        );
+        SDLNet_Write32(
+            static_cast<Uint32>(playerEntity->spatialRevision & 0xffffffffULL),
+            &net_packet->data[22]
+        );
+        SDLNet_Write32(
+            static_cast<Uint32>(playerEntity->spatialRevision >> 32U),
+            &net_packet->data[26]
+        );
         net_packet->address.host =
             net_clients[playerIndex - 1].host;
         net_packet->address.port =
             net_clients[playerIndex - 1].port;
-        net_packet->len = 20;
+        net_packet->len = 30;
         sendPacketSafe(
             net_sock,
             -1,
@@ -16819,13 +17729,26 @@ static bool placePlayersAtCustomTunnel(
 				&net_packet->data[16]
 			);
 
+			SDLNet_Write16(
+				static_cast<Uint16>(playerEntity->playableFloor),
+				&net_packet->data[20]
+			);
+			SDLNet_Write32(
+				static_cast<Uint32>(playerEntity->spatialRevision & 0xffffffffULL),
+				&net_packet->data[22]
+			);
+			SDLNet_Write32(
+				static_cast<Uint32>(playerEntity->spatialRevision >> 32U),
+				&net_packet->data[26]
+			);
+
 			net_packet->address.host =
 				net_clients[player - 1].host;
 
 			net_packet->address.port =
 				net_clients[player - 1].port;
 
-			net_packet->len = 20;
+			net_packet->len = 30;
 
 			sendPacketSafe(
 				net_sock,
@@ -18472,7 +19395,11 @@ static void simulateActiveAutomatiaInstanceEntities()
 			{
 				TileEntityList.addEntity(*entity);
 			}
+			{
+				ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+					entity->spatialSpawnContext());
 			(*entity->behavior)(entity);
+			}
 			const bool deleted = automatiaEntityWasDeleted(entity);
 			if ( !deleted )
 			{
@@ -18950,7 +19877,11 @@ void gameLogic(void)
 				entity->ticks++;
 				if ( entity->behavior != nullptr )
 				{
+					{
+						ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+							entity->spatialSpawnContext());
 					(*entity->behavior)(entity);
+					}
 					if ( entitiesdeleted.first != nullptr )
 					{
 						entitydeletedself = false;
@@ -19350,7 +20281,11 @@ void gameLogic(void)
 					{
 						if ( !gamePaused || (multiplayer && !client_disconnected[0]) )
 						{
+							{
+								ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+									entity->spatialSpawnContext());
 							(*entity->behavior)(entity);
+							}
 						}
 						if ( entitiesdeleted.first != nullptr )
 						{
@@ -19430,7 +20365,11 @@ void gameLogic(void)
 							{
 								printlog("DEBUG: Starting Entity sprite: %d", entity->sprite);
 							}*/
+							{
+								ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+									entity->spatialSpawnContext());
 							(*entity->behavior)(entity);
+							}
 						}
 						if ( entitiesdeleted.first != nullptr )
 						{
@@ -21161,7 +22100,11 @@ void gameLogic(void)
 					{
 						if ( !gamePaused || (multiplayer && !client_disconnected[0]) )
 						{
+							{
+								ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+									entity->spatialSpawnContext());
 							(*entity->behavior)(entity);
+							}
 						}
 						if ( entitiesdeleted.first != nullptr )
 						{
@@ -21222,7 +22165,11 @@ void gameLogic(void)
 						}
 						if ( !gamePaused || (multiplayer && !client_disconnected[0]) )
 						{
+							{
+								ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+									entity->spatialSpawnContext());
 							(*entity->behavior)(entity);
+							}
 							if ( entitiesdeleted.first != NULL )
 							{
 								entitydeletedself = false;
@@ -24959,9 +25906,15 @@ int main(int argc, char** argv)
 {
 #ifdef AUTOMATIA_STAGE4B_TEST_HOOK
 	if (argc == 2
-		&& strcmp(
+		&& (strcmp(
 			argv[1],
-			"--automatia-stage4b-runtime-characterization") == 0)
+			"--automatia-stage4b-runtime-characterization") == 0
+			|| strcmp(
+				argv[1],
+				"--automatia-stage4d-z2c-runtime-characterization") == 0
+			|| strcmp(
+				argv[1],
+				"--automatia-stage4d-z3-transition-characterization") == 0))
 	{
 		return runPlayableZRuntimeCharacterization();
 	}

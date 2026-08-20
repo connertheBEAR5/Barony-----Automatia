@@ -447,9 +447,10 @@ void actArrow(Entity* my)
 		}
 
 		bool arrowInGround = false;
-		int index = (int)(my->y / 16) * MAPLAYERS + (int)(my->x / 16) * MAPLAYERS * map.height;
-		index = std::clamp(index, 0, (int)(MAPLAYERS * map.width * map.height) - 1);
-		if ( map.tiles[index] )
+		const int tileX = static_cast<int>(my->x / 16);
+		const int tileY = static_cast<int>(my->y / 16);
+		const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, my->playableFloor);
+		if ( floorTile )
 		{
 			if ( my->sprite == PROJECTILE_BOLT_SPRITE || my->sprite == PROJECTILE_ROCK_SPRITE ) // bolt/rock
 			{
@@ -476,7 +477,7 @@ void actArrow(Entity* my)
 				}
 			}
 
-			if ( arrowInGround && (swimmingtiles[map.tiles[index]] || lavatiles[map.tiles[index]]) )
+			if ( arrowInGround && (swimmingtiles[floorTile] || lavatiles[floorTile]) )
 			{
 				my->removeLightField();
 				list_RemoveNode(my->mynode);

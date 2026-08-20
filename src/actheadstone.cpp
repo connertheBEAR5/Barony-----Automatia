@@ -50,6 +50,10 @@ void actHeadstone(Entity* my)
 			for ( node = map.entities->first; node != nullptr; node = node->next )
 			{
 				Entity* entity = (Entity*)node->element;
+				if ( !entity || entity->playableFloor != my->playableFloor )
+				{
+					continue;
+				}
 				if ( entity->sprite == 130 )   // gold bag
 				{
 					++goldbags;

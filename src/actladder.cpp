@@ -338,6 +338,132 @@ void actLadderUp(Entity* my)
     }
 }
 
+static bool playableLayerStairHasRequiredWall(const Entity* stair)
+{
+	if ( !stair || stair->floorDecorationDestroyIfNoWall < 0 )
+	{
+		return true;
+	}
+	const int x = static_cast<int>(stair->x) >> 4;
+	const int y = static_cast<int>(stair->y) >> 4;
+	static constexpr int dx[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
+	static constexpr int dy[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
+	const int direction = std::clamp(stair->floorDecorationDestroyIfNoWall, 0, 7);
+	const bool diagonal = (direction & 1) != 0;
+	const int checks = diagonal ? 2 : 1;
+	for ( int check = 0; check < checks; ++check )
+	{
+		const int dir = diagonal
+			? ((direction + (check == 0 ? 7 : 1)) & 7)
+			: direction;
+		const int tx = x + dx[dir];
+		const int ty = y + dy[dir];
+		if ( tx < 0 || ty < 0 || tx >= map.width || ty >= map.height
+			|| map.tileAt(tx, ty, OBSTACLELAYER, stair->playableFloor) == 0 )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static std::string playableLayerStairInteractText(const Entity* stair)
+{
+	char buf[193] = "";
+	int totalChars = 0;
+	if ( !stair )
+	{
+		return {};
+	}
+	for ( int i = 8; i < 60 && totalChars < 192; ++i )
+	{
+		if ( i == 28 )
+		{
+			continue;
+		}
+		for ( int c = 0; c < 4 && totalChars < 192; ++c )
+		{
+			const char ch = static_cast<char>((stair->skill[i] >> (c * 8)) & 0xFF);
+			if ( ch == '\0' )
+			{
+				buf[totalChars] = '\0';
+				return std::string(buf);
+			}
+			buf[totalChars++] = ch;
+		}
+	}
+	buf[totalChars] = '\0';
+	return std::string(buf);
+}
+
+void actPlayableFloorTransition(Entity* my)
+{
+    if (!my)
+    {
+        return;
+    }
+
+    if (my->ticks == 1)
+    {
+        my->createWorldUITooltip();
+    }
+
+    // Floor changes are server-authoritative. Clients receive the PZTR
+    // transaction and then resume ordinary floor-scoped ENTU updates.
+    if (multiplayer == CLIENT)
+    {
+        return;
+    }
+
+    // Decoration-compatible wall attachment for authored stairs. This uses
+    // the stair's current playable floor rather than the legacy base layer.
+    if (!playableLayerStairHasRequiredWall(my))
+    {
+        list_RemoveNode(my->mynode);
+        return;
+    }
+
+    for (int i = 0; i < MAXPLAYERS; ++i)
+    {
+        if (selectedEntity[i] != my && client_selected[i] != my)
+        {
+            continue;
+        }
+        if (!inrange[i]
+            || client_disconnected[i]
+            || !players[i]
+            || !players[i]->entity
+            || players[i]->entity->playableFloor != my->playableFloor)
+        {
+            continue;
+        }
+
+        if (transitionAutomatiaPlayerThroughPlayableFloorEndpoint(i, my))
+        {
+            const std::string customText = playableLayerStairInteractText(my);
+            if ( !customText.empty() )
+            {
+                messagePlayer(i, MESSAGE_INTERACTION, "%s", customText.c_str());
+            }
+            else
+            {
+                messagePlayer(
+                    i,
+                    MESSAGE_INTERACTION,
+                    "You move to another floor.");
+            }
+        }
+        else
+        {
+            messagePlayer(
+                i,
+                MESSAGE_INTERACTION,
+                "The way to the other floor is blocked.");
+        }
+        return;
+    }
+}
+
 void actPortal(Entity* my)
 {
 	int playercount = 0;

@@ -296,11 +296,13 @@ void actSpriteWorldTooltip(Entity* my)
 Entity* spawnBang(Sint16 x, Sint16 y, Sint16 z)
 {
 	int c;
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 	if ( multiplayer == SERVER )
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -308,9 +310,12 @@ Entity* spawnBang(Sint16 x, Sint16 y, Sint16 z)
 			SDLNet_Write16(x, &net_packet->data[4]);
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[10]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[16]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 10;
+			net_packet->len = 20;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -342,11 +347,13 @@ Entity* spawnBang(Sint16 x, Sint16 y, Sint16 z)
 Entity* spawnExplosion(Sint16 x, Sint16 y, Sint16 z)
 {
 	int c, i;
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 	if ( multiplayer == SERVER )
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -354,9 +361,12 @@ Entity* spawnExplosion(Sint16 x, Sint16 y, Sint16 z)
 			SDLNet_Write16(x, &net_packet->data[4]);
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[10]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[16]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 10;
+			net_packet->len = 20;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -411,11 +421,13 @@ Entity* spawnExplosion(Sint16 x, Sint16 y, Sint16 z)
 
 Entity* spawnExplosionFromSprite(Uint16 sprite, Sint16 x, Sint16 y, Sint16 z)
 {
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 	if ( multiplayer == SERVER )
 	{
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -424,9 +436,12 @@ Entity* spawnExplosionFromSprite(Uint16 sprite, Sint16 x, Sint16 y, Sint16 z)
 			SDLNet_Write16(x, &net_packet->data[6]);
 			SDLNet_Write16(y, &net_packet->data[8]);
 			SDLNet_Write16(z, &net_packet->data[10]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[14]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[18]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 12;
+			net_packet->len = 22;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -490,6 +505,7 @@ Entity* spawnExplosionFromSprite(Uint16 sprite, Sint16 x, Sint16 y, Sint16 z)
 
 Entity* spawnPoof(Sint16 x, Sint16 y, Sint16 z, real_t scale, bool updateClients)
 {
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 	// poof
 	auto entity = newEntity(170, 1, map.entities, nullptr);
 	entity->x = x;
@@ -519,7 +535,8 @@ Entity* spawnPoof(Sint16 x, Sint16 y, Sint16 z, real_t scale, bool updateClients
 	{
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -528,9 +545,12 @@ Entity* spawnPoof(Sint16 x, Sint16 y, Sint16 z, real_t scale, bool updateClients
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
 			SDLNet_Write16(static_cast<Uint16>(scale * 100), &net_packet->data[10]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[14]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[18]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 12;
+			net_packet->len = 22;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -565,12 +585,14 @@ void actSleepZ(Entity* my)
 Entity* spawnSleepZ(Sint16 x, Sint16 y, Sint16 z)
 {
 	int c;
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 
 	if ( multiplayer == SERVER )
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -578,9 +600,12 @@ Entity* spawnSleepZ(Sint16 x, Sint16 y, Sint16 z)
 			SDLNet_Write16(x, &net_packet->data[4]);
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[10]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[16]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 10;
+			net_packet->len = 20;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -613,12 +638,14 @@ Entity* spawnSleepZ(Sint16 x, Sint16 y, Sint16 z)
 Entity* spawnFloatingSpriteMisc(int sprite, Sint16 x, Sint16 y, Sint16 z)
 {
 	int c;
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 
 	if ( multiplayer == SERVER )
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -627,9 +654,12 @@ Entity* spawnFloatingSpriteMisc(int sprite, Sint16 x, Sint16 y, Sint16 z)
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
 			SDLNet_Write16(sprite, &net_packet->data[10]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[12]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[14]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[18]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 12;
+			net_packet->len = 22;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}

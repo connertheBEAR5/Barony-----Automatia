@@ -13,6 +13,93 @@
 #include "light.hpp"
 #include "draw.hpp"
 
+AdditionalPlayableFloorLightmaps additionalPlayableFloorLightmaps;
+
+namespace
+{
+void ensurePlayableFloorLightmapDimensions(
+	PlayableFloorLightmapBuffers& buffers,
+	int width,
+	int height)
+{
+	const std::size_t rawSize = lightmapSize3D(width, height);
+	const std::size_t smoothedSize = lightmapSmoothedSize3D(width, height);
+	for ( int index = 0; index < MAXPLAYERS + 1; ++index )
+	{
+		if ( buffers.lightmap[index].size() != rawSize )
+		{
+			buffers.lightmap[index].assign(rawSize, vec4_t{});
+		}
+		if ( buffers.lightmapSmoothed[index].size() != smoothedSize )
+		{
+			buffers.lightmapSmoothed[index].assign(smoothedSize, vec4_t{});
+		}
+	}
+}
+}
+
+std::vector<vec4_t>& lightmapForPlayableFloor(
+	int index,
+	PlayableFloorId playableFloor,
+	int width,
+	int height)
+{
+	index = std::max(0, std::min(index, MAXPLAYERS));
+	if ( playableFloor == DEFAULT_PLAYABLE_FLOOR
+		|| map.playableFloorUsesAuthoredLayerStack(playableFloor) )
+	{
+		/*
+		 * Layer-authored floors share one world-space light volume. A floor
+		 * transition changes collision height, not which lights exist. Legacy
+		 * explicit FLOR geometry keeps its isolated light buffers.
+		 */
+		const std::size_t expected = lightmapSize3D(width, height);
+		if ( lightmaps[index].size() != expected )
+		{
+			lightmaps[index].assign(expected, vec4_t{});
+		}
+		return lightmaps[index];
+	}
+
+	auto& buffers = additionalPlayableFloorLightmaps[playableFloor];
+	ensurePlayableFloorLightmapDimensions(buffers, width, height);
+	return buffers.lightmap[index];
+}
+
+std::vector<vec4_t>& lightmapSmoothedForPlayableFloor(
+	int index,
+	PlayableFloorId playableFloor,
+	int width,
+	int height)
+{
+	index = std::max(0, std::min(index, MAXPLAYERS));
+	if ( playableFloor == DEFAULT_PLAYABLE_FLOOR
+		|| map.playableFloorUsesAuthoredLayerStack(playableFloor) )
+	{
+		const std::size_t expected = lightmapSmoothedSize3D(width, height);
+		if ( lightmapsSmoothed[index].size() != expected )
+		{
+			lightmapsSmoothed[index].assign(expected, vec4_t{});
+		}
+		return lightmapsSmoothed[index];
+	}
+
+	auto& buffers = additionalPlayableFloorLightmaps[playableFloor];
+	ensurePlayableFloorLightmapDimensions(buffers, width, height);
+	return buffers.lightmapSmoothed[index];
+}
+
+void clearAdditionalPlayableFloorLightmaps()
+{
+	additionalPlayableFloorLightmaps.clear();
+}
+
+void swapAdditionalPlayableFloorLightmaps(
+	AdditionalPlayableFloorLightmaps& other)
+{
+	additionalPlayableFloorLightmaps.swap(other);
+}
+
 /*-------------------------------------------------------------------------------
 
 	lightSphereShadow
@@ -24,7 +111,8 @@
 static inline bool lightWallBlocksAtLayer(
 	int x,
 	int y,
-	int layer
+	int layer,
+	PlayableFloorId playableFloor
 )
 {
 	if ( x < 0
@@ -43,12 +131,11 @@ static inline bool lightWallBlocksAtLayer(
 			? OBSTACLELAYER
 			: layer;
 
-	const int index =
-		blockingLayer
-		+ y * MAPLAYERS
-		+ x * MAPLAYERS * map.height;
-
-	const Sint32 tile = map.tiles[index];
+	const Sint32 tile = map.tileAt(
+		x,
+		y,
+		blockingLayer,
+		playableFloor);
 
 	return tile != 0
 		&& tile != TRANSPARENT_TILE;
@@ -65,11 +152,12 @@ light_t* lightSphereShadow(
 	float exp
 )
 {
-	return lightSphereShadow(
+	return lightSphereShadowOnPlayableFloor(
 		index,
 		x,
 		y,
-		0,
+		activeRuntimePlayableFloor(),
+		activeRuntimeStructuralMapLayer(),
 		radius,
 		r,
 		g,
@@ -79,10 +167,11 @@ light_t* lightSphereShadow(
 	);
 }
 
-light_t* lightSphereShadow(
+light_t* lightSphereShadowOnPlayableFloor(
 	int index,
 	Sint32 x,
 	Sint32 y,
+	PlayableFloorId playableFloor,
 	Sint32 layer,
 	Sint32 radius,
 	float r,
@@ -93,10 +182,11 @@ light_t* lightSphereShadow(
 )
 {
 	light_t* light =
-		newLight(
+		newLightOnPlayableFloor(
 			index,
 			x,
 			y,
+			playableFloor,
 			layer,
 			radius
 		);
@@ -153,7 +243,8 @@ bool wallhit = false;
 if ( lightWallBlocksAtLayer(
 		u2,
 		v2,
-		light->layer
+		light->layer,
+		light->playableFloor
 	) )
 {
 	wallhit = true;
@@ -179,7 +270,8 @@ if ( lightWallBlocksAtLayer(
 if ( lightWallBlocksAtLayer(
 		u2,
 		v2,
-		light->layer
+		light->layer,
+		light->playableFloor
 	) )
 {
 	wallhit = true;
@@ -232,7 +324,8 @@ if ( lightWallBlocksAtLayer(
 				if ( index )
 				{
 					auto& destination =
-						lightmaps[index][doff];
+						lightmapForPlayableFloor(
+							index, light->playableFloor, map.width, map.height)[doff];
 
 					destination.x += source.x;
 					destination.y += source.y;
@@ -246,7 +339,8 @@ if ( lightWallBlocksAtLayer(
 						++player )
 					{
 						auto& destination =
-							lightmaps[player][doff];
+							lightmapForPlayableFloor(
+								player, light->playableFloor, map.width, map.height)[doff];
 
 						destination.x += source.x;
 						destination.y += source.y;
@@ -259,6 +353,24 @@ if ( lightWallBlocksAtLayer(
 	}
 
 	return light;
+}
+
+light_t* lightSphereShadow(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	Sint32 layer,
+	Sint32 radius,
+	float r,
+	float g,
+	float b,
+	float a,
+	float exp
+)
+{
+	return lightSphereShadowOnPlayableFloor(
+		index, x, y, activeRuntimePlayableFloor(), layer, radius,
+		r, g, b, a, exp);
 }
 
 /*-------------------------------------------------------------------------------
@@ -282,11 +394,12 @@ light_t* lightSphere(
 	float exp
 )
 {
-	return lightSphere(
+	return lightSphereOnPlayableFloor(
 		index,
 		x,
 		y,
-		0,
+		activeRuntimePlayableFloor(),
+		activeRuntimeStructuralMapLayer(),
 		radius,
 		r,
 		g,
@@ -296,10 +409,11 @@ light_t* lightSphere(
 	);
 }
 
-light_t* lightSphere(
+light_t* lightSphereOnPlayableFloor(
 	int index,
 	Sint32 x,
 	Sint32 y,
+	PlayableFloorId playableFloor,
 	Sint32 layer,
 	Sint32 radius,
 	float r,
@@ -310,10 +424,11 @@ light_t* lightSphere(
 )
 {
 	light_t* light =
-		newLight(
+		newLightOnPlayableFloor(
 			index,
 			x,
 			y,
+			playableFloor,
 			layer,
 			radius
 		);
@@ -383,7 +498,8 @@ light_t* lightSphere(
 			if ( index )
 			{
 				auto& destination =
-					lightmaps[index][doff];
+					lightmapForPlayableFloor(
+						index, light->playableFloor, map.width, map.height)[doff];
 
 				destination.x += source.x;
 				destination.y += source.y;
@@ -397,7 +513,8 @@ light_t* lightSphere(
 					++player )
 				{
 					auto& destination =
-						lightmaps[player][doff];
+						lightmapForPlayableFloor(
+							player, light->playableFloor, map.width, map.height)[doff];
 
 					destination.x += source.x;
 					destination.y += source.y;
@@ -410,6 +527,24 @@ light_t* lightSphere(
 
 	return light;
 }
+light_t* lightSphere(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	Sint32 layer,
+	Sint32 radius,
+	float r,
+	float g,
+	float b,
+	float a,
+	float exp
+)
+{
+	return lightSphereOnPlayableFloor(
+		index, x, y, activeRuntimePlayableFloor(), layer, radius,
+		r, g, b, a, exp);
+}
+
 #include "rapidjson/document.h"
 #include "rapidjson/filereadstream.h"
 #include "files.hpp"
@@ -507,7 +642,7 @@ light_t* addLight(
 	return addLight(
 		x,
 		y,
-		0,
+		activeRuntimeStructuralMapLayer(),
 		name,
 		range_bonus,
 		index
@@ -517,6 +652,20 @@ light_t* addLight(
 light_t* addLight(
 	Sint32 x,
 	Sint32 y,
+	Sint32 layer,
+	const char* name,
+	int range_bonus,
+	int index
+)
+{
+	return addLightOnPlayableFloor(
+		x, y, activeRuntimePlayableFloor(), layer, name, range_bonus, index);
+}
+
+light_t* addLightOnPlayableFloor(
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
 	Sint32 layer,
 	const char* name,
 	int range_bonus,
@@ -542,10 +691,11 @@ light_t* addLight(
 
 	if ( def.shadows )
 	{
-		return lightSphereShadow(
+		return lightSphereShadowOnPlayableFloor(
 			index,
 			x,
 			y,
+			playableFloor,
 			layer,
 			radius,
 			def.r,
@@ -557,10 +707,11 @@ light_t* addLight(
 	}
 	else
 	{
-		return lightSphere(
+		return lightSphereOnPlayableFloor(
 			index,
 			x,
 			y,
+			playableFloor,
 			layer,
 			radius,
 			def.r,

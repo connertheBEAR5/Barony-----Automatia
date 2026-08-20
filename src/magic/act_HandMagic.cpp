@@ -24,6 +24,7 @@
 #include "../prng.hpp"
 #include "../mod_tools.hpp"
 #include "../collision.hpp"
+#include "../draw.hpp"
 
 //The spellcasting animation stages:
 #define ANIM_SPELL_CIRCLE 0 //One circle
@@ -550,20 +551,20 @@ void spellcasting_animation_manager_t::setRangeFinderLocation()
 			starty += (invertZ ? -1.0 : 1.0) * sin(yaw);
 			const int index_x = static_cast<int>(startx) >> 4;
 			const int index_y = static_cast<int>(starty) >> 4;
-			index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
 
 			if ( index_x < 0 || index_x >= map.width || index_y < 0 || index_y >= map.height )
 			{
 				break;
 			}
 
-			if ( (map.tiles[index] || rangefinder != RANGEFINDER_TARGET) && !map.tiles[OBSTACLELAYER + index] )
+			if ( (map.tileAt(index_x, index_y, 0, caster->playableFloor) || rangefinder != RANGEFINDER_TARGET)
+				&& !map.tileAt(index_x, index_y, OBSTACLELAYER, caster->playableFloor) )
 			{
 				// store the last known good coordinate
 				previousx = startx;// + 16 * cos(yaw);
 				previousy = starty;// + 16 * sin(yaw);
 			}
-			if ( map.tiles[OBSTACLELAYER + index] )
+			if ( map.tileAt(index_x, index_y, OBSTACLELAYER, caster->playableFloor) )
 			{
 				break;
 			}
@@ -1303,7 +1304,7 @@ void actLeftHandMagic(Entity* my)
 	//Set the initial values. (For the particle spray)
 	my->x = 8;
 	my->y = -3;
-	my->z = (cameras[HANDMAGIC_PLAYERNUM].z * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
+	my->z = (getCameraHudLocalZ(HANDMAGIC_PLAYERNUM) * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
 	my->z -= 4;
 	my->yaw = HANDMAGIC_YAW - cameravars[HANDMAGIC_PLAYERNUM].shakex2;
 	double defaultpitch = (0 - 2.2);
@@ -1722,7 +1723,8 @@ void actLeftHandMagic(Entity* my)
 					bool swimming = false;
 					int x = std::min<int>(std::max<int>(0, floor(players[HANDMAGIC_PLAYERNUM]->entity->x / 16)), map.width - 1);
 					int y = std::min<int>(std::max<int>(0, floor(players[HANDMAGIC_PLAYERNUM]->entity->y / 16)), map.height - 1);
-					if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] || lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+					const Sint32 groundTile = map.tileAt(x, y, 0, players[HANDMAGIC_PLAYERNUM]->entity->playableFloor);
+					if ( swimmingtiles[groundTile] || lavatiles[groundTile] )
 					{
 						swimming = true;
 					}
@@ -1889,7 +1891,8 @@ void actLeftHandMagic(Entity* my)
 					bool swimming = false;
 					int x = std::min<int>(std::max<int>(0, floor(players[HANDMAGIC_PLAYERNUM]->entity->x / 16)), map.width - 1);
 					int y = std::min<int>(std::max<int>(0, floor(players[HANDMAGIC_PLAYERNUM]->entity->y / 16)), map.height - 1);
-					if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] || lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+					const Sint32 groundTile = map.tileAt(x, y, 0, players[HANDMAGIC_PLAYERNUM]->entity->playableFloor);
+					if ( swimmingtiles[groundTile] || lavatiles[groundTile] )
 					{
 						swimming = true;
 					}
@@ -1946,7 +1949,7 @@ void actLeftHandMagic(Entity* my)
 	else
 	{
 		my->y = -3;
-		my->z = (cameras[HANDMAGIC_PLAYERNUM].z * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
+		my->z = (getCameraHudLocalZ(HANDMAGIC_PLAYERNUM) * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
 		my->z -= 4;
 		my->yaw = HANDMAGIC_YAW - cameravars[HANDMAGIC_PLAYERNUM].shakex2;
 		my->pitch = defaultpitch + HANDMAGIC_PITCH - cameravars[HANDMAGIC_PLAYERNUM].shakey2 / 200.f;
@@ -2110,7 +2113,7 @@ void actRightHandMagic(Entity* my)
 
 	my->x = 8;
 	my->y = 3;
-	my->z = (cameras[HANDMAGIC_PLAYERNUM].z * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
+	my->z = (getCameraHudLocalZ(HANDMAGIC_PLAYERNUM) * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
 	my->z -= 4;
 	my->yaw = HANDMAGIC_YAW - cameravars[HANDMAGIC_PLAYERNUM].shakex2;
 	double defaultpitch = (0 - 2.2);
@@ -2453,7 +2456,7 @@ void actRightHandMagic(Entity* my)
 	{
 		my->x = 8;
 		my->y = 3;
-		my->z = (cameras[HANDMAGIC_PLAYERNUM].z * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
+		my->z = (getCameraHudLocalZ(HANDMAGIC_PLAYERNUM) * .5 - players[HANDMAGIC_PLAYERNUM]->entity->z) + 7;
 		my->z -= 4;
 		my->yaw = HANDMAGIC_YAW - cameravars[HANDMAGIC_PLAYERNUM].shakex2;
 		my->pitch = defaultpitch + HANDMAGIC_PITCH - cameravars[HANDMAGIC_PLAYERNUM].shakey2 / 200.f;

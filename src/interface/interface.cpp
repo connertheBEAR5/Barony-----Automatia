@@ -29264,7 +29264,8 @@ CalloutRadialMenu::CalloutType CalloutRadialMenu::getCalloutTypeForEntity(const 
 	{
 		type = CALLOUT_TYPE_BOULDER;
 	}
-	else if ( parent->behavior == &actLadderReverse )
+	else if ( parent->behavior == &actLadderReverse
+		|| parent->behavior == &actPlayableFloorTransition )
 	{
 		type = CALLOUT_TYPE_EXIT;
 	}
@@ -31615,7 +31616,8 @@ bool CalloutRadialMenu::allowedInteractEntity(Entity& selectedEntity, bool updat
 			strcat(interactText, Language::get(6270)); // "bell"
 		}
 	}
-	else if ( selectedEntity.behavior == &actLadderReverse )
+	else if ( selectedEntity.behavior == &actLadderReverse
+		|| selectedEntity.behavior == &actPlayableFloorTransition )
 	{
 		if ( updateInteractText )
 		{

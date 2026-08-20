@@ -3026,28 +3026,36 @@ void item_ScrollLight(Item*& item, int player)
 	messagePlayer(player, MESSAGE_HINT, Language::get(851));
     
     const char name[] = "scroll_light";
-	addLight(
-        players[player]->entity->x / 16,
-        players[player]->entity->y / 16,
+	Entity* lightCaster = players[player]->entity;
+	const SpatialSpawnContext spatialContext = lightCaster->spatialSpawnContext();
+	addLightOnPlayableFloor(
+        lightCaster->x / 16,
+        lightCaster->y / 16,
+		spatialContext.playableFloor,
+		0,
         name);
 
-	// send new light info to clients
+	// send new light info only to clients sharing this playable floor.
 	if (multiplayer == SERVER)
 	{
 		for (c = 1; c < MAXPLAYERS; c++)
 		{
-			if (client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if (!serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor))
 			{
 				continue;
 			}
-			strcpy((char*)net_packet->data, "ALIT");
-			SDLNet_Write16(players[player]->entity->x / 16, &net_packet->data[4]);
-			SDLNet_Write16(players[player]->entity->y / 16, &net_packet->data[6]);
-			SDLNet_Write16(sizeof(name), &net_packet->data[8]);
-            stringCopyUnsafe((char*)&net_packet->data[10], name, sizeof(name));
+			strcpy((char*)net_packet->data, "ALIZ");
+			SDLNet_Write16(lightCaster->x / 16, &net_packet->data[4]);
+			SDLNet_Write16(lightCaster->y / 16, &net_packet->data[6]);
+			SDLNet_Write16(
+				static_cast<Uint16>(spatialContext.playableFloor),
+				&net_packet->data[8]);
+			SDLNet_Write16(sizeof(name), &net_packet->data[10]);
+            stringCopyUnsafe((char*)&net_packet->data[12], name, sizeof(name));
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 10 + sizeof(name);
+			net_packet->len = 12 + sizeof(name);
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}

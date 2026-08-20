@@ -100,10 +100,41 @@ public:
     // 0 means the entity has not received an ID yet.
 	Sint32 persistentID = 0;
 
+	/*
+	 * Editor-authored structural map layer. This is intentionally separate from
+	 * Entity::z: legacy/runtime sprites often use z for local model elevation, so
+	 * inferring gameplay floors from an arbitrary runtime z value is unsafe.
+	 * V4.9 maps persist this through the optional ELYR chunk. Legacy maps default
+	 * to layer 0 and therefore remain on playable floor Z0.
+	 */
+	Sint16 authoredMapLayer = 0;
+
 	// Discrete gameplay floor identity. Entity::z remains local elevation.
 	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
-	// Monotonic routing/barrier generation for future floor transitions.
+	// Monotonic routing/barrier generation for floor transitions and stale-packet rejection.
 	std::uint64_t spatialRevision = 0;
+
+	/*
+	 * Stage Z3 authored same-map floor transition endpoint. The optional PZLV
+	 * ZTRN chunk owns these fields; legacy maps leave them disabled. The
+	 * destination is another playable floor in the same MapInstance and the
+	 * target persistent ID identifies the paired arrival endpoint.
+	 */
+	bool playableFloorTransitionEnabled = false;
+	PlayableFloorId playableFloorTransitionDestination = DEFAULT_PLAYABLE_FLOOR;
+	Sint32 playableFloorTransitionTargetPersistentID = 0;
+
+	/*
+	 * Layer-authored vertical stair marker. Unlike the older ZTRN endpoint
+	 * model, this is tied directly to the existing Zed map layer stored in
+	 * Entity::z. +1 means one editor layer up, -1 means one layer down.
+	 * Runtime traversal is wired in the next vertical-layer stage; the marker
+	 * is persisted now so authoring never needs a separate playable-floor UI.
+	 */
+	Sint16 verticalLayerTransitionDelta = 0;
+	/* Runtime voxel model and cardinal facing authored for a layer stair. */
+	Sint32 verticalLayerTransitionModel = 0;
+	Sint16 verticalLayerTransitionRotation = 0; // decor-style 0..7: E,SE,S,SW,W,NW,N,NE
 
 	/*
 	* Runtime monsters normally have persistentID == 0 and disappear when
@@ -174,14 +205,27 @@ public:
 	// currently in TileEntityList, the spatial index is moved atomically to
 	// the new floor and spatialRevision advances as a stale-packet barrier.
 	bool setPlayableFloor(PlayableFloorId newPlayableFloor);
+	// Atomic same-map floor move used by Stage Z3 stairs/transitions. This
+	// validates destination geometry, advances spatialRevision through
+	// setPlayableFloor(), reindexes TileEntityList, snaps interpolation state,
+	// and leaves Entity::z as local elevation on the destination floor.
+	bool transitionToPlayableFloor(
+		PlayableFloorId newPlayableFloor,
+		real_t destinationX,
+		real_t destinationY,
+		real_t destinationZ);
 	SpatialSpawnContext spatialSpawnContext() const
 	{
-		return SpatialSpawnContext{playableFloor, spatialRevision};
+		return SpatialSpawnContext{
+			playableFloor, spatialRevision,
+			static_cast<Sint16>(structuralMapLayer())};
 	}
 	void applySpatialSpawnContext(const SpatialSpawnContext& context)
 	{
 		playableFloor = context.playableFloor;
 		spatialRevision = context.spatialRevision;
+		authoredMapLayer = static_cast<Sint16>(std::clamp<int>(
+			static_cast<int>(context.authoredMapLayer), 0, MAPLAYERS - 1));
 	}
 	void inheritSpatialContextFrom(const Entity* source)
 	{
@@ -189,12 +233,43 @@ public:
 		{
 			playableFloor = source->playableFloor;
 			spatialRevision = source->spatialRevision;
+			authoredMapLayer = static_cast<Sint16>(source->structuralMapLayer());
 		}
 		else
 		{
 			playableFloor = DEFAULT_PLAYABLE_FLOOR;
 			spatialRevision = 0;
+			authoredMapLayer = 0;
 		}
+	}
+
+	/*
+	 * Z3.4C: runtime Entity::z is local model elevation again. Structural
+	 * placement is carried explicitly and folded into render/light coordinates
+	 * only when needed. Ordinary entities follow their current playable floor;
+	 * a vertical stair is the intentional boundary-object exception and renders
+	 * on its authored layer above the source floor.
+	 */
+	int structuralMapLayer() const
+	{
+		/*
+		 * Ordinary sprites live on the same structural layer as their playable
+		 * floor. Vertical stairs are the one authored boundary object whose model
+		 * intentionally sits one layer above its source gameplay floor.
+		 */
+		const int layer = verticalLayerTransitionDelta != 0
+			? static_cast<int>(authoredMapLayer)
+			: static_cast<int>(playableFloor);
+		return std::clamp(layer, 0, MAPLAYERS - 1);
+	}
+	real_t worldRenderZ() const
+	{
+		return z - 16.0 * static_cast<real_t>(structuralMapLayer());
+	}
+	int structuralLightmapLayer() const
+	{
+		return clampLightmapLayer(
+			structuralMapLayer() + entityZToLightmapLayer(z));
 	}
 	Uint32 ticks;                  // duration of the entity's existence
 	real_t x, y, z;                // world coordinates
@@ -1434,13 +1509,15 @@ extern bool monsterally[NUMMONSTERS][NUMMONSTERS];
 int AC(Stat* stat);
 
 Entity* uidToEntity(Sint32 uidnum);
-list_t* checkTileForEntity(int x, int y); //Don't forget to free the list returned when you're done with it. Also, provide x and y in map, not entity, units.
+list_t* checkTileForEntity(int x, int y); // Legacy floor-Z0 lookup.
+list_t* checkTileForEntity(int x, int y, PlayableFloorId playableFloor);
 /*
  * Don't forget to free the list returned when you're done with it.
  * Provide x and y in map, not entity, units.
  * The list parameter is a pointer to the list all the items found will be appended to.
  */
 void getItemsOnTile(int x, int y, list_t** list);
+void getItemsOnTile(int x, int y, list_t** list, PlayableFloorId playableFloor);
 
 // get mana regen from stats and proficiencies only.
 int getBaseManaRegen(Entity* my, Stat& myStats, bool excludeItemsEffectsBonus = false);
@@ -1479,7 +1556,8 @@ void actSink(Entity* my);
 //--- Mechanism functions ---
 void actCircuit(Entity* my);
 void actSwitch(Entity* my); //Needs to be called periodically to ensure network's powered state is correct.
-void getPowerablesOnTile(int x, int y, list_t** list); //Stores a list of all circuits and mechanisms, on the tile (in map coordinates), in list.
+void getPowerablesOnTile(int x, int y, list_t** list); // Legacy floor-Z0 lookup.
+void getPowerablesOnTile(int x, int y, list_t** list, PlayableFloorId playableFloor); // Stores circuits/mechanisms on one authored playable floor.
 void actGate(Entity* my);
 void actArrowTrap(Entity* my);
 void actTrap(Entity* my);

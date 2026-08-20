@@ -40,13 +40,7 @@ void actTorch(Entity* my)
 {
 	int i;
 
-	const int lightLayer =
-		entityZToLightmapLayer(my->z);
-
-	const int wallLayer =
-		lightLayer == 0
-			? OBSTACLELAYER
-			: lightLayer;
+	const int lightLayer = my->structuralLightmapLayer();
 
 	if ( my->ticks == 1 )
 	{
@@ -96,11 +90,11 @@ void actTorch(Entity* my)
 	checkx = checkx >> 4;
 	int checky = my->y - sin(my->yaw) * 8;
 	checky = checky >> 4;
-if ( !map.tiles[
-	wallLayer
-	+ checky * MAPLAYERS
-	+ checkx * MAPLAYERS * map.height
-] )	{
+	if ( checkx < 0 || checky < 0
+		|| checkx >= static_cast<int>(map.width)
+		|| checky >= static_cast<int>(map.height)
+		|| !map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor) )
+	{
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
 		return;
@@ -242,13 +236,7 @@ void actCrystalShard(Entity* my)
 {
 	int i;
 
-	const int lightLayer =
-		entityZToLightmapLayer(my->z);
-
-	const int wallLayer =
-		lightLayer == 0
-			? OBSTACLELAYER
-			: lightLayer;
+	const int lightLayer = my->structuralLightmapLayer();
 
 	if ( my->ticks == 1 )
 	{
@@ -295,7 +283,10 @@ void actCrystalShard(Entity* my)
 	checkx = checkx >> 4;
 	int checky = my->y - sin(my->yaw) * 8;
 	checky = checky >> 4;
-	if ( !map.tiles[wallLayer + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
+	if ( checkx < 0 || checky < 0
+		|| checkx >= static_cast<int>(map.width)
+		|| checky >= static_cast<int>(map.height)
+		|| !map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor) )
 	{
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
@@ -434,8 +425,7 @@ void actLightSource(Entity* my)
 
 void Entity::actLightSource()
 {
-const int lightLayer =
-	entityZToLightmapLayer(z);
+	const int lightLayer = structuralLightmapLayer();
 	// Light fields are client-local additive records. If a late map/lightmap
 	// rebuild retained this pointer without retaining its contribution, repair
 	// it before another overlapping light is removed from the same tiles.
@@ -453,10 +443,12 @@ const int lightLayer =
 		const int lightmapPlayer = light->index
 			? light->index
 			: std::max(0, std::min(clientnum, MAXPLAYERS));
-		if (mapOffset < lightmaps[lightmapPlayer].size())
+		auto& floorLightmap = lightmapForPlayableFloor(
+			lightmapPlayer, light->playableFloor, map.width, map.height);
+		if (mapOffset < floorLightmap.size())
 		{
 			const vec4_t& expected = light->tiles[centerOffset];
-			const vec4_t& actual = lightmaps[lightmapPlayer][mapOffset];
+			const vec4_t& actual = floorLightmap[mapOffset];
 			constexpr float tolerance = 0.5f;
 			const bool missingContribution =
 				(expected.x > tolerance && actual.x + tolerance < expected.x)

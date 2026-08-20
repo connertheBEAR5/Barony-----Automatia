@@ -53,6 +53,22 @@ static Uint32 sightedPitWarningShakeTicks[MAXPLAYERS] = { 0 };
 static Uint32 sightedPitPushTicks[MAXPLAYERS] = { 0 };
 extern bool playerAllowedToEnterPit[MAXPLAYERS];
 
+static PlayableFloorId playableFloorForPlayerIndex(const int player)
+{
+	if ( player >= 0 && player < MAXPLAYERS
+		&& players[player] && players[player]->entity )
+	{
+		return players[player]->entity->playableFloor;
+	}
+	return DEFAULT_PLAYABLE_FLOOR;
+}
+
+static Sint32 playerMapTileAt(
+	const int player, const int x, const int y, const int layer)
+{
+	return map.tileAt(x, y, layer, playableFloorForPlayerIndex(player));
+}
+
 /*-------------------------------------------------------------------------------
 
 	act*
@@ -672,7 +688,7 @@ void Player::Ghost_t::handleAttack()
 			entity->sprite = 16;
 			entity->x = 8;
 			entity->y = 0;
-			entity->z = (cameras[player.playernum].z * .5 - my->z) + 7 + -2;
+			entity->z = (getCameraHudLocalZ(player.playernum) * .5 - my->z) + 7 + -2;
 			entity->z -= 4.75;
 			entity->z = local_rng.uniform(entity->z, entity->z - 4);
 			entity->z += 5.0;
@@ -787,7 +803,7 @@ void Player::Ghost_t::handleAttack()
 				entity->sprite = 16;
 				entity->x = 8;
 				entity->y = 0;
-				entity->z = (cameras[player.playernum].z * .5 - my->z) + 7 + -2;
+				entity->z = (getCameraHudLocalZ(player.playernum) * .5 - my->z) + 7 + -2;
 				entity->z -= 6.75;
 				entity->z = local_rng.uniform(entity->z, entity->z - 4);
 				entity->z += 5.0;
@@ -994,13 +1010,14 @@ void Player::Ghost_t::handleActions()
 							const int index_x = static_cast<int>(startx) >> 4;
 							const int index_y = static_cast<int>(starty) >> 4;
 							index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-							if ( map.tiles[index] && !map.tiles[OBSTACLELAYER + index] )
+							if ( playerMapTileAt(player.playernum, index_x, index_y, FLOORLAYER)
+								&& !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 							{
 								// store the last known good coordinate
 								previousx = startx;// + 16 * cos(yaw);
 								previousy = starty;// + 16 * sin(yaw);
 							}
-							if ( map.tiles[OBSTACLELAYER + index] )
+							if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 							{
 								break;
 							}
@@ -1153,13 +1170,13 @@ void Player::Ghost_t::handleActions()
 								const int index_x = static_cast<int>(startx) >> 4;
 								const int index_y = static_cast<int>(starty) >> 4;
 								index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-								if ( !map.tiles[OBSTACLELAYER + index] )
+								if ( !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 								{
 									// store the last known good coordinate
 									previousx = startx;// + 16 * cos(yaw);
 									previousy = starty;// + 16 * sin(yaw);
 								}
-								if ( map.tiles[OBSTACLELAYER + index] )
+								if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 								{
 									break;
 								}
@@ -1300,13 +1317,13 @@ void Player::Ghost_t::handleActions()
 							const int index_x = static_cast<int>(startx) >> 4;
 							const int index_y = static_cast<int>(starty) >> 4;
 							index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-							if ( !map.tiles[OBSTACLELAYER + index] )
+							if ( !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 							{
 								// store the last known good coordinate
 								previousx = startx;// + 16 * cos(yaw);
 								previousy = starty;// + 16 * sin(yaw);
 							}
-							if ( map.tiles[OBSTACLELAYER + index] )
+							if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
 							{
 								break;
 							}
@@ -1809,7 +1826,7 @@ void spawnPlayerXP(real_t x, real_t y, int player, int xpAmount)
 			int checky = static_cast<int>(y / 16) + iy;
 			if ( checkx >= 0 && checkx < map.width && checky >= 0 && checky < map.height )
 			{
-				if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )
+				if ( !map.tileAt(checkx, checky, OBSTACLELAYER, entity->playableFloor) )
 				{
 					okspots.insert(checkx + 10000 * checky);
 					if ( !checkObstacle(checkx * 16.0 + 8.0, checky * 16.0 + 8.0, entity, nullptr, true, true, false, false) )
@@ -2545,7 +2562,11 @@ void actDeathGhost(Entity* my)
 		real_t camx, camy, camz, camang, camvang;
 		camx = my->x / 16.f;
 		camy = my->y / 16.f;
-		camz = my->z * 2.f + GHOSTCAM_BOB;
+		const real_t playableFloorCameraOffset =
+			map.playableFloorUsesAuthoredLayerStack(my->playableFloor)
+				? -32.0 * static_cast<real_t>(my->playableFloor)
+				: 0.0;
+		camz = my->z * 2.f + GHOSTCAM_BOB + playableFloorCameraOffset;
 
 		if ( player->ghost.isSpiritGhost() )
 		{
@@ -3675,8 +3696,9 @@ bool Player::PlayerMovement_t::isPlayerSwimming()
 	{
 		int x = std::min(std::max<unsigned int>(0, floor(my->x / 16)), map.width - 1);
 		int y = std::min(std::max<unsigned int>(0, floor(my->y / 16)), map.height - 1);
-		if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]]
-			|| lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+		const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, my->playableFloor);
+		if ( swimmingtiles[floorTile]
+			|| lavatiles[floorTile] )
 		{
 			// can swim in lavatiles or swimmingtiles only.
 			swimming = true;
@@ -4592,11 +4614,11 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 	static ConsoleVariable<float> cvar_map_tile_slow("/map_tile_slow", 0.25);
 	real_t movementDrag = 0.75;
 	{
-		if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_SLIPPERY) )
+		if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_SLIPPERY, my->playableFloor) )
 		{
 			movementDrag = *cvar_map_tile_slippery;
 		}
-		else if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_GREASE) )
+		else if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_GREASE, my->playableFloor) )
 		{
 			movementDrag = 0.99;
 		}
@@ -4824,7 +4846,7 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 			my->playerStrafeVelocity = 0.0f;
 		}
 
-		if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_SLOW) )
+		if ( map.tileHasAttribute(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, map_t::TILE_ATTRIBUTE_SLOW, my->playableFloor) )
 		{
 			if ( !isLevitating(stats[PLAYER_NUM]) )
 			{
@@ -4978,7 +5000,12 @@ void Player::PlayerMovement_t::handlePlayerCameraPosition(bool useRefreshRateDel
 			TimerExperiments::cameraCurrentState[PLAYER_NUM].y.velocity = TimerExperiments::lerpFactor * (my->y / 16.0 - TimerExperiments::cameraCurrentState[PLAYER_NUM].y.position);
 		}
 
-		real_t cameraSetpointZ = (my->z * 2) - 2.5 + (swimming ? 1 : 0);
+		const real_t playableFloorCameraOffset =
+			map.playableFloorUsesAuthoredLayerStack(my->playableFloor)
+				? -32.0 * static_cast<real_t>(my->playableFloor)
+				: 0.0;
+		real_t cameraSetpointZ = (my->z * 2) - 2.5
+			+ playableFloorCameraOffset + (swimming ? 1 : 0);
 		if ( swimming && (playerRace == RAT || playerRace == SPIDER) )
 		{
 			cameraSetpointZ -= 0.5; // float a little higher.
@@ -6337,10 +6364,7 @@ static bool playerMovementWouldEnterMissingFloor(
 			}
 
 			const int floorTile =
-				map.tiles[
-					y * MAPLAYERS
-					+ x * MAPLAYERS * map.height
-				];
+				map.tileAt(x, y, FLOORLAYER, player->playableFloor);
 
 			if ( !floorTile )
 			{
@@ -8089,7 +8113,12 @@ void actPlayer(Entity* my)
 					}
 				}
 
-				if ( !birdInHand )
+				const bool duckPersistedInWorld =
+					automatiaPersistentHermitDuckExists(
+						PLAYER_NUM,
+						duck.first);
+
+				if ( !birdInHand && !duckPersistedInWorld )
 				{
 					if ( multiplayer == CLIENT )
 					{
@@ -9446,6 +9475,7 @@ void actPlayer(Entity* my)
 		// levitation
 		levitating = isLevitating(stats[PLAYER_NUM]);
 		players[PLAYER_NUM]->mechanics.previouslyLevitating = levitating;
+		bool waitingForStackedFallAuthority = false;
 
 		if ( !levitating
 			&& stats[PLAYER_NUM]->HP > 0 )
@@ -9473,36 +9503,88 @@ void actPlayer(Entity* my)
 				);
 
 			const int floorTile =
-				map.tiles[
-					pitY * MAPLAYERS
-					+ pitX * MAPLAYERS * map.height
-				];
+				map.tileAt(pitX, pitY, FLOORLAYER, my->playableFloor);
 
 			if ( !floorTile )
 			{
-				my->setObituary(
-					Language::get(3010)
-				);
-				stats[PLAYER_NUM]->killer =
-					KilledBy::BOTTOMLESS_PIT;
+				PlayableFloorId lowerLandingFloor = DEFAULT_PLAYABLE_FLOOR;
+				int previewFloorsFallen = 0;
+				const bool hasLowerStackedLanding =
+					map.findLowerPlayableFloorLanding(
+						pitX, pitY, my->playableFloor,
+						lowerLandingFloor, previewFloorsFallen);
 
-				if ( multiplayer != CLIENT )
+				if ( hasLowerStackedLanding )
 				{
-					Compendium_t::Events_t::eventUpdateWorld(
-						PLAYER_NUM,
-						Compendium_t::CPDM_PITS_DEATHS,
-						"pits",
-						1
-					);
+					waitingForStackedFallAuthority = multiplayer == CLIENT;
+					/*
+					 * Authored stacked floors are real vertical space, not bottomless
+					 * pits. The server/single-player authority moves the actor to the
+					 * nearest lower surface and applies one HP of fall damage per
+					 * structural floor crossed. Clients wait for the reliable PZTR.
+					 */
+					if ( multiplayer != CLIENT )
+					{
+						int floorsFallen = 0;
+						if ( fallAutomatiaPlayerToLowerPlayableFloor(
+								PLAYER_NUM, floorsFallen) )
+						{
+							const int fallDamage = std::max(1, floorsFallen);
+							if ( stats[PLAYER_NUM]->HP <= fallDamage )
+							{
+								my->setObituary(Language::get(3010));
+								stats[PLAYER_NUM]->killer = KilledBy::DEATH_KNOCKBACK;
+							}
+							my->modHP(-fallDamage);
+
+							if ( players[PLAYER_NUM]->isLocalPlayer() )
+							{
+								cameravars[PLAYER_NUM].shakex +=
+									0.05 * floorsFallen;
+								cameravars[PLAYER_NUM].shakey +=
+									4 * floorsFallen;
+							}
+							else if ( multiplayer == SERVER && PLAYER_NUM > 0 )
+							{
+								std::memcpy(net_packet->data, "SHAK", 4);
+								net_packet->data[4] = static_cast<Uint8>(
+									std::min(255, 5 * floorsFallen));
+								net_packet->data[5] = static_cast<Uint8>(
+									std::min(255, 4 * floorsFallen));
+								net_packet->address.host = net_clients[PLAYER_NUM - 1].host;
+								net_packet->address.port = net_clients[PLAYER_NUM - 1].port;
+								net_packet->len = 6;
+								sendPacketSafe(net_sock, -1, net_packet, PLAYER_NUM - 1);
+							}
+						}
+					}
 				}
-
-				stats[PLAYER_NUM]->HP = 0;
-
-				if ( stats[PLAYER_NUM]->type
-					== AUTOMATON )
+				else
 				{
-					my->playerAutomatonDeathCounter =
-						TICKS_PER_SECOND * 5;
+					my->setObituary(
+						Language::get(3010)
+					);
+					stats[PLAYER_NUM]->killer =
+						KilledBy::BOTTOMLESS_PIT;
+
+					if ( multiplayer != CLIENT )
+					{
+						Compendium_t::Events_t::eventUpdateWorld(
+							PLAYER_NUM,
+							Compendium_t::CPDM_PITS_DEATHS,
+							"pits",
+							1
+						);
+					}
+
+					stats[PLAYER_NUM]->HP = 0;
+
+					if ( stats[PLAYER_NUM]->type
+						== AUTOMATON )
+					{
+						my->playerAutomatonDeathCounter =
+							TICKS_PER_SECOND * 5;
+					}
 				}
 			}
 		}
@@ -9521,7 +9603,7 @@ void actPlayer(Entity* my)
 			{
 				int x = std::min(std::max<unsigned int>(1, my->x / 16), map.width - 2);
 				int y = std::min(std::max<unsigned int>(1, my->y / 16), map.height - 2);
-				if ( !map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( !map.tileAt(x, y, FLOORLAYER, my->playableFloor) )
 				{
 					Compendium_t::Events_t::eventUpdateWorld(PLAYER_NUM, Compendium_t::CPDM_PITS_LEVITATED, "pits", 1);
 				}
@@ -9533,7 +9615,7 @@ void actPlayer(Entity* my)
 			//{
 			//	int x = std::min(std::max<unsigned int>(0, floor(my->x / 16)), map.width - 1);
 			//	int y = std::min(std::max<unsigned int>(0, floor(my->y / 16)), map.height - 1);
-			//	int mapTile = map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height];
+			//	int mapTile = map.tileAt(x, y, FLOORLAYER, my->playableFloor);
 			//	if ( animatedtiles[mapTile] )
 			//	{
 			//		if ( mapTile >= 447 && mapTile <= 454 )
@@ -9546,7 +9628,7 @@ void actPlayer(Entity* my)
 
 		my->creatureHandleLiftZ();
 
-		if ( !levitating && prevlevitating )
+		if ( !levitating && prevlevitating && !waitingForStackedFallAuthority )
 		{
 			int x, y, u, v;
 			x = std::min(std::max<unsigned int>(1, my->x / 16), map.width - 2);
@@ -9716,7 +9798,7 @@ void actPlayer(Entity* my)
 			if ( !PLAYER_INWATER && (players[PLAYER_NUM]->isLocalPlayer()) )
 			{
 				PLAYER_INWATER = 1;
-				if ( lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+				if ( lavatiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 				{
 					messagePlayer(PLAYER_NUM, MESSAGE_STATUS, Language::get(573));
 					if ( stats[PLAYER_NUM]->type == AUTOMATON )
@@ -9733,7 +9815,7 @@ void actPlayer(Entity* my)
 					cameravars[PLAYER_NUM].shakex += .1;
 					cameravars[PLAYER_NUM].shakey += 10;
 				}
-				else if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] && stats[PLAYER_NUM]->type == VAMPIRE )
+				else if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] && stats[PLAYER_NUM]->type == VAMPIRE )
 				{
 					messagePlayerColor(PLAYER_NUM, MESSAGE_STATUS, makeColorRGB(255, 0, 0), Language::get(3183));
 					if ( stats[PLAYER_NUM]->mask && stats[PLAYER_NUM]->mask->type == MASK_HAZARD_GOGGLES )
@@ -9749,13 +9831,13 @@ void actPlayer(Entity* my)
 					cameravars[PLAYER_NUM].shakey += 10;
 					createWaterSplash(my->x, my->y, 30);
 				}
-				else if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] && stats[PLAYER_NUM]->type == AUTOMATON )
+				else if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] && stats[PLAYER_NUM]->type == AUTOMATON )
 				{
 					messagePlayer(PLAYER_NUM, MESSAGE_STATUS, Language::get(3702));
 					playSound(136, 128);
 					createWaterSplash(my->x, my->y, 30);
 				}
-				else if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+				else if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 				{
 					playSound(136, 128);
 					createWaterSplash(my->x, my->y, 30);
@@ -9764,7 +9846,7 @@ void actPlayer(Entity* my)
 
 			if ( players[PLAYER_NUM]->isLocalPlayer() )
 			{
-				if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+				if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 				{
 					Compendium_t::Events_t::eventUpdateWorld(PLAYER_NUM, Compendium_t::CPDM_SWIM_TIME, "murky water", 1);
 				}
@@ -9777,7 +9859,7 @@ void actPlayer(Entity* my)
 			if ( multiplayer != CLIENT )
 			{
 				// Check if the Player is in Water or Lava
-				if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+				if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 				{
 					if ( my->flags[BURNING] )
 					{
@@ -10095,13 +10177,14 @@ void actPlayer(Entity* my)
 									const int index_x = static_cast<int>(startx) >> 4;
 									const int index_y = static_cast<int>(starty) >> 4;
 									index = (index_y)* MAPLAYERS + (index_x)* MAPLAYERS * map.height;
-									if ( map.tiles[index] && !map.tiles[OBSTACLELAYER + index] )
+									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, FLOORLAYER)
+										&& !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 									{
 										// store the last known good coordinate
 										previousx = startx;// + 16 * cos(yaw);
 										previousy = starty;// + 16 * sin(yaw);
 									}
-									if ( map.tiles[OBSTACLELAYER + index] )
+									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 									{
 										break;
 									}
@@ -10254,13 +10337,13 @@ void actPlayer(Entity* my)
 										const int index_x = static_cast<int>(startx) >> 4;
 										const int index_y = static_cast<int>(starty) >> 4;
 										index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-										if ( !map.tiles[OBSTACLELAYER + index] )
+										if ( !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 										{
 											// store the last known good coordinate
 											previousx = startx;// + 16 * cos(yaw);
 											previousy = starty;// + 16 * sin(yaw);
 										}
-										if ( map.tiles[OBSTACLELAYER + index] )
+										if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 										{
 											break;
 										}
@@ -10404,13 +10487,13 @@ void actPlayer(Entity* my)
 									const int index_x = static_cast<int>(startx) >> 4;
 									const int index_y = static_cast<int>(starty) >> 4;
 									index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-									if ( !map.tiles[OBSTACLELAYER + index] )
+									if ( !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 									{
 										// store the last known good coordinate
 										previousx = startx;// + 16 * cos(yaw);
 										previousy = starty;// + 16 * sin(yaw);
 									}
-									if ( map.tiles[OBSTACLELAYER + index] )
+									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
 									{
 										break;
 									}
@@ -11661,7 +11744,7 @@ void actPlayer(Entity* my)
 							{
 								int x = std::min(std::max<unsigned int>(0, floor(my->x / 16)), map.width - 1);
 								int y = std::min(std::max<unsigned int>(0, floor(my->y / 16)), map.height - 1);
-								if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+								if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 								{
 									Compendium_t::Events_t::eventUpdateWorld(PLAYER_NUM, Compendium_t::CPDM_SWIM_KILLED_WHILE, "murky water", 1);
 								}
@@ -11922,8 +12005,9 @@ void actPlayer(Entity* my)
 					int index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
 					if ( index_x >= 0 && index_x < map.width && index_y >= 0 && index_y < map.height )
 					{
-						if ( !map.tiles[index] || swimmingtiles[map.tiles[index_y * MAPLAYERS + index_x * MAPLAYERS * map.height]]
-							|| lavatiles[map.tiles[index_y * MAPLAYERS + index_x * MAPLAYERS * map.height]] )
+						const Sint32 floorTile = map.tileAt(index_x, index_y, FLOORLAYER, my->playableFloor);
+						if ( !floorTile || swimmingtiles[floorTile]
+							|| lavatiles[floorTile] )
 						{
 							players[PLAYER_NUM]->mechanics.updateSustainedSpellEvent(SPELL_LEVITATION, dist, 0.5, nullptr);
 							if ( stats[PLAYER_NUM]->getEffectActive(EFF_FLUTTER) )
@@ -12236,8 +12320,9 @@ void actPlayer(Entity* my)
 					int index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
 					if ( index_x >= 0 && index_x < map.width && index_y >= 0 && index_y < map.height )
 					{
-						if ( !map.tiles[index] || swimmingtiles[map.tiles[index_y * MAPLAYERS + index_x * MAPLAYERS * map.height]]
-							|| lavatiles[map.tiles[index_y * MAPLAYERS + index_x * MAPLAYERS * map.height]] )
+						const Sint32 floorTile = map.tileAt(index_x, index_y, FLOORLAYER, my->playableFloor);
+						if ( !floorTile || swimmingtiles[floorTile]
+							|| lavatiles[floorTile] )
 						{
 							players[PLAYER_NUM]->mechanics.updateSustainedSpellEvent(SPELL_LEVITATION, dist, 0.5, nullptr);
 							if ( stats[PLAYER_NUM]->getEffectActive(EFF_FLUTTER) )

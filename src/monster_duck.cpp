@@ -26,6 +26,85 @@
 #include "mod_tools.hpp"
 #include "paths.hpp"
 
+Entity* resolveHermitDuckOwner(Entity* duck, Stat* duckStats, int* ownerPlayer)
+{
+	if ( ownerPlayer )
+	{
+		*ownerPlayer = -1;
+	}
+	if ( !duck || !duckStats )
+	{
+		return nullptr;
+	}
+
+	int owner = -1;
+	const std::string encodedOwner = duckStats->getAttribute("duck_owner");
+	if ( !encodedOwner.empty() )
+	{
+		try
+		{
+			const int parsedOwner = std::stoi(encodedOwner);
+			if ( parsedOwner >= 0 && parsedOwner < MAXPLAYERS )
+			{
+				owner = parsedOwner;
+			}
+		}
+		catch ( ... )
+		{
+			owner = -1;
+		}
+	}
+
+	// Z3.4B backward compatibility: older persisted Hermit ducks did not have
+	// duck_owner yet. TOOL_DUCK appearance stores owner in appearance % MAXPLAYERS.
+	if ( owner < 0 )
+	{
+		const std::string encodedDuckType = duckStats->getAttribute("duck_type");
+		if ( !encodedDuckType.empty() )
+		{
+			try
+			{
+				const int duckType = std::stoi(encodedDuckType);
+				if ( duckType >= 0 )
+				{
+					owner = duckType % MAXPLAYERS;
+					duckStats->setAttribute("duck_owner", std::to_string(owner));
+				}
+			}
+			catch ( ... )
+			{
+				owner = -1;
+			}
+		}
+	}
+
+	if ( ownerPlayer )
+	{
+		*ownerPlayer = owner;
+	}
+
+	if ( owner >= 0 && owner < MAXPLAYERS
+		&& players[owner] && players[owner]->entity )
+	{
+		Entity* ownerEntity = players[owner]->entity;
+		duckStats->leader_uid = ownerEntity->getUID();
+		duck->parent = ownerEntity->getUID();
+		return ownerEntity;
+	}
+
+	/*
+	 * During a map transition/reconnect the durable player slot can exist before
+	 * its new Entity UID does. Do not erase the old relationship here; the next
+	 * duck tick will rebind it as soon as the player actor is present.
+	 */
+	if ( owner >= 0 )
+	{
+		return nullptr;
+	}
+
+	return uidToEntity(duckStats->leader_uid);
+}
+
 void initDuck(Entity* my, Stat* myStats)
 {
 	node_t* node;
@@ -67,6 +146,11 @@ void initDuck(Entity* my, Stat* myStats)
 		MONSTER_SPOTVAR = 1;
 		MONSTER_IDLESND = 789;
 		MONSTER_IDLEVAR = 5;
+	}
+
+	if ( multiplayer != CLIENT && myStats )
+	{
+		resolveHermitDuckOwner(my, myStats, nullptr);
 	}
 
 	if ( multiplayer != CLIENT && !MONSTER_INIT && myStats )
@@ -670,17 +754,35 @@ void duckAnimate(Entity* my, Stat* myStats, double dist)
 			{
 				int lifetime = std::stoi(myStats->getAttribute("duck_time"));
 				bool ghostActive = false;
-				if ( Entity* leader = uidToEntity(myStats->leader_uid) )
+				int durableOwnerPlayer = -1;
+				Entity* leader = resolveHermitDuckOwner(
+					my, myStats, &durableOwnerPlayer);
+				const bool leaderTemporarilyUnavailable =
+					durableOwnerPlayer >= 0 && !leader;
+				const bool leaderOnOtherPlayableFloor =
+					leader && leader->playableFloor != my->playableFloor;
+				if ( leader && !leaderOnOtherPlayableFloor )
 				{
 					if ( leader->behavior == &actPlayer && players[leader->skill[2]]->ghost.isActive() )
 					{
 						ghostActive = true;
 					}
 				}
-				if ( my->monsterSpecialState != DUCK_DIVE && !ghostActive )
+				/*
+				 * A Hermit duck left on another playable floor should remain
+				 * there. Freeze its return lifetime while its owner is on a
+				 * different floor instead of letting an off-floor player make
+				 * the duck expire invisibly.
+				 */
+				const bool brokenDuckRunsAway =
+					myStats->getAttribute("duck_run") == "1";
+				if ( my->monsterSpecialState != DUCK_DIVE
+					&& !ghostActive
+					&& !leaderOnOtherPlayableFloor
+					&& (!leaderTemporarilyUnavailable || brokenDuckRunsAway) )
 				{
 					--lifetime;
-					if ( !uidToEntity(myStats->leader_uid) )
+					if ( !leader && durableOwnerPlayer < 0 )
 					{
 						--lifetime;
 					}
@@ -808,22 +910,21 @@ void duckAnimate(Entity* my, Stat* myStats, double dist)
 	{
 		if ( mapx >= 0 && mapx < map.width && mapy >= 0 && mapy < map.height )
 		{
-			int mapIndex = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
-			if ( !map.tiles[mapIndex] )
-			{
-				noFloor = true;
-			}
-			if ( map.tiles[mapIndex] && lavatiles[map.tiles[mapIndex]] )
+			const Sint32 floorTile =
+				map.tileAt(mapx, mapy, FLOORLAYER, my->playableFloor);
+			const Sint32 obstacleTile =
+				map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor);
+			noFloor = floorTile == 0;
+			if ( floorTile && lavatiles[floorTile] )
 			{
 				lavaTile = true;
 			}
-			if ( !map.tiles[OBSTACLELAYER + mapIndex] && map.tiles[mapIndex]
-				&& swimmingtiles[map.tiles[mapIndex]] )
+			if ( !obstacleTile && floorTile && swimmingtiles[floorTile] )
 			{
 				waterTile = true;
 				inertHeight += 0.6;
 			}
-			if ( (!lavaTile && !noFloor) || swimmingtiles[map.tiles[mapIndex]] )
+			if ( (!lavaTile && !noFloor) || (floorTile && swimmingtiles[floorTile]) )
 			{
 				safeTile = true;
 			}

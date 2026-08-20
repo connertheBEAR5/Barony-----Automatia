@@ -807,10 +807,10 @@ void actBoulder(Entity* my)
 	bool noground = false;
 	int x = std::min<int>(std::max(0, (int)(my->x / 16)), map.width);
 	int y = std::min<int>(std::max(0, (int)(my->y / 16)), map.height);
-	Uint32 index = y * MAPLAYERS + x * MAPLAYERS * map.height;
-	if ( !map.tiles[index] || swimmingtiles[map.tiles[index]] || lavatiles[map.tiles[index]] )
+	const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, my->playableFloor);
+	if ( !floorTile || swimmingtiles[floorTile] || lavatiles[floorTile] )
 	{
-		if ( (swimmingtiles[map.tiles[index]] || lavatiles[map.tiles[index]]) 
+		if ( (swimmingtiles[floorTile] || lavatiles[floorTile]) 
 			&& (my->sprite == BOULDER_LAVA_SPRITE || my->sprite == BOULDER_ARCANE_SPRITE) )
 		{
 			// lava/arcane balls, roll over lava.
@@ -1390,7 +1390,7 @@ void actBoulder(Entity* my)
 			int y = (my->y + my->vel_y * 8) / 16;
 			x = std::min<unsigned int>(std::max<int>(0, x), map.width - 1);
 			y = std::min<unsigned int>(std::max<int>(0, y), map.height - 1);
-			if ( map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				my->vel_x = 0.0;
 				my->vel_y = 0.0;
@@ -1606,7 +1606,12 @@ void actBoulder(Entity* my)
 	}
 	if ( (!BOULDER_STOPPED || BOULDER_ROLLING) && (fabs(my->vel_x) > 0 || fabs(my->vel_y) > 0) )
 	{
-		if ( multiplayer != CLIENT && map.tiles[static_cast<int>(my->y / 16) * MAPLAYERS + static_cast<int>(my->x / 16) * MAPLAYERS * map.height] )
+		if ( multiplayer != CLIENT
+			&& map.tileAt(
+				static_cast<int>(my->x / 16),
+				static_cast<int>(my->y / 16),
+				FLOORLAYER,
+				my->playableFloor) )
 		{
 			// spawn blood only if there's a floor!
 			if ( BOULDER_SPAWNBLOOD != 0 && BOULDER_BLOODTIME > 0 )
@@ -1678,7 +1683,7 @@ void actBoulderTrapHole(Entity* my)
 		// in ceiling, delete self if ceiling no longer exists
 		int x = ((int)(my->x)) >> 4;
 		int y = ((int)(my->y)) >> 4;
-		if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+		if ( !map.tileAt(x, y, CEILINGLAYER, my->playableFloor) )
 		{
 			list_RemoveNode(my->mynode);
 			return;
@@ -1774,10 +1779,14 @@ void actBoulderTrap(Entity* my)
 					y = ((int)(y + my->y)) >> 4;
 					if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 					{
-						if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+						if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 						{
-							list_t* trapdoors = TileEntityList.getTileList(x, y);
-							for ( node_t* trapNode = trapdoors->first; trapNode != nullptr; trapNode = trapNode->next )
+							list_t* trapdoors = TileEntityList.getTileList(
+								x,
+								y,
+								my->playableFloor);
+							for ( node_t* trapNode = trapdoors ? trapdoors->first : nullptr;
+								trapNode != nullptr; trapNode = trapNode->next )
 							{
 								Entity* trapEntity = (Entity*)trapNode->element;
 								if ( trapEntity && trapEntity->sprite == 252 && trapEntity->z <= -10 )
@@ -1916,7 +1925,7 @@ void actBoulderTrapEast(Entity* my)
 			c = 0; // direction
 			x = ((int)(my->x)) >> 4;
 			y = ((int)(my->y)) >> 4;
-			if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				Entity* entity = newEntity(getBoulderSpriteForMap(), 1, map.entities, nullptr); // boulder
 				entity->parent = my->getUID();
@@ -2036,7 +2045,7 @@ void actBoulderTrapSouth(Entity* my)
 			c = 1; // direction
 			x = ((int)(my->x)) >> 4;
 			y = ((int)(my->y)) >> 4;
-			if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				Entity* entity = newEntity(getBoulderSpriteForMap(), 1, map.entities, nullptr); // boulder
 				entity->parent = my->getUID();
@@ -2156,7 +2165,7 @@ void actBoulderTrapWest(Entity* my)
 			c = 2; // direction
 			x = ((int)(my->x)) >> 4;
 			y = ((int)(my->y)) >> 4;
-			if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				Entity* entity = newEntity(getBoulderSpriteForMap(), 1, map.entities, nullptr); // boulder
 				entity->parent = my->getUID();
@@ -2276,7 +2285,7 @@ void actBoulderTrapNorth(Entity* my)
 			c = 3; // direction
 			x = ((int)(my->x)) >> 4;
 			y = ((int)(my->y)) >> 4;
-			if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				Entity* entity = newEntity(getBoulderSpriteForMap(), 1, map.entities, nullptr); // boulder
 				entity->parent = my->getUID();

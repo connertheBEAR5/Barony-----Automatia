@@ -1054,8 +1054,18 @@ int getMapPossibleLocationY2()
 
 bool mapTileDiggable(const int x, const int y)
 {
-	if ( swimmingtiles[map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height]]
-		|| lavatiles[map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+	return mapTileDiggable(x, y, DEFAULT_PLAYABLE_FLOOR);
+}
+
+bool mapTileDiggable(const int x, const int y, const PlayableFloorId playableFloor)
+{
+	if ( x < 0 || y < 0 || x >= map.width || y >= map.height )
+	{
+		return false;
+	}
+
+	const Sint32 obstacleTile = map.tileAt(x, y, OBSTACLELAYER, playableFloor);
+	if ( swimmingtiles[obstacleTile] || lavatiles[obstacleTile] )
 	{
 		return false;
 	}
@@ -1068,7 +1078,7 @@ bool mapTileDiggable(const int x, const int y)
 		}
 	}
 
-	if ( map.tileHasAttribute(x, y, OBSTACLELAYER, map_t::TILE_ATTRIBUTE_NODIG) )
+	if ( map.tileHasAttribute(x, y, OBSTACLELAYER, map_t::TILE_ATTRIBUTE_NODIG, playableFloor) )
 	{
 		return false;
 	}
@@ -7255,6 +7265,62 @@ void assignActions(
 		{
 			continue;
 		}
+
+		/*
+		 * Z3.4A: use explicit editor-layer identity, never arbitrary runtime z.
+		 * Legacy/submap entities may legitimately carry values such as z=-24 for
+		 * local model placement. Treating those as "layer 2" caused generated-map
+		 * assignActions() to route ordinary sprites into nonzero floor grids and
+		 * could crash during an asynchronous level change. V4.9 ELYR/editor data
+		 * owns authoredMapLayer; older maps remain layer 0 / playable floor Z0.
+		 */
+		const int authoredMapLayer = std::clamp(
+			static_cast<int>(entity->authoredMapLayer), 0, MAPLAYERS - 1);
+		entity->authoredMapLayer = static_cast<Sint16>(authoredMapLayer);
+
+		/*
+		 * Z3.4C universal layer ownership:
+		 *   ordinary editor sprite on authored layer N -> playable floor N.
+		 * A vertical stair is the deliberate exception because it is authored on
+		 * the shared boundary layer above its source floor: layer 1 is the UP stair
+		 * from floor 0, layer 2 is the DOWN stair from floor 1, etc.
+		 */
+		const PlayableFloorId authoredPlayableFloor =
+			entity->verticalLayerTransitionDelta != 0
+				? static_cast<PlayableFloorId>(std::max(0, authoredMapLayer - 1))
+				: static_cast<PlayableFloorId>(authoredMapLayer);
+		/*
+		 * ELYR is authoritative for layer-authored sprites. Z3.4A/B could save a
+		 * stale EFLR value using the old N-1 mapping for authored layers above 1;
+		 * overwrite that compatibility assignment whenever an explicit authored
+		 * layer is present. Layer-0 entities keep legacy explicit-FLOR EFLR
+		 * behavior because they have no authored-stack elevation to migrate.
+		 */
+		if ( authoredMapLayer > 0 || entity->verticalLayerTransitionDelta != 0 )
+		{
+			entity->playableFloor = authoredPlayableFloor;
+		}
+		else if ( entity->playableFloor == DEFAULT_PLAYABLE_FLOOR
+			&& authoredPlayableFloor != DEFAULT_PLAYABLE_FLOOR )
+		{
+			entity->playableFloor = authoredPlayableFloor;
+		}
+		if ( entity->playableFloor != DEFAULT_PLAYABLE_FLOOR )
+		{
+			map->ensurePlayableFloorGeometry(entity->playableFloor, false);
+		}
+
+		/*
+		 * Serialized editor Z stores the authored structural layer. Legacy action
+		 * conversion code expects Entity::z to be a local model elevation. Remove
+		 * the structural component exactly once before the sprite switch; rendering
+		 * and lighting add it back from authoredMapLayer/playableFloor explicitly.
+		 */
+		entity->z += 16.0 * static_cast<real_t>(authoredMapLayer);
+
+		ScopedPlayableFloorRuntimeContext authoredFloorContext(
+			entity->spatialSpawnContext());
+
 		switch ( entity->sprite )
 		{
 			// null:
@@ -7486,7 +7552,7 @@ void assignActions(
 				{
 					// if MAXPLAYERS > 4, then add some new player markers
 					--balance;
-					Entity* extraPlayer = newEntity(1, 1, map->entities, nullptr);
+					Entity* extraPlayer = newEntityWithSpatialContext(1, 1, map->entities, nullptr, entity);
 					extraPlayer->x = entity->x - 8;
 					extraPlayer->y = entity->y - 8;
 				}
@@ -7504,7 +7570,7 @@ void assignActions(
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(2, 0, map->entities, nullptr); // Door entity.
+				auto childEntity = newEntityWithSpatialContext(2, 0, map->entities, nullptr, entity); // Door entity.
 
 				/*
 				* Transfer the editor sprite's stable persistence ID to the actual
@@ -7531,7 +7597,7 @@ void assignActions(
 				childEntity->doorForceLockedUnlocked = entity->doorForceLockedUnlocked;
 				childEntity->doorDisableOpening = entity->doorDisableOpening;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x;
@@ -7542,7 +7608,7 @@ void assignActions(
 				childEntity->sizex = 2;
 				childEntity->sizey = 2;
 				childEntity->behavior = &actDoorFrame;
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x;
@@ -7563,7 +7629,7 @@ void assignActions(
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(2, 0, map->entities, nullptr); // Door entity.
+				auto childEntity = newEntityWithSpatialContext(2, 0, map->entities, nullptr, entity); // Door entity.
 
 				childEntity->persistentID =
 					entity->persistentID;
@@ -7587,7 +7653,7 @@ void assignActions(
 				childEntity->doorForceLockedUnlocked = entity->doorForceLockedUnlocked;
 				childEntity->doorDisableOpening = entity->doorDisableOpening;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x - 7;
@@ -7600,7 +7666,7 @@ void assignActions(
 				childEntity->sizey = 2;
 				childEntity->behavior = &actDoorFrame;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x + 7;
@@ -8260,7 +8326,7 @@ void assignActions(
 					}
 					if ( myStats->type == DEVIL )
 					{
-						auto childEntity = newEntity(72, 1, map->entities, nullptr);
+						auto childEntity = newEntityWithSpatialContext(72, 1, map->entities, nullptr, entity);
 						//printlog("Generated devil spawner. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->x = entity->x - 8;
 						childEntity->y = entity->y - 8;
@@ -8401,7 +8467,7 @@ void assignActions(
                 entity->z = 7.5;
                 entity->sprite = 184; // this is the switch base.
                 entity->flags[PASSABLE] = true;
-                auto childEntity = newEntity(186, 0, map->entities, nullptr); //Switch entity.
+                auto childEntity = newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity); //Switch entity.
 				/*
 				* The editor sprite becomes only the lever base. Transfer the
 				* stable map identity to the interactive runtime handle.
@@ -8450,7 +8516,7 @@ void assignActions(
                 entity->behavior = &actDoorFrame;
                 
                 //entity->skill[28] = 1; //It's a mechanism.
-                auto childEntity = newEntity(186, 0, map->entities, nullptr); //Gate entity.
+                auto childEntity = newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity); //Gate entity.
 				childEntity->persistentID =
     			entity->persistentID;
 
@@ -8471,7 +8537,7 @@ void assignActions(
                 // copy editor options from frame to gate itself.
                 childEntity->gateDisableOpening = entity->gateDisableOpening;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x - 7;
@@ -8483,7 +8549,7 @@ void assignActions(
                 childEntity->sizey = 2;
                 childEntity->behavior = &actDoorFrame;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x + 7;
@@ -8505,7 +8571,7 @@ void assignActions(
                 entity->flags[PASSABLE] = true;
                 entity->behavior = &actDoorFrame;
                 
-                auto childEntity = newEntity(186, 0, map->entities, nullptr); //Gate entity.
+                auto childEntity = newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity); //Gate entity.
 				childEntity->persistentID =
     			entity->persistentID;
 
@@ -8525,7 +8591,7 @@ void assignActions(
                 // copy editor options from frame to gate itself.
                 childEntity->gateDisableOpening = entity->gateDisableOpening;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x;
@@ -8536,7 +8602,7 @@ void assignActions(
                 childEntity->sizey = 2;
                 childEntity->behavior = &actDoorFrame;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x;
@@ -8563,7 +8629,7 @@ void assignActions(
 
 				entity->seedEntityRNG(map_server_rng.getU32());
 
-				auto childEntity = newEntity(216, 0, map->entities, nullptr); //Chest lid entity.
+				auto childEntity = newEntityWithSpatialContext(216, 0, map->entities, nullptr, entity); //Chest lid entity.
 				childEntity->parent = entity->getUID();
 				entity->parent = childEntity->getUID();
 				if ( entity->yaw == 0 ) //EAST FACING
@@ -8769,14 +8835,14 @@ void assignActions(
 					y = ((int)(y + entity->y)) >> 4;
 					if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 					{
-						if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 						{
-							Entity* childEntity = newEntity(252, 1, map->entities, nullptr);
+							Entity* childEntity = newEntityWithSpatialContext(252, 1, map->entities, nullptr, entity);
 							childEntity->x = (x << 4) + 8;
 							childEntity->y = (y << 4) + 8;
 							//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 							childEntity->flags[PASSABLE] = true;
-							if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+							if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 							{
 								childEntity->z = -26.99;
 							}
@@ -8845,7 +8911,7 @@ void assignActions(
 				const int y = entity->y / 16;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 					{
 						entity->z = -6.25 - 16.0;
 					}
@@ -8868,7 +8934,7 @@ void assignActions(
                 int y = entity->y / 16;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
                     {
                         entity->z = -6.25 - 16.0;
                     }
@@ -8974,7 +9040,7 @@ void assignActions(
 				if ( doItem )
 				{
 					// put an item on the table
-					auto childEntity = newEntity(8, 1, map->entities, nullptr);
+					auto childEntity = newEntityWithSpatialContext(8, 1, map->entities, nullptr, entity);
 					setSpriteAttributes(childEntity, nullptr, nullptr);
 					childEntity->x = entity->x - 8;
 					childEntity->y = entity->y - 8;
@@ -9012,7 +9078,7 @@ void assignActions(
 					}
 					for ( int c = 0; c < numChairs; c++ )
 					{
-						auto childEntity = newEntity(60, 1, map->entities, nullptr);
+						auto childEntity = newEntityWithSpatialContext(60, 1, map->entities, nullptr, entity);
 						setSpriteAttributes(childEntity, nullptr, nullptr);
 						childEntity->x = entity->x - 8;
 						childEntity->y = entity->y - 8;
@@ -9110,7 +9176,7 @@ void assignActions(
                 entity->behavior = &actSpearTrap;
                 entity->skill[28] = 1; // is a mechanism
                 entity->flags[PASSABLE] = true;
-                auto childEntity = newEntity(283, 0, map->entities, nullptr);
+                auto childEntity = newEntityWithSpatialContext(283, 0, map->entities, nullptr, entity);
                 childEntity->x = entity->x;
                 childEntity->y = entity->y;
                 TileEntityList.addEntity(*childEntity);
@@ -9267,14 +9333,14 @@ void assignActions(
 				const int y = ((int)(entity->y)) >> 4;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 					{
-						Entity* childEntity = newEntity(252, 1, map->entities, nullptr);
+						Entity* childEntity = newEntityWithSpatialContext(252, 1, map->entities, nullptr, entity);
 						childEntity->x = (x << 4) + 8;
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9309,14 +9375,14 @@ void assignActions(
 				const int y = ((int)(entity->y)) >> 4;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 					{
-						Entity* childEntity = newEntity(252, 1, map->entities, nullptr);
+						Entity* childEntity = newEntityWithSpatialContext(252, 1, map->entities, nullptr, entity);
 						childEntity->x = (x << 4) + 8;
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9351,14 +9417,14 @@ void assignActions(
 				const int y = ((int)(entity->y)) >> 4;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 					{
-						Entity* childEntity = newEntity(252, 1, map->entities, nullptr);
+						Entity* childEntity = newEntityWithSpatialContext(252, 1, map->entities, nullptr, entity);
 						childEntity->x = (x << 4) + 8;
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9393,14 +9459,14 @@ void assignActions(
 				const int y = ((int)(entity->y)) >> 4;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 					{
-						Entity* childEntity = newEntity(252, 1, map->entities, nullptr);
+						Entity* childEntity = newEntityWithSpatialContext(252, 1, map->entities, nullptr, entity);
 						childEntity->x = (x << 4) + 8;
 						childEntity->y = (y << 4) + 8;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							childEntity->z = -26.99;
 						}
@@ -9429,7 +9495,7 @@ void assignActions(
 				entity->yaw = entity->yaw * (PI / 2); // rotate as set in editor
 				entity->flags[PASSABLE] = false;
 
-				auto childEntity = newEntity(578, 0, map->entities, nullptr); //floating crystal
+				auto childEntity = newEntityWithSpatialContext(578, 0, map->entities, nullptr, entity); //floating crystal
 				childEntity->parent = entity->getUID();
 
 				childEntity->x = entity->x;
@@ -9569,7 +9635,7 @@ void assignActions(
                 entity->behavior = &actStalagCeiling;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
                     {
                         entity->flags[PASSABLE] = true;
                         entity->z -= 16;
@@ -9591,7 +9657,7 @@ void assignActions(
                 entity->behavior = &actStalagCeiling;
                 if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
                 {
-                    if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+                    if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
                     {
                         entity->flags[PASSABLE] = true;
                         entity->z -= 16;
@@ -9610,7 +9676,7 @@ void assignActions(
                 entity->behavior = &actDoorFrame;
                 
                 //entity->skill[28] = 1; //It's a mechanism.
-                auto childEntity = newEntity(186, 0, map->entities, nullptr);
+                auto childEntity = newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity);
 				childEntity->persistentID =
    				entity->persistentID;
 
@@ -9631,7 +9697,7 @@ void assignActions(
                 // copy editor options from frame to gate itself.
                 childEntity->gateDisableOpening = entity->gateDisableOpening;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr);
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity);
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x - 7;
@@ -9643,7 +9709,7 @@ void assignActions(
                 childEntity->sizey = 2;
                 childEntity->behavior = &actDoorFrame;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr);
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity);
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x + 7;
@@ -9665,7 +9731,7 @@ void assignActions(
                 entity->flags[PASSABLE] = true;
                 entity->behavior = &actDoorFrame;
                 
-                auto childEntity = newEntity(186, 0, map->entities, nullptr);
+                auto childEntity = newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity);
 				childEntity->persistentID =
     			entity->persistentID;
 
@@ -9685,7 +9751,7 @@ void assignActions(
                 // copy editor options from frame to gate itself.
                 childEntity->gateDisableOpening = entity->gateDisableOpening;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr);
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity);
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x;
@@ -9696,7 +9762,7 @@ void assignActions(
                 childEntity->sizey = 2;
                 childEntity->behavior = &actDoorFrame;
                 
-                childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr);
+                childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity);
                 childEntity->flags[INVISIBLE] = true;
                 childEntity->flags[BLOCKSIGHT] = true;
                 childEntity->x = entity->x;
@@ -9718,7 +9784,7 @@ void assignActions(
                 entity->z = 7.5;
                 entity->sprite = 585; // this is the switch base.
                 entity->flags[PASSABLE] = true;
-                auto childEntity = newEntity(586, 0, map->entities, nullptr);
+                auto childEntity = newEntityWithSpatialContext(586, 0, map->entities, nullptr, entity);
 				childEntity->persistentID =
 				entity->persistentID;
 
@@ -9766,7 +9832,7 @@ void assignActions(
 					entity->flags[PASSABLE] = true;
 				}
 
-				auto childEntity = newEntity(602 + entity->pedestalOrbType - 1, 0, map->entities, nullptr); //floating orb
+				auto childEntity = newEntityWithSpatialContext(602 + entity->pedestalOrbType - 1, 0, map->entities, nullptr, entity); //floating orb
 				childEntity->parent = entity->getUID();
 				childEntity->behavior = &actPedestalOrb;
 				childEntity->x = entity->x;
@@ -9828,7 +9894,7 @@ void assignActions(
 					const int y = entity->y / 16;
 					if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 					{
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							entity->z = -6.25 - 16.0;
 						}
@@ -9899,15 +9965,15 @@ void assignActions(
 				Entity* childEntity = nullptr;
 				if ( x >= 0 && y >= 0 && x < map->width && y < map->height )
 				{
-					if ( !map->tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+					if ( !map->tileAt(x, y, OBSTACLELAYER, entity->playableFloor) )
 					{
-						childEntity = newEntity(644, 1, map->entities, nullptr);
+						childEntity = newEntityWithSpatialContext(644, 1, map->entities, nullptr, entity);
 						childEntity->parent = entity->getUID();
 						childEntity->x = entity->x;
 						childEntity->y = entity->y;
 						//printlog("30 Generated entity. Sprite: %d Uid: %d X: %.2f Y: %.2f\n",childEntity->sprite,childEntity->getUID(),childEntity->x,childEntity->y);
 						childEntity->flags[PASSABLE] = true;
-						if ( !map->tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map->height] )
+						if ( !map->tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 						{
 							childEntity->z = -22.99;
 						}
@@ -9921,7 +9987,7 @@ void assignActions(
 						tempNode->deconstructor = &emptyDeconstructor;
 						tempNode->size = sizeof(Entity*);
 
-						childEntity = newEntity(645, 1, map->entities, nullptr);
+						childEntity = newEntityWithSpatialContext(645, 1, map->entities, nullptr, entity);
 						childEntity->parent = entity->getUID();
 						childEntity->x = entity->x;
 						childEntity->y = entity->y;
@@ -10088,7 +10154,7 @@ void assignActions(
 				entity->flags[BLOCKSIGHT] = false;
 				entity->behavior = &actPistonBase;
 
-				auto childEntity = newEntity(632, 1, map->entities, nullptr); //cam1
+				auto childEntity = newEntityWithSpatialContext(632, 1, map->entities, nullptr, entity); //cam1
 				childEntity->parent = entity->getUID();
 				childEntity->x = entity->x + 2.25;
 				childEntity->y = entity->y + 2.25;
@@ -10101,7 +10167,7 @@ void assignActions(
 					entity_uids--;
 				}
 				childEntity->setUID(-3);*/
-				childEntity = newEntity(633, 1, map->entities, nullptr); //cam2
+				childEntity = newEntityWithSpatialContext(633, 1, map->entities, nullptr, entity); //cam2
 				childEntity->parent = entity->getUID();
 				childEntity->x = entity->x - 2.25;
 				childEntity->y = entity->y - 2.25;
@@ -10524,7 +10590,7 @@ void assignActions(
 				entity->yaw = (map_rng.rand() % 360) * PI / 180.0;
 				entity->seedEntityRNG(map_rng.getU32());
 				{
-					Entity* childEntity = newEntity(1480, 1, map->entities, nullptr); // base
+					Entity* childEntity = newEntityWithSpatialContext(1480, 1, map->entities, nullptr, entity); // base
 					childEntity->parent = entity->getUID();
 					childEntity->x = entity->x;
 					childEntity->y = entity->y;
@@ -10556,7 +10622,7 @@ void assignActions(
 				entity->seedEntityRNG(map_rng.getU32());
 				entity->skill[11] = map_rng.rand(); // buff type
 				{
-					Entity* childEntity = newEntity(1475, 1, map->entities, nullptr); // bell
+					Entity* childEntity = newEntityWithSpatialContext(1475, 1, map->entities, nullptr, entity); // bell
 					childEntity->parent = entity->getUID();
 					childEntity->x = entity->x - 2 * cos(entity->yaw);
 					childEntity->y = entity->y - 2 * sin(entity->yaw);
@@ -10580,7 +10646,7 @@ void assignActions(
 				int roll = bellRng.rand() % 4;
 				if ( roll == 0 )
 				{
-					Entity* itemEntity = newEntity(8, 1, map->entities, nullptr);  // item
+					Entity* itemEntity = newEntityWithSpatialContext(8, 1, map->entities, nullptr, entity);  // item
 					setSpriteAttributes(itemEntity, nullptr, nullptr);
 					itemEntity->x = entity->x - 8.0;
 					itemEntity->y = entity->y - 8.0;
@@ -10593,7 +10659,7 @@ void assignActions(
 				}
 				else if ( roll == 1 )
 				{
-					Entity* goldEntity = newEntity(9, 1, map->entities, nullptr);  // gold
+					Entity* goldEntity = newEntityWithSpatialContext(9, 1, map->entities, nullptr, entity);  // gold
 					goldEntity->x = entity->x - 8.0;
 					goldEntity->y = entity->y - 8.0;
 					goldEntity->z = -16;
@@ -10697,12 +10763,12 @@ void assignActions(
 					break;
 				}
 
-				map->tileAttributes[OBSTACLELAYER + (nodigtiley)
-					*MAPLAYERS + (nodigtilex)
-					*MAPLAYERS * map->height] |= map_t::TILE_ATTRIBUTE_NODIG;
+				map->setTileAttribute(
+					nodigtilex, nodigtiley, OBSTACLELAYER,
+					map_t::TILE_ATTRIBUTE_NODIG, true, entity->playableFloor);
 
 				{
-					Entity* childEntity = newEntity(keySprite, 1, map->entities, nullptr); // lock
+					Entity* childEntity = newEntityWithSpatialContext(keySprite, 1, map->entities, nullptr, entity); // lock
 					childEntity->parent = entity->getUID();
 					childEntity->x = entity->x + 4 * cos(entity->yaw);
 					childEntity->y = entity->y + 4 * sin(entity->yaw);
@@ -10777,12 +10843,12 @@ void assignActions(
 					break;
 				}
 
-				map->tileAttributes[OBSTACLELAYER + (nodigtiley)
-					* MAPLAYERS + (nodigtilex)
-					* MAPLAYERS * map->height] |= map_t::TILE_ATTRIBUTE_NODIG;
+				map->setTileAttribute(
+					nodigtilex, nodigtiley, OBSTACLELAYER,
+					map_t::TILE_ATTRIBUTE_NODIG, true, entity->playableFloor);
 
 				{
-					Entity* childEntity = newEntity(1152, 1, map->entities, nullptr); // button
+					Entity* childEntity = newEntityWithSpatialContext(1152, 1, map->entities, nullptr, entity); // button
 					childEntity->parent = entity->getUID();
 					childEntity->x = entity->x + 4 * cos(entity->yaw);
 					childEntity->y = entity->y + 4 * sin(entity->yaw);
@@ -10802,9 +10868,11 @@ void assignActions(
 			}
 				break;
 			case 216: // nodig tile
-				map->tileAttributes[OBSTACLELAYER + (static_cast<int>(entity->y) >> 4)
-					* MAPLAYERS + (static_cast<int>(entity->x) >> 4)
-					* MAPLAYERS * map->height] |= map_t::TILE_ATTRIBUTE_NODIG;
+				map->setTileAttribute(
+					static_cast<int>(entity->x) >> 4,
+					static_cast<int>(entity->y) >> 4,
+					OBSTACLELAYER, map_t::TILE_ATTRIBUTE_NODIG, true,
+					entity->playableFloor);
 				list_RemoveNode(entity->mynode);
 				entity = nullptr;
 				break;
@@ -10817,7 +10885,7 @@ void assignActions(
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(1162, 0, map->entities, nullptr); // Iron door entity.
+				auto childEntity = newEntityWithSpatialContext(1162, 0, map->entities, nullptr, entity); // Iron door entity.
 
 				childEntity->persistentID =
 					entity->persistentID;
@@ -10843,7 +10911,7 @@ void assignActions(
 				childEntity->doorDisableOpening = entity->doorDisableOpening;
 				childEntity->doorUnlockWhenPowered = entity->doorUnlockWhenPowered;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x - 7;
@@ -10856,7 +10924,7 @@ void assignActions(
 				childEntity->sizey = 2;
 				childEntity->behavior = &actDoorFrame;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x + 7;
@@ -10878,7 +10946,7 @@ void assignActions(
 				entity->sprite = doorFrameSprite();
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actDoorFrame;
-				auto childEntity = newEntity(1162, 0, map->entities, nullptr); // Iron door entity.
+				auto childEntity = newEntityWithSpatialContext(1162, 0, map->entities, nullptr, entity); // Iron door entity.
 
 				childEntity->persistentID =
 					entity->persistentID;
@@ -10903,7 +10971,7 @@ void assignActions(
 				childEntity->doorDisableOpening = entity->doorDisableOpening;
 				childEntity->doorUnlockWhenPowered = entity->doorUnlockWhenPowered;
 
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x;
@@ -10914,7 +10982,7 @@ void assignActions(
 				childEntity->sizex = 2;
 				childEntity->sizey = 2;
 				childEntity->behavior = &actDoorFrame;
-				childEntity = newEntity(doorFrameSprite(), 0, map->entities, nullptr); //Door frame entity.
+				childEntity = newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity); //Door frame entity.
 				childEntity->flags[INVISIBLE] = true;
 				childEntity->flags[BLOCKSIGHT] = true;
 				childEntity->x = entity->x;
@@ -10927,9 +10995,11 @@ void assignActions(
 				break;
 			}
 			case 219: // slippery tile
-				map->tileAttributes[0 + (static_cast<int>(entity->y) >> 4)
-					* MAPLAYERS + (static_cast<int>(entity->x) >> 4)
-					* MAPLAYERS * map->height] |= map_t::TILE_ATTRIBUTE_SLIPPERY;
+				map->setTileAttribute(
+					static_cast<int>(entity->x) >> 4,
+					static_cast<int>(entity->y) >> 4,
+					FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, true,
+					entity->playableFloor);
 				list_RemoveNode(entity->mynode);
 				entity = nullptr;
 				break;
@@ -10955,9 +11025,11 @@ void assignActions(
 				break;
 			}
 			case 221: // slow tile
-				map->tileAttributes[0 + (static_cast<int>(entity->y) >> 4)
-					* MAPLAYERS + (static_cast<int>(entity->x) >> 4)
-					* MAPLAYERS * map->height] |= map_t::TILE_ATTRIBUTE_SLOW;
+				map->setTileAttribute(
+					static_cast<int>(entity->x) >> 4,
+					static_cast<int>(entity->y) >> 4,
+					FLOORLAYER, map_t::TILE_ATTRIBUTE_SLOW, true,
+					entity->playableFloor);
 				list_RemoveNode(entity->mynode);
 				entity = nullptr;
 				break;
@@ -11031,6 +11103,44 @@ void assignActions(
 		}
 		if ( entity )
 		{
+			/*
+			 * Stage Z3 transition metadata is applied after the ordinary editor
+			 * sprite conversion so authors can reuse an existing ladder/portal
+			 * visual without consuming a new legacy sprite number. Z5 will add
+			 * dedicated editor authoring controls; runtime behavior is complete now.
+			 */
+			if ( entity->playableFloorTransitionEnabled
+				|| entity->verticalLayerTransitionDelta != 0 )
+			{
+				entity->flags[PASSABLE] = true;
+				entity->flags[UNCLICKABLE] = false;
+				entity->behavior = &actPlayableFloorTransition;
+				if ( entity->verticalLayerTransitionDelta != 0 )
+				{
+					const Sint32 defaultModel =
+						entity->verticalLayerTransitionDelta > 0 ? 161 : 253;
+					entity->sprite = entity->verticalLayerTransitionModel > 0
+						? entity->verticalLayerTransitionModel
+						: defaultModel;
+					entity->verticalLayerTransitionModel = entity->sprite;
+					int stairRotation = static_cast<int>(entity->verticalLayerTransitionRotation);
+					if ( stairRotation < 0 )
+					{
+						stairRotation = map_rng.rand() % 8;
+					}
+					stairRotation = std::max(0, std::min(7, stairRotation));
+					entity->verticalLayerTransitionRotation = static_cast<Sint16>(stairRotation);
+					// Entity::z is local at runtime; world rendering applies authoredMapLayer.
+					entity->z = 7.5 - entity->floorDecorationHeightOffset * 0.25;
+					entity->x += entity->floorDecorationXOffset * 0.25;
+					entity->y += entity->floorDecorationYOffset * 0.25;
+					entity->yaw = stairRotation * (PI / 4.0);
+					if ( entity->floorDecorationDestroyIfNoWall == 8 )
+					{
+						entity->floorDecorationDestroyIfNoWall = (stairRotation + 4) % 8;
+					}
+				}
+			}
 			nextnode = node->next;
 			TileEntityList.addEntity(*entity);
 		}
@@ -11076,6 +11186,7 @@ void assignActions(
 				{
 					Entity* tmpentity = (Entity*)tmpnode->element;
 					if ( (tmpentity->behavior == &actFurniture
+							&& tmpentity->playableFloor == postProcessEntity->playableFloor
 							&& (tmpentity->x == postProcessEntity->x) && (tmpentity->y == postProcessEntity->y)
 						) )
 					{
@@ -11103,7 +11214,8 @@ void assignActions(
 				// trapdoor for boulder traps.
 				int findx = static_cast<int>(postProcessEntity->x) >> 4;
 				int findy = static_cast<int>(postProcessEntity->y) >> 4;
-				list_t* entitiesOnTile = TileEntityList.getTileList(findx, findy);
+				list_t* entitiesOnTile = TileEntityList.getTileList(
+					findx, findy, postProcessEntity->playableFloor);
 				for ( node_t* tmpnode = entitiesOnTile->first; tmpnode != nullptr; tmpnode = tmpnode->next )
 				{
 					Entity* tmpentity = (Entity*)tmpnode->element;
@@ -11125,7 +11237,7 @@ void assignActions(
 			{
 				int findx = static_cast<int>(postProcessEntity->x) >> 4;
 				int findy = static_cast<int>(postProcessEntity->y) >> 4;
-				if ( !map->tiles[findy * MAPLAYERS + findx * MAPLAYERS * map->height] )
+				if ( !map->tileAt(findx, findy, FLOORLAYER, postProcessEntity->playableFloor) )
 				{
 					// remove the lever as it is over a pit.
 					printlog("[MAP GENERATOR] Removed switch over a pit at x:%d y:%d.", findx, findy);
@@ -11259,7 +11371,7 @@ void assignActions(
 
 		// mimic
 		numMimics++;
-		Entity* entity = newEntity(10, 1, map->entities, map->creatures);
+		Entity* entity = newEntityWithSpatialContext(10, 1, map->entities, map->creatures, chest);
 		entity->sizex = 4;
 		entity->sizey = 4;
 		entity->x = chest->x;
@@ -11755,16 +11867,6 @@ int loadMainMenuMap(bool blessedAdditionMaps, bool forceVictoryMap, int forcemap
 		assert(0 && "selected invalid main menu map");
 		return -1;
 	}
-}
-
-bool map_t::tileHasAttribute(int x, int y, int layer, Uint32 attribute)
-{
-	auto find = tileAttributes.find(layer + y * MAPLAYERS + x * MAPLAYERS * height);
-	if ( find != tileAttributes.end() )
-	{
-		return find->second & attribute;
-	}
-	return false;
 }
 
 void map_t::setMapHDRSettings()

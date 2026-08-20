@@ -3831,19 +3831,23 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 					// draw line from the players height and direction until we hit the ground.
 					real_t previousx = startx;
 					real_t previousy = starty;
-					int index = 0;
 					for ( ; startz < 0.f; startz += abs(0.25 * tan(pitch)) )
 					{
 						startx += 0.5 * cos(playerEntity->yaw);
 						starty += 0.5 * sin(playerEntity->yaw);
-						index = (static_cast<int>(starty + 16 * sin(playerEntity->yaw)) >> 4) * MAPLAYERS + (static_cast<int>(startx + 16 * cos(playerEntity->yaw)) >> 4) * MAPLAYERS * map.height;
-						if ( !map.tiles[OBSTACLELAYER + index] )
+						const int testX = static_cast<int>(
+							startx + 16 * cos(playerEntity->yaw)) >> 4;
+						const int testY = static_cast<int>(
+							starty + 16 * sin(playerEntity->yaw)) >> 4;
+						const Sint32 obstacleTile = map.tileAt(
+							testX, testY, OBSTACLELAYER, playerEntity->playableFloor);
+						if ( !obstacleTile )
 						{
 							// store the last known good coordinate
 							previousx = startx;
 							previousy = starty;
 						}
-						if ( map.tiles[OBSTACLELAYER + index] )
+						if ( obstacleTile )
 						{
 							break;
 						}
@@ -3878,7 +3882,6 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 					// draw line from the players height and direction until we hit the ground.
 					real_t previousx = startx;
 					real_t previousy = starty;
-					int index = 0;
 					const real_t yaw = cameras[player.playernum].ang;
 
 					bool onCeilingLayer = parent->z > -11.0 && parent->z < -10;
@@ -3893,18 +3896,21 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 						starty += 0.1 * sin(yaw);
 						const int index_x = static_cast<int>(startx) >> 4;
 						const int index_y = static_cast<int>(starty) >> 4;
-						index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-						if ( !map.tiles[(OBSTACLELAYER) + index] )
+						const Sint32 obstacleTile = map.tileAt(
+							index_x, index_y, OBSTACLELAYER, playerEntity->playableFloor);
+						const Sint32 ceilingTile = map.tileAt(
+							index_x, index_y, OBSTACLELAYER + 1, playerEntity->playableFloor);
+						if ( !obstacleTile )
 						{
 							// store the last known good coordinate
 							previousx = startx;// + 16 * cos(yaw);
 							previousy = starty;// + 16 * sin(yaw);
 						}
-						if ( map.tiles[OBSTACLELAYER + index] )
+						if ( obstacleTile )
 						{
 							break;
 						}
-						if ( map.tiles[(OBSTACLELAYER + 1) + index] && !onCeilingLayer )
+						if ( ceilingTile && !onCeilingLayer )
 						{
 							break;
 						}
@@ -3945,7 +3951,6 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 					// draw line from the players height and direction until we hit the ground.
 					real_t previousx = startx;
 					real_t previousy = starty;
-					int index = 0;
 					const real_t yaw = cameras[player.playernum].ang;
 					for ( ; startz < 7.5; startz += abs((0.1) * tan(pitch)) )
 					{
@@ -3953,14 +3958,15 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 						starty += 0.1 * sin(yaw);
 						const int index_x = static_cast<int>(startx) >> 4;
 						const int index_y = static_cast<int>(starty) >> 4;
-						index = (index_y)* MAPLAYERS + (index_x)* MAPLAYERS * map.height;
-						if ( !map.tiles[OBSTACLELAYER + index] )
+						const Sint32 obstacleTile = map.tileAt(
+							index_x, index_y, OBSTACLELAYER, playerEntity->playableFloor);
+						if ( !obstacleTile )
 						{
 							// store the last known good coordinate
 							previousx = startx;// + 16 * cos(yaw);
 							previousy = starty;// + 16 * sin(yaw);
 						}
-						if ( map.tiles[OBSTACLELAYER + index] )
+						if ( obstacleTile )
 						{
 							break;
 						}
@@ -3976,6 +3982,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 								if ( parent->behavior == &actItem || parent->behavior == &actGoldBag
 									|| parent->behavior == &actLadder
 									|| parent->behavior == &actLadderReverse
+									|| parent->behavior == &actPlayableFloorTransition
 									|| parent->behavior == &actBeartrap
 									|| parent->behavior == &actBomb
 									|| parent->behavior == &actSwitch || parent->behavior == &actSwitchWithTimer )
@@ -3994,6 +4001,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 						else if ( parent && ((parent->behavior == &actItem && parent->z > 4) || parent->behavior == &actGoldBag
 							|| parent->behavior == &actLadder
 							|| parent->behavior == &actLadderReverse
+							|| parent->behavior == &actPlayableFloorTransition
 							|| parent->behavior == &actBeartrap
 							|| parent->behavior == &actBomb
 							|| parent->behavior == &actSwitch || parent->behavior == &actSwitchWithTimer) )
@@ -4296,7 +4304,8 @@ void Player::WorldUI_t::setTooltipActive(Entity& tooltip)
 		{
 			interactText = Language::get(4026); // "Disarm beartrap" 
 		}
-		else if ( parent->behavior == &actLadderReverse )
+		else if ( parent->behavior == &actLadderReverse
+			|| parent->behavior == &actPlayableFloorTransition )
 		{
 			interactText = Language::get(4038); // "Climb ladder"
 		}

@@ -246,6 +246,10 @@ void actDoor(Entity* my)
 				for ( node = currentList->first; node != nullptr; node = node->next )
 				{
 					Entity* entity = (Entity*)node->element;
+					if ( entity && entity->playableFloor != my->playableFloor )
+					{
+						continue;
+					}
 					if ( entity == my || (entity->flags[PASSABLE] && entity->behavior != &actDeathGhost) 
 						|| entity->behavior == &actDoorFrame )
 					{
@@ -638,6 +642,10 @@ void Entity::actIronDoor()
 				for ( node = currentList->first; node != nullptr; node = node->next )
 				{
 					Entity* entity = (Entity*)node->element;
+					if ( entity && entity->playableFloor != playableFloor )
+					{
+						continue;
+					}
 					if ( entity == this || (entity->flags[PASSABLE] && entity->behavior != &actDeathGhost)
 						|| entity->behavior == &actDoorFrame )
 					{

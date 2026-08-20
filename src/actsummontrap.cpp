@@ -218,16 +218,13 @@ void actSummonTrap(Entity* my)
 
 				int x = my->x / 16;
 				int y = my->y / 16;
-				int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 				bool splash = false;
 				if ( x > 0 && x < map.width && y > 0 && y < map.height )
 				{
-					if ( map.tiles[mapIndex] )
+					const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, my->playableFloor);
+					if ( floorTile && (lavatiles[floorTile] || swimmingtiles[floorTile]) )
 					{
-						if ( lavatiles[map.tiles[mapIndex]] || swimmingtiles[map.tiles[mapIndex]] )
-						{
-							splash = true;
-						}
+						splash = true;
 					}
 				}
 				if ( splash )

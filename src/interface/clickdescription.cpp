@@ -167,7 +167,8 @@ void clickDescription(int player, Entity* entity)
 				{
 					messagePlayer(player, MESSAGE_INSPECTION, Language::get(263));
 				}
-				else if ( entity->behavior == &actLadder)
+				else if ( entity->behavior == &actLadder
+					|| entity->behavior == &actPlayableFloorTransition)
 				{
 					messagePlayer(player, MESSAGE_INSPECTION, Language::get(264));
 				}

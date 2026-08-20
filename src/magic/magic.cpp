@@ -1905,18 +1905,19 @@ Entity* spellEffectPolymorph(Entity* target, Entity* parent, bool fromMagicSpell
 				{
 					if ( entityInsideTile(target, u, v, 0) )   // no floor
 					{
-						if ( !map.tiles[0 + u * MAPLAYERS + v * MAPLAYERS * map.height] )
+						const Sint32 groundTile = map.tileAt(u, v, 0, target->playableFloor);
+						if ( !groundTile )
 						{
 							// no floor.
 							fellToDeath = true;
 							tryReposition = true;
 						}
-						else if ( lavatiles[map.tiles[0 + u * MAPLAYERS + v * MAPLAYERS * map.height]] )
+						else if ( lavatiles[groundTile] )
 						{
 							fellInLava = true;
 							tryReposition = true;
 						}
-						else if ( swimmingtiles[map.tiles[0 + u * MAPLAYERS + v * MAPLAYERS * map.height]] )
+						else if ( swimmingtiles[groundTile] )
 						{
 							fellInWater = true;
 							tryReposition = true;

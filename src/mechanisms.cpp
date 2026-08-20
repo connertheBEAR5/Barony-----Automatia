@@ -1028,6 +1028,15 @@ void Entity::switchUpdateNeighbors()
 
 void getPowerablesOnTile(int x, int y, list_t** list)
 {
+	getPowerablesOnTile(x, y, list, DEFAULT_PLAYABLE_FLOOR);
+}
+
+void getPowerablesOnTile(
+	int x,
+	int y,
+	list_t** list,
+	const PlayableFloorId playableFloor)
+{
 
 	//Take the return value of checkTileForEntity() and sort that list for powerables.
 	//if (entity->powerable == true)
@@ -1035,7 +1044,7 @@ void getPowerablesOnTile(int x, int y, list_t** list)
 
 	//Right. First, grab all the entities on the tile.
 	list_t* entities = NULL;
-	entities = checkTileForEntity(x, y);
+	entities = checkTileForEntity(x, y, playableFloor);
 
 	if (!entities)
 	{
@@ -1086,11 +1095,11 @@ list_t* Entity::getPowerableNeighbors()
 	int tx = x / 16;
 	int ty = y / 16;
 
-	getPowerablesOnTile(tx, ty, &return_val); //Check current tile
-	getPowerablesOnTile(tx - 1, ty, &return_val); //Check tile to the left.
-	getPowerablesOnTile(tx + 1, ty, &return_val); //Check tile to the right.
-	getPowerablesOnTile(tx, ty - 1, &return_val); //Check tile up.
-	getPowerablesOnTile(tx, ty + 1, &return_val); //Check tile down.
+	getPowerablesOnTile(tx, ty, &return_val, playableFloor); //Check current tile
+	getPowerablesOnTile(tx - 1, ty, &return_val, playableFloor); //Check tile to the left.
+	getPowerablesOnTile(tx + 1, ty, &return_val, playableFloor); //Check tile to the right.
+	getPowerablesOnTile(tx, ty - 1, &return_val, playableFloor); //Check tile up.
+	getPowerablesOnTile(tx, ty + 1, &return_val, playableFloor); //Check tile down.
 	//getPowerablesOnTile(tx - 1, ty - 1, &return_val); //Check tile diagonal up left.
 	//getPowerablesOnTile(tx + 1, ty - 1, &return_val); //Check tile diagonal up right.
 	//getPowerablesOnTile(tx - 1, ty + 1, &return_val); //Check tile diagonal down left.
@@ -1268,7 +1277,8 @@ void persistentSignalControllerBroadcastOutput(
     getPowerablesOnTile(
         outputX,
         outputY,
-        &neighbors
+        &neighbors,
+        controller->playableFloor
     );
 
     if ( !neighbors )
@@ -1541,16 +1551,16 @@ void Entity::actSignalTimer()
 		switch ( signalInputDirection )
 		{
 			case 0: // west
-				getPowerablesOnTile(tx + 1, ty, &neighbors); //Check tile to the left.
+				getPowerablesOnTile(tx + 1, ty, &neighbors, playableFloor); //Check tile to the left.
 				break;
 			case 1: // south
-				getPowerablesOnTile(tx, ty - 1, &neighbors); //Check tile to the north.
+				getPowerablesOnTile(tx, ty - 1, &neighbors, playableFloor); //Check tile to the north.
 				break;
 			case 2: // east
-				getPowerablesOnTile(tx - 1, ty, &neighbors); //Check tile to the right.
+				getPowerablesOnTile(tx - 1, ty, &neighbors, playableFloor); //Check tile to the right.
 				break;
 			case 3: // north
-				getPowerablesOnTile(tx, ty + 1, &neighbors); //Check tile to the south
+				getPowerablesOnTile(tx, ty + 1, &neighbors, playableFloor); //Check tile to the south
 				break;
 		}
 		if ( neighbors != nullptr )
@@ -1837,16 +1847,16 @@ void Entity::actSignalGateAND()
 		switch ( signalInputDirection % 4 )
 		{
 		case 0: // east
-			getPowerablesOnTile(tx + 1, ty, &neighbors);
+			getPowerablesOnTile(tx + 1, ty, &neighbors, playableFloor);
 			break;
 		case 1: // south
-			getPowerablesOnTile(tx, ty + 1, &neighbors);
+			getPowerablesOnTile(tx, ty + 1, &neighbors, playableFloor);
 			break;
 		case 2: // east
-			getPowerablesOnTile(tx - 1, ty, &neighbors);
+			getPowerablesOnTile(tx - 1, ty, &neighbors, playableFloor);
 			break;
 		case 3: // north
-			getPowerablesOnTile(tx, ty - 1, &neighbors);
+			getPowerablesOnTile(tx, ty - 1, &neighbors, playableFloor);
 			break;
 		}
 		if ( neighbors != nullptr )
@@ -1953,7 +1963,7 @@ void Entity::actWallButton()
 	int checky = y + (wallLockDir == 1 ? -8 : (wallLockDir == 3 ? 8 : 0));
 	checkx = checkx >> 4;
 	checky = checky >> 4;
-	if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )
+	if ( !map.tileAt(checkx, checky, OBSTACLELAYER, playableFloor) )
 	{
 		if ( key )
 		{
@@ -2128,16 +2138,16 @@ void Entity::actWallButton()
 			switch ( wallLockDir )
 			{
 			case 0: // west
-				getPowerablesOnTile(tx - 1, ty, &neighbors);
+				getPowerablesOnTile(tx - 1, ty, &neighbors, playableFloor);
 				break;
 			case 1: // south
-				getPowerablesOnTile(tx, ty - 1, &neighbors);
+				getPowerablesOnTile(tx, ty - 1, &neighbors, playableFloor);
 				break;
 			case 2: // east
-				getPowerablesOnTile(tx + 1, ty, &neighbors);
+				getPowerablesOnTile(tx + 1, ty, &neighbors, playableFloor);
 				break;
 			case 3: // north
-				getPowerablesOnTile(tx, ty + 1, &neighbors);
+				getPowerablesOnTile(tx, ty + 1, &neighbors, playableFloor);
 				break;
 			}
 			if ( neighbors != nullptr )
@@ -2243,7 +2253,7 @@ void Entity::actWallLock()
 	int checky = y + (wallLockDir == 1 ? -8 : (wallLockDir == 3 ? 8 : 0));
 	checkx = checkx >> 4;
 	checky = checky >> 4;
-	if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )
+	if ( !map.tileAt(checkx, checky, OBSTACLELAYER, playableFloor) )
 	{
 		if ( key )
 		{
@@ -2534,16 +2544,16 @@ void Entity::actWallLock()
 			switch ( wallLockDir )
 			{
 			case 0: // west
-				getPowerablesOnTile(tx - 1, ty, &neighbors);
+				getPowerablesOnTile(tx - 1, ty, &neighbors, playableFloor);
 				break;
 			case 1: // south
-				getPowerablesOnTile(tx, ty - 1, &neighbors);
+				getPowerablesOnTile(tx, ty - 1, &neighbors, playableFloor);
 				break;
 			case 2: // east
-				getPowerablesOnTile(tx + 1, ty, &neighbors);
+				getPowerablesOnTile(tx + 1, ty, &neighbors, playableFloor);
 				break;
 			case 3: // north
-				getPowerablesOnTile(tx, ty + 1, &neighbors);
+				getPowerablesOnTile(tx, ty + 1, &neighbors, playableFloor);
 				break;
 			}
 			if ( neighbors != nullptr )
@@ -2631,7 +2641,10 @@ static ConsoleVariable<float> cvar_map_tile_wind("/map_tile_wind", 1.0);
 
 bool entityInsideWind(Entity* entity1, Entity* wind)
 {
-	if ( !entity1 || !wind ) { return false; }
+	if ( !entity1 || !wind || entity1->playableFloor != wind->playableFloor )
+	{
+		return false;
+	}
 	real_t startx = wind->x;
 	real_t starty = wind->y;
 	int numTiles = wind->actWindTileBonusLength;
@@ -2642,7 +2655,7 @@ bool entityInsideWind(Entity* entity1, Entity* wind)
 		int map_y = wind->y / 16;
 		if ( map_x > 0 && map_x < map.width - 1 && map_y > 0 && map_y < map.height - 1 )
 		{
-			if ( map.tiles[OBSTACLELAYER + map_y * MAPLAYERS + map_x * MAPLAYERS * map.height] )
+			if ( map.tileAt(map_x, map_y, OBSTACLELAYER, wind->playableFloor) )
 			{
 				break; // no blow through walls
 			}
@@ -2682,7 +2695,7 @@ void Entity::actWind()
 	if ( multiplayer == CLIENT )
 	{
 		Entity* entity = players[clientnum]->entity;
-		if ( entity )
+		if ( entity && entity->playableFloor == playableFloor )
 		{
 			if ( windEffectsEntity(entity) && entityInsideWind(entity, this) )
 			{
@@ -2699,7 +2712,11 @@ void Entity::actWind()
 	{
 		int map_x = static_cast<int>(x / 16);
 		int map_y = static_cast<int>(y / 16);
-		std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(map_x, map_y, actWindTileBonusLength + 2);
+		std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(
+			map_x,
+			map_y,
+			actWindTileBonusLength + 2,
+			playableFloor);
 		for ( std::vector<list_t*>::iterator it = entLists.begin(); it != entLists.end(); ++it )
 		{
 			list_t* currentList = *it;

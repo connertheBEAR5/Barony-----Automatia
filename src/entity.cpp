@@ -91,6 +91,63 @@ bool Entity::setPlayableFloor(const PlayableFloorId newPlayableFloor)
     return true;
 }
 
+bool Entity::transitionToPlayableFloor(
+    const PlayableFloorId newPlayableFloor,
+    const real_t destinationX,
+    const real_t destinationY,
+    const real_t destinationZ)
+{
+    if (playableFloor == newPlayableFloor
+        || !map.playableFloors.hasFloor(newPlayableFloor)
+        || map.tilesForPlayableFloor(newPlayableFloor) == nullptr
+        || !std::isfinite(static_cast<double>(destinationX))
+        || !std::isfinite(static_cast<double>(destinationY))
+        || !std::isfinite(static_cast<double>(destinationZ))
+        || destinationX < 0.0
+        || destinationY < 0.0
+        || destinationX >= static_cast<real_t>(map.width) * 16.0
+        || destinationY >= static_cast<real_t>(map.height) * 16.0)
+    {
+        return false;
+    }
+
+    const Sint32 tileX = static_cast<Sint32>(destinationX / 16.0);
+    const Sint32 tileY = static_cast<Sint32>(destinationY / 16.0);
+    if (map.tileAt(tileX, tileY, FLOORLAYER, newPlayableFloor) == 0
+        || map.tileAt(tileX, tileY, OBSTACLELAYER, newPlayableFloor) != 0)
+    {
+        return false;
+    }
+
+    // A light owned by this entity belongs to the old floor. Let normal entity
+    // behavior recreate it on the new floor on the following simulation tick.
+    removeLightField();
+
+    if (!setPlayableFloor(newPlayableFloor))
+    {
+        return false;
+    }
+
+    x = destinationX;
+    y = destinationY;
+    z = destinationZ;
+    new_x = destinationX;
+    new_y = destinationY;
+    new_z = destinationZ;
+    vel_x = 0.0;
+    vel_y = 0.0;
+    vel_z = 0.0;
+    lerp_ox = destinationX;
+    lerp_oy = destinationY;
+    bNeedsRenderPositionInit = true;
+
+    if (myTileListNode)
+    {
+        TileEntityList.updateEntity(*this);
+    }
+    return true;
+}
+
 /*-------------------------------------------------------------------------------
 
 Entity::~Entity)
@@ -578,12 +635,15 @@ int Entity::entityLight()
 	const int light_y =
 		static_cast<int>(this->y) / 16;
 
+	const int lightLayer = structuralLightmapLayer();
+	auto& floorLightmap = lightmapForPlayableFloor(
+		0, this->playableFloor, map.width, map.height);
 	const auto& light =
-		lightmaps[0][
+		floorLightmap[
 			lightmapIndex3D(
 				light_x,
 				light_y,
-				0,
+				lightLayer,
 				map.width,
 				map.height
 			)
@@ -1952,7 +2012,7 @@ void Entity::effectTimes()
 							{
 								int playerx = std::min(std::max<unsigned int>(1, this->x / 16), map.width - 2);
 								int playery = std::min(std::max<unsigned int>(1, this->y / 16), map.height - 2);
-								if ( map.tiles[0 + playery * MAPLAYERS + playerx * MAPLAYERS * map.height] )
+								if ( map.tileAt(playerx, playery, FLOORLAYER, playableFloor) )
 								{
 									// there's ground..
 									achievementObserver.playerAchievements[skill[2]].checkPathBetweenObjects(this, nullptr, AchievementObserver::BARONY_ACH_FLUTTERSHY);
@@ -6830,9 +6890,9 @@ void Entity::handleEffects(Stat* myStats)
 			int y = this->y / 16;
 			if ( x >= 0 && x < map.width && y >= 0 && y < map.height )
 			{
-				if ( map.tiles[0 + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( map.tileAt(x, y, FLOORLAYER, playableFloor) )
 				{
-					Entity* entity = newEntity(862, 1, map.entities, nullptr); //Web pool entity.
+					Entity* entity = newEntityWithSpatialContext(862, 1, map.entities, nullptr, this); //Web pool entity.
 					if ( entity != NULL )
 					{
 						entity->x = this->x;
@@ -10038,11 +10098,19 @@ returns a list of entities that are occupying the map tile specified at
 
 list_t* checkTileForEntity(int x, int y)
 {
+	return checkTileForEntity(x, y, DEFAULT_PLAYABLE_FLOOR);
+}
+
+list_t* checkTileForEntity(
+	int x,
+	int y,
+	const PlayableFloorId playableFloor)
+{
 	if ( x < 0 || y < 0 || x > 255 || y > 255 )
 	{
 		return nullptr; // invalid grid reference!
 	}
-	return TileEntityList.getTileList(x, y);
+	return TileEntityList.getTileList(x, y, playableFloor);
 
 //	list_t* return_val = NULL;
 //
@@ -10099,6 +10167,15 @@ map tile (x, y)
 
 void getItemsOnTile(int x, int y, list_t** list)
 {
+	getItemsOnTile(x, y, list, DEFAULT_PLAYABLE_FLOOR);
+}
+
+void getItemsOnTile(
+	int x,
+	int y,
+	list_t** list,
+	const PlayableFloorId playableFloor)
+{
 
 	//Take the return value of checkTileForEntity() and sort that list for items.
 	//if( entity->behavior == &actItem )
@@ -10106,7 +10183,7 @@ void getItemsOnTile(int x, int y, list_t** list)
 
 	//Right. First, grab all the entities on the tile.
 	list_t* entities = NULL;
-	entities = checkTileForEntity(x, y);
+	entities = checkTileForEntity(x, y, playableFloor);
 
 	if ( !entities )
 	{
@@ -11699,7 +11776,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 							int c;
 							for ( c = 0; c < i; c++ )
 							{
-								Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Rock/item entity.
+								Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, this); //Rock/item entity.
 								entity->flags[INVISIBLE] = true;
 								entity->flags[UPDATENEEDED] = true;
 								entity->x = hit.entity->x - 4 + local_rng.rand() % 8;
@@ -16769,13 +16846,13 @@ void Entity::attack(int pose, int charge, Entity* target)
 								spawnBang(hit.x - cos(yaw) * 2, hit.y - sin(yaw) * 2, 0);
 								degradePickaxe = false;
 							}
-							else if ( swimmingtiles[map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height]]
-								|| lavatiles[map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height]] )
+							else if ( swimmingtiles[map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor)]
+								|| lavatiles[map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor)] )
 							{
 								// no effect for lava/water tiles.
 								degradePickaxe = false;
 							}
-							else if ( !mapTileDiggable(hit.mapx, hit.mapy) )
+							else if ( !mapTileDiggable(hit.mapx, hit.mapy, playableFloor) )
 							{
 								degradePickaxe = false;
 								spawnBang(hit.x - cos(yaw) * 2, hit.y - sin(yaw) * 2, 0);
@@ -16788,7 +16865,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 								i = 8 + local_rng.rand() % 4;
 								for ( c = 0; c < i; c++ )
 								{
-									Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Rock/item entity.
+									Entity* entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, this); //Rock/item entity.
 									entity->flags[INVISIBLE] = true;
 									entity->flags[UPDATENEEDED] = true;
 									entity->x = hit.mapx * 16 + 4 + local_rng.rand() % 8;
@@ -16811,8 +16888,8 @@ void Entity::attack(int pose, int charge, Entity* target)
 									entity->skill[15] = 1;			 // identified
 								}
 
-								if ( map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height] >= 41
-									&& map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height] <= 49 )
+								const Sint32 dugWallTile = map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor);
+								if ( dugWallTile >= 41 && dugWallTile <= 49 )
 								{
 									steamAchievementClient(player, "BARONY_ACH_BAD_REVIEW");
 								}
@@ -16825,8 +16902,8 @@ void Entity::attack(int pose, int charge, Entity* target)
 									}
 								}
 
-								map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height] = 0;
-								// send wall destroy info to clients
+								map.setTileAt(hit.mapx, hit.mapy, OBSTACLELAYER, 0, playableFloor);
+								// send floor-aware wall destroy info to clients
 								if ( multiplayer == SERVER )
 								{
 									for ( c = 1; c < MAXPLAYERS; c++ )
@@ -16835,17 +16912,32 @@ void Entity::attack(int pose, int charge, Entity* target)
 										{
 											continue;
 										}
-										strcpy((char*)net_packet->data, "WALD");
-										SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
-										SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+										if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+										{
+											strcpy((char*)net_packet->data, "WALD");
+											SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
+											SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+											net_packet->len = 8;
+										}
+										else
+										{
+											strcpy((char*)net_packet->data, "WALZ");
+											SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
+											SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+											SDLNet_Write16((Uint16)playableFloor, &net_packet->data[8]);
+											net_packet->len = 10;
+										}
 										net_packet->address.host = net_clients[c - 1].host;
 										net_packet->address.port = net_clients[c - 1].port;
-										net_packet->len = 8;
 										sendPacketSafe(net_sock, -1, net_packet, c - 1);
 									}
 								}
-								// Update the paths so that monsters know they can walk through it
-								generatePathMaps();
+								// Z2B: path maps are still the legacy Z0 navigation surface.
+								// Do not rebuild that cache for a wall change on another playable floor.
+								if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+								{
+									generatePathMaps();
+								}
 							}
 							int chance = 2 + (myStats->type == GOBLIN ? 2 : 0);
 							if ( local_rng.rand() % chance == 0 && degradePickaxe && myStats->weapon
@@ -31585,6 +31677,7 @@ bool Entity::bEntityTooltipRequiresButtonHeld() const
 {
 	if ( behavior == &actPortal || behavior == &actLadder
 		|| behavior == &actLadderReverse
+		|| behavior == &actPlayableFloorTransition
 		|| behavior == &::actMidGamePortal || behavior == &::actExpansionEndGamePortal
 		|| behavior == &actWinningPortal || behavior == &actCustomPortal )
 	{

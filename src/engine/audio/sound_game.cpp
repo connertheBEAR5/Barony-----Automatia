@@ -159,7 +159,8 @@ FMOD::Channel* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 	{
 		for (int c = 1; c < MAXPLAYERS; c++)
 		{
-			if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, activeRuntimePlayableFloor()) )
 			{
 				continue;
 			}
@@ -526,7 +527,8 @@ OPENAL_SOUND* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 	{
 		for (c = 1; c < MAXPLAYERS; c++)
 		{
-			if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, activeRuntimePlayableFloor()) )
 			{
 				continue;
 			}
@@ -1146,7 +1148,8 @@ void* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 	{
 		for (c = 1; c < MAXPLAYERS; c++)
 		{
-			if ( client_disconnected[c] == true || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, activeRuntimePlayableFloor()) )
 			{
 				continue;
 			}

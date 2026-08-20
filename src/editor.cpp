@@ -67,6 +67,49 @@ real_t prev_y = 0;
 bool duplicatedSprite = false;
 int game = 0;
 
+/*
+ * Stage Z3.3 layer-authored stair tools. These are virtual palette entries
+ * only: they reuse the existing ladder artwork while storing a dedicated
+ * one-layer vertical marker on the entity. The existing Zed drawlayer is the
+ * sole vertical authoring control; there is no separate playable-floor UI.
+ */
+static constexpr int EDITOR_VIRTUAL_Z_STAIR_UP = -10001;
+static constexpr int EDITOR_VIRTUAL_Z_STAIR_DOWN = -10002;
+static constexpr int EDITOR_Z_STAIR_UP_VISUAL = 11;
+static constexpr int EDITOR_Z_STAIR_DOWN_VISUAL = 43;
+
+static bool editorIsVirtualZStair(const int paletteIndex)
+{
+    return paletteIndex == EDITOR_VIRTUAL_Z_STAIR_UP
+        || paletteIndex == EDITOR_VIRTUAL_Z_STAIR_DOWN;
+}
+
+static const char* editorVirtualSpriteName(const int paletteIndex)
+{
+    switch (paletteIndex)
+    {
+        case EDITOR_VIRTUAL_Z_STAIR_UP:
+            return "Z STAIR UP (next map layer)";
+        case EDITOR_VIRTUAL_Z_STAIR_DOWN:
+            return "Z STAIR DOWN (previous map layer)";
+        default:
+            return "";
+    }
+}
+
+static int editorVirtualSpriteVisual(const int paletteIndex)
+{
+    switch (paletteIndex)
+    {
+        case EDITOR_VIRTUAL_Z_STAIR_UP:
+            return EDITOR_Z_STAIR_UP_VISUAL;
+        case EDITOR_VIRTUAL_Z_STAIR_DOWN:
+            return EDITOR_Z_STAIR_DOWN_VISUAL;
+        default:
+            return paletteIndex;
+    }
+}
+
 /* Per-map fog editor fields packed into MAP_FLAG_GENBYTES5/6. */
 char mapFogEnabledText[4] = "[ ]";
 char mapFogDistanceText[8] = "384";
@@ -220,6 +263,13 @@ static void editorPaletteRebuildMatches(int paletteType)
             if ( editorPaletteTextMatches(spriteEditorNameStrings[index], index, filter) )
             {
                 editorPaletteMatches.push_back(index);
+            }
+        }
+        for ( const int virtualIndex : { EDITOR_VIRTUAL_Z_STAIR_UP, EDITOR_VIRTUAL_Z_STAIR_DOWN } )
+        {
+            if ( editorPaletteTextMatches(editorVirtualSpriteName(virtualIndex), virtualIndex, filter) )
+            {
+                editorPaletteMatches.push_back(virtualIndex);
             }
         }
     }
@@ -11907,13 +11957,17 @@ static real_t spriteLayerToEntityZ(int layer)
 	return -16.0 * static_cast<real_t>(layer);
 }
 
-// Convert an entity Z coordinate back into its nearest editor layer.
-static int entityZToSpriteLayer(real_t z)
+// Structural ownership is explicit as of V4.9/ELYR. Editor selection/copy
+// must not infer a sprite layer from model-height Z because decoration offsets
+// and runtime-local Z are independent of the authored layer.
+static int entityAuthoredSpriteLayer(const Entity* entity)
 {
-	const int layer =
-		static_cast<int>(std::round(-z / 16.0));
-
-	return std::max(0, std::min(layer, MAPLAYERS - 1));
+	if ( !entity )
+	{
+		return 0;
+	}
+	return std::clamp(
+		static_cast<int>(entity->authoredMapLayer), 0, MAPLAYERS - 1);
 }
 
 static void clearRoomClipboard()
@@ -12108,7 +12162,7 @@ void editorRoomCopySelection()
 			}
 
 			const int sourceLayer =
-				entityZToSpriteLayer(source->z);
+				entityAuthoredSpriteLayer(source);
 			const int sourceTileX =
 				static_cast<int>(source->x / 16);
 			const int sourceTileY =
@@ -12147,10 +12201,12 @@ void editorRoomCopySelection()
 				source->x - selectedarea_x1 * 16;
 			snapshot->y =
 				source->y - selectedarea_y1 * 16;
+			const int clipboardLocalLayer =
+				sourceLayer - roomSelectBottomLayer;
+			snapshot->authoredMapLayer =
+				static_cast<Sint16>(clipboardLocalLayer);
 			snapshot->z =
-				spriteLayerToEntityZ(
-					sourceLayer - roomSelectBottomLayer
-				);
+				spriteLayerToEntityZ(clipboardLocalLayer);
 			snapshot->persistentID = 0;
 
 			++roomClipboardEntityCount;
@@ -12266,7 +12322,7 @@ void editorRoomPlaceClipboard(
 			}
 
 			const int localLayer =
-				entityZToSpriteLayer(snapshot->z);
+				entityAuthoredSpriteLayer(snapshot);
 			const int destinationLayer =
 				destinationBottomLayer + localLayer;
 			const int destinationTileX =
@@ -12310,6 +12366,7 @@ void editorRoomPlaceClipboard(
 				destinationX * 16 + snapshot->x;
 			pastedEntity->y =
 				destinationY * 16 + snapshot->y;
+			pastedEntity->authoredMapLayer = static_cast<Sint16>(destinationLayer);
 			pastedEntity->z =
 				spriteLayerToEntityZ(destinationLayer);
 			pastedEntity->persistentID = 0;
@@ -12397,7 +12454,7 @@ void editorRoomDeleteSelection()
 			}
 
 			const int entityLayer =
-				entityZToSpriteLayer(entity->z);
+				entityAuthoredSpriteLayer(entity);
 			const int entityX =
 				static_cast<int>(entity->x / 16);
 			const int entityY =
@@ -13121,7 +13178,7 @@ void mainLogic(void)
 				drawlayer = std::min(drawlayer + 1, MAPLAYERS - 1);
 
 				if ( selectedEntity[0]
-					&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+					&& entityAuthoredSpriteLayer(selectedEntity[0]) != drawlayer )
 				{
 					selectedEntity[0] = nullptr;
 				}
@@ -14287,6 +14344,7 @@ int main(int argc, char** argv)
 			}
 		}
 	}
+    clearAdditionalPlayableFloorLightmaps();
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
         lightmaps[c].resize(
@@ -14889,7 +14947,7 @@ int main(int argc, char** argv)
 					{
 						nextnode = node->next;
 						entity = (Entity*)node->element;
-							if ( entityZToSpriteLayer(entity->z) != drawlayer )
+							if ( entityAuthoredSpriteLayer(entity) != drawlayer )
 							{
 								continue;
 							}
@@ -15318,6 +15376,8 @@ int main(int argc, char** argv)
 						editorSpriteType == 13;
 					const bool isColliderDecoration =
 						editorSpriteType == 27;
+					const bool isVerticalLayerStair =
+						entity->verticalLayerTransitionDelta != 0;
 
 					int editor3DModelIndex =
 						entity->sprite;
@@ -15332,11 +15392,16 @@ int main(int argc, char** argv)
 						editor3DModelIndex =
 							entity->colliderDecorationModel;
 					}
+					else if ( isVerticalLayerStair )
+					{
+						editor3DModelIndex = entity->verticalLayerTransitionModel;
+					}
 
 					const bool hasEditorPreviewModel =
 						editor3DModelsEnabled
 						&& (isFloorDecoration
-							|| isColliderDecoration)
+							|| isColliderDecoration
+							|| isVerticalLayerStair)
 						&& editor3DModelIndex >= 0
 						&& static_cast<Uint32>(
 							editor3DModelIndex
@@ -15354,42 +15419,34 @@ int main(int argc, char** argv)
 							editor3DModelIndex;
 
 						if ( isFloorDecoration
-							|| isColliderDecoration )
+							|| isColliderDecoration
+							|| isVerticalLayerStair )
 						{
-							const Sint32 heightOffset =
-								isFloorDecoration
-									? entity->floorDecorationHeightOffset
-									: entity->colliderDecorationHeightOffset;
-							const Sint32 xOffset =
-								isFloorDecoration
-									? entity->floorDecorationXOffset
-									: entity->colliderDecorationXOffset;
-							const Sint32 yOffset =
-								isFloorDecoration
-									? entity->floorDecorationYOffset
-									: entity->colliderDecorationYOffset;
+							const Sint32 heightOffset = isVerticalLayerStair
+								? entity->floorDecorationHeightOffset
+								: (isFloorDecoration ? entity->floorDecorationHeightOffset
+									: entity->colliderDecorationHeightOffset);
+							const Sint32 xOffset = isVerticalLayerStair
+								? entity->floorDecorationXOffset
+								: (isFloorDecoration ? entity->floorDecorationXOffset
+									: entity->colliderDecorationXOffset);
+							const Sint32 yOffset = isVerticalLayerStair
+								? entity->floorDecorationYOffset
+								: (isFloorDecoration ? entity->floorDecorationYOffset
+									: entity->colliderDecorationYOffset);
+							int decorationRotation = isVerticalLayerStair
+								? entity->verticalLayerTransitionRotation
+								: (isFloorDecoration ? entity->floorDecorationRotation
+									: entity->colliderDecorationRotation);
 
-							int decorationRotation =
-								isFloorDecoration
-									? entity->floorDecorationRotation
-									: entity->colliderDecorationRotation;
-
-							entity->z +=
-								7.5
-								- heightOffset * 0.25;
-							entity->x +=
-								xOffset * 0.25;
-							entity->y +=
-								yOffset * 0.25;
-
+							entity->z += 7.5 - heightOffset * 0.25;
+							entity->x += xOffset * 0.25;
+							entity->y += yOffset * 0.25;
 							if ( decorationRotation < 0 )
 							{
 								decorationRotation = 0;
 							}
-
-							entity->yaw =
-								decorationRotation
-								* (PI / 4);
+							entity->yaw = decorationRotation * (PI / 4);
 						}
 
 						++editor3DModelCount;
@@ -24277,7 +24334,7 @@ int main(int argc, char** argv)
 						{
 							// Do not keep a single sprite selected after leaving its layer.
 							if ( selectedEntity[0]
-								&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+								&& entityAuthoredSpriteLayer(selectedEntity[0]) != drawlayer )
 							{
 								selectedEntity[0] = nullptr;
 							}
@@ -24299,7 +24356,7 @@ int main(int argc, char** argv)
 						if ( drawlayer != oldLayer )
 						{
 							if ( selectedEntity[0]
-								&& entityZToSpriteLayer(selectedEntity[0]->z) != drawlayer )
+								&& entityAuthoredSpriteLayer(selectedEntity[0]) != drawlayer )
 							{
 								selectedEntity[0] = nullptr;
 							}
@@ -24824,9 +24881,12 @@ int main(int argc, char** argv)
                 SDL_Surface* image = nullptr;
                 if ( paletteType == 1 )
                 {
-                    if ( objectIndex >= 0 && objectIndex < numsprites )
+                    const int visualIndex = editorIsVirtualZStair(objectIndex)
+                        ? editorVirtualSpriteVisual(objectIndex)
+                        : objectIndex;
+                    if ( visualIndex >= 0 && visualIndex < numsprites )
                     {
-                        image = sprites[objectIndex] != nullptr ? sprites[objectIndex] : sprites[0];
+                        image = sprites[visualIndex] != nullptr ? sprites[visualIndex] : sprites[0];
                     }
                 }
                 else if ( objectIndex >= 0 && objectIndex < numtiles )
@@ -24881,11 +24941,91 @@ int main(int argc, char** argv)
                 const int objectIndex = editorPaletteMatches[editorPaletteSelectedMatch];
                 if ( paletteType == 1 )
                 {
-                    entity = newEntity(objectIndex, 0, map.entities, nullptr);
+                    /*
+                     * Virtual Z stairs behave like ordinary sprite palette
+                     * entries: selecting one always gives the editor a held
+                     * sprite. If the current authored layer cannot host that
+                     * stair direction, move to the nearest valid layer rather
+                     * than rejecting the palette selection.
+                     */
+                    const int originalDrawLayer = drawlayer;
+                    if ( objectIndex == EDITOR_VIRTUAL_Z_STAIR_UP )
+                    {
+                        drawlayer = std::max(
+                            OBSTACLELAYER,
+                            std::min(drawlayer, MAPLAYERS - 3));
+                    }
+                    else if ( objectIndex == EDITOR_VIRTUAL_Z_STAIR_DOWN )
+                    {
+                        drawlayer = std::max(
+                            OBSTACLELAYER + 1,
+                            std::min(drawlayer, MAPLAYERS - 1));
+                    }
+                    if ( drawlayer != originalDrawLayer )
+                    {
+                        reselectEntityGroup();
+                    }
+
+                    const int spriteIndex = editorIsVirtualZStair(objectIndex)
+                        ? editorVirtualSpriteVisual(objectIndex)
+                        : objectIndex;
+                    entity = newEntity(spriteIndex, 0, map.entities, nullptr);
                     selectedEntity[0] = entity;
                     lastSelectedEntity[0] = entity;
                     setSpriteAttributes(entity, nullptr, nullptr);
-                    entity->z = spriteLayerToEntityZ(drawlayer);
+                    entity->authoredMapLayer = static_cast<Sint16>(
+                        std::max(0, std::min(drawlayer, MAPLAYERS - 1)));
+                    entity->z = spriteLayerToEntityZ(entity->authoredMapLayer);
+                    if ( objectIndex == EDITOR_VIRTUAL_Z_STAIR_UP )
+                    {
+                        entity->verticalLayerTransitionDelta = 1;
+                        entity->verticalLayerTransitionModel = 161;
+                        entity->verticalLayerTransitionRotation = 0;
+                        entity->floorDecorationHeightOffset = 0;
+                        entity->floorDecorationXOffset = 0;
+                        entity->floorDecorationYOffset = 0;
+                        entity->floorDecorationDestroyIfNoWall = -1;
+                        entity->playableFloorTransitionEnabled = false;
+                        entity->playableFloorTransitionTargetPersistentID = 0;
+                        if ( drawlayer != originalDrawLayer )
+                        {
+                            snprintf(message, sizeof(message),
+                                "Z STAIR UP selected; switched map layer %d -> %d for valid placement.",
+                                originalDrawLayer, drawlayer);
+                        }
+                        else
+                        {
+                            snprintf(message, sizeof(message),
+                                "Z STAIR UP selected on map layer %d -> %d.",
+                                drawlayer, drawlayer + 1);
+                        }
+                        messagetime = 100;
+                    }
+                    else if ( objectIndex == EDITOR_VIRTUAL_Z_STAIR_DOWN )
+                    {
+                        entity->verticalLayerTransitionDelta = -1;
+                        entity->verticalLayerTransitionModel = 253;
+                        entity->verticalLayerTransitionRotation = 0;
+                        entity->floorDecorationHeightOffset = 0;
+                        entity->floorDecorationXOffset = 0;
+                        entity->floorDecorationYOffset = 0;
+                        entity->floorDecorationDestroyIfNoWall = -1;
+                        entity->playableFloorTransitionEnabled = false;
+                        entity->playableFloorTransitionTargetPersistentID = 0;
+                        if ( drawlayer != originalDrawLayer )
+                        {
+                            snprintf(message, sizeof(message),
+                                "Z STAIR DOWN selected; switched map layer %d -> %d for valid placement.",
+                                originalDrawLayer, drawlayer);
+                        }
+                        else
+                        {
+                            snprintf(message, sizeof(message),
+                                "Z STAIR DOWN selected on map layer %d -> %d.",
+                                drawlayer, drawlayer - 1);
+                        }
+                        messagetime = 100;
+                    }
                     spritepalette = 0;
                 }
                 else
@@ -24911,10 +25051,26 @@ int main(int argc, char** argv)
                 && infoIndex < static_cast<int>(editorPaletteMatches.size()) )
             {
                 const int objectIndex = editorPaletteMatches[infoIndex];
-                const char* displayName = paletteType == 1
-                    ? spriteEditorNameStrings[objectIndex] : tileEditorNameStrings[objectIndex];
-                printTextFormatted(font8x8_bmp, 4, yres - 20, "%s %d: %s",
-                    paletteType == 1 ? "Sprite" : "Tile", objectIndex, displayName);
+                const char* displayName = nullptr;
+                if ( paletteType == 1 )
+                {
+                    displayName = editorIsVirtualZStair(objectIndex)
+                        ? editorVirtualSpriteName(objectIndex)
+                        : spriteEditorNameStrings[objectIndex];
+                }
+                else
+                {
+                    displayName = tileEditorNameStrings[objectIndex];
+                }
+                if ( paletteType == 1 && editorIsVirtualZStair(objectIndex) )
+                {
+                    printTextFormatted(font8x8_bmp, 4, yres - 20, "Layer stair: %s", displayName);
+                }
+                else
+                {
+                    printTextFormatted(font8x8_bmp, 4, yres - 20, "%s %d: %s",
+                        paletteType == 1 ? "Sprite" : "Tile", objectIndex, displayName);
+                }
             }
             else
             {
@@ -25033,7 +25189,7 @@ void reselectEntityGroup()
 		}
 
 		const int entityLayer =
-			entityZToSpriteLayer(entity->z);
+			entityAuthoredSpriteLayer(entity);
 
 		if ( selectedTool == 3 )
 		{

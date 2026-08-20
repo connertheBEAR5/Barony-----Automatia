@@ -806,6 +806,10 @@ void initHologram(Entity* my, Stat* myStats);
 void initMoth(Entity* my, Stat* myStats);
 void initEarthElemental(Entity* my, Stat* myStats);
 void initDuck(Entity* my, Stat* myStats);
+// Resolve a Hermit duck's durable owner slot (duck_owner, with duck_type
+// fallback for older saves) to the current player entity UID. ownerPlayer
+// receives -1 when no durable owner is encoded.
+Entity* resolveHermitDuckOwner(Entity* duck, Stat* duckStats, int* ownerPlayer = nullptr);
 
 //--act*Limb functions--
 void actHumanLimb(Entity* my);

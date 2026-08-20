@@ -100,11 +100,40 @@ static inline int entityZToLightmapLayer(real_t z)
 
 	return clampLightmapLayer(layer);
 }
+
+// Z3.3C: layer-authored playable floors share the legacy global 3D light
+// volume because they are one continuous authored structure. Only legacy
+// explicit FLOR geometry keeps independent raw/smoothed lightmap buffers.
+struct PlayableFloorLightmapBuffers
+{
+	std::vector<vec4_t> lightmap[MAXPLAYERS + 1];
+	std::vector<vec4_t> lightmapSmoothed[MAXPLAYERS + 1];
+};
+
+using AdditionalPlayableFloorLightmaps =
+	std::unordered_map<PlayableFloorId, PlayableFloorLightmapBuffers>;
+
+extern AdditionalPlayableFloorLightmaps additionalPlayableFloorLightmaps;
+
+std::vector<vec4_t>& lightmapForPlayableFloor(
+	int index,
+	PlayableFloorId playableFloor,
+	int width,
+	int height);
+std::vector<vec4_t>& lightmapSmoothedForPlayableFloor(
+	int index,
+	PlayableFloorId playableFloor,
+	int width,
+	int height);
+void clearAdditionalPlayableFloorLightmaps();
+void swapAdditionalPlayableFloorLightmaps(
+	AdditionalPlayableFloorLightmaps& other);
 typedef struct light_t
 {
 	Sint32 x, y;
 	Sint32 radius;
 	Sint32 layer;
+	PlayableFloorId playableFloor;
 	vec4_t* tiles;
 	int index; // which lightmap this actually exists in
 
@@ -176,6 +205,43 @@ light_t* newLight(
 	Sint32 layer,
 	Sint32 radius
 );
+light_t* newLightOnPlayableFloor(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
+	Sint32 layer,
+	Sint32 radius
+);
+
+light_t* lightSphereShadowOnPlayableFloor(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
+	Sint32 layer,
+	Sint32 radius,
+	float r,
+	float g,
+	float b,
+	float a,
+	float exp
+);
+
+light_t* lightSphereOnPlayableFloor(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
+	Sint32 layer,
+	Sint32 radius,
+	float r,
+	float g,
+	float b,
+	float a,
+	float exp
+);
+
 bool loadLights(bool forceLoadBaseDirectory = false);
 light_t* addLight(
 	Sint32 x,
@@ -192,6 +258,16 @@ light_t* addLight(
 	int range_bonus = 0,
 	int index = 0
 );
+light_t* addLightOnPlayableFloor(
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
+	Sint32 layer,
+	const char* name,
+	int range_bonus = 0,
+	int index = 0
+);
+
 struct LightDef {
     int radius = 0;
     float r = 0.f;

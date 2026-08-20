@@ -1935,7 +1935,12 @@ bool playerThrowDuck(const int player, Item* const item, int charge)
 	{
 		playSoundEntity(players[player]->entity, 75, 64);
 
-		Entity* entity = newEntity(itemModel(item), 1, map.entities, nullptr); // thrown item
+		Entity* entity = newEntityWithSpatialContext(
+			itemModel(item),
+			1,
+			map.entities,
+			nullptr,
+			players[player]->entity); // thrown duck inherits the player's floor
 		entity->parent = players[player]->entity->getUID();
 		entity->x = players[player]->entity->x;
 		entity->y = players[player]->entity->y;

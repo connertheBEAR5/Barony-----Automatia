@@ -23,6 +23,7 @@
 #include "ui/MainMenu.hpp"
 #include "prng.hpp"
 #include "mod_tools.hpp"
+#include "draw.hpp"
 
 /*-------------------------------------------------------------------------------
 
@@ -3726,7 +3727,7 @@ void actHudWeapon(Entity* my)
 		{
 			my->x = 6 + HUDWEAPON_MOVEX / 3;
 			my->y = 3;// +HUDWEAPON_MOVEY;
-			my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .1 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ / 10;
+			my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .1 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ / 10;
 			my->yaw = 0.f - camera_shakex2;
 			my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 			my->roll = HUDWEAPON_ROLL;
@@ -3740,7 +3741,7 @@ void actHudWeapon(Entity* my)
 		{
 			my->x = 6 + HUDWEAPON_MOVEX;
 			my->y = 3;// +HUDWEAPON_MOVEY;
-			my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
+			my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
 			my->yaw = 0.f - camera_shakex2;
 			my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 			my->roll = HUDWEAPON_ROLL;
@@ -3749,7 +3750,7 @@ void actHudWeapon(Entity* my)
 		{
 			my->x = 6 + HUDWEAPON_MOVEX;
 			my->y = 3 + HUDWEAPON_MOVEY;
-			my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
+			my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
 			my->yaw = HUDWEAPON_YAW - camera_shakex2;
 			my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 			my->roll = HUDWEAPON_ROLL;
@@ -3815,7 +3816,7 @@ void actHudWeapon(Entity* my)
 			{
 				my->x = 6 + HUDWEAPON_MOVEX;
 				my->y = 1.5 + HUDWEAPON_MOVEY;
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 8 + HUDWEAPON_MOVEZ;
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 8 + HUDWEAPON_MOVEZ;
 				my->yaw = -.05 - camera_shakex2;
 				my->pitch = HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 				my->roll = HUDWEAPON_ROLL;
@@ -3824,7 +3825,7 @@ void actHudWeapon(Entity* my)
 			{
 				my->x = 6 + HUDWEAPON_MOVEX + 3 * (itemCategory(item) == POTION) + 5;
 				my->y = 3 + HUDWEAPON_MOVEY - 3 * (itemCategory(item) == POTION) + 2;
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION)
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION)
 					+ 2;
 				my->yaw = HUDWEAPON_YAW - camera_shakex2;
 				my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f + -.25;
@@ -3842,7 +3843,7 @@ void actHudWeapon(Entity* my)
 			{
 				my->x = 6 + HUDWEAPON_MOVEX;
 				my->y = 3 + HUDWEAPON_MOVEY;
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
 				my->yaw = HUDWEAPON_YAW - camera_shakex2;
 				my->pitch = HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 				my->roll = HUDWEAPON_ROLL;
@@ -3852,7 +3853,7 @@ void actHudWeapon(Entity* my)
 				my->x = 6 + HUDWEAPON_MOVEX + 5;
 				my->y = 3 + HUDWEAPON_MOVEY - 0.5 + 1;
 				//my->flags[OVERDRAW] = false;
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ;
 				my->yaw = HUDWEAPON_YAW - camera_shakex2;
 				my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 				if ( my->sprite == items[TOOL_WHIP].fpindex + 1 )
@@ -3876,7 +3877,7 @@ void actHudWeapon(Entity* my)
 			{
 				my->x = 6 + HUDWEAPON_MOVEX + 3 * (itemCategory(item) == POTION);
 				my->y = 3 + HUDWEAPON_MOVEY - 3 * (itemCategory(item) == POTION);
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION);
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION);
 				my->yaw = HUDWEAPON_YAW - camera_shakex2;
 				my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 				my->roll = HUDWEAPON_ROLL + (PI / 2) * (itemCategory(item) == POTION);
@@ -3932,7 +3933,7 @@ void actHudWeapon(Entity* my)
 			{
 				my->x = 6 + HUDWEAPON_MOVEX + 3 * (itemCategory(item) == POTION);
 				my->y = 3 + HUDWEAPON_MOVEY - 3 * (itemCategory(item) == POTION);
-				my->z = (cameras[HUDWEAPON_PLAYERNUM].z * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION);
+				my->z = (getCameraHudLocalZ(HUDWEAPON_PLAYERNUM) * .5 - players[HUDWEAPON_PLAYERNUM]->entity->z) + 7 + HUDWEAPON_MOVEZ - 3 * (itemCategory(item) == POTION);
 				my->yaw = HUDWEAPON_YAW - camera_shakex2;
 				my->pitch = defaultpitch + HUDWEAPON_PITCH - camera_shakey2 / 200.f;
 				my->roll = HUDWEAPON_ROLL + (PI / 2) * (itemCategory(item) == POTION);
@@ -4875,7 +4876,7 @@ void actHudShield(Entity* my)
 	// set entity position
 	my->x = 7 + HUDSHIELD_MOVEX;
 	my->y = -3.5 + HUDSHIELD_MOVEY;
-	my->z = 6 + HUDSHIELD_MOVEZ + (cameras[HUDSHIELD_PLAYERNUM].z * .5 - players[HUDSHIELD_PLAYERNUM]->entity->z);
+	my->z = 6 + HUDSHIELD_MOVEZ + (getCameraHudLocalZ(HUDSHIELD_PLAYERNUM) * .5 - players[HUDSHIELD_PLAYERNUM]->entity->z);
 	if ( !my->flags[OVERDRAW] )
 	{
 		my->x += 32;
@@ -5666,7 +5667,7 @@ void actHudAdditional(Entity* my)
 	// set entity position
 	my->x = 7 + HUDSHIELD_MOVEX;
 	my->y = -3.5 + HUDSHIELD_MOVEY;
-	my->z = 6 + HUDSHIELD_MOVEZ + (cameras[HUDSHIELD_PLAYERNUM].z * .5 - players[HUDSHIELD_PLAYERNUM]->entity->z);
+	my->z = 6 + HUDSHIELD_MOVEZ + (getCameraHudLocalZ(HUDSHIELD_PLAYERNUM) * .5 - players[HUDSHIELD_PLAYERNUM]->entity->z);
 	my->yaw = HUDSHIELD_YAW - camera_shakex2 - PI / 3;
 	my->pitch = HUDSHIELD_PITCH - camera_shakey2 / 200.f;
 	my->roll = HUDSHIELD_ROLL;

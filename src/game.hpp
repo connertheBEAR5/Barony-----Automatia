@@ -12,6 +12,7 @@
 #pragma once
 
 #include <vector>
+#include <cstdint>
 #include <chrono>
 #include <string>
 #include <memory>
@@ -59,7 +60,7 @@ bool persistentStoryNPCNodeWasSeen(const int player, const std::string& mapName,
 class Entity;
 
 #define DEBUG 1
-#define ENTITY_PACKET_LENGTH 48
+#define ENTITY_PACKET_LENGTH 58
 #define NET_PACKET_SIZE 2048
 
 // impulses (bound keystrokes, mousestrokes, and joystick/game controller strokes) //TODO: Player-by-player basis.
@@ -612,6 +613,13 @@ void receiveClientPersistentTileState(
     Sint32 layer,
     Sint32 tile
 );
+void receiveClientPersistentTileState(
+    Sint32 x,
+    Sint32 y,
+    Sint32 layer,
+    Sint32 tile,
+    PlayableFloorId playableFloor
+);
 void receiveClientPersistentPedestalState(
     Sint32 persistentID,
     Sint32 hasOrb,
@@ -632,6 +640,16 @@ void receiveClientPersistentChestState(
     Sint32 oldHealth,
     Sint32 voidState
 );
+/*
+ * Returns true when the persistent-world registry already owns the
+ * Hermit's unique duck outside the player's inventory. This suppresses
+ * the vanilla per-level fallback spawn so persistence cannot duplicate it.
+ */
+bool automatiaPersistentHermitDuckExists(
+    int playerIndex,
+    int duckColor
+);
+
 /*
  * Restores surviving original monster/NPC HP, MP and world position
  * after species initialization. Living non-mechanical creatures heal
@@ -697,6 +715,38 @@ bool importAutomatiaPersistentMinimapSnapshotForFloor(
 void syncClientPersistentMinimap(bool force);
 void resetClientPersistentMinimapSync();
 void restoreAutomatiaPersistentMinimapForLocalPlayer();
+
+// Stage Z3 same-map playable-floor transition transaction. The endpoint is an
+// authored entity carrying PZLV ZTRN metadata. This moves only the selected
+// player; follower/pathfinding traversal remains Stage Z4.
+bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(
+    int playerIndex,
+    Entity* sourceEndpoint
+);
+
+// Applies an authoritative floor placement locally. Used by the Z3 PZTR
+// server packet and by reconnect/save restoration once nonzero floors are legal.
+bool applyAutomatiaPlayableFloorPlacement(
+    int playerIndex,
+    PlayableFloorId playableFloor,
+    std::uint64_t spatialRevision,
+    real_t x,
+    real_t y,
+    real_t z,
+    real_t yaw,
+    real_t pitch,
+    real_t roll,
+    bool requirePassable = true
+);
+
+// Drops a non-levitating player through a missing authored floor to the nearest
+// lower valid playable floor at the same X/Y. Returns the number of floors
+// crossed; damage policy remains in actPlayer.
+bool fallAutomatiaPlayerToLowerPlayableFloor(
+    int playerIndex,
+    int& floorsFallen
+);
+
 bool loadAutomatiaPersistentWorldSave(
     const char* path,
     const std::string& sessionId,
@@ -977,6 +1027,7 @@ void serverSpawnGibForClient(Entity* gib);
 void actLadder(Entity* my);
 void actLadderReverse(Entity* my);
 void actLadderUp(Entity* my);
+void actPlayableFloorTransition(Entity* my);
 void actPortal(Entity* my);
 void actWinningPortal(Entity* my);
 void actFlame(Entity* my);
@@ -1111,6 +1162,7 @@ int mapLevel(int player, int radius, int _x, int _y, bool usingSpell);
 void mapLevel2(int player);
 void mapFoodOnLevel(int player);
 bool mapTileDiggable(const int x, const int y);
+bool mapTileDiggable(const int x, const int y, PlayableFloorId playableFloor);
 
 class TileEntityListHandler
 {

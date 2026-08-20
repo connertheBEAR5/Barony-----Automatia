@@ -72,6 +72,10 @@ namespace
 	constexpr Uint8 kEntityArchetypeEditorLight = 2;
 	constexpr Uint8 kEntityArchetypePlayer = 3;
 	constexpr std::size_t kEntityArchetypeOffset = 47;
+	constexpr std::size_t kEntityPlayableFloorOffset = 48;
+	constexpr std::size_t kEntitySpatialRevisionLowOffset = 50;
+	constexpr std::size_t kEntitySpatialRevisionHighOffset = 54;
+	constexpr std::size_t kEntityFloorScopedPacketLength = 58;
 	constexpr std::size_t kReconnectTokenLength = ReconnectToken::length;
 	constexpr int kHeloChunkHeaderSize = 12;
 	constexpr int kHeloChunkPayloadMax = 900;
@@ -595,6 +599,53 @@ namespace
 			return kEntityArchetypeNone;
 		}
 		return net_packet->data[kEntityArchetypeOffset];
+	}
+
+	static bool receivedEntityHasPlayableFloorScope()
+	{
+		return net_packet
+			&& net_packet->len >= static_cast<int>(kEntityFloorScopedPacketLength);
+	}
+
+	static SpatialSpawnContext receivedEntitySpatialContext()
+	{
+		if (!receivedEntityHasPlayableFloorScope())
+		{
+			return SpatialSpawnContext{};
+		}
+		SpatialSpawnContext context;
+		context.playableFloor = static_cast<PlayableFloorId>(
+			SDLNet_Read16(&net_packet->data[kEntityPlayableFloorOffset]));
+		const std::uint64_t low = SDLNet_Read32(
+			&net_packet->data[kEntitySpatialRevisionLowOffset]);
+		const std::uint64_t high = SDLNet_Read32(
+			&net_packet->data[kEntitySpatialRevisionHighOffset]);
+		context.spatialRevision = low | (high << 32U);
+		// Network packets carry the gameplay floor, not a separate authored-layer
+		// field. Dynamic received entities therefore use that floor as their
+		// structural render/spawn layer. Map-authored fixtures keep ELYR locally.
+		context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor);
+		return context;
+	}
+
+	static SpatialSpawnContext receivedSpatialContextAt(std::size_t floorOffset)
+	{
+		if (!net_packet
+			|| net_packet->len < static_cast<int>(floorOffset + 10U))
+		{
+			// Pre-Z2C visual packets are ground-floor-only by definition.
+			return SpatialSpawnContext{};
+		}
+		SpatialSpawnContext context;
+		context.playableFloor = static_cast<PlayableFloorId>(
+			SDLNet_Read16(&net_packet->data[floorOffset]));
+		const std::uint64_t low = SDLNet_Read32(
+			&net_packet->data[floorOffset + 2U]);
+		const std::uint64_t high = SDLNet_Read32(
+			&net_packet->data[floorOffset + 6U]);
+		context.spatialRevision = low | (high << 32U);
+		context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor);
+		return context;
 	}
 
 	static Entity* findUnboundMapFixtureForEntityUpdate(Uint8 archetype)
@@ -2411,46 +2462,33 @@ bool clientApplyAutomatiaLateJoinPositionAfterPlayerInit()
 		return false;
 	}
 
-	Entity* entity = players[clientnum]->entity;
-	if (placement.playableFloor != DEFAULT_PLAYABLE_FLOOR)
+	if (!map.playableFloors.hasFloor(placement.playableFloor)
+		|| map.tilesForPlayableFloor(placement.playableFloor) == nullptr)
 	{
 		printlog(
-			"[Playable Z] Runtime STRT requested floor %d during Z1; "
-			"nonzero floor activation remains gated until Z2.",
+			"[Playable Z] Runtime STRT requested unavailable floor %d.",
 			static_cast<int>(placement.playableFloor));
 		return false;
 	}
-	entity->playableFloor = placement.playableFloor;
-	entity->spatialRevision = placement.spatialRevision;
-	entity->x = placement.x;
-	entity->y = placement.y;
-	entity->z = placement.z;
-	entity->yaw = placement.yaw;
-	entity->pitch = placement.pitch;
-	entity->roll = placement.roll;
-	entity->new_x = placement.x;
-	entity->new_y = placement.y;
-	entity->new_z = placement.z;
-	entity->new_yaw = placement.yaw;
-	entity->new_pitch = placement.pitch;
-	entity->new_roll = placement.roll;
-	entity->vel_x = 0.0;
-	entity->vel_y = 0.0;
-	entity->vel_z = 0.0;
-	entity->lerp_ox = placement.x;
-	entity->lerp_oy = placement.y;
-	entity->bNeedsRenderPositionInit = true;
-	for (Entity* bodypart : entity->bodyparts)
+	if (!applyAutomatiaPlayableFloorPlacement(
+			clientnum,
+			placement.playableFloor,
+			placement.spatialRevision,
+			placement.x,
+			placement.y,
+			placement.z,
+			placement.yaw,
+			placement.pitch,
+			placement.roll,
+			true))
 	{
-		if (bodypart)
-		{
-			bodypart->inheritSpatialContextFrom(entity);
-			bodypart->bNeedsRenderPositionInit = true;
-		}
+		printlog(
+			"[Playable Z] Runtime STRT could not restore player %d on floor %d.",
+			clientnum,
+			static_cast<int>(placement.playableFloor));
+		return false;
 	}
 
-	players[clientnum]->player_last_x = placement.x;
-	players[clientnum]->player_last_y = placement.y;
 	cameras[clientnum].x = placement.x / 16.0;
 	cameras[clientnum].y = placement.y / 16.0;
 	cameras[clientnum].ang = placement.yaw;
@@ -3150,6 +3188,8 @@ struct PendingTunnelSpawn
     real_t y = 0.0;
     real_t z = 0.0;
     real_t yaw = 0.0;
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    std::uint64_t spatialRevision = 0;
 };
 
 static PendingTunnelSpawn pendingTunnelSpawn;
@@ -3190,54 +3230,19 @@ bool applyPendingTunnelSpawn()
     Entity* playerEntity =
         players[clientnum]->entity;
 
-    playerEntity->x =
-        pendingTunnelSpawn.x;
-
-    playerEntity->y =
-        pendingTunnelSpawn.y;
-
-    playerEntity->z =
-        pendingTunnelSpawn.z;
-
-    playerEntity->yaw =
-        pendingTunnelSpawn.yaw;
-
-    playerEntity->new_x =
-        playerEntity->x;
-
-    playerEntity->new_y =
-        playerEntity->y;
-
-    playerEntity->new_z =
-        playerEntity->z;
-
-    playerEntity->new_yaw =
-        playerEntity->yaw;
-
-    playerEntity->vel_x = 0.0;
-    playerEntity->vel_y = 0.0;
-    playerEntity->vel_z = 0.0;
-
-    playerEntity->bNeedsRenderPositionInit = true;
-
-    for ( Entity* bodypart : playerEntity->bodyparts )
+    if (!applyAutomatiaPlayableFloorPlacement(
+            clientnum,
+            pendingTunnelSpawn.playableFloor,
+            pendingTunnelSpawn.spatialRevision,
+            pendingTunnelSpawn.x,
+            pendingTunnelSpawn.y,
+            pendingTunnelSpawn.z,
+            pendingTunnelSpawn.yaw,
+            playerEntity->pitch,
+            playerEntity->roll,
+            true))
     {
-        if ( bodypart )
-        {
-            bodypart->bNeedsRenderPositionInit = true;
-        }
-    }
-
-    for ( node_t* node = map.entities->first; node != nullptr; node = node->next )
-    {
-        Entity* entity = static_cast<Entity*>(node->element);
-        if ( entity && entity->behavior == &actSpriteNametag )
-        {
-            if ( entity->parent == playerEntity->getUID() )
-            {
-                entity->bNeedsRenderPositionInit = true;
-            }
-        }
+        return false;
     }
 
     temporarilyDisableDithering();
@@ -3755,6 +3760,34 @@ bool serverPlayerCanReceiveActiveMapUpdates(int playerIndex)
 	return g_lateJoinTransactions[playerIndex].mayReceiveLiveSimulation()
 		|| phase == LateJoinSnapshotTransaction::Phase::Receiving
 		|| phase == LateJoinSnapshotTransaction::Phase::Complete;
+}
+
+
+bool serverPlayerCanReceivePlayableFloorUpdates(
+	int playerIndex,
+	PlayableFloorId playableFloor)
+{
+	if (!serverPlayerCanReceiveActiveMapUpdates(playerIndex))
+	{
+		return false;
+	}
+	const MapInstance* activeInstance = worldState.activeInstance();
+	if (!activeInstance)
+	{
+		return false;
+	}
+	Entity* receiver = worldState.playerEntityFor(
+		activeInstance->key(), playerIndex);
+	return receiver
+		&& playableFloorsShareRuntimeScope(
+			receiver->playableFloor, playableFloor);
+}
+
+bool serverPlayerCanReceiveEntityUpdates(int playerIndex, const Entity* entity)
+{
+	return entity
+		&& serverPlayerCanReceivePlayableFloorUpdates(
+			playerIndex, entity->playableFloor);
 }
 
 bool serverPlayerCanReceiveGameplayUpdates(int playerIndex)
@@ -4952,7 +4985,10 @@ static bool sendServerLateJoinStart(int playerIndex)
         if (client_disconnected[visiblePlayer]
             || !players[visiblePlayer]
             || !players[visiblePlayer]->entity
-            || !players[visiblePlayer]->worldInstance.matches(identity))
+            || !players[visiblePlayer]->worldInstance.matches(identity)
+            || !playableFloorsShareRuntimeScope(
+                players[visiblePlayer]->entity->playableFloor,
+                authoritativePlayer->playableFloor))
         {
             continue;
         }
@@ -5052,7 +5088,7 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		return;
 	}
-    if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+    if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 	{
 		return;
 	}
@@ -5109,6 +5145,15 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	}
 	net_packet->data[kEntityArchetypeOffset] =
 		networkEntityArchetype(entity);
+	SDLNet_Write16(
+		static_cast<Uint16>(entity->playableFloor),
+		&net_packet->data[kEntityPlayableFloorOffset]);
+	SDLNet_Write32(
+		static_cast<Uint32>(entity->spatialRevision & 0xffffffffULL),
+		&net_packet->data[kEntitySpatialRevisionLowOffset]);
+	SDLNet_Write32(
+		static_cast<Uint32>(entity->spatialRevision >> 32U),
+		&net_packet->data[kEntitySpatialRevisionHighOffset]);
 	net_packet->address.host = net_clients[c - 1].host;
 	net_packet->address.port = net_clients[c - 1].port;
 	net_packet->len = ENTITY_PACKET_LENGTH;
@@ -5199,7 +5244,7 @@ void serverUpdateBodypartIDs(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5251,7 +5296,7 @@ void serverUpdateEntityBodypart(Entity* entity, int bodypart)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5310,7 +5355,7 @@ void serverUpdateEntitySprite(Entity* entity)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5341,7 +5386,7 @@ void serverUpdateEntitySkill(Entity* entity, int skill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5377,7 +5422,7 @@ void serverUpdateEntityStatFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5409,7 +5454,7 @@ void serverUpdateEntityFSkill(Entity* entity, int fskill)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5441,7 +5486,7 @@ void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSpri
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5470,14 +5515,24 @@ Spawns misc particle effects for all clients at given coordinates.
 void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int particleType, 
 	int particleSprite, Uint32 duration, Uint32 optionalData, Uint32 optionalUID)
 {
-	int c;
+	serverSpawnMiscParticlesAtLocationWithSpatialContext(
+		x, y, z, particleType, particleSprite, activeRuntimeSpatialContext(),
+		duration, optionalData, optionalUID);
+}
+
+void serverSpawnMiscParticlesAtLocationWithSpatialContext(
+	Sint16 x, Sint16 y, Sint16 z, int particleType, int particleSprite,
+	const SpatialSpawnContext& spatialContext, Uint32 duration,
+	Uint32 optionalData, Uint32 optionalUID)
+{
 	if ( multiplayer != SERVER )
 	{
 		return;
 	}
-	for ( c = 1; c < MAXPLAYERS; c++ )
+	for ( int c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+		if ( !serverPlayerCanReceivePlayableFloorUpdates(
+			c, spatialContext.playableFloor) )
 		{
 			continue;
 		}
@@ -5490,7 +5545,16 @@ void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int partic
 		SDLNet_Write32(duration, &net_packet->data[13]);
 		SDLNet_Write32(optionalData, &net_packet->data[17]);
 		SDLNet_Write32(optionalUID, &net_packet->data[21]);
-		net_packet->len = 25;
+		SDLNet_Write16(
+			static_cast<Uint16>(spatialContext.playableFloor),
+			&net_packet->data[25]);
+		SDLNet_Write32(
+			static_cast<Uint32>(spatialContext.spatialRevision & 0xffffffffULL),
+			&net_packet->data[27]);
+		SDLNet_Write32(
+			static_cast<Uint32>(spatialContext.spatialRevision >> 32U),
+			&net_packet->data[31]);
+		net_packet->len = 35;
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
 		sendPacketSafe(net_sock, -1, net_packet, c - 1);
@@ -5514,7 +5578,7 @@ void serverUpdateEntityFlag(Entity* entity, int flag)
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
 		{
 			continue;
 		}
@@ -5538,7 +5602,7 @@ void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint
 	}
 	for ( c = 1; c < MAXPLAYERS; c++ )
 	{
-        if ( !serverPlayerCanReceiveActiveMapUpdates(c) )
+        if ( !serverPlayerCanReceivePlayableFloorUpdates(c, activeRuntimePlayableFloor()) )
 		{
 			continue;
 		}
@@ -5548,9 +5612,19 @@ void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint
 		SDLNet_Write32(flagSet, &net_packet->data[8]);
 		SDLNet_Write32(flagRemove, &net_packet->data[12]);
 		net_packet->data[16] = layer;
+		const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
+		SDLNet_Write16(
+			static_cast<Uint16>(spatialContext.playableFloor),
+			&net_packet->data[17]);
+		SDLNet_Write32(
+			static_cast<Uint32>(spatialContext.spatialRevision & 0xffffffffULL),
+			&net_packet->data[19]);
+		SDLNet_Write32(
+			static_cast<Uint32>(spatialContext.spatialRevision >> 32U),
+			&net_packet->data[23]);
 		net_packet->address.host = net_clients[c - 1].host;
 		net_packet->address.port = net_clients[c - 1].port;
-		net_packet->len = 17;
+		net_packet->len = 27;
 		sendPacketSafe(net_sock, -1, net_packet, c - 1);
 	}
 }
@@ -6812,6 +6886,26 @@ Entity* receiveEntity(Entity* entity)
 	entity->lastupdate = ticks;
 	entity->lastupdateserver = (Uint32)SDLNet_Read32(&net_packet->data[36]);
 	entity->setUID((int)SDLNet_Read32(&net_packet->data[4])); // remember who I am
+	const SpatialSpawnContext receivedSpatialContext =
+		receivedEntitySpatialContext();
+	/*
+	 * Stage Z3 turns spatialRevision into the stale-packet barrier it was
+	 * reserved for in Z2A. A reliable PZTR floor transition may overtake an
+	 * older queued ENTU from the source floor; never allow that packet to move
+	 * the entity back across floors.
+	 */
+	if (!newentity
+		&& (receivedSpatialContext.spatialRevision < entity->spatialRevision
+			|| (receivedSpatialContext.spatialRevision == entity->spatialRevision
+				&& receivedSpatialContext.playableFloor != entity->playableFloor)))
+	{
+		return entity;
+	}
+	if (entity->playableFloor != receivedSpatialContext.playableFloor)
+	{
+		entity->setPlayableFloor(receivedSpatialContext.playableFloor);
+	}
+	entity->spatialRevision = receivedSpatialContext.spatialRevision;
 	entity->new_x = ((Sint16)SDLNet_Read16(&net_packet->data[10])) / 32.0;
 	entity->new_y = ((Sint16)SDLNet_Read16(&net_packet->data[12])) / 32.0;
 	if (!excludeForAnimation && (newentity || monsterType != SCARAB)) {
@@ -9316,6 +9410,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn an explosion
 	{'EXPL', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(10));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9324,6 +9420,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn an explosion, custom sprite
 	{'EXPS', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(12));
 		Uint16 sprite = (Uint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9333,6 +9431,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn a bang sprite
 	{'BANG', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(10));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9341,6 +9441,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn a gib
 	{'SPGB', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(13));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9356,6 +9458,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn a sleep Z
 	{'SLEZ', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(10));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9364,6 +9468,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn a poof
 	{ 'PUFF', []() {
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(12));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9373,6 +9479,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn a misc sprite like the sleep Z
 	{'SLEM', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(12));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9382,6 +9490,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 
 	// spawn magical effect particles
 	{'MAGE', [](){
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(14));
 		Sint16 x = (Sint16)SDLNet_Read16(&net_packet->data[4]);
 		Sint16 y = (Sint16)SDLNet_Read16(&net_packet->data[6]);
 		Sint16 z = (Sint16)SDLNet_Read16(&net_packet->data[8]);
@@ -9395,6 +9505,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		if ( Entity* entity = uidToEntity(uid) )
 		{
 			Uint32 sprite = (Uint32)SDLNet_Read32(&net_packet->data[8]);
+			ScopedPlayableFloorRuntimeContext spatialScope(entity->spatialSpawnContext());
 			spawnMagicEffectParticlesBell(entity, sprite);
 		}
 	} },
@@ -9404,6 +9515,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Entity *entity = uidToEntity((int)SDLNet_Read32(&net_packet->data[4]));
 		if ( entity )
 		{
+			ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(
+				entity->spatialSpawnContext());
 			int particleType = static_cast<int>(net_packet->data[8]);
 			int sprite = static_cast<int>(SDLNet_Read16(&net_packet->data[9]));
 			switch ( particleType )
@@ -9809,6 +9922,18 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Sint16 particle_z = static_cast<Sint16>(SDLNet_Read16(&net_packet->data[8]));
 		int particleType = static_cast<int>(net_packet->data[10]);
 		int sprite = static_cast<int>(SDLNet_Read16(&net_packet->data[11]));
+		SpatialSpawnContext spatialContext;
+		if (net_packet->len >= 35)
+		{
+			spatialContext.playableFloor = static_cast<PlayableFloorId>(
+				SDLNet_Read16(&net_packet->data[25]));
+			const std::uint64_t low = SDLNet_Read32(&net_packet->data[27]);
+			const std::uint64_t high = SDLNet_Read32(&net_packet->data[31]);
+			spatialContext.spatialRevision = low | (high << 32U);
+			spatialContext.authoredMapLayer =
+				static_cast<std::int16_t>(spatialContext.playableFloor);
+		}
+		ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(spatialContext);
 		//messagePlayer(1, "recv, %d, %d, %d, type: %d", particle_x, particle_y, particle_z, particleType);
 		switch ( particleType )
 		{
@@ -10080,7 +10205,11 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		{
 			displayType = DamageGibDisplayType::DMG_GIB_GUARD;
 		}
-		spawnDamageGib(uidToEntity(uid), dmg, gib, displayType);
+		if ( Entity* parent = uidToEntity(uid) )
+		{
+			ScopedPlayableFloorRuntimeContext spatialScope(parent->spatialSpawnContext());
+			spawnDamageGib(parent, dmg, gib, displayType);
+		}
 	}},
 
 	// ping
@@ -10869,6 +10998,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		    data.data());
 	}},
 
+	// add light on an explicit playable floor (Stage Z2C).
+	{'ALIZ', [](){
+        std::vector<char> data;
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(
+			SDLNet_Read16(&net_packet->data[8]));
+        const auto len = SDLNet_Read16(&net_packet->data[10]);
+        data.resize(len);
+        stringCopy(data.data(), (const char*)&net_packet->data[12], data.size(), len);
+		addLightOnPlayableFloor(
+		    SDLNet_Read16(&net_packet->data[4]),
+		    SDLNet_Read16(&net_packet->data[6]),
+			playableFloor,
+			0,
+		    data.data());
+	}},
+
 	// create wall
 	{'WALC', [](){
 		int y = SDLNet_Read16(&net_packet->data[6]);
@@ -10893,6 +11038,29 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		{
 			map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
 		}
+	}},
+
+	// destroy wall on an explicit playable floor (Stage Z2B).
+	{'WALZ', [](){
+		if ( net_packet->len < 10 )
+		{
+			printlog("[NET][Playable Z] refusing malformed WALZ packet.\n");
+			return;
+		}
+		const int y = SDLNet_Read16(&net_packet->data[6]);
+		const int x = SDLNet_Read16(&net_packet->data[4]);
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(SDLNet_Read16(&net_packet->data[8]));
+		if ( x < 0 || x >= map.width || y < 0 || y >= map.height )
+		{
+			return;
+		}
+		if ( playableFloor == DEFAULT_PLAYABLE_FLOOR
+			|| map.tilesForPlayableFloor(playableFloor) == nullptr )
+		{
+			printlog("[NET][Playable Z] refusing WALZ for unavailable floor %d.\n", static_cast<int>(playableFloor));
+			return;
+		}
+		map.setTileAt(x, y, OBSTACLELAYER, 0, playableFloor);
 	}},
 
 	// destroy wall + ceiling
@@ -12633,6 +12801,36 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
             )
         );
     }},
+	    // Floor-qualified authoritative persistent tile override.
+    {'PWTZ', []()
+    {
+        if ( net_packet->len < 22 )
+        {
+            printlog(
+                "[Persistent World MP][Playable Z] Ignored malformed PWTZ packet with length %d.",
+                net_packet->len
+            );
+            return;
+        }
+
+        const PlayableFloorId playableFloor =
+            static_cast<PlayableFloorId>(SDLNet_Read16(&net_packet->data[4]));
+        if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+        {
+            printlog(
+                "[Persistent World MP][Playable Z] Ignored PWTZ packet for legacy floor Z0."
+            );
+            return;
+        }
+
+        receiveClientPersistentTileState(
+            static_cast<Sint32>(SDLNet_Read32(&net_packet->data[6])),
+            static_cast<Sint32>(SDLNet_Read32(&net_packet->data[10])),
+            static_cast<Sint32>(SDLNet_Read32(&net_packet->data[14])),
+            static_cast<Sint32>(SDLNet_Read32(&net_packet->data[18])),
+            playableFloor
+        );
+    }},
 	    // Authoritative persistent orb-pedestal state.
     {'PWPD', []()
     {
@@ -12860,6 +13058,68 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 );
 		changeLevel();
 	}},
+	// Stage Z3 server-authoritative same-map playable-floor transition.
+	// This packet intentionally reaches every client on the active MapInstance:
+	// source-floor peers must immediately hide the departing player, while the
+	// moving client and destination-floor peers adopt the new spatial revision.
+	{'PZTR', [](){
+		if (net_packet->len < 43)
+		{
+			printlog(
+				"[Playable Z] Ignored malformed PZTR packet with length %d.",
+				net_packet->len);
+			return;
+		}
+
+		const int playerIndex = static_cast<int>(net_packet->data[4]);
+		const Uint32 playerUid = SDLNet_Read32(&net_packet->data[5]);
+		if (playerIndex < 0 || playerIndex >= MAXPLAYERS
+			|| !players[playerIndex] || !players[playerIndex]->entity)
+		{
+			// A destination-floor peer may not have received this remote player yet;
+			// the ordinary floor-scoped ENTU stream will create it shortly.
+			return;
+		}
+		Entity* entity = players[playerIndex]->entity;
+		if (entity->getUID() != playerUid)
+		{
+			printlog(
+				"[Playable Z] Ignored PZTR for player %d with stale UID %u (current %u).",
+				playerIndex, playerUid, entity->getUID());
+			return;
+		}
+
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(
+			SDLNet_Read16(&net_packet->data[9]));
+		const std::uint64_t revisionLow = SDLNet_Read32(&net_packet->data[11]);
+		const std::uint64_t revisionHigh = SDLNet_Read32(&net_packet->data[15]);
+		const std::uint64_t spatialRevision =
+			revisionLow | (revisionHigh << 32U);
+		const real_t x = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[19])) / 32.0;
+		const real_t y = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[23])) / 32.0;
+		const real_t z = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[27])) / 32.0;
+		const real_t yaw = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[31])) / 256.0;
+		const real_t pitch = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[35])) / 256.0;
+		const real_t roll = static_cast<Sint32>(
+			SDLNet_Read32(&net_packet->data[39])) / 256.0;
+
+		if (!applyAutomatiaPlayableFloorPlacement(
+				playerIndex, playableFloor, spatialRevision,
+				x, y, z, yaw, pitch, roll, true))
+		{
+			printlog(
+				"[Playable Z] Client rejected PZTR player %d floor=%d revision=%llu.",
+				playerIndex,
+				static_cast<int>(playableFloor),
+				static_cast<unsigned long long>(spatialRevision));
+		}
+	}},
+
 	// Server-authoritative spawn position after a custom tunnel load.
 	{'TNSP', [](){
 		if ( net_packet->len < 20 )
@@ -12899,14 +13159,30 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 				)
 			) / 256.0;
 
+		pendingTunnelSpawn.playableFloor = DEFAULT_PLAYABLE_FLOOR;
+		pendingTunnelSpawn.spatialRevision = 0;
+		if (net_packet->len >= 30)
+		{
+			pendingTunnelSpawn.playableFloor =
+				static_cast<PlayableFloorId>(
+					SDLNet_Read16(&net_packet->data[20]));
+			const std::uint64_t low =
+				SDLNet_Read32(&net_packet->data[22]);
+			const std::uint64_t high =
+				SDLNet_Read32(&net_packet->data[26]);
+			pendingTunnelSpawn.spatialRevision = low | (high << 32U);
+		}
+
 		pendingTunnelSpawn.active = true;
 
 		printlog(
-			"[Custom Tunnel] Client received server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f.",
+			"[Custom Tunnel] Client received server tunnel spawn: x=%.2f y=%.2f z=%.2f yaw=%.2f floor=%d revision=%llu.",
 			pendingTunnelSpawn.x,
 			pendingTunnelSpawn.y,
 			pendingTunnelSpawn.z,
-			pendingTunnelSpawn.yaw
+			pendingTunnelSpawn.yaw,
+			static_cast<int>(pendingTunnelSpawn.playableFloor),
+			static_cast<unsigned long long>(pendingTunnelSpawn.spatialRevision)
 		);
 
 		applyPendingTunnelSpawn();
@@ -14579,21 +14855,21 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Uint32 flagSet = SDLNet_Read32(&net_packet->data[8]);
 		Uint32 flagRemove = SDLNet_Read32(&net_packet->data[12]);
 		int layer = net_packet->data[16];
+		PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+		if (net_packet->len >= 27)
+		{
+			playableFloor = static_cast<PlayableFloorId>(
+				SDLNet_Read16(&net_packet->data[17]));
+		}
 		if ( x >= 0 && x < map.width && y >= 0 && y < map.height && layer >= 0 && layer < MAPLAYERS )
 		{
 			if ( flagSet )
 			{
-				if ( !map.tileHasAttribute(x, y, layer, flagSet) )
-				{
-					map.tileAttributes[layer + (y * MAPLAYERS) + (x * MAPLAYERS * map.height)] |= flagSet;
-				}
+				map.setTileAttribute(x, y, layer, flagSet, true, playableFloor);
 			}
 			if ( flagRemove )
 			{
-				if ( map.tileHasAttribute(x, y, layer, flagRemove) )
-				{
-					map.tileAttributes[layer + (y * MAPLAYERS) + (x * MAPLAYERS * map.height)] &= ~flagRemove;
-				}
+				map.setTileAttribute(x, y, layer, flagRemove, false, playableFloor);
 			}
 		}
 	}},
@@ -14613,6 +14889,8 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	} },
 
 	{ 'FOCI',[]() {
+		ScopedPlayableFloorRuntimeContext spatialScope(
+			receivedSpatialContextAt(24));
 		Uint32 uid = SDLNet_Read32(&net_packet->data[4]);
 		real_t x = SDLNet_Read16(&net_packet->data[8]) / 32.0;
 		real_t y = SDLNet_Read16(&net_packet->data[10]) / 32.0;
@@ -18504,6 +18782,10 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			return;
 		}
 		const int duck = net_packet->data[5];
+		if ( automatiaPersistentHermitDuckExists(player, duck) )
+		{
+			return;
+		}
 		players[player]->mechanics.pendingDucks.push_back(
 			std::make_pair(duck, ticks + (3 + (local_rng.rand() % 30)) * TICKS_PER_SECOND));
 	} },

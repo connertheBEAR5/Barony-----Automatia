@@ -187,6 +187,10 @@ void Entity::actGate()
 			for ( node = currentList->first; node != nullptr; node = node->next )
 			{
 				Entity* entity = (Entity*)node->element;
+				if ( entity && entity->playableFloor != playableFloor )
+				{
+					continue;
+				}
 				if ( entity == this || (entity->flags[PASSABLE] && entity->behavior != &actDeathGhost)
 					|| entity->behavior == &actDoorFrame || entity->behavior == &::actGate )
 				{

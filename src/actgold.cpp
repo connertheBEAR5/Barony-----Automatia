@@ -49,6 +49,10 @@ void actGoldBag(Entity* my)
 			for ( node = map.entities->first; node != nullptr; node = node->next )
 			{
 				Entity* entity = (Entity*)node->element;
+				if ( !entity || entity->playableFloor != my->playableFloor )
+				{
+					continue;
+				}
 				if ( entity->isBoulderSprite() )   // boulder.vox
 				{
 					return;
@@ -211,7 +215,7 @@ void actGoldBag(Entity* my)
 		{
 			if ( my->x >= 0 && my->y >= 0 && my->x < map.width << 4 && my->y < map.height << 4 )
 			{
-				const int tile = map.tiles[(int)(my->y / 16) * MAPLAYERS + (int)(my->x / 16) * MAPLAYERS * map.height];
+				const Sint32 tile = map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), FLOORLAYER, my->playableFloor);
 				if ( tile )
 				{
 					onground = true;

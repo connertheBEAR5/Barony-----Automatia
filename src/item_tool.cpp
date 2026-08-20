@@ -1972,6 +1972,13 @@ void Item::applyDuck(Uint32 parentUid, real_t x, real_t y, Entity* hitentity, bo
 	}
 	if ( summon )
 	{
+		/*
+		 * TOOL_DUCK becomes a runtime DUCK_SMALL monster immediately. Mark it
+		 * as an explicitly persistent dynamic monster so leaving and revisiting
+		 * a persistent-world map preserves the duck when it is not in the
+		 * player's inventory.
+		 */
+		summon->persistentDynamicMonster = true;
 		Stat* summonedStats = summon->getStats();
 		Entity* parent = uidToEntity(parentUid);
 		if ( parent && parent->behavior == &actPlayer )
@@ -2043,11 +2050,21 @@ void Item::applyDuck(Uint32 parentUid, real_t x, real_t y, Entity* hitentity, bo
 			summonedStats->setAttribute("duck_bless", std::to_string(beatitude));
 			summonedStats->setAttribute("skip_obituary", "1");
 			summonedStats->MISC_FLAGS[STAT_FLAG_MONSTER_DISABLE_HC_SCALING] = 1;
-			int playerOwner = this->getDuckPlayer();
+			const int playerOwner = this->getDuckPlayer();
 			if ( playerOwner >= 0 && playerOwner < MAXPLAYERS )
 			{
-				summonedStats->leader_uid = achievementObserver.playerUids[playerOwner];
-				summon->parent = achievementObserver.playerUids[playerOwner];
+				// Keep the Hermit relationship durable across map unload/reload.
+				// leader_uid is transient; duck_owner is the stable player slot
+				// already encoded by TOOL_DUCK appearance.
+				summonedStats->setAttribute("duck_owner", std::to_string(playerOwner));
+				Entity* ownerEntity = players[playerOwner]
+					? players[playerOwner]->entity
+					: nullptr;
+				const Uint32 ownerUid = ownerEntity
+					? ownerEntity->getUID()
+					: achievementObserver.playerUids[playerOwner];
+				summonedStats->leader_uid = ownerUid;
+				summon->parent = ownerUid;
 			}
 		}
 	}

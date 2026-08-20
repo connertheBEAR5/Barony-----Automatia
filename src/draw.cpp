@@ -38,6 +38,7 @@ static int entityZToEditorLayer(real_t z)
 	return std::max(0, std::min(layer, MAPLAYERS - 1));
 }
 #endif
+
 const std::unordered_map<Mesh::BufferType, int> Mesh::ElementsPerVBO = {
 	{Mesh::BufferType::Position, 3},
 	{Mesh::BufferType::TexCoord, 2},
@@ -226,6 +227,53 @@ bool resetMapVisibilityState(
 
 	return success;
 }
+
+PlayableFloorId getCameraPlayableFloor(const view_t* camera)
+{
+	if ( !camera )
+	{
+		return DEFAULT_PLAYABLE_FLOOR;
+	}
+#ifndef EDITOR
+	for ( int player = 0; player < MAXPLAYERS; ++player )
+	{
+		if ( camera == &cameras[player]
+			&& players[player]
+			&& players[player]->entity )
+		{
+			return players[player]->entity->playableFloor;
+		}
+	}
+#endif
+	return DEFAULT_PLAYABLE_FLOOR;
+}
+
+real_t getCameraHudLocalZ(int player)
+{
+#ifndef EDITOR
+	if ( player >= 0
+		&& player < MAXPLAYERS
+		&& players[player]
+		&& players[player]->entity )
+	{
+		const PlayableFloorId floor =
+			players[player]->entity->playableFloor;
+		if ( map.playableFloorUsesAuthoredLayerStack(floor) )
+		{
+			/*
+			 * The authored-stack floor offset belongs to world-space camera
+			 * placement. First-person/HUD entities are authored in camera-local
+			 * coordinates and must continue to see the legacy local camera Z.
+			 */
+			return cameras[player].z
+				+ 32.0 * static_cast<real_t>(floor);
+		}
+		return cameras[player].z;
+	}
+#endif
+	return 0.0;
+}
+
 static Shader gearShader;
 static Shader lineShader;
 static Mesh lineMesh = {
@@ -2319,6 +2367,10 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
         const int posx = (int)camera.x;
         const int posy = (int)camera.y; // integer coordinates
         const int cameraLayer = cameraStructuralLayer(camera);
+        const int activeFloorLayer = std::min(
+            MAPLAYERS - 1, cameraLayer + FLOORLAYER);
+        const int activeObstacleLayer = std::min(
+            MAPLAYERS - 1, cameraLayer + OBSTACLELAYER);
 		if ( posx == 0 && posy == 0 ) { return result; } // camera not initialized
         const real_t fracx = camera.x - posx;
         const real_t fracy = camera.y - posy; // fraction coordinates
@@ -2398,7 +2450,8 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
 							&& !(z > 0 && tiles[z + iny2 * MAPLAYERS + inx2 * MAPLAYERS * mh] == TRANSPARENT_TILE)) {
                             continue;
                         }
-                        auto& l = lights[iny2 + inx2 * mh];
+                        auto& l = lights[lightmapIndex3D(
+                            inx2, iny2, cameraLayer, mw, mh)];
                         const auto light = std::max({0.f, l.x, l.y, l.z});
 						bool visible = light > 1.f;
 						if ( !visible && !ins.fillWithColor )
@@ -2412,7 +2465,7 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
 						}
                         
                         // update minimap
-                        if (d < raycastMaxDist && z == OBSTACLELAYER) {
+                        if (d < raycastMaxDist && z == activeObstacleLayer) {
                             if ( visible ) {
                                 // wall space
                                 if (WriteOutsSequentially) {
@@ -2436,9 +2489,10 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
                                 }
                             }
                         }
-                    } else if (z == OBSTACLELAYER) {
+                    } else if (z == activeObstacleLayer) {
                         // update minimap to show empty region
-                        auto& l = lights[iny2 + inx2 * mh];
+                        auto& l = lights[lightmapIndex3D(
+                            inx2, iny2, cameraLayer, mw, mh)];
                         const auto light = std::max({0.f, l.x, l.y, l.z});
 						bool visible = light > 1.f;
 						if ( !visible && !ins.fillWithColor )
@@ -2453,7 +2507,7 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
 
                         if (d < raycastMaxDist ) {
                             if ( visible && 
-								tiles[iny * MAPLAYERS + inx * MAPLAYERS * mh] ) {
+								tiles[activeFloorLayer + iny * MAPLAYERS + inx * MAPLAYERS * mh] ) {
                                 // walkable space
                                 if (WriteOutsSequentially) {
 									if ( ins.fillWithColor )
@@ -2535,15 +2589,25 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
     auto t = std::chrono::high_resolution_clock::now();
 
     // shoot the rays
-    const vec4_t* lightmap = lightmaps[0].data();
+	const PlayableFloorId renderFloor = getCameraPlayableFloor(&camera);
 	int player = -1;
+	int lightmapIndex = 0;
     for (int c = 0; c < MAXPLAYERS; ++c) {
         if (&camera == &cameras[c]) {
-            lightmap = lightmaps[c + 1].data();
+			lightmapIndex = c + 1;
 			player = c;
             break;
         }
     }
+	auto& rayLightmap = lightmapForPlayableFloor(
+		lightmapIndex, renderFloor, map.width, map.height);
+	const vec4_t* lightmap = rayLightmap.data();
+
+	const Sint32* renderTiles = map.tilesForPlayableFloorRendering(renderFloor);
+	if ( !renderTiles )
+	{
+		return;
+	}
 
 #ifndef EDITOR
 	raycastMaxDist = 16.0;
@@ -2564,7 +2628,7 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
         std::vector<std::future<std::vector<outs_t>>> tasks;
         for (int x = 0; x < NumRays; x += NumRaysPerJob) {
             tasks.emplace_back(std::async(std::launch::async, shoot_ray,
-                ins_t{x, (int)map.width, (int)map.height, camera, map.tiles, lightmap, minimap, fillWithColor}));
+                ins_t{x, (int)map.width, (int)map.height, camera, renderTiles, lightmap, minimap, fillWithColor}));
         }
         for (int x = (int)tasks.size() - 1; x >= 0; --x) {
             auto out_list = tasks[x].get();
@@ -2575,7 +2639,7 @@ void raycast(const view_t& camera, Sint8 (*minimap)[MINIMAP_MAX_DIMENSION], bool
         }
     } else {
         for (int x = 0; x < NumRays; x += NumRaysPerJob) {
-            auto out_list = shoot_ray(ins_t{x, (int)map.width, (int)map.height, camera, map.tiles, lightmap, minimap, fillWithColor});
+            auto out_list = shoot_ray(ins_t{x, (int)map.width, (int)map.height, camera, renderTiles, lightmap, minimap, fillWithColor});
             for (auto& it : out_list) {
                 minimap[it.y][it.x] = it.value;
             }
@@ -2636,6 +2700,7 @@ void drawEntities3D(view_t* camera, int mode)
 			break;
 		}
 	}
+	const PlayableFloorId cameraFloor = getCameraPlayableFloor(camera);
     
     const bool ditheringDisabled = ticks - ditherDisabledTime < TICKS_PER_SECOND;
 
@@ -2653,6 +2718,32 @@ void drawEntities3D(view_t* camera, int mode)
             }
         }
         
+#ifndef EDITOR
+		if ( currentPlayerViewport >= 0 )
+		{
+			const bool authoredStackVisual =
+				map.playableFloorUsesAuthoredLayerStack(cameraFloor)
+				&& map.playableFloorUsesAuthoredLayerStack(entity->playableFloor);
+			const bool entityVisibleOnCameraFloor = authoredStackVisual
+				? entity->playableFloor <= cameraFloor
+				: entity->playableFloor == cameraFloor;
+			if ( !entityVisibleOnCameraFloor )
+			{
+				const bool viewportGlobal = entity->flags[OVERDRAW]
+					|| entity->behavior == &actHudWeapon
+					|| entity->behavior == &actHudShield
+					|| entity->behavior == &actHudAdditional
+					|| entity->behavior == &actHudAdditional2
+					|| entity->behavior == &actHudArrowModel
+					|| entity->behavior == &actLeftHandMagic
+					|| entity->behavior == &actRightHandMagic;
+				if ( !viewportGlobal )
+				{
+					continue;
+				}
+			}
+		}
+#endif
         if ( entity->flags[INVISIBLE] && !entity->flags[INVISIBLE_DITHER] )
         {
             continue;
@@ -3359,6 +3450,7 @@ void drawEntities2D(long camx, long camy)
 		pos.w = TEXTURESIZE;
 		pos.h = TEXTURESIZE;
 		//ttfPrintText(ttf8, 100, 100, inputstr); debug any errant text input in editor
+
 
 		if ( entity->sprite >= 0 && entity->sprite < numsprites && entity->sprite < spriteEditorNameStrings.size() )
 		{
@@ -4433,79 +4525,129 @@ bool behindCamera(const view_t& camera, real_t x, real_t y)
     return dot < c;
 }
 
-static inline bool testTileOccludes(const map_t& map, int index) {
-    assert(index >= 0 && index <= map.width * map.height * MAPLAYERS - MAPLAYERS);
-    const Uint64& t0 = *(Uint64*)&map.tiles[index];
-    const Uint32& t1 = *(Uint32*)&map.tiles[index + 2];
-    return (t0 & 0xffffffff00000000) // is floor != 0
-		&& (t0 & 0x00000000ffffffff) // is obstacle layer != 0
-		&& t1 // is ceiling != 0
-		&& (((t0 & 0xffffffff00000000) >> 32) != TRANSPARENT_TILE)  // is floor != TRANSPARENT_TILE
-		&& ((t0 & 0x00000000ffffffff) != TRANSPARENT_TILE)  // is obstacle layer != TRANSPARENT_TILE
-		&& (t1 != TRANSPARENT_TILE); // is ceiling != TRANSPARENT_TILE
-}
 static constexpr int LEGACY_OCCLUSION_LAYER_COUNT = 3;
-static constexpr Uint32 LEGACY_OCCLUSION_LAYER_MASK =
-	(static_cast<Uint32>(1u) << LEGACY_OCCLUSION_LAYER_COUNT) - 1u;
-static constexpr Uint32 LAYERED_OCCLUSION_LAYER_MASK =
-	~LEGACY_OCCLUSION_LAYER_MASK;
+
+static inline int rendererLegacyBandStart(
+    const map_t& map,
+    PlayableFloorId playableFloor)
+{
+    if ( map.playableFloorUsesAuthoredLayerStack(playableFloor) )
+    {
+        return std::max(
+            0,
+            std::min(
+                static_cast<int>(playableFloor),
+                MAPLAYERS - LEGACY_OCCLUSION_LAYER_COUNT
+            )
+        );
+    }
+    return 0;
+}
+
+static inline Uint32 rendererLegacyBandMask(
+    const map_t& map,
+    PlayableFloorId playableFloor)
+{
+    const int firstLayer = rendererLegacyBandStart(map, playableFloor);
+    Uint32 mask = 0;
+    for ( int offset = 0; offset < LEGACY_OCCLUSION_LAYER_COUNT; ++offset )
+    {
+        mask |= static_cast<Uint32>(1u) << (firstLayer + offset);
+    }
+    return mask;
+}
+
+static inline bool testTileOccludes(
+    const map_t& map,
+    int index,
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR)
+{
+    assert(index >= 0 && index <= map.width * map.height * MAPLAYERS - MAPLAYERS);
+    const Sint32* floorTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    if ( !floorTiles )
+    {
+        return true;
+    }
+
+    /*
+     * Z3.3D: the legacy 2D occlusion ray follows the camera's active authored
+     * structural band. Floor N views authored layers N/N+1/N+2 as its
+     * floor/wall/ceiling instead of permanently testing 0/1/2.
+     */
+    const int firstLayer = rendererLegacyBandStart(map, playableFloor);
+    const Sint32 floorTile = floorTiles[index + firstLayer + FLOORLAYER];
+    const Sint32 obstacleTile = floorTiles[index + firstLayer + OBSTACLELAYER];
+    const Sint32 ceilingTile = floorTiles[index + firstLayer + CEILINGLAYER];
+
+    return floorTile != 0
+        && obstacleTile != 0
+        && ceilingTile != 0
+        && floorTile != TRANSPARENT_TILE
+        && obstacleTile != TRANSPARENT_TILE
+        && ceilingTile != TRANSPARENT_TILE;
+}
 
 static Uint32 rendererColumnOcclusionMask(
-	const map_t& map,
-	int x,
-	int y
+    const map_t& map,
+    int x,
+    int y,
+    PlayableFloorId playableFloor
 )
 {
-	if ( x < 0
-		|| y < 0
-		|| x >= map.width
-		|| y >= map.height )
-	{
-		return LAYERED_OCCLUSION_LAYER_MASK;
-	}
+    const Uint32 legacyBandMask = rendererLegacyBandMask(map, playableFloor);
+    const Uint32 layeredMask = ~legacyBandMask;
+    if ( x < 0
+        || y < 0
+        || x >= map.width
+        || y >= map.height )
+    {
+        return layeredMask;
+    }
 
-	const int baseIndex =
-		y * MAPLAYERS
-		+ x * MAPLAYERS * map.height;
+    const int baseIndex =
+        y * MAPLAYERS
+        + x * MAPLAYERS * map.height;
+    const Sint32* floorTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    if ( !floorTiles )
+    {
+        return layeredMask;
+    }
 
-	Uint32 mask = 0;
+    Uint32 mask = 0;
 
-	/*
-	 * Layers 0, 1 and 2 are deliberately excluded here. They use Barony's
-	 * original expanded 2D camera.vismap, which is stable in long corridors and
-	 * one-tile-high rooms. The layered ray is only responsible for layers 3+.
-	 *
-	 * A solid tile in upper layer L occupies the vertical band from L - 1 to L.
-	 * Mark only that physical band as blocked. Do not hide every layer above it:
-	 * a short lower wall must not erase a taller tower or upper room behind it.
-	 */
-	for ( int layer = LEGACY_OCCLUSION_LAYER_COUNT;
-		layer < MAPLAYERS;
-		++layer )
-	{
-		const Sint32 tile =
-			map.tiles[baseIndex + layer];
+    /*
+     * camera.vismap owns the active three-layer band. Every other absolute
+     * authored layer keeps the exact height-aware ray mask, including lower
+     * structure that remains visible beneath an upstairs player.
+     */
+    for ( int layer = 0; layer < MAPLAYERS; ++layer )
+    {
+        const Uint32 layerBit = static_cast<Uint32>(1u) << layer;
+        if ( legacyBandMask & layerBit )
+        {
+            continue;
+        }
 
-		if ( tile == 0
-			|| tile == TRANSPARENT_TILE )
-		{
-			continue;
-		}
+        const Sint32 tile = floorTiles[baseIndex + layer];
+        if ( tile == 0 || tile == TRANSPARENT_TILE )
+        {
+            continue;
+        }
 
-		mask |=
-			static_cast<Uint32>(1u)
-				<< layer;
+        mask |= layerBit;
 
-		const int lowerBand = layer - 1;
-		if ( lowerBand >= LEGACY_OCCLUSION_LAYER_COUNT )
-		{
-			mask |=
-				static_cast<Uint32>(1u)
-					<< lowerBand;
-		}
-	}
+        const int lowerBand = layer - 1;
+        if ( lowerBand >= 0 )
+        {
+            const Uint32 lowerBit = static_cast<Uint32>(1u) << lowerBand;
+            if ( !(legacyBandMask & lowerBit) )
+            {
+                mask |= lowerBit;
+            }
+        }
+    }
 
-	return mask;
+    return mask & layeredMask;
 }
 
 static Uint32 rendererVisibilityRay(
@@ -4513,7 +4655,8 @@ static Uint32 rendererVisibilityRay(
 	int startX,
 	int startY,
 	int destinationX,
-	int destinationY
+	int destinationY,
+	PlayableFloorId playableFloor
 )
 {
 	int x = startX;
@@ -4569,7 +4712,8 @@ static Uint32 rendererVisibilityRay(
 			rendererColumnOcclusionMask(
 				map,
 				x,
-				y
+				y,
+				playableFloor
 			);
 	}
 
@@ -4586,6 +4730,7 @@ static void updateRendererVisibilityMap(
 			&camera
 		];
 
+	const PlayableFloorId playableFloor = getCameraPlayableFloor(&camera);
 	const size_t tileCount =
 		static_cast<size_t>(map.width)
 		* static_cast<size_t>(map.height);
@@ -4648,16 +4793,20 @@ static void updateRendererVisibilityMap(
 
 			/*
 			 * Hybrid visibility:
-			 * - layers 0..2 use the proven legacy 2D occlusion map, including its
-			 *   conservative one-tile expansion;
-			 * - layers 3..31 use the exact per-height ray mask.
+			 * - the camera floor's three-layer structural band uses the proven
+			 *   legacy 2D occlusion map and its conservative expansion;
+			 * - every other authored layer uses the exact per-height ray mask.
 			 *
 			 * This restores long-hallway floor/wall/ceiling rendering without
 			 * allowing a ground-floor wall to cull a tower above it.
 			 */
+			const Uint32 legacyBandMask =
+				rendererLegacyBandMask(map, playableFloor);
+			const Uint32 layeredBandMask = ~legacyBandMask;
+
 			const Uint32 legacyVisibility =
 				camera.vismap[index]
-					? LEGACY_OCCLUSION_LAYER_MASK
+					? legacyBandMask
 					: 0u;
 
 			const Uint32 layeredVisibility =
@@ -4666,13 +4815,14 @@ static void updateRendererVisibilityMap(
 					cameraX,
 					cameraY,
 					x,
-					y
+					y,
+					playableFloor
 				)
-				& LAYERED_OCCLUSION_LAYER_MASK;
+				& layeredBandMask;
 
 			state.visibleLayers[index] =
 				legacyVisibility
-				| layeredVisibility;
+					| layeredVisibility;
 		}
 	}
 
@@ -4941,6 +5091,11 @@ bool rendererColumnHasVisibleGeometry(
 		y * MAPLAYERS
 		+ x * MAPLAYERS
 			* map.height;
+	const Sint32* floorTiles = map.tilesForPlayableFloorRendering(getCameraPlayableFloor(&camera));
+	if ( !floorTiles )
+	{
+		return false;
+	}
 
 	Uint32 geometryLayers = 0;
 
@@ -4949,7 +5104,7 @@ bool rendererColumnHasVisibleGeometry(
 		++layer )
 	{
 		const Sint32 tile =
-			map.tiles[
+			floorTiles[
 				baseIndex + layer
 			];
 
@@ -5035,9 +5190,21 @@ void occlusionCulling(map_t& map, view_t& camera)
 #endif
 
 	const int size = map.width * map.height;
+	const PlayableFloorId playableFloor = getCameraPlayableFloor(&camera);
+	/*
+	 * Z3.3E correctness gate: the legacy 2D/height-mask occlusion solver was
+	 * designed around the base 0/1/2 structural band. On an authored-stack
+	 * upper floor it can incorrectly erase lower cumulative geometry while the
+	 * player looks around. Until the later full 3D occlusion pass, keep upper
+	 * authored floors conservative and submit all layers; the depth buffer still
+	 * provides correct visual hiding.
+	 */
+	const bool authoredStackUpperFloor =
+		playableFloor > DEFAULT_PLAYABLE_FLOOR
+		&& map.playableFloorUsesAuthoredLayerStack(playableFloor);
 	bool rendererCullingDisabled =
-	*disabled;
-if ( *disabled )
+		*disabled || authoredStackUpperFloor;
+if ( rendererCullingDisabled )
 {
 	memset(
 		camera.vismap,
@@ -5060,13 +5227,7 @@ if ( *disabled )
     // don't do culling if camera in wall
 if ( *disableInWalls )
 {
-	if ( map.tiles[
-		OBSTACLELAYER
-			+ camy * MAPLAYERS
-			+ camx
-				* MAPLAYERS
-				* map.height
-	] != 0 )
+	if ( map.tileAt(camx, camy, OBSTACLELAYER, playableFloor) != 0 )
 	{
 		memset(
 			camera.vismap,
@@ -5121,7 +5282,7 @@ if ( *disableInWalls )
                 const int x = std::min(std::max(0, camx + foo), (int)map.width - 1);
                 const int y = std::min(std::max(0, camy + bar), (int)map.height - 1);
                 const int xyindex = y * hoff + x * woff;
-                if (testTileOccludes(map, xyindex)) {
+                if (testTileOccludes(map, xyindex, playableFloor)) {
                     continue;
                 }
                 const int dx = u - x;
@@ -5141,7 +5302,7 @@ if ( *disableInWalls )
                             a -= dxabs;
                             index -= hoff * sdy;
                         }
-                        if (testTileOccludes(map, index)) {
+                        if (testTileOccludes(map, index, playableFloor)) {
                             wallhit = true;
                             break;
                         }
@@ -5156,7 +5317,7 @@ if ( *disableInWalls )
                             a -= dyabs;
                             index -= woff * sdx;
                         }
-                        if (testTileOccludes(map, index)) {
+                        if (testTileOccludes(map, index, playableFloor)) {
                             wallhit = true;
                             break;
                         }
@@ -5174,28 +5335,28 @@ if ( *disableInWalls )
         if (camera.vismap[v + u * map.height]) {
             if (u < map.width - 1) { // check tiles to the east
                 if (closed.emplace(u + 1, v).second) {
-                    if (!testTileOccludes(map, uvindex + woff)) {
+                    if (!testTileOccludes(map, uvindex + woff, playableFloor)) {
                         open.emplace_back(u + 1, v);
                     }
                 }
             }
             if (v < map.height - 1) { // check tiles to the south
                 if (closed.emplace(u, v + 1).second) {
-                    if (!testTileOccludes(map, uvindex + hoff)) {
+                    if (!testTileOccludes(map, uvindex + hoff, playableFloor)) {
                         open.emplace_back(u, v + 1);
                     }
                 }
             }
             if (u > 0) { // check tiles to the west
                 if (closed.emplace(u - 1, v).second) {
-                    if (!testTileOccludes(map, uvindex - woff)) {
+                    if (!testTileOccludes(map, uvindex - woff, playableFloor)) {
                         open.emplace_back(u - 1, v);
                     }
                 }
             }
             if (v > 0) { // check tiles to the north
                 if (closed.emplace(u, v - 1).second) {
-                    if (!testTileOccludes(map, uvindex - hoff)) {
+                    if (!testTileOccludes(map, uvindex - hoff, playableFloor)) {
                         open.emplace_back(u, v - 1);
                     }
                 }

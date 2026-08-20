@@ -1036,7 +1036,7 @@ void actItem(Entity* my)
 	bool overWater = false;
 	if (my->x >= 0 && my->y >= 0 && my->x < map.width << 4 && my->y < map.height << 4)
 	{
-		const int tile = map.tiles[(int)(my->y / 16) * MAPLAYERS + (int)(my->x / 16) * MAPLAYERS * map.height];
+		const Sint32 tile = map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), FLOORLAYER, my->playableFloor);
 		overWater = (tile >= 22 && tile < 30) || (tile >= 64 && tile < 72);
 	}
 
@@ -1145,7 +1145,7 @@ void actItem(Entity* my)
 	{
 		if ( my->x >= 0 && my->y >= 0 && my->x < map.width << 4 && my->y < map.height << 4 )
 		{
-			const int tile = map.tiles[(int)(my->y / 16) * MAPLAYERS + (int)(my->x / 16) * MAPLAYERS * map.height];
+			const Sint32 tile = map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), FLOORLAYER, my->playableFloor);
 			if ( tile || (my->sprite >= 610 && my->sprite <= 613) || (my->sprite >= 1206 && my->sprite <= 1210) )
 			{
 				onground = true;

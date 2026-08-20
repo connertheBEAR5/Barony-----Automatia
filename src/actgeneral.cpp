@@ -1373,7 +1373,7 @@ void Entity::colliderOnDestroy()
 						{
 							for ( int i = 1; i < MAXPLAYERS; ++i )
 							{
-								if ( !client_disconnected[i] )
+								if ( serverPlayerCanReceiveEntityUpdates(i, entity) )
 								{
 									strcpy((char*)net_packet->data, "BREK");
 									SDLNet_Write32(static_cast<Uint32>(entity->getUID()), &net_packet->data[4]);
@@ -1412,7 +1412,7 @@ void Entity::colliderOnDestroy()
 									{
 										for ( int i = 1; i < MAXPLAYERS; ++i )
 										{
-											if ( !client_disconnected[i] )
+											if ( serverPlayerCanReceiveEntityUpdates(i, ent) )
 											{
 												strcpy((char*)net_packet->data, "BREK");
 												SDLNet_Write32(static_cast<Uint32>(ent->getUID()), &net_packet->data[4]);
@@ -1453,7 +1453,7 @@ void Entity::colliderOnDestroy()
 						{
 							for ( int i = 1; i < MAXPLAYERS; ++i )
 							{
-								if ( !client_disconnected[i] )
+								if ( serverPlayerCanReceiveEntityUpdates(i, entity) )
 								{
 									strcpy((char*)net_packet->data, "BREK");
 									SDLNet_Write32(static_cast<Uint32>(entity->getUID()), &net_packet->data[4]);
@@ -1534,8 +1534,12 @@ Entity* Entity::createBreakableCollider(int colliderDamageType, real_t _x, real_
 	{
 		return nullptr;
 	}
-	int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-	if ( !map.tiles[mapIndex] || swimmingtiles[map.tiles[mapIndex]] || lavatiles[map.tiles[mapIndex]] )
+	const SpatialSpawnContext colliderContext = parent
+		? parent->spatialSpawnContext()
+		: activeRuntimeSpatialContext();
+	const PlayableFloorId colliderFloor = colliderContext.playableFloor;
+	const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, colliderFloor);
+	if ( !floorTile || swimmingtiles[floorTile] || lavatiles[floorTile] )
 	{
 		return nullptr;
 	}
@@ -1547,7 +1551,8 @@ Entity* Entity::createBreakableCollider(int colliderDamageType, real_t _x, real_
 	}
 
 
-	Entity* breakable = newEntity(-1, 1, map.entities, nullptr);
+	Entity* breakable = newEntityWithSpatialContext(
+		-1, 1, map.entities, nullptr, colliderContext);
 	breakable->x = x * 16.0 + 8.0;
 	breakable->y = y * 16.0 + 8.0;
 	std::vector<std::pair<int, int>> coords =
@@ -2008,7 +2013,7 @@ void actColliderDecoration(Entity* my)
 		{
 			int x = static_cast<int>(my->x) >> 4;
 			int y = static_cast<int>(my->y) >> 4;
-			if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 			{
 				//messagePlayer(0, MESSAGE_DEBUG, "[Collider]: Destroyed self at x: %d, y: %d", x, y);
 				my->removeLightField();
@@ -2490,7 +2495,7 @@ void actFloorDecoration(Entity* my)
 			int y = pair.second;
 			if ( x >= 0 && x < map.width && y >= 0 && y < map.height )
 			{
-				if ( !map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 				{
 					list_RemoveNode(my->mynode);
 					return;
@@ -5574,7 +5579,7 @@ void spawnMagicEffectParticlesBell(Entity* my, Uint32 sprite)
 	{
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceiveEntityUpdates(c, my) )
 			{
 				continue;
 			}
@@ -6431,7 +6436,10 @@ void actBell(Entity* my)
 						{
 							if ( child->x >= 0 && child->y >= 0 && child->x < map.width << 4 && child->y < map.height << 4 )
 							{
-								const int tile = map.tiles[(int)(child->y / 16) * MAPLAYERS + (int)(child->x / 16) * MAPLAYERS * map.height];
+								const int tile = map.tileAt(
+									static_cast<int>(child->x / 16),
+									static_cast<int>(child->y / 16),
+									FLOORLAYER, child->playableFloor);
 								if ( tile )
 								{
 									onground = true;
@@ -6742,7 +6750,7 @@ void actBell(Entity* my)
 						{
 							for ( int i = 1; i < MAXPLAYERS; ++i )
 							{
-								if ( !client_disconnected[i] )
+								if ( serverPlayerCanReceiveEntityUpdates(i, entity) )
 								{
 									strcpy((char*)net_packet->data, "BELI");
 									SDLNet_Write32(static_cast<Uint32>(entity->getUID()), &net_packet->data[4]);
@@ -6774,7 +6782,7 @@ void actBell(Entity* my)
 						{
 							for ( int i = 1; i < MAXPLAYERS; ++i )
 							{
-								if ( !client_disconnected[i] )
+								if ( serverPlayerCanReceiveEntityUpdates(i, entity) )
 								{
 									strcpy((char*)net_packet->data, "BELI");
 									SDLNet_Write32(static_cast<Uint32>(entity->getUID()), &net_packet->data[4]);

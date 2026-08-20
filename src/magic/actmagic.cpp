@@ -670,7 +670,7 @@ void actMagiclightBall(Entity* my)
 			lightball_hoverangle = 0;
 		}
 
-		if (map.tiles[(int)((my->y / 16) * MAPLAYERS + (my->x / 16) * MAPLAYERS * map.height)])
+		if ( map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, my->playableFloor) )
 		{
 			//Ceiling.
 			my->z = lightball_hover_basez + ((lightball_hover_basez + LIGHTBALL_HOVER_HIGHPEAK + lightball_hover_basez + LIGHTBALL_HOVER_LOWPEAK) / 2) * sin(lightball_hoverangle * (12.568f / 360.0f)) * 0.1f;
@@ -734,7 +734,7 @@ void actMagiclightBall(Entity* my)
 							continue;
 						}
 						int index = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
-						if ( !map.tiles[OBSTACLELAYER + index] )
+						if ( !map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 						{
 							bool foundObstacle = false;
 							if ( checkedTiles.find(mapx + mapy * 10000) == checkedTiles.end() )
@@ -763,7 +763,7 @@ void actMagiclightBall(Entity* my)
 								previousy = starty;
 							}
 						}
-						else if ( map.tiles[OBSTACLELAYER + index] )
+						else if ( map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 						{
 							break;
 						}
@@ -786,7 +786,7 @@ void actMagiclightBall(Entity* my)
 							continue;
 						}
 						int index = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
-						if ( !map.tiles[OBSTACLELAYER + index] )
+						if ( !map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 						{
 							bool foundObstacle = false;
 							if ( checkedTiles.find(mapx + mapy * 10000) == checkedTiles.end() )
@@ -823,7 +823,7 @@ void actMagiclightBall(Entity* my)
 								previousy = starty;
 							}
 						}
-						else if ( map.tiles[OBSTACLELAYER + index] )
+						else if ( map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 						{
 							break;
 						}
@@ -907,7 +907,7 @@ void actMagiclightBall(Entity* my)
 							}
 						}
 						
-						if ( map.tiles[(int)(OBSTACLELAYER + static_cast<int>(my->y / 16) * MAPLAYERS + static_cast<int>(my->x / 16) * MAPLAYERS * map.height)] )   //If the ball has come to rest in a wall, move its butt.
+						if ( map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), OBSTACLELAYER, my->playableFloor) )   //If the ball has come to rest in a wall, move its butt.
 						{
 							double tangent = atan2(parent->y - my->y, parent->x - my->x);
 							my->vel_x = cos(tangent) * ((distance) / MAGICLIGHTBALL_DIVIDE_CONSTANT);
@@ -921,7 +921,7 @@ void actMagiclightBall(Entity* my)
 			else
 			{
 				lightball_movement_timer = 0;// LIGHTBALL_MOVE_DELAY;
-				if (map.tiles[(int)(OBSTACLELAYER + static_cast<int>(my->y / 16) * MAPLAYERS + static_cast<int>(my->x / 16) * MAPLAYERS * map.height)])   //If the ball has come to rest in a wall, move its butt.
+				if ( map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), OBSTACLELAYER, my->playableFloor) )   //If the ball has come to rest in a wall, move its butt.
 				{
 					double tangent = atan2(parent->y - my->y, parent->x - my->x);
 					my->vel_x = cos(tangent) * ((distance) / MAGICLIGHTBALL_DIVIDE_CONSTANT);
@@ -7789,11 +7789,13 @@ Entity* spawnMagicParticleCustom(Entity* parentent, int sprite, real_t scale, re
 void spawnMagicEffectParticles(Sint16 x, Sint16 y, Sint16 z, Uint32 sprite)
 {
 	int c;
+	const SpatialSpawnContext spatialContext = activeRuntimeSpatialContext();
 	if ( multiplayer == SERVER )
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceivePlayableFloorUpdates(
+				c, spatialContext.playableFloor) )
 			{
 				continue;
 			}
@@ -7802,9 +7804,12 @@ void spawnMagicEffectParticles(Sint16 x, Sint16 y, Sint16 z, Uint32 sprite)
 			SDLNet_Write16(y, &net_packet->data[6]);
 			SDLNet_Write16(z, &net_packet->data[8]);
 			SDLNet_Write32(sprite, &net_packet->data[10]);
+			SDLNet_Write16(spatialContext.playableFloor, &net_packet->data[14]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision), &net_packet->data[16]);
+			SDLNet_Write32(static_cast<Uint32>(spatialContext.spatialRevision >> 32U), &net_packet->data[20]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 14;
+			net_packet->len = 24;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -8884,7 +8889,7 @@ void actParticleAestheticOrbit(Entity* my)
 			int mapIndex = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
 			if ( mapx > 0 && mapy > 0 && mapx < map.width - 1 && mapy < map.height - 1 )
 			{
-				if ( map.tiles[OBSTACLELAYER + mapIndex] )
+				if ( map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 				{
 					my->removeLightField();
 					list_RemoveNode(my->mynode);
@@ -10388,7 +10393,7 @@ void createParticleSap(Entity* parent)
 			entity->vel_y = 1 * sin(entity->yaw);
 			int x = entity->x / 16;
 			int y = entity->y / 16;
-			if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+			if ( !map.tileAt(x, y, CEILINGLAYER, entity->playableFloor) )
 			{
 				// no ceiling, bounce higher.
 				entity->vel_z = -0.4;
@@ -10599,12 +10604,13 @@ Entity* floorMagicCreateRoots(real_t x, real_t y, Entity* caster, int damage, in
 {
 	int mapx = static_cast<int>(x) >> 4;
 	int mapy = static_cast<int>(y) >> 4;
-	int mapIndex = (mapy)*MAPLAYERS + (mapx) * MAPLAYERS * map.height;
+	const PlayableFloorId playableFloor = caster
+		? caster->playableFloor
+		: activeRuntimePlayableFloor();
 	if ( mapx > 0 && mapy > 0 && mapx < map.width - 1 && mapy < map.height - 1 )
 	{
-		if ( !map.tiles[mapIndex] 
-			|| swimmingtiles[map.tiles[mapIndex]]
-				|| lavatiles[map.tiles[mapIndex]] )
+		const Sint32 groundTile = map.tileAt(mapx, mapy, 0, playableFloor);
+		if ( !groundTile || swimmingtiles[groundTile] || lavatiles[groundTile] )
 		{
 			return nullptr;
 		}
@@ -10660,11 +10666,13 @@ void floorMagicCreateSpores(Entity* spawnOnEntity, real_t x, real_t y, Entity* c
 
 	int mapx = static_cast<int>(x) >> 4;
 	int mapy = static_cast<int>(y) >> 4;
+	const PlayableFloorId playableFloor = spawnOnEntity
+		? spawnOnEntity->playableFloor
+		: (caster ? caster->playableFloor : activeRuntimePlayableFloor());
 
-	int mapIndex = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
 	if ( mapx > 0 && mapy > 0 && mapx < map.width - 1 && mapy < map.height - 1 )
 	{
-		if ( map.tiles[OBSTACLELAYER + mapIndex] )
+		if ( map.tileAt(mapx, mapy, OBSTACLELAYER, playableFloor) )
 		{
 			return;
 		}
@@ -10680,7 +10688,7 @@ void floorMagicCreateSpores(Entity* spawnOnEntity, real_t x, real_t y, Entity* c
 	}
 	else
 	{
-		auto entLists = TileEntityList.getEntitiesWithinRadius(mapx, mapy, 0);
+		auto entLists = TileEntityList.getEntitiesWithinRadius(mapx, mapy, 0, playableFloor);
 		for ( auto it : entLists )
 		{
 			if ( !freeSpot )
@@ -11108,7 +11116,7 @@ void actParticleTimer(Entity* my)
 				spawnExplosion(my->x, my->y, -4.0);
 				bool forceLocation = false;
 				if ( my->particleTimerEndAction == PARTICLE_EFFECT_DEVIL_SUMMON_MONSTER &&
-					!map.tiles[static_cast<int>(my->y / 16) * MAPLAYERS + static_cast<int>(my->x / 16) * MAPLAYERS * map.height] )
+					!map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), 0, my->playableFloor) )
 				{
 					if ( my->particleTimerVariable1 == SHADOW || my->particleTimerVariable1 == CREATURE_IMP )
 					{
@@ -12363,7 +12371,7 @@ void actParticleTimer(Entity* my)
 				Stat* parentStats = parent ? parent->getStats() : nullptr;
 				if ( parent && parentStats && ((parent->behavior == &actPlayer ? parent->skill[9] : parent->monsterAttack) != 0) )
 				{
-					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 2);
+					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 2, parent->playableFloor);
 					for ( auto it : entLists )
 					{
 						node_t* node;
@@ -12457,7 +12465,7 @@ void actParticleTimer(Entity* my)
 				Stat* parentStats = parent ? parent->getStats() : nullptr;
 				if ( parent && parentStats && parent->monsterAttack != 0 && parentStats->getEffectActive(EFF_KNOCKBACK) )
 				{
-					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 1);
+					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 1, parent->playableFloor);
 					for ( auto it : entLists )
 					{
 						node_t* node;
@@ -12548,7 +12556,7 @@ void actParticleTimer(Entity* my)
 				Stat* parentStats = parent ? parent->getStats() : nullptr;
 				if ( parent && parentStats && parent->monsterAttack == MONSTER_POSE_EARTH_ELEMENTAL_ROLL && parentStats->getEffectActive(EFF_KNOCKBACK) )
 				{
-					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 1);
+					std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(parent->x / 16, parent->y / 16, 1, parent->playableFloor);
 					for ( auto it : entLists )
 					{
 						node_t* node;
@@ -13215,9 +13223,8 @@ void actParticleTimer(Entity* my)
 					}
 					if ( my->ticks < TICKS_PER_SECOND )
 					{
-						int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 						bool tallCeiling = false;
-						if ( !map.tiles[CEILINGLAYER + mapIndex] )
+						if ( !map.tileAt(x, y, CEILINGLAYER, my->playableFloor) )
 						{
 							tallCeiling = true;
 						}
@@ -13506,10 +13513,9 @@ void actParticleTimer(Entity* my)
 				{
 					int x = static_cast<int>(my->x) >> 4;
 					int y = static_cast<int>(my->y) >> 4;
-					int mapIndex = (y)*MAPLAYERS + (x) * MAPLAYERS * map.height;
 					if ( x > 0 && y > 0 && x < map.width - 1 && y < map.height - 1 )
 					{
-						if ( map.tiles[mapIndex] )
+						if ( map.tileAt(x, y, 0, my->playableFloor) )
 						{
 							Entity* entity = newEntityWithSpatialContext(1869, 1, map.entities, nullptr, my); //Gib entity.
 							entity->x = my->x;
@@ -13567,10 +13573,9 @@ void actParticleTimer(Entity* my)
 				{
 					int x = static_cast<int>(my->x) >> 4;
 					int y = static_cast<int>(my->y) >> 4;
-					int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 					if ( x > 0 && y > 0 && x < map.width - 1 && y < map.height - 1 )
 					{
-						if ( map.tiles[mapIndex] )
+						if ( map.tileAt(x, y, 0, my->playableFloor) )
 						{
 							Entity* entity = newEntityWithSpatialContext(1869, 1, map.entities, nullptr, my); //Gib entity.
 							entity->x = my->x;
@@ -13667,11 +13672,10 @@ void actParticleTimer(Entity* my)
 						auto& data = findEffect->second;
 						int x = static_cast<int>(data.x) >> 4;
 						int y = static_cast<int>(data.y) >> 4;
-						int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
 						if ( x > 0 && y > 0 && x < map.width - 1 && y < map.height - 1
-							&& !map.tiles[OBSTACLELAYER + mapIndex] )
+							&& !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 						{
-							auto entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0);
+							auto entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0, my->playableFloor);
 							bool freeSpot = true;
 							std::vector<Entity*> toDelete;
 							for ( auto it : entLists )
@@ -13732,11 +13736,10 @@ void actParticleTimer(Entity* my)
 						auto& data = findEffect->second;
 						int x = static_cast<int>(data.x) >> 4;
 						int y = static_cast<int>(data.y) >> 4;
-						int mapIndex = (y)*MAPLAYERS + (x) * MAPLAYERS * map.height;
 						if ( x > 0 && y > 0 && x < map.width - 1 && y < map.height - 1
-							&& !map.tiles[OBSTACLELAYER + mapIndex] )
+							&& !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 						{
-							auto entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0);
+							auto entLists = TileEntityList.getEntitiesWithinRadius(x, y, 0, my->playableFloor);
 							bool freeSpot = true;
 							std::vector<Entity*> toDelete;
 							for ( auto it : entLists )
@@ -13830,11 +13833,11 @@ void actParticleTimer(Entity* my)
 							int mapx = static_cast<int>(data.x) >> 4;
 							int mapy = static_cast<int>(data.y) >> 4;
 
-							int mapIndex = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
 							if ( mapx > 0 && mapy > 0 && mapx < map.width - 1 && mapy < map.height - 1 )
 							{
-								if ( !map.tiles[OBSTACLELAYER + mapIndex] && map.tiles[mapIndex] 
-									&& !swimmingtiles[map.tiles[mapIndex] && !lavatiles[map.tiles[mapIndex]]] )
+								const Sint32 groundTile = map.tileAt(mapx, mapy, 0, my->playableFloor);
+								if ( !map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor)
+									&& groundTile && !swimmingtiles[groundTile] && !lavatiles[groundTile] )
 								{
 									Entity* fx = createFloorMagic(data.effectType, my->particleTimerCountdownSprite, data.x, data.y, 7.8, data.yaw, PARTICLE_LIFE + 3 * TICKS_PER_SECOND);
 									fx->inheritSpatialContextFrom(my);
@@ -15961,9 +15964,13 @@ void spawnMagicTower(Entity* parent, real_t x, real_t y, int spellID, Entity* au
 
 bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 {
+	const Entity* spatialSource = projectile ? projectile : parent;
+	const PlayableFloorId playableFloor = spatialSource
+		? spatialSource->playableFloor
+		: activeRuntimePlayableFloor();
 	if ( !hit.entity )
 	{
-		if ( map.tiles[(int)(OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height)] != 0 )
+		if ( map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor) != 0 )
 		{
 			if ( MFLAG_DISABLEDIGGING )
 			{
@@ -15974,12 +15981,12 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 				}
 				playSoundPos(hit.x, hit.y, 66, 128); // strike wall
 			}
-			else if ( swimmingtiles[map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height]]
-				|| lavatiles[map.tiles[OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height]] )
+			else if ( swimmingtiles[map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor)]
+				|| lavatiles[map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor)] )
 			{
 				// no effect for lava/water tiles.
 			}
-			else if ( !mapTileDiggable(hit.mapx, hit.mapy) )
+			else if ( !mapTileDiggable(hit.mapx, hit.mapy, playableFloor) )
 			{
 				if ( parent && parent->behavior == &actPlayer )
 				{
@@ -16026,13 +16033,13 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 					rock->skill[15] = 1;		   // identified
 				}
 
-				if ( map.tiles[(int)(OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height)] >= 41
-					&& map.tiles[(int)(OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height)] <= 49 )
+				const Sint32 dugWallTile = map.tileAt(hit.mapx, hit.mapy, OBSTACLELAYER, playableFloor);
+				if ( dugWallTile >= 41 && dugWallTile <= 49 )
 				{
 					steamAchievementEntity(parent, "BARONY_ACH_BAD_REVIEW");
 				}
 
-				map.tiles[(int)(OBSTACLELAYER + hit.mapy * MAPLAYERS + hit.mapx * MAPLAYERS * map.height)] = 0;
+				map.setTileAt(hit.mapx, hit.mapy, OBSTACLELAYER, 0, playableFloor);
 
 				// send wall destroy info to clients
 				if ( multiplayer == SERVER )
@@ -16043,12 +16050,23 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 						{
 							continue;
 						}
-						strcpy((char*)net_packet->data, "WALD");
-						SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
-						SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+						if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+						{
+							strcpy((char*)net_packet->data, "WALD");
+							SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
+							SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+							net_packet->len = 8;
+						}
+						else
+						{
+							strcpy((char*)net_packet->data, "WALZ");
+							SDLNet_Write16((Uint16)hit.mapx, &net_packet->data[4]);
+							SDLNet_Write16((Uint16)hit.mapy, &net_packet->data[6]);
+							SDLNet_Write16((Uint16)playableFloor, &net_packet->data[8]);
+							net_packet->len = 10;
+						}
 						net_packet->address.host = net_clients[c - 1].host;
 						net_packet->address.port = net_clients[c - 1].port;
-						net_packet->len = 8;
 						sendPacketSafe(net_sock, -1, net_packet, c - 1);
 					}
 				}
@@ -16058,7 +16076,11 @@ bool magicDig(Entity* parent, Entity* projectile, int numRocks, int randRocks)
 					magicOnSpellCastEvent(parent, projectile, nullptr, SPELL_DIG, spell_t::SpellOnCastEventTypes::SPELL_LEVEL_EVENT_DEFAULT | spell_t::SPELL_LEVEL_EVENT_MINOR_CHANCE, 1);
 				}
 
-				generatePathMaps();
+				// The legacy path cache still describes floor Z0 only.
+				if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+				{
+					generatePathMaps();
+				}
 				return true;
 			}
 		}
@@ -16941,8 +16963,9 @@ void actParticleRoot(Entity* my)
 
 	if ( my->sprite != 2200 ) // void root
 	{
-		int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-		if ( !map.tiles[mapIndex] || swimmingtiles[map.tiles[mapIndex]] || lavatiles[map.tiles[mapIndex]] || map.tiles[OBSTACLELAYER + mapIndex] )
+		const Sint32 groundTile = map.tileAt(x, y, 0, my->playableFloor);
+		if ( !groundTile || swimmingtiles[groundTile] || lavatiles[groundTile]
+			|| map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 		{
 			my->flags[INVISIBLE] = true;
 			list_RemoveNode(my->mynode);
@@ -19324,6 +19347,9 @@ void tunnelPortalSetAttributes(Entity* portal, int duration, int dir)
 
 Entity* createTunnelPortal(real_t x, real_t y, int duration, int dir, Entity* caster)
 {
+	const PlayableFloorId playableFloor = caster
+		? caster->playableFloor
+		: activeRuntimePlayableFloor();
 	if ( dir == 0 ) { return nullptr; }
 	int checkx = x;
 	int checky = y;
@@ -19356,7 +19382,7 @@ Entity* createTunnelPortal(real_t x, real_t y, int duration, int dir, Entity* ca
 	int starty = y;
 	checkx = x;
 	checky = y;
-	if ( !mapTileDiggable(checkx, checky) )
+	if ( !mapTileDiggable(checkx, checky, playableFloor) )
 	{
 		return nullptr;
 	}
@@ -19367,7 +19393,7 @@ Entity* createTunnelPortal(real_t x, real_t y, int duration, int dir, Entity* ca
 		if ( checkx > 0 && checkx < map.width - 1 && checky > 0 && checky < map.height - 1 )
 		{
 			int mapIndex = (checky)*MAPLAYERS + (checkx) * MAPLAYERS * map.height;
-			if ( !map.tiles[OBSTACLELAYER + mapIndex] )
+			if ( !map.tileAt(checkx, checky, OBSTACLELAYER, playableFloor) )
 			{
 				if ( !checkObstacle((checkx << 4) + 8, (checky << 4) + 8, caster, nullptr, true, true, false, false) )
 				{
@@ -19894,7 +19920,7 @@ Entity* createMagicRadiusBadge(Entity& parent)
 	int mapy = entity->y / 16;
 	if ( mapx >= 0 && mapx < map.width && mapy >= 0 && mapy < map.height )
 	{
-		if ( !map.tiles[CEILINGLAYER + mapy * MAPLAYERS + mapx * MAPLAYERS * map.height] )
+		if ( !map.tileAt(mapx, mapy, CEILINGLAYER, parent.playableFloor) )
 		{
 			// no ceiling
 			entity->fskill[0] = *cvar_magic_radius_badge2;
@@ -21202,7 +21228,7 @@ void doSpellExplosionArea(int spellID, Entity* my, Entity* caster, real_t x, rea
 		}
 	}
 
-	std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(x / 16, y / 16, 1 + (radius / 16));
+	std::vector<list_t*> entLists = TileEntityList.getEntitiesWithinRadius(x / 16, y / 16, 1 + (radius / 16), my->playableFloor);
 	for ( auto it : entLists )
 	{
 		node_t* node;
@@ -21359,14 +21385,13 @@ void actParticleShatterEarth(Entity* my)
 	}
 	else
 	{
-		int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-		if ( !map.tiles[mapIndex] || swimmingtiles[map.tiles[mapIndex]]
-			|| lavatiles[map.tiles[mapIndex]] )
+		const Sint32 groundTile = map.tileAt(x, y, 0, my->playableFloor);
+		if ( !groundTile || swimmingtiles[groundTile] || lavatiles[groundTile] )
 		{
 			noground = true;
 		}
 
-		if ( !map.tiles[CEILINGLAYER + mapIndex] )
+		if ( !map.tileAt(x, y, CEILINGLAYER, my->playableFloor) )
 		{
 			tallCeiling = true;
 		}
@@ -21644,9 +21669,8 @@ void actParticleShatterEarthRock(Entity* my)
 	}
 	else
 	{
-		int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-		if ( !map.tiles[mapIndex] || swimmingtiles[map.tiles[mapIndex]]
-			|| lavatiles[map.tiles[mapIndex]] )
+		const Sint32 groundTile = map.tileAt(x, y, 0, my->playableFloor);
+		if ( !groundTile || swimmingtiles[groundTile] || lavatiles[groundTile] )
 		{
 			noground = true;
 		}
@@ -21710,9 +21734,11 @@ void createParticleShatterEarth(Entity* my, Entity* caster, real_t _x, real_t _y
 		return;
 	}
 
-	int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
+	const PlayableFloorId playableFloor = my
+		? my->playableFloor
+		: (caster ? caster->playableFloor : activeRuntimePlayableFloor());
 	bool tallCeiling = false;
-	if ( !map.tiles[CEILINGLAYER + mapIndex] )
+	if ( !map.tileAt(x, y, CEILINGLAYER, playableFloor) )
 	{
 		tallCeiling = true;
 	}

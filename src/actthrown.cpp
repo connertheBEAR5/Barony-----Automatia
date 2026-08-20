@@ -574,8 +574,10 @@ void actThrown(Entity* my)
 			}
 
 			// landing on the ground.
-			int index = (int)(my->y / 16)*MAPLAYERS + (int)(my->x / 16)*MAPLAYERS * map.height;
-			if ( map.tiles[index] )
+			const int tileX = static_cast<int>(my->x / 16);
+			const int tileY = static_cast<int>(my->y / 16);
+			const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, my->playableFloor);
+			if ( floorTile )
 			{
 				item = newItemFromEntity(my);
 				bool tinkeringItemCanBePlaced = true;
@@ -683,7 +685,7 @@ void actThrown(Entity* my)
 					}
 				}
 				else if ( item && (item->type >= TOOL_BOMB && item->type <= TOOL_TELEPORT_BOMB)
-					&& !(swimmingtiles[map.tiles[index]] || lavatiles[map.tiles[index]]) )
+					&& !(swimmingtiles[floorTile] || lavatiles[floorTile]) )
 				{
 					// don't deploy on swimming/lava tiles.
 					if ( parent )
@@ -696,7 +698,7 @@ void actThrown(Entity* my)
 					return;
 				}
 				else if ( item && itemIsThrowableTinkerTool(item) && !(item->type >= TOOL_BOMB && item->type <= TOOL_TELEPORT_BOMB)
-					&& !(swimmingtiles[map.tiles[index]] || lavatiles[map.tiles[index]])
+					&& !(swimmingtiles[floorTile] || lavatiles[floorTile])
 					&& tinkeringItemCanBePlaced )
 				{
 					// don't deploy on swimming/lava tiles.

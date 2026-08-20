@@ -16,7 +16,9 @@
 #include <dirent.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <list>
@@ -276,6 +278,203 @@ bool savePlayableZExtension(File* fp, const map_t& loadedMap)
     }
     appendPlayableZChunk(payload, "EFLR", assignments);
 
+    /*
+     * Z3.4A explicit editor-layer identity. Entity::z is runtime/local
+     * elevation after assignActions(), so structural ownership must not be
+     * reconstructed from arbitrary z values. Persist the authoring layer by
+     * stable entity ID. This chunk is optional for older V4.9 maps.
+     */
+    std::vector<std::uint8_t> authoredLayers;
+    std::uint32_t authoredLayerCount = 0;
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity)
+        {
+            continue;
+        }
+        if (entity->authoredMapLayer < 0 || entity->authoredMapLayer >= MAPLAYERS)
+        {
+            printlog(
+                "[Playable Z] Entity sprite %d has invalid authored map layer %d.",
+                entity->sprite, static_cast<int>(entity->authoredMapLayer));
+            return false;
+        }
+        if (entity->persistentID <= 0)
+        {
+            continue;
+        }
+        ++authoredLayerCount;
+    }
+    appendPlayableZU32(authoredLayers, authoredLayerCount);
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity || entity->persistentID <= 0)
+        {
+            continue;
+        }
+        appendPlayableZI32(authoredLayers, entity->persistentID);
+        appendPlayableZI16(authoredLayers, entity->authoredMapLayer);
+        appendPlayableZU16(authoredLayers, 0);
+    }
+    appendPlayableZChunk(payload, "ELYR", authoredLayers);
+
+    /*
+     * Stage Z3.3 layer-authored stairs use the existing Zed structural layer.
+     * Z3.4A persists that ownership in ELYR instead of reconstructing it from
+     * Entity::z. Z3.3F extends ZLDR with floor-decoration-style model transform,
+     * wall attachment and interaction text while keeping the older 8-byte and
+     * 12-byte stair records readable. No paired endpoint or duplicate geometry
+     * stack is required.
+     */
+    std::vector<std::uint8_t> layerTransitions;
+    std::uint32_t layerTransitionCount = 0;
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity || entity->verticalLayerTransitionDelta == 0)
+        {
+            continue;
+        }
+        if (entity->persistentID <= 0
+            || (entity->verticalLayerTransitionDelta != -1
+                && entity->verticalLayerTransitionDelta != 1)
+            || entity->verticalLayerTransitionRotation < -1
+            || entity->verticalLayerTransitionRotation > 7
+            || entity->verticalLayerTransitionModel < 0
+            || entity->floorDecorationDestroyIfNoWall < -1
+            || entity->floorDecorationDestroyIfNoWall > 8)
+        {
+            printlog(
+                "[Playable Z] Entity sprite %d has invalid layer stair marker delta %d or persistent ID %d.",
+                entity->sprite,
+                static_cast<int>(entity->verticalLayerTransitionDelta),
+                entity->persistentID);
+            return false;
+        }
+        ++layerTransitionCount;
+    }
+    if (layerTransitionCount > 0)
+    {
+        appendPlayableZU32(layerTransitions, layerTransitionCount);
+        for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+            node; node = node->next)
+        {
+            const Entity* entity = static_cast<const Entity*>(node->element);
+            if (!entity || entity->verticalLayerTransitionDelta == 0)
+            {
+                continue;
+            }
+            appendPlayableZI32(layerTransitions, entity->persistentID);
+            appendPlayableZI16(layerTransitions, entity->verticalLayerTransitionDelta);
+            appendPlayableZI16(layerTransitions, entity->verticalLayerTransitionRotation);
+            appendPlayableZI32(layerTransitions, entity->verticalLayerTransitionModel);
+            appendPlayableZI32(layerTransitions, entity->floorDecorationHeightOffset);
+            appendPlayableZI32(layerTransitions, entity->floorDecorationXOffset);
+            appendPlayableZI32(layerTransitions, entity->floorDecorationYOffset);
+            appendPlayableZI32(layerTransitions, entity->floorDecorationDestroyIfNoWall);
+            int stairTextBytes = 0;
+            for ( int i = 8; i < 60 && stairTextBytes < 192; ++i )
+            {
+                if ( i == 28 )
+                {
+                    continue;
+                }
+                for ( int c = 0; c < 4 && stairTextBytes < 192; ++c )
+                {
+                    layerTransitions.push_back(static_cast<std::uint8_t>(
+                        (entity->skill[i] >> (c * 8)) & 0xFF));
+                    ++stairTextBytes;
+                }
+            }
+            while ( stairTextBytes++ < 192 )
+            {
+                layerTransitions.push_back(0);
+            }
+        }
+        appendPlayableZChunk(payload, "ZLDR", layerTransitions);
+    }
+
+    /*
+     * Stage Z3 transition endpoints are an optional, length-delimited PZLV
+     * chunk so V4.9 maps remain backward compatible. Each record links an
+     * authored source entity to a persistent destination endpoint on another
+     * playable floor in the same map instance.
+     */
+    std::unordered_map<Sint32, const Entity*> transitionEntitiesById;
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity || entity->persistentID <= 0)
+        {
+            continue;
+        }
+        if (!transitionEntitiesById.emplace(entity->persistentID, entity).second)
+        {
+            printlog(
+                "[Playable Z] Refusing to save ZTRN data with duplicate persistent ID %d.",
+                entity->persistentID);
+            return false;
+        }
+    }
+
+    std::vector<std::uint8_t> transitions;
+    std::uint32_t transitionCount = 0;
+    for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+        node; node = node->next)
+    {
+        const Entity* entity = static_cast<const Entity*>(node->element);
+        if (!entity || !entity->playableFloorTransitionEnabled)
+        {
+            continue;
+        }
+        const auto target = transitionEntitiesById.find(
+            entity->playableFloorTransitionTargetPersistentID);
+        if (entity->persistentID <= 0
+            || entity->playableFloorTransitionTargetPersistentID <= 0
+            || entity->playableFloorTransitionDestination == entity->playableFloor
+            || !loadedMap.playableFloors.hasFloor(
+                entity->playableFloorTransitionDestination)
+            || target == transitionEntitiesById.end()
+            || !target->second
+            || target->second->playableFloor
+                != entity->playableFloorTransitionDestination)
+        {
+            printlog(
+                "[Playable Z] Entity ID %d has an invalid Z3 floor transition to floor %d target ID %d.",
+                entity->persistentID,
+                static_cast<int>(entity->playableFloorTransitionDestination),
+                entity->playableFloorTransitionTargetPersistentID);
+            return false;
+        }
+        ++transitionCount;
+    }
+    if (transitionCount > 0)
+    {
+        appendPlayableZU32(transitions, transitionCount);
+        for (node_t* node = loadedMap.entities ? loadedMap.entities->first : nullptr;
+            node; node = node->next)
+        {
+            const Entity* entity = static_cast<const Entity*>(node->element);
+            if (!entity || !entity->playableFloorTransitionEnabled)
+            {
+                continue;
+            }
+            appendPlayableZI32(transitions, entity->persistentID);
+            appendPlayableZI16(
+                transitions, entity->playableFloorTransitionDestination);
+            appendPlayableZU16(transitions, 0);
+            appendPlayableZI32(
+                transitions, entity->playableFloorTransitionTargetPersistentID);
+        }
+        appendPlayableZChunk(payload, "ZTRN", transitions);
+    }
+
     if (payload.size() > kPlayableZMaximumPayloadBytes
         || payload.size() > std::numeric_limits<std::uint32_t>::max())
     {
@@ -391,8 +590,37 @@ bool loadPlayableZExtension(
         Sint32 persistentId = 0;
         PlayableFloorId floor = DEFAULT_PLAYABLE_FLOOR;
     };
+    struct EntityAuthoredLayerAssignment
+    {
+        Sint32 persistentId = 0;
+        Sint16 authoredMapLayer = 0;
+    };
+    struct PlayableFloorTransitionAssignment
+    {
+        Sint32 sourcePersistentId = 0;
+        PlayableFloorId destinationFloor = DEFAULT_PLAYABLE_FLOOR;
+        Sint32 targetPersistentId = 0;
+    };
+    struct VerticalLayerTransitionAssignment
+    {
+        Sint32 sourcePersistentId = 0;
+        Sint16 delta = 0;
+        Sint16 rotation = 0;
+        Sint32 model = 0;
+        Sint32 heightOffset = 0;
+        Sint32 xOffset = 0;
+        Sint32 yOffset = 0;
+        Sint32 destroyIfNoWall = -1;
+        std::array<std::uint8_t, 192> interactText{};
+    };
     std::vector<EntityFloorAssignment> pendingAssignments;
+    std::vector<EntityAuthoredLayerAssignment> pendingAuthoredLayers;
+    std::vector<PlayableFloorTransitionAssignment> pendingTransitions;
+    std::vector<VerticalLayerTransitionAssignment> pendingLayerTransitions;
     bool sawEntityAssignments = false;
+    bool sawAuthoredLayers = false;
+    bool sawTransitions = false;
+    bool sawLayerTransitions = false;
 
     std::size_t offset = 0;
     while (offset < payload.size())
@@ -487,6 +715,170 @@ bool loadPlayableZExtension(
                 pendingAssignments.push_back({persistentId, floorId});
             }
         }
+        else if (std::memcmp(tag, "ELYR", 4) == 0)
+        {
+            if (sawAuthoredLayers)
+            {
+                printlog("[Playable Z] Map '%s' has duplicate ELYR chunks.", filename);
+                return false;
+            }
+            sawAuthoredLayers = true;
+            std::uint32_t count = 0;
+            if (!readPlayableZU32(payload, offset, count)
+                || count > 1048576U
+                || chunkLength != 4U + static_cast<std::size_t>(count) * 8U)
+            {
+                printlog("[Playable Z] Map '%s' has malformed ELYR data.", filename);
+                return false;
+            }
+            pendingAuthoredLayers.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index)
+            {
+                std::int32_t persistentId = 0;
+                std::int16_t authoredLayer = 0;
+                std::uint16_t chunkReserved = 0;
+                if (!readPlayableZI32(payload, offset, persistentId)
+                    || !readPlayableZI16(payload, offset, authoredLayer)
+                    || !readPlayableZU16(payload, offset, chunkReserved)
+                    || persistentId <= 0
+                    || authoredLayer < 0
+                    || authoredLayer >= MAPLAYERS
+                    || chunkReserved != 0)
+                {
+                    return false;
+                }
+                pendingAuthoredLayers.push_back({persistentId, authoredLayer});
+            }
+        }
+        else if (std::memcmp(tag, "ZLDR", 4) == 0)
+        {
+            if (sawLayerTransitions)
+            {
+                printlog("[Playable Z] Map '%s' has duplicate ZLDR chunks.", filename);
+                return false;
+            }
+            sawLayerTransitions = true;
+            std::uint32_t count = 0;
+            if (!readPlayableZU32(payload, offset, count) || count > 1048576U)
+            {
+                printlog("[Playable Z] Map '%s' has malformed ZLDR data.", filename);
+                return false;
+            }
+            const bool legacyRecords =
+                chunkLength == 4U + static_cast<std::size_t>(count) * 8U;
+            const bool authoredModelRecords =
+                chunkLength == 4U + static_cast<std::size_t>(count) * 12U;
+            const bool decorationRecords =
+                chunkLength == 4U + static_cast<std::size_t>(count) * 220U;
+            if (!legacyRecords && !authoredModelRecords && !decorationRecords)
+            {
+                printlog("[Playable Z] Map '%s' has malformed ZLDR record size.", filename);
+                return false;
+            }
+            pendingLayerTransitions.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index)
+            {
+                std::int32_t sourcePersistentId = 0;
+                std::int16_t delta = 0;
+                std::int16_t rotation = 0;
+                std::int32_t model = 0;
+                std::int32_t heightOffset = 0;
+                std::int32_t xOffset = 0;
+                std::int32_t yOffset = 0;
+                std::int32_t destroyIfNoWall = -1;
+                std::array<std::uint8_t, 192> interactText{};
+                if (!readPlayableZI32(payload, offset, sourcePersistentId)
+                    || !readPlayableZI16(payload, offset, delta))
+                {
+                    return false;
+                }
+                if (legacyRecords)
+                {
+                    std::uint16_t chunkReserved = 0;
+                    if (!readPlayableZU16(payload, offset, chunkReserved)
+                        || chunkReserved != 0)
+                    {
+                        return false;
+                    }
+                }
+                else if (!readPlayableZI16(payload, offset, rotation)
+                    || !readPlayableZI32(payload, offset, model))
+                {
+                    return false;
+                }
+                if (decorationRecords)
+                {
+                    if (!readPlayableZI32(payload, offset, heightOffset)
+                        || !readPlayableZI32(payload, offset, xOffset)
+                        || !readPlayableZI32(payload, offset, yOffset)
+                        || !readPlayableZI32(payload, offset, destroyIfNoWall)
+                        || payload.size() - offset < interactText.size())
+                    {
+                        return false;
+                    }
+                    std::memcpy(interactText.data(), payload.data() + offset, interactText.size());
+                    offset += interactText.size();
+                }
+                if (sourcePersistentId <= 0
+                    || (delta != -1 && delta != 1)
+                    || rotation < -1 || rotation > 7
+                    || model < 0
+                    || destroyIfNoWall < -1 || destroyIfNoWall > 8)
+                {
+                    printlog("[Playable Z] Map '%s' has invalid ZLDR record data.", filename);
+                    return false;
+                }
+                VerticalLayerTransitionAssignment assignment;
+                assignment.sourcePersistentId = sourcePersistentId;
+                assignment.delta = delta;
+                assignment.rotation = rotation;
+                assignment.model = model;
+                assignment.heightOffset = heightOffset;
+                assignment.xOffset = xOffset;
+                assignment.yOffset = yOffset;
+                assignment.destroyIfNoWall = destroyIfNoWall;
+                assignment.interactText = interactText;
+                pendingLayerTransitions.push_back(assignment);
+            }
+        }
+        else if (std::memcmp(tag, "ZTRN", 4) == 0)
+        {
+            if (sawTransitions)
+            {
+                printlog("[Playable Z] Map '%s' has duplicate ZTRN chunks.", filename);
+                return false;
+            }
+            sawTransitions = true;
+            std::uint32_t count = 0;
+            if (!readPlayableZU32(payload, offset, count)
+                || count > 1048576U
+                || chunkLength != 4U + static_cast<std::size_t>(count) * 12U)
+            {
+                printlog("[Playable Z] Map '%s' has malformed ZTRN data.", filename);
+                return false;
+            }
+            pendingTransitions.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index)
+            {
+                std::int32_t sourcePersistentId = 0;
+                std::int16_t destinationFloor = 0;
+                std::uint16_t chunkReserved = 0;
+                std::int32_t targetPersistentId = 0;
+                if (!readPlayableZI32(payload, offset, sourcePersistentId)
+                    || !readPlayableZI16(payload, offset, destinationFloor)
+                    || !readPlayableZU16(payload, offset, chunkReserved)
+                    || !readPlayableZI32(payload, offset, targetPersistentId)
+                    || sourcePersistentId <= 0
+                    || targetPersistentId <= 0
+                    || chunkReserved != 0)
+                {
+                    printlog("[Playable Z] Map '%s' has invalid ZTRN record data.", filename);
+                    return false;
+                }
+                pendingTransitions.push_back({
+                    sourcePersistentId, destinationFloor, targetPersistentId});
+            }
+        }
         else
         {
             // V4.9 optional chunks are length-delimited and may be skipped.
@@ -517,6 +909,9 @@ bool loadPlayableZExtension(
         }
         entity->playableFloor = DEFAULT_PLAYABLE_FLOOR;
         entity->spatialRevision = 0;
+        entity->verticalLayerTransitionDelta = 0;
+        entity->verticalLayerTransitionModel = 0;
+        entity->verticalLayerTransitionRotation = 0;
         if (entity->persistentID > 0)
         {
             if (!entityByPersistentId.emplace(entity->persistentID, entity).second)
@@ -524,6 +919,26 @@ bool loadPlayableZExtension(
                 duplicatePersistentIds.insert(entity->persistentID);
             }
         }
+    }
+
+    std::unordered_set<Sint32> authoredLayerPersistentIds;
+    for (const EntityAuthoredLayerAssignment& assignment : pendingAuthoredLayers)
+    {
+        if (!authoredLayerPersistentIds.insert(assignment.persistentId).second
+            || duplicatePersistentIds.count(assignment.persistentId) != 0)
+        {
+            printlog("[Playable Z] Map '%s' has an ambiguous ELYR assignment.", filename);
+            return false;
+        }
+        const auto found = entityByPersistentId.find(assignment.persistentId);
+        if (found == entityByPersistentId.end() || !found->second)
+        {
+            printlog(
+                "[Playable Z] Map '%s' assigns authored layer to missing entity ID %d.",
+                filename, assignment.persistentId);
+            return false;
+        }
+        found->second->authoredMapLayer = assignment.authoredMapLayer;
     }
 
     std::unordered_set<Sint32> assignedPersistentIds;
@@ -544,6 +959,80 @@ bool loadPlayableZExtension(
             return false;
         }
         found->second->playableFloor = assignment.floor;
+    }
+
+    std::unordered_set<Sint32> layerTransitionSources;
+    for (const VerticalLayerTransitionAssignment& transition : pendingLayerTransitions)
+    {
+        const auto source = entityByPersistentId.find(transition.sourcePersistentId);
+        if (duplicatePersistentIds.count(transition.sourcePersistentId) != 0
+            || source == entityByPersistentId.end()
+            || !source->second
+            || !layerTransitionSources.insert(transition.sourcePersistentId).second)
+        {
+            printlog(
+                "[Playable Z] Map '%s' has an unresolved or ambiguous ZLDR stair marker for ID %d.",
+                filename, transition.sourcePersistentId);
+            return false;
+        }
+        source->second->verticalLayerTransitionDelta = transition.delta;
+        source->second->verticalLayerTransitionRotation = transition.rotation;
+        source->second->verticalLayerTransitionModel = transition.model > 0
+            ? transition.model
+            : (transition.delta > 0 ? 161 : 253);
+        source->second->floorDecorationHeightOffset = transition.heightOffset;
+        source->second->floorDecorationXOffset = transition.xOffset;
+        source->second->floorDecorationYOffset = transition.yOffset;
+        source->second->floorDecorationDestroyIfNoWall = transition.destroyIfNoWall;
+        for ( int i = 8; i < 60; ++i )
+        {
+            if ( i != 28 )
+            {
+                source->second->skill[i] = 0;
+            }
+        }
+        std::size_t stairTextOffset = 0;
+        for ( int i = 8; i < 60 && stairTextOffset < transition.interactText.size(); ++i )
+        {
+            if ( i == 28 )
+            {
+                continue;
+            }
+            for ( int c = 0; c < 4 && stairTextOffset < transition.interactText.size(); ++c )
+            {
+                source->second->skill[i] |= static_cast<Sint32>(
+                    transition.interactText[stairTextOffset++]) << (c * 8);
+            }
+        }
+    }
+
+    std::unordered_set<Sint32> transitionSources;
+    for (const PlayableFloorTransitionAssignment& transition : pendingTransitions)
+    {
+        const auto source = entityByPersistentId.find(transition.sourcePersistentId);
+        const auto target = entityByPersistentId.find(transition.targetPersistentId);
+        if (!loadedMap.playableFloors.hasFloor(transition.destinationFloor)
+            || source == entityByPersistentId.end()
+            || target == entityByPersistentId.end()
+            || !source->second
+            || !target->second
+            || source->second->playableFloor == transition.destinationFloor
+            || target->second->playableFloor != transition.destinationFloor
+            || !transitionSources.insert(transition.sourcePersistentId).second)
+        {
+            printlog(
+                "[Playable Z] Map '%s' has an unresolved or ambiguous ZTRN transition from ID %d to floor %d target ID %d.",
+                filename,
+                transition.sourcePersistentId,
+                static_cast<int>(transition.destinationFloor),
+                transition.targetPersistentId);
+            return false;
+        }
+        source->second->playableFloorTransitionEnabled = true;
+        source->second->playableFloorTransitionDestination =
+            transition.destinationFloor;
+        source->second->playableFloorTransitionTargetPersistentID =
+            transition.targetPersistentId;
     }
     return true;
 }
@@ -4061,6 +4550,22 @@ fp->read(&numentities, sizeof(Uint32), 1);
 			entity->z = 0.0;
 		}
 
+		/*
+		 * Z3.4A: never infer a gameplay floor from arbitrary legacy Entity::z
+		 * inside assignActions(). Older maps used z as local model elevation and
+		 * procedural submaps still contain those values. Only V4.9 maps belong to
+		 * the layer-authoring era; ELYR below overrides this compatibility guess.
+		 */
+		if ( editorVersion >= 49 )
+		{
+			entity->authoredMapLayer = static_cast<Sint16>(std::max(0, std::min(
+				MAPLAYERS - 1, static_cast<int>(std::round(-entity->z / 16.0)))));
+		}
+		else
+		{
+			entity->authoredMapLayer = 0;
+		}
+
 		mapHashData += (sprite * c);
 	}
 
@@ -4077,25 +4582,18 @@ fp->read(&numentities, sizeof(Uint32), 1);
 	}
 #ifndef EDITOR
 	/*
-	 * Stage Z1 can store and inspect nonzero playable floors, but gameplay
-	 * isolation is intentionally not active until Z2. Never run a real game
-	 * with overlapping floor data under the legacy 2D collision/query rules.
+	 * Stage Z3 permits explicit, server-authoritative player transitions between
+	 * simultaneously loaded playable floors. Maps without ZTRN endpoint metadata
+	 * keep legacy behavior and simply remain on floor Z0.
 	 */
 	if (destmap == &map && game
 		&& destmap->playableFloors.floors.size() > 1)
 	{
 		printlog(
-			"[Playable Z] Map '%s' contains %zu playable floors; "
-			"Stage Z1 keeps nonzero floors data-only until Z2 isolation.",
+			"[Playable Z] Z3 loaded map '%s' with %zu isolated playable floors; "
+			"authored ZTRN endpoints may transition players between them.",
 			filename,
 			destmap->playableFloors.floors.size());
-		FileIO::close(fp);
-		list_FreeAll(entlist);
-		if (creatureList)
-		{
-			list_FreeAll(creatureList);
-		}
-		return -1;
 	}
 #endif
 
@@ -4152,6 +4650,7 @@ fp->read(&numentities, sizeof(Uint32), 1);
 #endif
 
 		// create new lightmap
+		clearAdditionalPlayableFloorLightmaps();
         for (int c = 0; c < MAXPLAYERS + 1; ++c) {
             auto& lightmap = lightmaps[c];
             auto& lightmapSmoothed = lightmapsSmoothed[c];

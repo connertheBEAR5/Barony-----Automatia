@@ -194,7 +194,8 @@ void lightDeconstructor(void* data)
 				if ( light->index )
 				{
 					auto& destination =
-						lightmaps[light->index][doff];
+						lightmapForPlayableFloor(
+							light->index, light->playableFloor, map.width, map.height)[doff];
 
 					// A lightmap can be rebuilt independently of its entity list
 					// during a late map activation. Never let removal of a stale
@@ -211,7 +212,8 @@ void lightDeconstructor(void* data)
 						++player )
 					{
 						auto& destination =
-							lightmaps[player][doff];
+							lightmapForPlayableFloor(
+								player, light->playableFloor, map.width, map.height)[doff];
 
 						destination.x = std::max(0.f, destination.x - source.x);
 						destination.y = std::max(0.f, destination.y - source.y);
@@ -403,6 +405,19 @@ light_t* newLight(
 	Sint32 radius
 )
 {
+	return newLightOnPlayableFloor(
+		index, x, y, activeRuntimePlayableFloor(), layer, radius);
+}
+
+light_t* newLightOnPlayableFloor(
+	int index,
+	Sint32 x,
+	Sint32 y,
+	PlayableFloorId playableFloor,
+	Sint32 layer,
+	Sint32 radius
+)
+{
 	light_t* light;
 
 	if ( (light = static_cast<light_t*>(
@@ -422,6 +437,7 @@ light_t* newLight(
 	light->node->size = sizeof(light_t);
 
 	light->index = index;
+	light->playableFloor = playableFloor;
 	light->x = x;
 	light->y = y;
 	light->layer =

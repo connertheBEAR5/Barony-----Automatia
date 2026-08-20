@@ -210,7 +210,7 @@ void actGib(Entity* my)
 	{
 		if ( my->x >= 0 && my->y >= 0 && my->x < map.width << 4 && my->y < map.height << 4 )
 		{
-			if ( !map.tiles[(int)(floor(my->y / 16)*MAPLAYERS + floor(my->x / 16)*MAPLAYERS * map.height)] )
+			if ( !map.tileAt(static_cast<int>(floor(my->x / 16)), static_cast<int>(floor(my->y / 16)), FLOORLAYER, my->playableFloor) )
 			{
 				GIB_VELZ += GIB_GRAVITY;
 				my->z += GIB_VELZ;
@@ -928,7 +928,7 @@ void actDamageGib(Entity* my)
 	{
 		if ( my->x >= 0 && my->y >= 0 && my->x < map.width << 4 && my->y < map.height << 4 )
 		{
-			if ( !map.tiles[(int)(floor(my->y / 16)*MAPLAYERS + floor(my->x / 16)*MAPLAYERS * map.height)] )
+			if ( !map.tileAt(static_cast<int>(floor(my->x / 16)), static_cast<int>(floor(my->y / 16)), FLOORLAYER, my->playableFloor) )
 			{
 				GIB_VELZ += GIB_GRAVITY;
 				my->z += GIB_VELZ;
@@ -1353,7 +1353,7 @@ Entity* spawnFociGib(real_t x, real_t y, real_t z, real_t dir, real_t velocityBo
 	{
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceiveEntityUpdates(c, my) )
 			{
 				continue;
 			}
@@ -1366,9 +1366,12 @@ Entity* spawnFociGib(real_t x, real_t y, real_t z, real_t dir, real_t velocityBo
 			SDLNet_Write16((Sint16)(sprite), &net_packet->data[16]);
 			SDLNet_Write32(seed, &net_packet->data[18]);
 			SDLNet_Write16((Sint16)(velocityBonus * 256), &net_packet->data[22]);
+			SDLNet_Write16((Uint16)my->playableFloor, &net_packet->data[24]);
+			SDLNet_Write32((Uint32)(my->spatialRevision & 0xffffffffULL), &net_packet->data[26]);
+			SDLNet_Write32((Uint32)(my->spatialRevision >> 32), &net_packet->data[30]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 24;
+			net_packet->len = 34;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -1516,7 +1519,7 @@ Entity* spawnDamageGib(Entity* parentent, Sint32 dmgAmount, int gibDmgType, int 
 		{
 			for ( int c = 1; c < MAXPLAYERS; c++ )
 			{
-				if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+				if ( !serverPlayerCanReceiveEntityUpdates(c, parentent) )
 				{
 					continue;
 				}
@@ -1579,7 +1582,7 @@ void serverSpawnGibForClient(Entity* gib)
 	{
 		for ( c = 1; c < MAXPLAYERS; c++ )
 		{
-			if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+			if ( !serverPlayerCanReceiveEntityUpdates(c, gib) )
 			{
 				continue;
 			}
@@ -1590,9 +1593,12 @@ void serverSpawnGibForClient(Entity* gib)
 			SDLNet_Write16((Sint16)gib->sprite, &net_packet->data[10]);
 			net_packet->data[12] = gib->flags[SPRITE] ? 1 << 0 : 0;
 			net_packet->data[12] |= (gib->skill[5] == 1) ? 1 << 1 : 0; // poof
+			SDLNet_Write16(gib->playableFloor, &net_packet->data[13]);
+			SDLNet_Write32(static_cast<Uint32>(gib->spatialRevision), &net_packet->data[15]);
+			SDLNet_Write32(static_cast<Uint32>(gib->spatialRevision >> 32U), &net_packet->data[19]);
 			net_packet->address.host = net_clients[c - 1].host;
 			net_packet->address.port = net_clients[c - 1].port;
-			net_packet->len = 13;
+			net_packet->len = 23;
 			sendPacketSafe(net_sock, -1, net_packet, c - 1);
 		}
 	}
@@ -1603,15 +1609,17 @@ void spawnGreasePuddleSpawner(Entity* caster, real_t x, real_t y, int duration)
 	if ( multiplayer == CLIENT ) { return; }
 	int ox = x / 16;
 	int oy = y / 16;
+	const PlayableFloorId playableFloor = caster
+		? caster->playableFloor
+		: activeRuntimePlayableFloor();
 
 	if ( ox >= 0 && ox < map.width && oy >= 0 && oy < map.height )
 	{
-		int mapIndex = oy * MAPLAYERS + ox * MAPLAYERS * map.height;
-		if ( !map.tiles[mapIndex] )
+		if ( !map.tileAt(ox, oy, FLOORLAYER, playableFloor) )
 		{
 			return;
 		}
-		auto entLists = TileEntityList.getEntitiesWithinRadius(ox, oy, 0);
+		auto entLists = TileEntityList.getEntitiesWithinRadius(ox, oy, 0, playableFloor);
 		for ( std::vector<list_t*>::iterator it = entLists.begin(); it != entLists.end(); ++it )
 		{
 			list_t* currentList = *it;
@@ -1757,9 +1765,9 @@ void actGreasePuddleSpawner(Entity* my)
 
 				if ( !foundGrease )
 				{
-					if ( map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE) )
+					if ( map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, my->playableFloor) )
 					{
-						map.tileAttributes[0 + (y * MAPLAYERS) + (x * MAPLAYERS * map.height)] &= ~map_t::TILE_ATTRIBUTE_GREASE;
+						map.setTileAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, false, my->playableFloor);
 						serverUpdateMapTileFlag(x, y, 0, 0, map_t::TILE_ATTRIBUTE_GREASE);
 					}
 				}
@@ -1770,14 +1778,14 @@ void actGreasePuddleSpawner(Entity* my)
 		}
 		if ( x >= 0 && x < map.width && y >= 0 && y < map.height )
 		{
-			if ( !map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE) )
+			if ( !map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, my->playableFloor) )
 			{
-				map.tileAttributes[0 + (y * MAPLAYERS) + (x * MAPLAYERS * map.height)] |= map_t::TILE_ATTRIBUTE_GREASE;
+				map.setTileAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, true, my->playableFloor);
 				serverUpdateMapTileFlag(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, 0);
 			}
 
 			int mapIndex = y * MAPLAYERS + x * MAPLAYERS * map.height;
-			if ( lavatiles[map.tiles[mapIndex]] )
+			if ( lavatiles[map.tileAt(x, y, 0, my->playableFloor)] )
 			{
 				if ( !my->flags[BURNING] )
 				{
@@ -1816,7 +1824,7 @@ void actGreasePuddleSpawner(Entity* my)
 							{
 								if ( Stat* stats = entity->getStats() )
 								{
-									if ( swimmingtiles[map.tiles[mapIndex]] && entity->behavior == &actPlayer && players[entity->skill[2]]->movement.isPlayerSwimming() )
+									if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] && entity->behavior == &actPlayer && players[entity->skill[2]]->movement.isPlayerSwimming() )
 									{
 										continue;
 									}
@@ -1918,7 +1926,7 @@ void actGreasePuddleSpawner(Entity* my)
 		}
 		if ( my->skill[1] < 4 )
 		{
-			if ( map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE) )
+			if ( map.tileHasAttribute(x, y, 0, map_t::TILE_ATTRIBUTE_GREASE, my->playableFloor) )
 			{
 				++my->skill[1];
 				std::vector<unsigned int> chances(8);
@@ -2017,8 +2025,7 @@ void actLeafParticle(Entity* my)
 	{
 		if ( mapx >= 0 && mapx < map.width && mapy >= 0 && mapy < map.height )
 		{
-			int mapIndex = mapy * MAPLAYERS + mapx * MAPLAYERS * map.height;
-			if ( !map.tiles[mapIndex] )
+			if ( !map.tileAt(mapx, mapy, FLOORLAYER, my->playableFloor) )
 			{
 				noFloor = true;
 			}
@@ -2252,11 +2259,12 @@ Entity* spawnLeafPile(real_t x, real_t y, bool trap)
 
 		int mapx = static_cast<int>(x) / 16;
 		int mapy = static_cast<int>(y) / 16;
-		int mapIndex = mapy * MAPLAYERS + mapx * MAPLAYERS * map.height;
+		const PlayableFloorId playableFloor = leaf->playableFloor;
 		if ( mapx > 0 && mapx < map.width && mapy > 0 && mapy < map.height )
 		{
-			if ( !map.tiles[mapIndex] || swimmingtiles[map.tiles[mapIndex]] || lavatiles[map.tiles[mapIndex]]
-				|| map.tiles[OBSTACLELAYER + mapIndex] )
+			const Sint32 floorTile = map.tileAt(mapx, mapy, FLOORLAYER, playableFloor);
+			if ( !floorTile || swimmingtiles[floorTile] || lavatiles[floorTile]
+				|| map.tileAt(mapx, mapy, OBSTACLELAYER, playableFloor) )
 			{
 				leaf->skill[0] = 4.0 * TICKS_PER_SECOND; // lifetime on wrong terrain
 			}
@@ -2365,7 +2373,7 @@ void actLeafPile(Entity* my)
 								{
 									for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 									{
-										if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+										if ( !serverPlayerCanReceiveEntityUpdates(c, my) )
 										{
 											continue;
 										}
@@ -2608,7 +2616,7 @@ void actLeafPile(Entity* my)
 			{
 				for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 				{
-					if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+					if ( !serverPlayerCanReceiveEntityUpdates(c, my) )
 					{
 						continue;
 					}
@@ -2655,7 +2663,7 @@ void actLeafPile(Entity* my)
 			{
 				for ( int c = 1; c < MAXPLAYERS; ++c ) // send to other players
 				{
-					if ( client_disconnected[c] || players[c]->isLocalPlayer() )
+					if ( !serverPlayerCanReceiveEntityUpdates(c, my) )
 					{
 						continue;
 					}
@@ -2688,10 +2696,13 @@ Entity* spawnMiscPuddle(Entity* parentent, real_t x, real_t y, int sprite, bool 
 
 	int mapx = static_cast<int>(x) / 16;
 	int mapy = static_cast<int>(y) / 16;
-	int mapIndex = mapy * MAPLAYERS + mapx * MAPLAYERS * map.height;
+	const PlayableFloorId playableFloor = parentent
+		? parentent->playableFloor
+		: activeRuntimePlayableFloor();
 	if ( mapx > 0 && mapx < map.width && mapy > 0 && mapy < map.height )
 	{
-		if ( !map.tiles[mapIndex] || map.tiles[OBSTACLELAYER + mapIndex] )
+		if ( !map.tileAt(mapx, mapy, FLOORLAYER, playableFloor)
+			|| map.tileAt(mapx, mapy, OBSTACLELAYER, playableFloor) )
 		{
 			return nullptr;
 		}

@@ -243,7 +243,7 @@ void actMagicTrap(Entity* my)
 	// check wall inside me.
 	int checkx = static_cast<int>(my->x) >> 4;
 	int checky = static_cast<int>(my->y) >> 4;
-	if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
+	if ( !map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor) )   // wall
 	{
 		my->removeLightField();
 		list_RemoveNode(my->mynode);
@@ -295,7 +295,7 @@ void actMagicTrap(Entity* my)
 		}
 		int u = std::min<int>(std::max<int>(0.0, (my->x + x) / 16), map.width - 1);
 		int v = std::min<int>(std::max<int>(0.0, (my->y + y) / 16), map.height - 1);
-		if ( !map.tiles[OBSTACLELAYER + v * MAPLAYERS + u * MAPLAYERS * map.height] )
+		if ( !map.tileAt(u, v, OBSTACLELAYER, my->playableFloor) )
 		{
 			Entity* entity = castSpell(my->getUID(), getSpellFromID(MAGICTRAP_SPELL), false, true);
 			entity->x = my->x + x;
@@ -392,7 +392,7 @@ void Entity::actTeleportShrine()
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* entity = (Entity*)node->element;
-					if ( !entity ) { continue; }
+					if ( !entity || entity->playableFloor != playableFloor ) { continue; }
 					if ( entity->behavior == &::actTeleportShrine )
 					{
 						allShrines.push_back(std::make_pair(entity, std::make_pair((int)(entity->x / 16), (int)(entity->y / 16))));
@@ -465,7 +465,7 @@ void Entity::actTeleportShrine()
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* entity = (Entity*)node->element;
-					if ( !entity ) { continue; }
+					if ( !entity || entity->playableFloor != playableFloor ) { continue; }
 					if ( entity->behavior == &::actTeleportShrine )
 					{
 						allShrines.push_back(std::make_pair(entity, std::make_pair((int)(entity->x / 16), (int)(entity->y / 16))));
@@ -567,7 +567,7 @@ void daedalusShrineInteract(Entity* my, Entity* touched)
 		for ( node_t* node = map.entities->first; node; node = node->next )
 		{
 			Entity* entity = (Entity*)node->element;
-			if ( !entity ) { continue; }
+			if ( !entity || entity->playableFloor != my->playableFloor ) { continue; }
 			if ( (entity->behavior == &actLadder && strcmp(map.name, "Hell")) || (entity->behavior == &actPortal && !strcmp(map.name, "Hell")) )
 			{
 				if ( entity->behavior == &actLadder && entity->skill[3] != 1 )

@@ -428,6 +428,7 @@ struct Chunk {
         y = rhs.y;
         w = rhs.w;
         h = rhs.h;
+        playableFloor = rhs.playableFloor;
         
         rhs.vao = 0;
         rhs.vbo_positions = 0;
@@ -439,6 +440,7 @@ struct Chunk {
         rhs.y = 0;
         rhs.w = 0;
         rhs.h = 0;
+        rhs.playableFloor = DEFAULT_PLAYABLE_FLOOR;
         
         tiles.swap(rhs.tiles);
         dithering.swap(rhs.dithering);
@@ -455,6 +457,7 @@ struct Chunk {
         y = rhs.y;
         w = rhs.w;
         h = rhs.h;
+        playableFloor = rhs.playableFloor;
         
         rhs.vao = 0;
         rhs.vbo_positions = 0;
@@ -466,6 +469,7 @@ struct Chunk {
         rhs.y = 0;
         rhs.w = 0;
         rhs.h = 0;
+        rhs.playableFloor = DEFAULT_PLAYABLE_FLOOR;
         
         tiles.swap(rhs.tiles);
         dithering.swap(rhs.dithering);
@@ -476,7 +480,8 @@ struct Chunk {
         destroyBuffers();
     }
     
-    void build(const map_t& map, bool ceiling, int startX, int startY, int w, int h);
+    void build(const map_t& map, bool ceiling, int startX, int startY, int w, int h,
+        PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR);
     void buildBuffers(
 	const std::vector<float>& positions,
 	const std::vector<float>& texcoords,
@@ -488,6 +493,7 @@ struct Chunk {
     bool isDirty(const map_t& map);
     
     int x = 0, y = 0, w = 0, h = 0;
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     std::vector<Sint32> tiles;
     
     struct Dither {
@@ -498,13 +504,15 @@ struct Chunk {
     std::unordered_map<view_t*, Dither> dithering;
 };
 void clearChunks();
-void createChunks();
+void createChunks(PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR);
 
 void createCommonDrawResources();
 void destroyCommonDrawResources();
 
 extern view_t cameras[MAXPLAYERS];
 extern view_t menucam;
+PlayableFloorId getCameraPlayableFloor(const view_t* camera);
+real_t getCameraHudLocalZ(int player);
 
 // function prototypes for opengl.c:
 #define REALCOLORS 0

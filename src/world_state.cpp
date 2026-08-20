@@ -30,6 +30,7 @@ struct MapInstanceVisualState
     list_t lights{};
     std::vector<vec4_t> lightmap[MAXPLAYERS + 1];
     std::vector<vec4_t> lightmapSmoothed[MAXPLAYERS + 1];
+    AdditionalPlayableFloorLightmaps additionalPlayableFloorLightmaps;
 };
 
 namespace
@@ -62,6 +63,8 @@ void swapActiveVisualState(MapInstanceVisualState& state)
         lightmaps[index].swap(state.lightmap[index]);
         lightmapsSmoothed[index].swap(state.lightmapSmoothed[index]);
     }
+    swapAdditionalPlayableFloorLightmaps(
+        state.additionalPlayableFloorLightmaps);
 }
 
 void ensureActiveLightmapDimensions(const map_t& loadedMap)
@@ -79,6 +82,20 @@ void ensureActiveLightmapDimensions(const map_t& loadedMap)
         if (lightmapsSmoothed[index].size() != smoothedSize)
         {
             lightmapsSmoothed[index].assign(smoothedSize, vec4_t{});
+        }
+    }
+    for (const PlayableFloorData& floor : loadedMap.playableFloors.floors)
+    {
+        if (floor.id == DEFAULT_PLAYABLE_FLOOR)
+        {
+            continue;
+        }
+        for (int index = 0; index < MAXPLAYERS + 1; ++index)
+        {
+            (void)lightmapForPlayableFloor(
+                index, floor.id, loadedMap.width, loadedMap.height);
+            (void)lightmapSmoothedForPlayableFloor(
+                index, floor.id, loadedMap.width, loadedMap.height);
         }
     }
 }

@@ -385,16 +385,17 @@ bool entityInsideTile(Entity* entity, int x, int y, int z, bool checkSafeTiles)
 			{
 				if ( (entity->y - entity->sizey) < ((y + 1) << 4) )
 				{
+					const Sint32 floorTile = map.tileAt(x, y, z, entity->playableFloor);
 					if ( z == OBSTACLELAYER )
 					{
-						if ( map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+						if ( floorTile )
 						{
 							return true;
 						}
 					}
 					else if ( z == 0 )
 					{
-						if ( !checkSafeTiles && !map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+						if ( !checkSafeTiles && !floorTile )
 						{
 							if ( entity->behavior != &actDeathGhost 
 								&& !(entity->behavior == &actMonster 
@@ -411,15 +412,15 @@ bool entityInsideTile(Entity* entity, int x, int y, int z, bool checkSafeTiles)
 								return true;
 							}
 						}
-						else if ( checkSafeTiles && map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+						else if ( checkSafeTiles && floorTile )
 						{
 							return true;
 						}
                         if (entity && entity->behavior == &actMonster) {
 							bool waterWalking = entity->isWaterWalking();
 							bool lavaWalking = entity->isLavaWalking();
-                            if ((swimmingtiles[map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height]] && !waterWalking) ||
-                                (lavatiles[map.tiles[z + y * MAPLAYERS + x * MAPLAYERS * map.height]] && !lavaWalking))
+                            if ((swimmingtiles[floorTile] && !waterWalking) ||
+                                (lavatiles[floorTile] && !lavaWalking))
                             {
                                 return true;
                             }
@@ -1138,7 +1139,7 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 			{
 				if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 				{
-					if (map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height])
+					if (map.tileAt(x, y, OBSTACLELAYER, my->playableFloor))
 					{
 						// hit a wall
 						hit.x = x * 16 + 8;
@@ -1150,14 +1151,21 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 					}
 	
 					const int floorTile =
-						map.tiles[
-							y * MAPLAYERS
-							+ x * MAPLAYERS * map.height
-						];
+						map.tileAt(x, y, FLOORLAYER, my->playableFloor);
+
+					PlayableFloorId lowerLandingFloor = DEFAULT_PLAYABLE_FLOOR;
+					int lowerFloorsFallen = 0;
+					const bool playerHasLowerStackedLanding =
+						my->behavior == &actPlayer
+						&& !floorTile
+						&& map.findLowerPlayableFloorLanding(
+							static_cast<int>(x), static_cast<int>(y),
+							my->playableFloor, lowerLandingFloor, lowerFloorsFallen);
 
 					const bool blockedByMissingFloor =
 						!floorTile
-						&& !playerCanEnterMissingFloor;
+						&& !playerCanEnterMissingFloor
+						&& !playerHasLowerStackedLanding;
 
 					const bool blockedMonsterLiquid =
 						(
@@ -1611,7 +1619,7 @@ int barony_clear(real_t tx, real_t ty, Entity* my)
 								int tiley = entity->y / 16;
 								if ( tilex >= 0 && tilex < map.width && tiley >= 0 && tiley < map.height )
 								{
-									if ( !map.tiles[CEILINGLAYER + tiley * MAPLAYERS + tilex * MAPLAYERS * map.height] )
+									if ( !map.tileAt(tilex, tiley, CEILINGLAYER, my->playableFloor) )
 									{
 										if ( entity->behavior == &actMonster )
 										{
@@ -2452,8 +2460,12 @@ real_t lineTrace( Entity* my, real_t x1, real_t y1, real_t angle, real_t range, 
 		iy = y1 + ry * d;
 
 		// check against the map
-		int index = (iny >> 4) * MAPLAYERS + (inx >> 4) * MAPLAYERS * map.height;
-		if ( map.tiles[OBSTACLELAYER + index] )
+		const int tileX = inx >> 4;
+		const int tileY = iny >> 4;
+		const PlayableFloorId traceFloor = my ? my->playableFloor : DEFAULT_PLAYABLE_FLOOR;
+		const Sint32 obstacleTile = map.tileAt(tileX, tileY, OBSTACLELAYER, traceFloor);
+		const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, traceFloor);
+		if ( obstacleTile )
 		{
 			hit.x = ix;
 			hit.y = iy;
@@ -2464,9 +2476,9 @@ real_t lineTrace( Entity* my, real_t x1, real_t y1, real_t angle, real_t range, 
 		}
 		if ( ground )
 		{
-			if ( !map.tiles[index] 
-				|| (((swimmingtiles[map.tiles[index]] && !waterWalking) 
-					|| (lavatiles[map.tiles[index]] && !lavaWalking)) && isMonster) )
+			if ( !floorTile
+				|| (((swimmingtiles[floorTile] && !waterWalking)
+					|| (lavatiles[floorTile] && !lavaWalking)) && isMonster) )
 			{
 				hit.x = ix;
 				hit.y = iy;
@@ -2637,8 +2649,12 @@ real_t lineTraceTarget(Entity* my, real_t x1, real_t y1, real_t angle, real_t ra
 		iy = y1 + ry * d;
 
 		// check against the map
-		int index = (iny >> 4) * MAPLAYERS + (inx >> 4) * MAPLAYERS * map.height;
-		if ( map.tiles[OBSTACLELAYER + index] )
+		const int tileX = inx >> 4;
+		const int tileY = iny >> 4;
+		const PlayableFloorId traceFloor = my ? my->playableFloor : DEFAULT_PLAYABLE_FLOOR;
+		const Sint32 obstacleTile = map.tileAt(tileX, tileY, OBSTACLELAYER, traceFloor);
+		const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, traceFloor);
+		if ( obstacleTile )
 		{
 			hit.x = ix;
 			hit.y = iy;
@@ -2649,8 +2665,8 @@ real_t lineTraceTarget(Entity* my, real_t x1, real_t y1, real_t angle, real_t ra
 		}
 		if ( ground )
 		{
-			if ( !map.tiles[index] 
-				|| (((swimmingtiles[map.tiles[index]] && waterWalking) || (lavatiles[map.tiles[index]] && lavaWalking)) && isMonster) )
+			if ( !floorTile
+				|| (((swimmingtiles[floorTile] && waterWalking) || (lavatiles[floorTile] && lavaWalking)) && isMonster) )
 			{
 				hit.x = ix;
 				hit.y = iy;
@@ -2768,8 +2784,11 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 	{
 		if ( y >= 0 && y < map.height << 4 )
 		{
-			int index = (y >> 4) * MAPLAYERS + (x >> 4) * MAPLAYERS * map.height;
-			if (checkWalls && map.tiles[OBSTACLELAYER + index])   // wall
+			const int tileX = static_cast<int>(x) >> 4;
+			const int tileY = static_cast<int>(y) >> 4;
+			const Sint32 obstacleTile = map.tileAt(tileX, tileY, OBSTACLELAYER, queryFloor);
+			const Sint32 floorTile = map.tileAt(tileX, tileY, FLOORLAYER, queryFloor);
+			if (checkWalls && obstacleTile)   // wall
 			{
 				return 1;
 			}
@@ -2784,8 +2803,8 @@ int checkObstacle(long x, long y, Entity* my, Entity* target, bool useTileEntity
 			bool waterWalking = my && my->isWaterWalking();
 			bool lavaWalking = my && my->isLavaWalking();
 			if ( !levitating
-					&& ((!map.tiles[index] && checkFloor)
-								   || ( ((swimmingtiles[map.tiles[index]] && !waterWalking) || (lavatiles[map.tiles[index]] && !lavaWalking))
+					&& ((!floorTile && checkFloor)
+								   || ( ((swimmingtiles[floorTile] && !waterWalking) || (lavatiles[floorTile] && !lavaWalking))
 										 && isMonster) ) )   // no floor
 			{
 				return 1; // if there's no floor, or either water/lava then a non-levitating monster sees obstacle.

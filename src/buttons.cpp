@@ -1402,6 +1402,7 @@ void buttonNewConfirm(button_t* my)
         }
     }
 }
+    clearAdditionalPlayableFloorLightmaps();
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
         lightmaps[c].resize(
@@ -2338,6 +2339,7 @@ void buttonAttributesConfirm(button_t* my)
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
 	strcpy(map.name, nametext);
 	strcpy(map.author, authortext);
+    clearAdditionalPlayableFloorLightmaps();
     for (int c = 0; c < MAXPLAYERS + 1; ++c) {
         lightmaps[c].clear();
         lightmaps[c].resize(
@@ -2720,6 +2722,104 @@ void buttonOpenPrevMap(button_t* my)
 	messagetime = 60; // 60*50 ms = 3000 ms (3 seconds)
 }
 
+static void readDecorationInteractTextIntoSpriteProperties(const Entity* entity)
+{
+	if ( !entity )
+	{
+		return;
+	}
+	char buf[256] = "";
+	int totalChars = 0;
+	for ( int i = 8; i < 60; ++i )
+	{
+		if ( entity->skill[i] != 0 && i != 28 )
+		{
+			for ( int c = 0; c < 4; ++c )
+			{
+				const char ch = static_cast<char>((entity->skill[i] >> (c * 8)) & 0xFF);
+				if ( ch == '\0' && i != 59 && entity->skill[i + 1] != 0 )
+				{
+					// Continue through packed text just like floor decorations.
+				}
+				else
+				{
+					buf[totalChars] = ch;
+					++totalChars;
+				}
+			}
+		}
+	}
+	if ( totalChars >= static_cast<int>(sizeof(buf)) )
+	{
+		totalChars = static_cast<int>(sizeof(buf)) - 1;
+	}
+	buf[totalChars] = '\0';
+	strncpy(spriteProperties[6], buf, 48);
+	strncpy(spriteProperties[7], buf + 48, 48);
+	strncpy(spriteProperties[8], buf + 96, 48);
+	strncpy(spriteProperties[9], buf + 144, 48);
+	spriteProperties[6][48] = '\0';
+	spriteProperties[7][48] = '\0';
+	spriteProperties[8][48] = '\0';
+	spriteProperties[9][48] = '\0';
+}
+
+static void writeDecorationInteractTextFromSpriteProperties(Entity* entity)
+{
+	if ( !entity )
+	{
+		return;
+	}
+	int totalChars = 0;
+	char checkChr = 'a';
+	const int kMaxCharacters = 192;
+	for ( int i = 8; i < 60 && totalChars < kMaxCharacters; ++i )
+	{
+		if ( i != 28 )
+		{
+			entity->skill[i] = 0;
+		}
+	}
+	for ( int i = 8; i < 60 && totalChars < kMaxCharacters; ++i )
+	{
+		if ( i == 28 )
+		{
+			continue;
+		}
+		for ( int c = 0; c < 4; ++c )
+		{
+			if ( totalChars >= 144 )
+			{
+				entity->skill[i] |= (spriteProperties[9][totalChars - 144]) << (c * 8);
+				checkChr = spriteProperties[9][totalChars - 144];
+			}
+			else if ( totalChars >= 96 )
+			{
+				entity->skill[i] |= (spriteProperties[8][totalChars - 96]) << (c * 8);
+				checkChr = spriteProperties[8][totalChars - 96];
+			}
+			else if ( totalChars >= 48 )
+			{
+				entity->skill[i] |= (spriteProperties[7][totalChars - 48]) << (c * 8);
+				checkChr = spriteProperties[7][totalChars - 48];
+			}
+			else
+			{
+				entity->skill[i] |= (spriteProperties[6][totalChars]) << (c * 8);
+				checkChr = spriteProperties[6][totalChars];
+			}
+			if ( checkChr == '\0' )
+			{
+				totalChars += (48 - (totalChars % 48));
+			}
+			else
+			{
+				++totalChars;
+			}
+		}
+	}
+}
+
 void buttonSpriteProperties(button_t* my)
 {
 	button_t* button;
@@ -2735,7 +2835,8 @@ void buttonSpriteProperties(button_t* my)
 
 	if ( selectedEntity[0] == NULL && lastSelectedEntity[0] != NULL )
 	{
-		if ( checkSpriteType(lastSelectedEntity[0]->sprite) != 0 )
+		if ( checkSpriteType(lastSelectedEntity[0]->sprite) != 0
+			|| lastSelectedEntity[0]->verticalLayerTransitionDelta != 0 )
 		{
 			selectedEntity[0] = lastSelectedEntity[0];
 		}
@@ -2754,7 +2855,9 @@ void buttonSpriteProperties(button_t* my)
 			strcpy(spriteProperties[i], "");
 		}
 
-		spriteType = checkSpriteType(selectedEntity[0]->sprite);
+		spriteType = selectedEntity[0]->verticalLayerTransitionDelta != 0
+			? 41
+			: checkSpriteType(selectedEntity[0]->sprite);
 		switch ( spriteType )
 		{
 			case 1: //monsters
@@ -3524,6 +3627,35 @@ void buttonSpriteProperties(button_t* my)
 				suby2 = yres / 2 + 90;
 				strcpy(subtext, "Wind Properties:");
 				break;
+			case 41: // authored vertical-layer stair, decoration-compatible properties
+				snprintf(spriteProperties[0], 8, "%d",
+					static_cast<int>(selectedEntity[0]->verticalLayerTransitionModel));
+				snprintf(spriteProperties[1], 4, "%d",
+					static_cast<int>(selectedEntity[0]->verticalLayerTransitionRotation));
+				snprintf(spriteProperties[2], 5, "%d",
+					static_cast<int>(selectedEntity[0]->floorDecorationHeightOffset));
+				snprintf(spriteProperties[3], 5, "%d",
+					static_cast<int>(selectedEntity[0]->floorDecorationXOffset));
+				snprintf(spriteProperties[4], 5, "%d",
+					static_cast<int>(selectedEntity[0]->floorDecorationYOffset));
+				snprintf(spriteProperties[5], 5, "%d",
+					static_cast<int>(selectedEntity[0]->floorDecorationDestroyIfNoWall));
+				readDecorationInteractTextIntoSpriteProperties(selectedEntity[0]);
+				inputstr = spriteProperties[0];
+				cursorflash = ticks;
+				menuVisible = 0;
+				subwindow = 1;
+				// Reuse the exact floor-decoration property page so stairs expose
+				// model, direction, height/X/Y offsets, wall attachment and text.
+				newwindow = 15;
+				subx1 = xres / 2 - 200;
+				subx2 = xres / 2 + 200;
+				suby1 = yres / 2 - 190;
+				suby2 = yres / 2 + 190;
+				strcpy(subtext, selectedEntity[0]->verticalLayerTransitionDelta > 0
+					? "Z Stair Up Decoration Properties:"
+					: "Z Stair Down Decoration Properties:");
+				break;
 			default:
 				strcpy(message, "No properties available for current sprite.");
 				messagetime = 60;
@@ -4136,7 +4268,9 @@ void buttonSpritePropertiesConfirm(button_t* my)
 	button_t* button = NULL;
 	if ( selectedEntity[0] != NULL )
 	{
-		int spriteType = checkSpriteType(selectedEntity[0]->sprite);
+		int spriteType = selectedEntity[0]->verticalLayerTransitionDelta != 0
+			? 41
+			: checkSpriteType(selectedEntity[0]->sprite);
 		switch ( spriteType )
 		{
 			case 1: //monsters
@@ -4866,6 +5000,17 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				break;
 			case 33:
 				selectedEntity[0]->skill[0] = (Sint32)atoi(spriteProperties[0]);
+				break;
+			case 41:
+				selectedEntity[0]->verticalLayerTransitionModel =
+					std::max(0, atoi(spriteProperties[0]));
+				selectedEntity[0]->verticalLayerTransitionRotation = static_cast<Sint16>(
+					std::max(-1, std::min(7, atoi(spriteProperties[1]))));
+				selectedEntity[0]->floorDecorationHeightOffset = (Sint32)atoi(spriteProperties[2]);
+				selectedEntity[0]->floorDecorationXOffset = (Sint32)atoi(spriteProperties[3]);
+				selectedEntity[0]->floorDecorationYOffset = (Sint32)atoi(spriteProperties[4]);
+				selectedEntity[0]->floorDecorationDestroyIfNoWall = (Sint32)atoi(spriteProperties[5]);
+				writeDecorationInteractTextFromSpriteProperties(selectedEntity[0]);
 				break;
 			default:
 				break;

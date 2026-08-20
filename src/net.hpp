@@ -14,6 +14,7 @@
 #include "late_join_state.hpp"
 #include "party_chat.hpp"
 #include "party_protocol.hpp"
+#include "playable_z.hpp"
 
 #include "game.hpp"
 #include <cstddef>
@@ -47,6 +48,7 @@ void serverUpdateEntityFSkill(Entity* entity, int fskill);
 void serverUpdateEntityStatFlag(Entity* entity, int flag);
 void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSprite, Uint32 optionalUid = 0, Uint32 duration = 0, Uint32 optionalData = 0);
 void serverSpawnMiscParticlesAtLocation(Sint16 x, Sint16 y, Sint16 z, int particleType, int particleSprite, Uint32 duration = 0, Uint32 optionalData = 0, Uint32 optionalUid = 0);
+void serverSpawnMiscParticlesAtLocationWithSpatialContext(Sint16 x, Sint16 y, Sint16 z, int particleType, int particleSprite, const SpatialSpawnContext& spatialContext, Uint32 duration = 0, Uint32 optionalData = 0, Uint32 optionalUid = 0);
 void serverUpdateEntityFlag(Entity* entity, int flag);
 void serverUpdateMapTileFlag(Sint16 x, Sint16 y, int layer, Uint32 flagSet, Uint32 flagRemove);
 void serverUpdateBodypartIDs(Entity* entity);
@@ -287,6 +289,8 @@ struct PingNetworkStatus_t
 extern PingNetworkStatus_t PingNetworkStatus[MAXPLAYERS];
 bool serverPlayerCanReceiveGameplayUpdates(int playerIndex);
 bool serverPlayerCanReceiveActiveMapUpdates(int playerIndex);
+bool serverPlayerCanReceivePlayableFloorUpdates(int playerIndex, PlayableFloorId playableFloor);
+bool serverPlayerCanReceiveEntityUpdates(int playerIndex, const Entity* entity);
 bool beginServerLateJoinSnapshot(
     int playerIndex,
     Uint32 transferId,

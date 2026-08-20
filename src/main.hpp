@@ -10,7 +10,7 @@
 -------------------------------------------------------------------------------*/
 
 #pragma once
-#include "Config.hpp"
+#include <Config.hpp>
 
 #include <stdlib.h>
 //#ifdef WINDOWS
@@ -475,12 +475,40 @@ typedef struct map_t
 	std::set<int> liquidSfxPlayedTiles;
 	std::map<int, Uint32> tileAttributes;
 	PlayableFloorTable playableFloors;
+	/*
+	 * Stage Z2B: floor-qualified geometry access.
+	 *
+	 * Floor Z0 remains ABI/source compatible through map_t::tiles. Nonzero
+	 * floors never fall back to Z0: a missing/invalid floor stack returns
+	 * nullptr/0 so collision and rendering cannot accidentally read geometry
+	 * from another playable floor.
+	 */
+	std::size_t playableFloorTileCount() const;
+	const Sint32* tilesForPlayableFloor(PlayableFloorId playableFloor) const;
+	Sint32* tilesForPlayableFloor(PlayableFloorId playableFloor);
+	/*
+	 * Stage Z3.3C: layer-authored playable floors are collision views into one
+	 * continuous 32-layer world. Rendering must keep the authored stack intact
+	 * so lower layers remain visible from upper floors. Legacy explicit FLOR
+	 * geometry continues to render from its isolated floor-owned buffer.
+	 */
+	bool playableFloorUsesAuthoredLayerStack(PlayableFloorId playableFloor) const;
+	const Sint32* tilesForPlayableFloorRendering(PlayableFloorId playableFloor) const;
+	bool ensurePlayableFloorGeometry(PlayableFloorId playableFloor, bool copyDefaultGeometry = false);
+	bool findLowerPlayableFloorLanding(
+		int x, int y, PlayableFloorId fromFloor,
+		PlayableFloorId& landingFloor, int& floorsFallen) const;
+	Sint32 tileAt(int x, int y, int layer, PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR) const;
+	bool setTileAt(int x, int y, int layer, Sint32 tile, PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR);
 	static const Uint32 TILE_ATTRIBUTE_NODIG = 1 << 0;
 	static const Uint32 TILE_ATTRIBUTE_SLIPPERY = 1 << 1;
 	static const Uint32 TILE_ATTRIBUTE_SLOW = 1 << 2;
 	static const Uint32 TILE_ATTRIBUTE_GREASE = 1 << 3;
 	static const Uint32 TILE_ATTRIBUTE_TREASURE_ROOM = 1 << 4;
 	bool tileHasAttribute(int x, int y, int layer, Uint32 attribute);
+	bool tileHasAttribute(int x, int y, int layer, Uint32 attribute, PlayableFloorId playableFloor) const;
+	void setTileAttribute(int x, int y, int layer, Uint32 attribute, bool enabled,
+		PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR);
 	void setMapHDRSettings();
 	char filename[256];
 	~map_t()

@@ -443,8 +443,15 @@ Entity::Entity(Sint32 in_sprite, Uint32 pos, list_t* entlist, list_t* creatureli
 	// New entities have no persistent identity until the map is saved
 	// or an existing V4.5 map restores one.
 	persistentID = 0;
-	playableFloor = DEFAULT_PLAYABLE_FLOOR;
-	spatialRevision = 0;
+	// Stage Z2C: runtime-created entities inherit the executing behavior's
+	// discrete floor/revision. Outside behavior execution this remains Z0/0.
+	const SpatialSpawnContext runtimeSpatialContext =
+		activeRuntimeSpatialContext();
+	playableFloor = runtimeSpatialContext.playableFloor;
+	spatialRevision = runtimeSpatialContext.spatialRevision;
+	authoredMapLayer = static_cast<Sint16>(std::clamp<int>(
+		static_cast<int>(runtimeSpatialContext.authoredMapLayer),
+		0, MAPLAYERS - 1));
 	x = 0;
 	y = 0;
 	z = 0;
@@ -568,12 +575,18 @@ Entity* newEntityWithSpatialContext(
 	list_t* creaturelist,
 	const Entity* source)
 {
-	return newEntityWithSpatialContext(
+	Entity* spawned = newEntityWithSpatialContext(
 		sprite,
 		pos,
 		entlist,
 		creaturelist,
 		source ? source->spatialSpawnContext() : SpatialSpawnContext{});
+	if ( spawned && source )
+	{
+		spawned->authoredMapLayer =
+			static_cast<Sint16>(source->structuralMapLayer());
+	}
+	return spawned;
 }
 
 Monster editorSpriteTypeToMonster(Sint32 sprite)
@@ -2543,16 +2556,44 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
         // entity through undo, redo, cycling, or duplication.
         entityNew->z = entityToCopy->z;
         entityNew->persistentID = entityToCopy->persistentID;
+        entityNew->authoredMapLayer = entityToCopy->authoredMapLayer;
         entityNew->playableFloor = entityToCopy->playableFloor;
         entityNew->spatialRevision = 0;
+        entityNew->playableFloorTransitionEnabled = entityToCopy->playableFloorTransitionEnabled;
+        entityNew->playableFloorTransitionDestination = entityToCopy->playableFloorTransitionDestination;
+        entityNew->playableFloorTransitionTargetPersistentID = entityToCopy->playableFloorTransitionTargetPersistentID;
+        entityNew->verticalLayerTransitionDelta = entityToCopy->verticalLayerTransitionDelta;
+        entityNew->verticalLayerTransitionModel = entityToCopy->verticalLayerTransitionModel;
+        entityNew->verticalLayerTransitionRotation = entityToCopy->verticalLayerTransitionRotation;
+        if ( entityToCopy->verticalLayerTransitionDelta != 0 )
+        {
+            entityNew->floorDecorationHeightOffset = entityToCopy->floorDecorationHeightOffset;
+            entityNew->floorDecorationXOffset = entityToCopy->floorDecorationXOffset;
+            entityNew->floorDecorationYOffset = entityToCopy->floorDecorationYOffset;
+            entityNew->floorDecorationDestroyIfNoWall = entityToCopy->floorDecorationDestroyIfNoWall;
+            for ( int i = 8; i < 60; ++i )
+            {
+                if ( i != 28 )
+                {
+                    entityNew->skill[i] = entityToCopy->skill[i];
+                }
+            }
+        }
     }
     else
     {
         // Newly placed entities receive an ID on their first save.
         entityNew->z = 0.0;
         entityNew->persistentID = 0;
+        entityNew->authoredMapLayer = 0;
         entityNew->playableFloor = DEFAULT_PLAYABLE_FLOOR;
         entityNew->spatialRevision = 0;
+        entityNew->playableFloorTransitionEnabled = false;
+        entityNew->playableFloorTransitionDestination = DEFAULT_PLAYABLE_FLOOR;
+        entityNew->playableFloorTransitionTargetPersistentID = 0;
+        entityNew->verticalLayerTransitionDelta = 0;
+        entityNew->verticalLayerTransitionModel = 0;
+        entityNew->verticalLayerTransitionRotation = 0;
     }
 	if ( entityStatToCopy != nullptr )
 	{

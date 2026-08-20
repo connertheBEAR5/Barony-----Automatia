@@ -114,6 +114,10 @@ void Entity::actPedestalBase()
 				for ( node = map.entities->first; node != NULL; node = node->next )
 				{
 					Entity* entity = (Entity*)node->element;
+					if ( !entity || entity->playableFloor != playableFloor )
+					{
+						continue;
+					}
 					if ( entity->behavior == &actMonster )
 					{
 						Stat* stats = entity->getStats();
@@ -303,6 +307,10 @@ void Entity::actPedestalBase()
 		for ( node2 = map.entities->first; node2 != nullptr; node2 = node2->next )
 		{
 			Entity* entity = (Entity*)node2->element;
+			if ( !entity || entity->playableFloor != playableFloor )
+			{
+				continue;
+			}
 			if ( entity == this || (entity->flags[PASSABLE] && entity->behavior != &actDeathGhost)
 				|| entity->behavior == &actDoorFrame || entity == orbEntity )
 			{

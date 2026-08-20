@@ -468,6 +468,10 @@ void bombDoEffect(Entity* my, Entity* triggered, real_t entityDistance, bool spa
 		for ( node_t* node = map.entities->first; node != NULL; node = node->next )
 		{
 			Entity* entity = (Entity*)node->element;
+			if ( entity && entity->playableFloor != my->playableFloor )
+			{
+				continue;
+			}
 			if ( entity && entity != my && entity->behavior == &actBomb )
 			{
 				if ( entity->skill[21] == TOOL_TELEPORT_BOMB && entity->skill[22] == Item::ItemBombTriggerType::BOMB_TELEPORT_RECEIVER )
@@ -911,7 +915,7 @@ void actBomb(Entity* my)
 			}
 			checkx = checkx >> 4;
 			checky = checky >> 4;
-			if ( !map.tiles[OBSTACLELAYER + checky * MAPLAYERS + checkx * MAPLAYERS * map.height] )   // wall
+			if ( !map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor) )   // wall
 			{
 				shouldExplode = true;
 			}

@@ -7653,7 +7653,7 @@ void actMonster(Entity* my)
 						}
 
 						int mapIndex = (y) * MAPLAYERS + (x) * MAPLAYERS * map.height;
-						if ( !map.tiles[OBSTACLELAYER + mapIndex] )
+						if ( !map.tileAt(x, y, OBSTACLELAYER, my->playableFloor) )
 						{
 							// wall has been broken, fights on
 							my->monsterLichAllyStatus = 1;
@@ -7907,22 +7907,22 @@ void actMonster(Entity* my)
 					int my_x = static_cast<int>(my->x) >> 4;
 					int my_y = static_cast<int>(my->y) >> 4;
 					int mapIndex = (my_y) * MAPLAYERS + (my_x + 1) * MAPLAYERS * map.height;
-					if ( map.tiles[OBSTACLELAYER + mapIndex] )   // wall
+					if ( map.tileAt(my_x + 1, my_y, OBSTACLELAYER, my->playableFloor) )   // wall
 					{
 						++sides;
 					}
 					mapIndex = (my_y) * MAPLAYERS + (my_x - 1) * MAPLAYERS * map.height;
-					if ( map.tiles[OBSTACLELAYER + mapIndex] )   // wall
+					if ( map.tileAt(my_x - 1, my_y, OBSTACLELAYER, my->playableFloor) )   // wall
 					{
 						++sides;
 					}
 					mapIndex = (my_y + 1) * MAPLAYERS + (my_x) * MAPLAYERS * map.height;
-					if ( map.tiles[OBSTACLELAYER + mapIndex] )   // wall
+					if ( map.tileAt(my_x, my_y + 1, OBSTACLELAYER, my->playableFloor) )   // wall
 					{
 						++sides;
 					}
 					mapIndex = (my_y - 1) * MAPLAYERS + (my_x) * MAPLAYERS * map.height;
-					if ( map.tiles[OBSTACLELAYER + mapIndex] )   // wall
+					if ( map.tileAt(my_x, my_y - 1, OBSTACLELAYER, my->playableFloor) )   // wall
 					{
 						++sides;
 					}
@@ -8417,7 +8417,8 @@ void actMonster(Entity* my)
 					{
 						if ( myStats->getAttribute("gnome_type").find("gnome2") != std::string::npos )
 						{
-							if ( !(swimmingtiles[map.tiles[mapIndex]] || lavatiles[map.tiles[mapIndex]]) )
+							if ( !(swimmingtiles[map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), FLOORLAYER, my->playableFloor)]
+									|| lavatiles[map.tileAt(static_cast<int>(my->x / 16), static_cast<int>(my->y / 16), FLOORLAYER, my->playableFloor)]) )
 							{
 								item->isDroppable = false;
 								if ( item->type >= TOOL_BOMB && item->type <= TOOL_TELEPORT_BOMB )
@@ -9638,7 +9639,7 @@ void actMonster(Entity* my)
 								if ( mapy - 1 > 0 )
 								{
 									int index = (mapy - 1) * MAPLAYERS + (mapx) * MAPLAYERS * map.height;
-									if ( !map.tiles[OBSTACLELAYER + index] )
+									if ( !map.tileAt(mapx, mapy - 1, OBSTACLELAYER, my->playableFloor) )
 									{
 										// no effect, wall is missing
 										slide = false;
@@ -9658,7 +9659,7 @@ void actMonster(Entity* my)
 								if ( mapy + 1 < map.height )
 								{
 									int index = (mapy + 1) * MAPLAYERS + (mapx) * MAPLAYERS * map.height;
-									if ( !map.tiles[OBSTACLELAYER + index] )
+									if ( !map.tileAt(mapx, mapy + 1, OBSTACLELAYER, my->playableFloor) )
 									{
 										// no effect, wall is missing
 										slide = false;
@@ -9682,7 +9683,7 @@ void actMonster(Entity* my)
 								if ( mapx - 1 > 0 )
 								{
 									int index = (mapy) * MAPLAYERS + (mapx - 1) * MAPLAYERS * map.height;
-									if ( !map.tiles[OBSTACLELAYER + index] )
+									if ( !map.tileAt(mapx - 1, mapy, OBSTACLELAYER, my->playableFloor) )
 									{
 										// no effect, wall is missing
 										slide = false;
@@ -9702,7 +9703,7 @@ void actMonster(Entity* my)
 								if ( mapx + 1 < map.width )
 								{
 									int index = (mapy) * MAPLAYERS + (mapx + 1) * MAPLAYERS * map.height;
-									if ( !map.tiles[OBSTACLELAYER + index] )
+									if ( !map.tileAt(mapx + 1, mapy, OBSTACLELAYER, my->playableFloor) )
 									{
 										// no effect, wall is missing
 										slide = false;
@@ -10296,7 +10297,7 @@ void actMonster(Entity* my)
 							int mapx = (static_cast<int>(startx) >> 4);
 							int mapy = (static_cast<int>(starty) >> 4);
 							int index = (mapy) * MAPLAYERS + (mapx) * MAPLAYERS * map.height;
-							if ( !map.tiles[OBSTACLELAYER + index] )
+							if ( !map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 							{
 								bool foundObstacle = false;
 								if ( checkedTiles.find(mapx + mapy * 10000) == checkedTiles.end() )
@@ -10316,7 +10317,7 @@ void actMonster(Entity* my)
 								previousx = startx;
 								previousy = starty;
 							}
-							else if ( map.tiles[OBSTACLELAYER + index] )
+							else if ( map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 							{
 								// hit a wall.
 								break;
@@ -12172,7 +12173,7 @@ timeToGoAgain:
 							int mapx = (static_cast<int>(startx) >> 4);
 							int mapy = (static_cast<int>(starty) >> 4);
 							int index = (mapy) * MAPLAYERS + (mapx) * MAPLAYERS * map.height;
-							if ( !map.tiles[OBSTACLELAYER + index] )
+							if ( !map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 							{
 								bool foundObstacle = false;
 								if ( checkedTiles.find(mapx + mapy * 10000) == checkedTiles.end() )
@@ -12192,7 +12193,7 @@ timeToGoAgain:
 								previousx = startx;
 								previousy = starty;
 							}
-							else if ( map.tiles[OBSTACLELAYER + index] )
+							else if ( map.tileAt(mapx, mapy, OBSTACLELAYER, my->playableFloor) )
 							{
 								break;
 							}
@@ -14778,8 +14779,12 @@ timeToGoAgain:
 			else if ( my->monsterSpecialState == DUCK_RETURN )
 			{
 				my->monsterReleaseAttackTarget();
-				Entity* leader = uidToEntity(myStats->leader_uid);
-				if ( !leader || myStats->getAttribute("duck_run") == "1" )
+				int durableOwnerPlayer = -1;
+				Entity* leader = resolveHermitDuckOwner(
+					my, myStats, &durableOwnerPlayer);
+				const bool brokenDuckRunsAway =
+					myStats->getAttribute("duck_run") == "1";
+				if ( brokenDuckRunsAway || (!leader && durableOwnerPlayer < 0) )
 				{
 					int dir = my->getUID() % 4;
 					int mapx = 1;
@@ -14818,6 +14823,26 @@ timeToGoAgain:
 						my->setHP(0);
 						return;
 					}
+				}
+				else if ( !leader && durableOwnerPlayer >= 0 )
+				{
+					/*
+					 * The Hermit player slot survived persistence but its current actor
+					 * has not been rebound yet. Wait instead of treating the duck as
+					 * abandoned and running it off-map.
+					 */
+					MONSTER_VELX = 0.0;
+					MONSTER_VELY = 0.0;
+				}
+				else if ( leader && leader->playableFloor != my->playableFloor )
+				{
+					/*
+					 * Same-map playable floors are spatially isolated. A duck
+					 * returning to its Hermit must not chase or complete its
+					 * pickup against an owner on another floor.
+					 */
+					MONSTER_VELX = 0.0;
+					MONSTER_VELY = 0.0;
 				}
 				else if ( leader )
 				{
@@ -19435,7 +19460,7 @@ void Entity::monsterAllySendCommand(int command, int destX, int destY, Uint32 ui
 					if ( monsterY >= 0 && monsterY < map.height )
 					{
 						int index = (monsterY) * MAPLAYERS + (monsterX) * MAPLAYERS * map.height;
-						noground = !map.tiles[index];
+						noground = !map.tileAt(monsterX, monsterY, FLOORLAYER, playableFloor);
 					}
 				}
 
@@ -19718,7 +19743,7 @@ bool Entity::gyrobotSetPathToReturnLocation(int destX, int destY, int adjacentTi
 	else if ( !checkObstacle((destX << 4) + 8, (destY << 4) + 8, this, nullptr) )
 	{
 		int index = (destY)* MAPLAYERS + (destX)* MAPLAYERS * map.height;
-		if ( !tryRandomSpot && map.tiles[index] )
+		if ( !tryRandomSpot && map.tileAt(destX, destY, FLOORLAYER, playableFloor) )
 		{
 			foundplace = true; // we can path directly to the destination specified.
 		}
@@ -19739,7 +19764,7 @@ bool Entity::gyrobotSetPathToReturnLocation(int destX, int destY, int adjacentTi
 				else if ( !checkObstacle((u << 4) + 8, (v << 4) + 8, this, nullptr) )
 				{
 					int index = (v) * MAPLAYERS + (u) * MAPLAYERS * map.height;
-					if ( !map.tiles[index] )
+					if ( !map.tileAt(u, v, FLOORLAYER, playableFloor) )
 					{
 						continue; // bad spot to land
 					}
@@ -21284,7 +21309,7 @@ void mimicResetIdle(Entity* my)
 	{
 		int tx = pair.first;
 		int ty = pair.second;
-		if ( map.tiles[OBSTACLELAYER + ((ty)*MAPLAYERS + (tx)*MAPLAYERS * map.height)] )
+		if ( map.tileAt(tx, ty, OBSTACLELAYER, my->playableFloor) )
 		{
 			if ( tx == x + 1 )
 			{

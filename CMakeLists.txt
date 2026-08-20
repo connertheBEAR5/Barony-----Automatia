@@ -629,7 +629,16 @@ endif()
 
 #add_subdirectory(books)
  
-configure_file ( "${PROJECT_SOURCE_DIR}/src/Config.hpp.in" "${PROJECT_SOURCE_DIR}/src/Config.hpp")
+# Keep generated build configuration private to each CMake build directory.
+# This prevents build-super-posix and build (for example Steam-off vs Steam-on)
+# from overwriting a single shared src/Config.hpp in the source tree.
+set(BARONY_GENERATED_INCLUDE_DIR "${PROJECT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${BARONY_GENERATED_INCLUDE_DIR}")
+configure_file(
+	"${PROJECT_SOURCE_DIR}/src/Config.hpp.in"
+	"${BARONY_GENERATED_INCLUDE_DIR}/Config.hpp"
+)
+include_directories(BEFORE "${BARONY_GENERATED_INCLUDE_DIR}")
 
 message("***************************")
 message("Debug flags: ")
@@ -697,7 +706,7 @@ if (GAME_ENABLED)
 	)
 	add_test(
 		NAME playable_z_runtime_characterization
-		COMMAND barony --automatia-stage4b-runtime-characterization
+		COMMAND barony --automatia-stage4d-z3-transition-characterization
 	)
 	set_tests_properties(
 		playable_z_runtime_characterization

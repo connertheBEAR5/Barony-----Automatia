@@ -575,6 +575,7 @@ vec4_t unproject(
 static void fillSmoothLightmap(
 	int which,
 	map_t& map,
+	PlayableFloorId playableFloor,
 	float updateScale = 1.f
 )
 {
@@ -585,9 +586,12 @@ static void fillSmoothLightmap(
 	}
 #endif
 
-	auto* lightmap = lightmaps[which].data();
-	auto* lightmapSmoothed =
-		lightmapsSmoothed[which].data();
+	auto& lightmapBuffer = lightmapForPlayableFloor(
+		which, playableFloor, map.width, map.height);
+	auto& smoothedBuffer = lightmapSmoothedForPlayableFloor(
+		which, playableFloor, map.width, map.height);
+	auto* lightmap = lightmapBuffer.data();
+	auto* lightmapSmoothed = smoothedBuffer.data();
 
 	constexpr float epsilon = 1.f;
 	constexpr float defaultSmoothRate = 4.f;
@@ -694,12 +698,18 @@ const float rate =
 		}
 	}
 }
-static inline bool testTileOccludes(const map_t& map, int index) {
+static inline bool testTileOccludes(
+    const map_t& map, int index,
+    PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR) {
     if (index < 0 || index > map.width * map.height * MAPLAYERS - MAPLAYERS) {
         return true;
     }
-    const Uint64& t0 = *(Uint64*)&map.tiles[index];
-    const Uint32& t1 = *(Uint32*)&map.tiles[index + 2];
+    const Sint32* floorTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    if (!floorTiles) {
+        return true;
+    }
+    const Uint64& t0 = *(Uint64*)&floorTiles[index];
+    const Uint32& t1 = *(Uint32*)&floorTiles[index + 2];
     return (t0 & 0xffffffff00000000) // is floor != 0
         && (t0 & 0x00000000ffffffff) // is obstacle layer != 0
         && t1 // is ceiling != 0
@@ -711,7 +721,8 @@ static inline bool testLightLayerOccludes(
 	const map_t& map,
 	int x,
 	int y,
-	int layer
+	int layer,
+	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR
 )
 {
 	if ( x < 0
@@ -730,19 +741,26 @@ static inline bool testLightLayerOccludes(
 		+ y * MAPLAYERS
 		+ x * map.height * MAPLAYERS;
 
+	const Sint32* floorTiles = map.tilesForPlayableFloorRendering(playableFloor);
+	if ( !floorTiles )
+	{
+		return true;
+	}
 	const Sint32 tile =
-		map.tiles[index];
+		floorTiles[index];
 
 	return tile != 0
 		&& tile != TRANSPARENT_TILE;
 }
 static void loadLightmapTexture(
 	int which,
-	map_t& map
+	map_t& map,
+	PlayableFloorId playableFloor
 )
 {
-	auto* lightmapSmoothed =
-		lightmapsSmoothed[which].data();
+	auto& smoothedBuffer = lightmapSmoothedForPlayableFloor(
+		which, playableFloor, map.width, map.height);
+	auto* lightmapSmoothed = smoothedBuffer.data();
 
 static std::vector<float> pixels;
 
@@ -843,7 +861,8 @@ pixels.resize(
                             y * MAPLAYERS
                                 + x
                                     * MAPLAYERS
-                                    * map.height
+                                    * map.height,
+                            playableFloor
                         )
                         : false;
 
@@ -897,7 +916,8 @@ pixels.resize(
                                     * MAPLAYERS
                                     + neighbourX
                                         * MAPLAYERS
-                                        * map.height
+                                        * map.height,
+                                playableFloor
                             )
                             : false;
 
@@ -1376,6 +1396,7 @@ void glBeginCamera(view_t* camera, bool useHDR, map_t& map)
             break;
         }
     }
+    const PlayableFloorId renderFloor = getCameraPlayableFloor(camera);
 
     if (hdr) {
         const int numFbs = sizeof(view_t::fb) / sizeof(view_t::fb[0]);
@@ -1437,10 +1458,12 @@ void glBeginCamera(view_t* camera, bool useHDR, map_t& map)
 static bool lightmapInitialized[MAXPLAYERS + 1] = {};
 static int lightmapWidth[MAXPLAYERS + 1] = {};
 static int lightmapHeight[MAXPLAYERS + 1] = {};
+static PlayableFloorId lightmapPlayableFloor[MAXPLAYERS + 1] = {};
 
 const bool lightmapDimensionsChanged =
 	lightmapWidth[lightmapIndex] != map.width
-	|| lightmapHeight[lightmapIndex] != map.height;
+	|| lightmapHeight[lightmapIndex] != map.height
+	|| lightmapPlayableFloor[lightmapIndex] != renderFloor;
 
 const bool updateLightmap =
 	!lightmapInitialized[lightmapIndex]
@@ -1452,17 +1475,20 @@ if ( updateLightmap )
 	fillSmoothLightmap(
 		lightmapIndex,
 		map,
+		renderFloor,
 		2.f
 	);
 
 	loadLightmapTexture(
 		lightmapIndex,
-		map
+		map,
+		renderFloor
 	);
 
 	lightmapInitialized[lightmapIndex] = true;
 	lightmapWidth[lightmapIndex] = map.width;
 	lightmapHeight[lightmapIndex] = map.height;
+	lightmapPlayableFloor[lightmapIndex] = renderFloor;
 }
 else
 {
@@ -1653,6 +1679,21 @@ void glEndCamera(view_t* camera, bool useHDR, map_t& map)
     ++camera->drawnFrames;
 }
 
+static real_t entityRenderZ(const Entity* entity)
+{
+    if (!entity)
+    {
+        return 0.0;
+    }
+#ifndef EDITOR
+    if (!entity->flags[OVERDRAW])
+    {
+        return entity->worldRenderZ();
+    }
+#endif
+    return entity->z;
+}
+
 void glDrawVoxel(view_t* camera, Entity* entity, int mode) {
 	if (!camera || !entity) {
 		return;
@@ -1756,7 +1797,7 @@ void glDrawVoxel(view_t* camera, Entity* entity, int mode) {
         GL_CHECK_ERR(glUniformMatrix4fv(shader.uniform("uProj"), 1, false, (float*)&camera->proj_hud));
     }
 
-    v = vec4(entity->x * 2.f, -entity->z * 2.f - 1, entity->y * 2.f, 0.f);
+    v = vec4(entity->x * 2.f, -entityRenderZ(entity) * 2.f - 1, entity->y * 2.f, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
 
 #ifndef EDITOR
@@ -2368,7 +2409,7 @@ void glDrawSprite(view_t* camera, Entity* entity, int mode)
         (void)rotate_mat(&m, &t, rotx, &i.x); t = m; // roll
         GL_CHECK_ERR(glUniformMatrix4fv(shader.uniform("uProj"), 1, false, (float*)&camera->proj_hud));
     }
-    v = vec4(entity->x * 2.f, -entity->z * 2.f - 1, entity->y * 2.f, 0.f);
+    v = vec4(entity->x * 2.f, -entityRenderZ(entity) * 2.f - 1, entity->y * 2.f, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
 
     if ( (entity->actSpriteNoBillboard != 0 && entity->behavior == &actSprite) || entity->behavior == &actMagicRangefinder )
@@ -2554,7 +2595,7 @@ void glDrawSpriteFromImage(view_t* camera, Entity* entity, std::string text, int
         (void)rotate_mat(&m, &t, rotx, &i.x); t = m; // roll
     }
 
-    v = vec4(entity->x * 2.f, -entity->z * 2.f - 1, entity->y * 2.f, 0.f);
+    v = vec4(entity->x * 2.f, -entityRenderZ(entity) * 2.f - 1, entity->y * 2.f, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
     if ( rotate )
     {
@@ -2627,7 +2668,19 @@ static bool shouldDrawClouds(const map_t& map, int* cloudtile = nullptr, bool fo
         if (cloudtile) {
             *cloudtile = 77; // hell clouds
         }
-        if ((!strncmp(map.name, "Hell", 4) || map.skybox != 0) && smoothlighting) {
+        const bool authoredSky = !strncmp(map.name, "Hell", 4) || map.skybox != 0;
+#ifdef EDITOR
+        /*
+         * Z3.4C: Zed must preview the map's authored sky independently of the
+         * editor smooth-lighting toggle. The old condition returned false here
+         * and Chunk::build() synthesized a stone ceiling even though the game
+         * correctly rendered map.skybox.
+         */
+        const bool skyVisible = authoredSky;
+#else
+        const bool skyVisible = authoredSky && smoothlighting;
+#endif
+        if (skyVisible) {
             clouds = true;
             if (cloudtile) {
                 if (strncmp(map.name, "Hell", 4)) {
@@ -2642,7 +2695,13 @@ static bool shouldDrawClouds(const map_t& map, int* cloudtile = nullptr, bool fo
 
 #include "ui/Image.hpp"
 
-std::vector<Chunk> chunks;
+std::unordered_map<PlayableFloorId, std::vector<Chunk>> chunksByPlayableFloor;
+
+static std::vector<Chunk>& chunkCacheForFloor(const PlayableFloorId playableFloor)
+{
+    return chunksByPlayableFloor[playableFloor];
+}
+
 
 constexpr float sky_size = CLIPFAR * 16.f;
 constexpr float sky_htex_size = sky_size / 64.f;
@@ -2707,6 +2766,7 @@ static int currentSkyLayer = -1;
 static Uint32 currentSkyboxTile = 0;
 static int currentSkyMapWidth = -1;
 static int currentSkyMapHeight = -1;
+static PlayableFloorId currentSkyPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
 // Additional empty layers between the highest structure and the sky plane.
 constexpr int SKY_LAYER_CLEARANCE = 3;
 // you can change the sky clearance to get a more "roomy" sky with higher values. 
@@ -2719,11 +2779,18 @@ constexpr int SKY_LAYER_CLEARANCE = 3;
  *   2 = original ceiling
  *   3-31 = additional map layers
  */
-static int findHighestOccupiedSkyLayer(const map_t& map)
+static int findHighestOccupiedSkyLayer(
+    const map_t& map,
+    PlayableFloorId playableFloor)
 {
     // If there are no additional structures, layer 2 is treated as the
     // highest occupied layer.
     int highestOccupiedLayer = CEILINGLAYER;
+    const Sint32* floorTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    if (!floorTiles)
+    {
+        return highestOccupiedLayer;
+    }
 
     for (int x = 0; x < map.width; ++x)
     {
@@ -2736,7 +2803,7 @@ static int findHighestOccupiedSkyLayer(const map_t& map)
                     + y * MAPLAYERS
                     + x * map.height * MAPLAYERS;
 
-                const int tile = map.tiles[index];
+                const int tile = floorTiles[index];
 
                 if (tile != 0
                     && tile != TRANSPARENT_TILE)
@@ -2757,22 +2824,26 @@ static int findHighestOccupiedSkyLayer(const map_t& map)
  * This updates the mesh's CPU-side positions, then recreates its OpenGL
  * buffers only when the desired layer has changed.
  */
-static void updateDynamicSkyHeight(const map_t& map)
+static void updateDynamicSkyHeight(
+    const map_t& map,
+    PlayableFloorId playableFloor)
 {
         const bool changedMap =
         currentSkyboxTile != map.skybox
         || currentSkyMapWidth != map.width
-        || currentSkyMapHeight != map.height;
+        || currentSkyMapHeight != map.height
+        || currentSkyPlayableFloor != playableFloor;
 
     if (changedMap)
     {
         currentSkyboxTile = map.skybox;
         currentSkyMapWidth = map.width;
         currentSkyMapHeight = map.height;
+        currentSkyPlayableFloor = playableFloor;
         currentSkyLayer = -1;
     }
     const int highestOccupiedLayer =
-        findHighestOccupiedSkyLayer(map);
+        findHighestOccupiedSkyLayer(map, playableFloor);
 
     // Add some open space above the highest structure.
     // MAPLAYERS represents the virtual layer above real layer 31.
@@ -2830,6 +2901,12 @@ static ConsoleVariable<bool> cvar_allowChunkRebuild("/allow_chunk_rebuild", true
 
 void glDrawWorld(view_t* camera, int mode)
 {
+    const PlayableFloorId renderFloor = getCameraPlayableFloor(camera);
+    if (chunkCacheForFloor(renderFloor).empty())
+    {
+        createChunks(renderFloor);
+    }
+    auto& chunks = chunkCacheForFloor(renderFloor);
 #ifndef EDITOR
     static ConsoleVariable<bool> cvar_skipDrawWorld("/skipdrawworld", false);
     if (*cvar_skipDrawWorld) {
@@ -2962,7 +3039,7 @@ void glDrawWorld(view_t* camera, int mode)
     // Later editor changes are handled when map chunks are rebuilt.
     if (clouds && currentSkyLayer < 0)
     {
-        updateDynamicSkyHeight(map);
+        updateDynamicSkyHeight(map, renderFloor);
     }
                 // build chunks
                 if (allowChunkRebuild)
@@ -2973,7 +3050,7 @@ void glDrawWorld(view_t* camera, int mode)
 
                     if (rebuildClouds)
                     {
-                        updateDynamicSkyHeight(map);
+                        updateDynamicSkyHeight(map, renderFloor);
                     }
 
                     for (auto& pair : chunksToBuild)
@@ -2985,7 +3062,8 @@ void glDrawWorld(view_t* camera, int mode)
                             chunk.x,
                             chunk.y,
                             chunk.w,
-                            chunk.h
+                            chunk.h,
+                            renderFloor
                         );
                     }
                 }
@@ -3154,11 +3232,14 @@ static inline void makeTexCoords(float x, float y, float tile) {
     chunkTexCoords[1] = floorf(fdivf(tile, dim) + y) / dim;
 }
 
-void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w, int h) {
+void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w, int h,
+    PlayableFloorId playableFloor) {
     std::vector<float> positions;
     std::vector<float> texcoords;
     std::vector<float> colors;
     std::vector<float> lightLayers;
+    const Sint32* mapTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    this->playableFloor = playableFloor;
     
     positions.reserve(1200);
     texcoords.reserve(800);
@@ -3182,6 +3263,13 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
     const int sizeOfTiles = this->w * this->h * MAPLAYERS;
     this->tiles.clear();
     this->tiles.resize(sizeOfTiles);
+    if (!mapTiles)
+    {
+        std::fill(this->tiles.begin(), this->tiles.end(), 0);
+        indices = 0;
+        buildBuffers(positions, texcoords, colors, lightLayers);
+        return;
+    }
     
     for (int x = startX; x < endX; ++x) {
         for (int y = startY; y < endY; ++y) {
@@ -3197,8 +3285,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     + y * MAPLAYERS
                     + x * map.height * MAPLAYERS;
 
-                if (map.tiles[checkIndex] != 0
-                    && map.tiles[checkIndex] != TRANSPARENT_TILE)
+                if (mapTiles[checkIndex] != 0
+                    && mapTiles[checkIndex] != TRANSPARENT_TILE)
                 {
                     hasUpperStructure = true;
                     break;
@@ -3218,30 +3306,30 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
 
                 const bool solidMapTile =
                     validMapLayer
-                    && map.tiles[index] != 0
-                    && map.tiles[index] != TRANSPARENT_TILE;
+                    && mapTiles[index] != 0
+                    && mapTiles[index] != TRANSPARENT_TILE;
                 // build walls
                 if (validMapLayer)
                 {
                     assert(index2 < sizeOfTiles);
-                    this->tiles[index2] = map.tiles[index];
+                    this->tiles[index2] = mapTiles[index];
                     ++index2;
 
                     if (solidMapTile)
                     {
                     // select texture
                     float tile = mapceilingtile;
-                    if (map.tiles[index] >= 0 && map.tiles[index] < numtiles) {
-                        if (map.tiles[index] >= 22 && map.tiles[index] < 30) {
+                    if (mapTiles[index] >= 0 && mapTiles[index] < numtiles) {
+                        if (mapTiles[index] >= 22 && mapTiles[index] < 30) {
                             // water special case
-                            tile = 267 + map.tiles[index] - 22;
+                            tile = 267 + mapTiles[index] - 22;
                         }
-                        else if (map.tiles[index] >= 64 && map.tiles[index] < 72) {
+                        else if (mapTiles[index] >= 64 && mapTiles[index] < 72) {
                             // lava special case
-                            tile = 285 + map.tiles[index] - 64;
+                            tile = 285 + mapTiles[index] - 64;
                         }
                         else {
-                            tile = map.tiles[index];
+                            tile = mapTiles[index];
                         }
                     }
                     
@@ -3257,7 +3345,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
 
                     // draw east wall
                     const int easter = index + MAPLAYERS * map.height;
-                    if (x == map.width - 1 || !map.tiles[easter] || map.tiles[easter] == TRANSPARENT_TILE) {
+                    if (x == map.width - 1 || !mapTiles[easter] || mapTiles[easter] == TRANSPARENT_TILE) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3329,7 +3417,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
 
                     // draw south wall
                     const int souther = index + MAPLAYERS;
-                    if (y == map.height - 1 || !map.tiles[souther] || map.tiles[souther] == TRANSPARENT_TILE) {
+                    if (y == map.height - 1 || !mapTiles[souther] || mapTiles[souther] == TRANSPARENT_TILE) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3401,7 +3489,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
 
                     // draw west wall
                     const int wester = index - MAPLAYERS * map.height;
-                    if (x == 0 || !map.tiles[wester] || map.tiles[wester] == TRANSPARENT_TILE) {
+                    if (x == 0 || !mapTiles[wester] || mapTiles[wester] == TRANSPARENT_TILE) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3473,7 +3561,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
 
                     // draw north wall
                     const int norther = index - MAPLAYERS;
-                    if (y == 0 || !map.tiles[norther] || map.tiles[norther] == TRANSPARENT_TILE) {
+                    if (y == 0 || !mapTiles[norther] || mapTiles[norther] == TRANSPARENT_TILE) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3550,16 +3638,16 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     float tile = mapceilingtile;
 
                     // A generated ceiling must use the map's configured ceiling texture.
-                    // Only real tile surfaces should take their texture from map.tiles[index].
+                    // Only real tile surfaces should take their texture from mapTiles[index].
                     if (!generatedCeiling && validMapLayer)
                     {
-                        if (map.tiles[index] < 0 || map.tiles[index] >= numtiles)
+                        if (mapTiles[index] < 0 || mapTiles[index] >= numtiles)
                         {
                             tile = 0;
                         }
                         else
                         {
-                            tile = map.tiles[index];
+                            tile = mapTiles[index];
                         }
                     }
                     
@@ -3575,7 +3663,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     
                     // build floor
                     if (z < OBSTACLELAYER && solidMapTile) {
-                        if (!map.tiles[index + 1] || map.tiles[index + 1] == TRANSPARENT_TILE) {
+                        if (!mapTiles[index + 1] || mapTiles[index + 1] == TRANSPARENT_TILE) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
                             texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
@@ -3608,8 +3696,56 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                         }
                     }
                     
-                    // build ceiling
-                    else if (z > OBSTACLELAYER && (solidMapTile || generatedCeiling)) {
+                    /*
+                     * Z3.3D: every authored solid layer can become the walking
+                     * surface of the next playable floor. Legacy Barony only
+                     * emitted a top face for layer 0, which leaves layer-1+
+                     * platforms visually open/black when viewed from above.
+                     * Emit the exposed top cap of every solid structural tile.
+                     */
+                    if ( z >= OBSTACLELAYER && solidMapTile )
+                    {
+                        const bool topExposed =
+                            z == MAPLAYERS - 1
+                            || !mapTiles[index + 1]
+                            || mapTiles[index + 1] == TRANSPARENT_TILE;
+                        if ( topExposed )
+                        {
+                            const float topHeight = z * 32.f - 16.f;
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(0.f, 0.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 0.f, topHeight, y * 32.f + 0.f});
+
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(0.f, 1.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 0.f, topHeight, y * 32.f + 32.f});
+
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(1.f, 1.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 32.f, topHeight, y * 32.f + 32.f});
+
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(0.f, 0.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 0.f, topHeight, y * 32.f + 0.f});
+
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(1.f, 1.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 32.f, topHeight, y * 32.f + 32.f});
+
+                            colors.insert(colors.end(), {1.f, 1.f, 1.f});
+                            makeTexCoords(1.f, 0.f, tile);
+                            texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
+                            positions.insert(positions.end(), {x * 32.f + 32.f, topHeight, y * 32.f + 0.f});
+                        }
+                    }
+
+                    // build underside/ceiling of an upper structural tile
+                    if (z > OBSTACLELAYER && (solidMapTile || generatedCeiling)) {
                             bool drawCeilingSurface = false;
 
                             if (generatedCeiling)
@@ -3624,8 +3760,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                                     + x * map.height * MAPLAYERS;
 
                                 drawCeilingSurface =
-                                    !map.tiles[belowIndex]
-                                    || map.tiles[belowIndex] == TRANSPARENT_TILE;
+                                    !mapTiles[belowIndex]
+                                    || mapTiles[belowIndex] == TRANSPARENT_TILE;
                             }
                             if (drawCeilingSurface) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
@@ -3871,13 +4007,17 @@ bool Chunk::isDirty(const map_t& map) {
     if (tiles.empty()) {
         return true;
     }
+    const Sint32* mapTiles = map.tilesForPlayableFloorRendering(playableFloor);
+    if (!mapTiles) {
+        return true;
+    }
     for (int u = 0; u < w; ++u) {
         const int off0 = u * h * MAPLAYERS;
         const int off1 = (u + x) * map.height * MAPLAYERS + y * MAPLAYERS;
         const int size = MAPLAYERS * h;
         assert(off0 + size <= w * h * MAPLAYERS);
         assert(off1 + size <= map.width * map.height * MAPLAYERS);
-        if (memcmp(&tiles[off0], &map.tiles[off1], size * sizeof(Sint32))) {
+        if (memcmp(&tiles[off0], &mapTiles[off1], size * sizeof(Sint32))) {
             return true;
         }
     }
@@ -3885,22 +4025,23 @@ bool Chunk::isDirty(const map_t& map) {
 }
 
 void clearChunks() {
-    chunks.clear();
+    chunksByPlayableFloor.clear();
 
-	// A newly loaded map may have the same width, height, and skybox
-	// as the previous map but contain structures on different layers.
-	// Force the next sky draw to recalculate its height.
-	currentSkyLayer = -1;
+    // A newly loaded map may have the same dimensions but different floor data.
+    currentSkyLayer = -1;
+    currentSkyPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
 }
 
-void createChunks() {
+void createChunks(PlayableFloorId playableFloor) {
     constexpr int chunkSize = 4;
+    auto& chunks = chunkCacheForFloor(playableFloor);
+    chunks.clear();
     chunks.reserve((map.width / chunkSize + 1) * (map.height / chunkSize + 1));
     for (int x = 0; x < map.width; x += chunkSize) {
         for (int y = 0; y < map.height; y += chunkSize) {
             chunks.emplace_back();
             auto& chunk = chunks.back();
-            chunk.build(map, !shouldDrawClouds(map), x, y, chunkSize, chunkSize);
+            chunk.build(map, !shouldDrawClouds(map), x, y, chunkSize, chunkSize, playableFloor);
         }
     }
 }
@@ -3912,16 +4053,17 @@ void updateChunks() {
         cachedW = map.width;
         cachedH = map.height;
         clearChunks();
-        createChunks();
+        createChunks(DEFAULT_PLAYABLE_FLOOR);
     }
 }
 
 #ifndef EDITOR
 static ConsoleCommand ccmd_build_test_chunk("/build_test_chunk", "builds a chunk covering the whole level",
     [](int argc, const char* argv[]){
+    auto& chunks = chunkCacheForFloor(DEFAULT_PLAYABLE_FLOOR);
     chunks.emplace_back();
     auto& chunk = chunks.back();
-    chunk.build(map, !shouldDrawClouds(map), 0, 0, map.width, map.height);
+    chunk.build(map, !shouldDrawClouds(map), 0, 0, map.width, map.height, DEFAULT_PLAYABLE_FLOOR);
     });
 
 static ConsoleCommand ccmd_update_chunks("/updatechunks", "rebuilds all chunks",

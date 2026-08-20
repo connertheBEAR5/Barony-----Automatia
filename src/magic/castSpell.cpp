@@ -1032,7 +1032,8 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		{
 			int x = std::min<int>(std::max<int>(0, floor(caster->x / 16)), map.width - 1);
 			int y = std::min<int>(std::max<int>(0, floor(caster->y / 16)), map.height - 1);
-			if ( swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] || lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+			const Sint32 groundTile = map.tileAt(x, y, 0, caster->playableFloor);
+			if ( swimmingtiles[groundTile] || lavatiles[groundTile] )
 			{
 				swimming = true;
 			}
@@ -2486,8 +2487,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 										if ( mapx > 0 && mapx < map.width
 											&& mapy > 0 && mapy < map.height )
 										{
-											int mapIndex = (mapy)*MAPLAYERS + (mapx)*MAPLAYERS * map.height;
-											if ( map.tiles[mapIndex] ) // don't spawn over pit because gravity
+											if ( map.tileAt(mapx, mapy, 0, entity->playableFloor) ) // don't spawn over pit because gravity
 											{
 												breakables.push_back(entity); 
 											}
@@ -3747,14 +3747,13 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					}
 					else
 					{
-						int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-						if ( map.tiles[OBSTACLELAYER + mapIndex] )
+						if ( map.tileAt(x, y, OBSTACLELAYER, caster->playableFloor) )
 						{
 							noroom = true;
 						}
 						else if ( map.skybox != 0 )
 						{
-							if ( !map.tiles[CEILINGLAYER + mapIndex] )
+							if ( !map.tileAt(x, y, CEILINGLAYER, caster->playableFloor) )
 							{
 								noroom = true;
 							}
@@ -3811,14 +3810,13 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 					}
 					else
 					{
-						int mapIndex = (y)*MAPLAYERS + (x)*MAPLAYERS * map.height;
-						if ( map.tiles[OBSTACLELAYER + mapIndex] )
+						if ( map.tileAt(x, y, OBSTACLELAYER, caster->playableFloor) )
 						{
 							noroom = true;
 						}
 						else if ( map.skybox != 0 )
 						{
-							if ( !map.tiles[CEILINGLAYER + mapIndex] )
+							if ( !map.tileAt(x, y, CEILINGLAYER, caster->playableFloor) )
 							{
 								noroom = true;
 							}
@@ -4907,7 +4905,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 										int y = target->y / 16;
 										if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 										{
-											if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+											if ( !map.tileAt(x, y, CEILINGLAYER, target->playableFloor) )
 											{
 												z = -23;
 											}
@@ -4943,7 +4941,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 										int y = target->y / 16;
 										if ( x >= 0 && y >= 0 && x < map.width && y < map.height )
 										{
-											if ( !map.tiles[CEILINGLAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] )
+											if ( !map.tileAt(x, y, CEILINGLAYER, target->playableFloor) )
 											{
 												spellTimer->z = -23;
 											}
@@ -6054,7 +6052,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				{
 					int searchx = static_cast<int>(caster->x + 32 * cos(caster->yaw)) >> 4;
 					int searchy = static_cast<int>(caster->y + 32 * sin(caster->yaw)) >> 4;
-					std::vector<list_t*> itemsOnGround = TileEntityList.getEntitiesWithinRadius(searchx, searchy, 2);
+					std::vector<list_t*> itemsOnGround = TileEntityList.getEntitiesWithinRadius(searchx, searchy, 2, caster->playableFloor);
 					int totalMetal = 0;
 					int totalMagic = 0;
 					int numItems = 0;
@@ -7525,15 +7523,16 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				{
 					startx += 0.1 * cos(caster->yaw);
 					starty += 0.1 * sin(caster->yaw);
-					index = (static_cast<int>(starty + 16 * sin(caster->yaw)) >> 4) * MAPLAYERS 
-						+ (static_cast<int>(startx + 16 * cos(caster->yaw)) >> 4) * MAPLAYERS * map.height;
-					if ( map.tiles[index] && !map.tiles[OBSTACLELAYER + index] )
+					const int tileY = static_cast<int>(starty + 16 * sin(caster->yaw)) >> 4;
+					const int tileX = static_cast<int>(startx + 16 * cos(caster->yaw)) >> 4;
+					if ( map.tileAt(tileX, tileY, 0, caster->playableFloor)
+						&& !map.tileAt(tileX, tileY, OBSTACLELAYER, caster->playableFloor) )
 					{
 						// store the last known good coordinate
 						previousx = startx;
 						previousy = starty;
 					}
-					if ( map.tiles[OBSTACLELAYER + index] )
+					if ( map.tileAt(tileX, tileY, OBSTACLELAYER, caster->playableFloor) )
 					{
 						break;
 					}
