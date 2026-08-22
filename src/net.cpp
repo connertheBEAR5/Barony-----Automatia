@@ -607,6 +607,23 @@ namespace
 			&& net_packet->len >= static_cast<int>(kEntityFloorScopedPacketLength);
 	}
 
+	static std::int16_t receivedAuthoredMapLayerForFloor(
+		const PlayableFloorId playableFloor)
+	{
+		/*
+		 * Existing entity/visual packets carry gameplay floor but not a separate
+		 * authored layer. Only the explicit derived authored-stack format makes
+		 * those values equivalent for ordinary dynamic entities. Legacy FLOR
+		 * geometry remains structurally local to layer 0.
+		 */
+		if (!map.playableFloorUsesAuthoredLayerStack(playableFloor))
+		{
+			return 0;
+		}
+		return static_cast<std::int16_t>(std::clamp<int>(
+			static_cast<int>(playableFloor), 0, MAPLAYERS - 1));
+	}
+
 	static SpatialSpawnContext receivedEntitySpatialContext()
 	{
 		if (!receivedEntityHasPlayableFloorScope())
@@ -621,10 +638,8 @@ namespace
 		const std::uint64_t high = SDLNet_Read32(
 			&net_packet->data[kEntitySpatialRevisionHighOffset]);
 		context.spatialRevision = low | (high << 32U);
-		// Network packets carry the gameplay floor, not a separate authored-layer
-		// field. Dynamic received entities therefore use that floor as their
-		// structural render/spawn layer. Map-authored fixtures keep ELYR locally.
-		context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor);
+		context.authoredMapLayer =
+			receivedAuthoredMapLayerForFloor(context.playableFloor);
 		return context;
 	}
 
@@ -644,7 +659,8 @@ namespace
 		const std::uint64_t high = SDLNet_Read32(
 			&net_packet->data[floorOffset + 6U]);
 		context.spatialRevision = low | (high << 32U);
-		context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor);
+		context.authoredMapLayer =
+			receivedAuthoredMapLayerForFloor(context.playableFloor);
 		return context;
 	}
 
@@ -662,12 +678,15 @@ namespace
 			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[12])) / 32.0;
 		const real_t packetZ =
 			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[14])) / 32.0;
+		const PlayableFloorId packetPlayableFloor =
+			receivedEntitySpatialContext().playableFloor;
 		Entity* best = nullptr;
 		real_t bestDistance = 0.25;
 		for (node_t* node = map.entities->first; node; node = node->next)
 		{
 			Entity* candidate = static_cast<Entity*>(node->element);
-			if (!candidate || candidate->lastupdateserver != 0)
+			if (!candidate || candidate->lastupdateserver != 0
+				|| candidate->playableFloor != packetPlayableFloor)
 			{
 				continue;
 			}
@@ -6901,11 +6920,22 @@ Entity* receiveEntity(Entity* entity)
 	{
 		return entity;
 	}
-	if (entity->playableFloor != receivedSpatialContext.playableFloor)
+	if (newentity)
+	{
+		// ENTU carries a dynamic entity's gameplay floor but no authored-layer
+		// field. Its established wire-format meaning is the corresponding Z3
+		// structural stack layer; do not overwrite ELYR on map fixtures that
+		// already exist locally.
+		entity->applySpatialSpawnContext(receivedSpatialContext);
+	}
+	else if (entity->playableFloor != receivedSpatialContext.playableFloor)
 	{
 		entity->setPlayableFloor(receivedSpatialContext.playableFloor);
 	}
-	entity->spatialRevision = receivedSpatialContext.spatialRevision;
+	if (!newentity)
+	{
+		entity->spatialRevision = receivedSpatialContext.spatialRevision;
+	}
 	entity->new_x = ((Sint16)SDLNet_Read16(&net_packet->data[10])) / 32.0;
 	entity->new_y = ((Sint16)SDLNet_Read16(&net_packet->data[12])) / 32.0;
 	if (!excludeForAnimation && (newentity || monsterType != SCARAB)) {
@@ -9931,7 +9961,7 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			const std::uint64_t high = SDLNet_Read32(&net_packet->data[31]);
 			spatialContext.spatialRevision = low | (high << 32U);
 			spatialContext.authoredMapLayer =
-				static_cast<std::int16_t>(spatialContext.playableFloor);
+				receivedAuthoredMapLayerForFloor(spatialContext.playableFloor);
 		}
 		ScopedPlayableFloorRuntimeContext playableFloorRuntimeScope(spatialContext);
 		//messagePlayer(1, "recv, %d, %d, %d, type: %d", particle_x, particle_y, particle_z, particleType);

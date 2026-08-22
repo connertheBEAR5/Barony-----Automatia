@@ -187,7 +187,7 @@ void initDuck(Entity* my, Stat* myStats)
 	}
 
 	// body
-	Entity* entity = newEntity(appearance == 3 ? 2308 : 2226 + appearance * 6, 1, map.entities, nullptr); //Limb entity.
+	Entity* entity = newEntityWithSpatialContext(appearance == 3 ? 2308 : 2226 + appearance * 6, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -214,7 +214,7 @@ void initDuck(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// body sit
-	entity = newEntity(appearance == 3 ? 2307 : 2225 + appearance * 6, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntityWithSpatialContext(appearance == 3 ? 2307 : 2225 + appearance * 6, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -240,7 +240,7 @@ void initDuck(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// wingleft
-	entity = newEntity(appearance == 3 ? 2309 : 2227 + appearance * 6, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntityWithSpatialContext(appearance == 3 ? 2309 : 2227 + appearance * 6, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -266,7 +266,7 @@ void initDuck(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// wingright
-	entity = newEntity(appearance == 3 ? 2310 : 2228 + appearance * 6, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntityWithSpatialContext(appearance == 3 ? 2310 : 2228 + appearance * 6, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -292,7 +292,7 @@ void initDuck(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// leg left
-	entity = newEntity(2229, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntityWithSpatialContext(2229, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -318,7 +318,7 @@ void initDuck(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// leg right
-	entity = newEntity(2230, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntityWithSpatialContext(2230, 1, map.entities, nullptr, my); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -372,7 +372,7 @@ void duckSpawnFeather(int sprite, real_t x, real_t y, real_t z, Entity* my)
 	for ( int i = 0; i < 3; ++i )
 	{
 		real_t leafEndZ = z - 7.5;
-		Entity* leaf = newEntity(featherSprite, 1, map.entities, nullptr); //Gib entity.
+		Entity* leaf = newEntityWithSpatialContext(featherSprite, 1, map.entities, nullptr, my); //Gib entity.
 		if ( leaf != NULL )
 		{
 			leaf->x = x;
@@ -525,10 +525,11 @@ void actWaterSplashParticle(Entity* my)
 	my->vel_z += 0.04;
 }
 
-void createWaterSplash(real_t x, real_t y, int lifetime)
+void createWaterSplash(real_t x, real_t y, int lifetime, const Entity* source)
 {
 	{
-		Entity* splash = newEntity(2246, 1, map.entities, nullptr); //Gib entity.
+		Entity* splash = newEntityWithSpatialContext(
+			2246, 1, map.entities, nullptr, source); //Gib entity.
 		real_t centerx = static_cast<int>(x / 16) * 16.0 + 8.0;
 		real_t centery = static_cast<int>(y / 16) * 16.0 + 8.0;
 		splash->x = std::max(-2.5, std::min(2.5, (x - centerx))) + centerx;
@@ -551,7 +552,8 @@ void createWaterSplash(real_t x, real_t y, int lifetime)
 	real_t offsetYaw = ((local_rng.rand() % 9) / 8.0) * PI / 4;
 	for ( int i = 0; i < 4; ++i )
 	{
-		Entity* splashParticle = newEntity(2248, 1, map.entities, nullptr); //Gib entity.
+		Entity* splashParticle = newEntityWithSpatialContext(
+			2248, 1, map.entities, nullptr, source); //Gib entity.
 		splashParticle->yaw = offsetYaw + i * (PI / 2);
 		splashParticle->x = static_cast<int>(x / 16) * 16.0 + 8.0 + 2.0 * cos(splashParticle->yaw);
 		splashParticle->y = static_cast<int>(y / 16) * 16.0 + 8.0 + 2.0 * sin(splashParticle->yaw);
@@ -823,7 +825,7 @@ void duckAnimate(Entity* my, Stat* myStats, double dist)
 				dir += 0.1;
 			}
 
-			createWaterSplash(my->x, my->y, 30);
+			createWaterSplash(my->x, my->y, 30, my);
 			playSoundEntityLocal(my, 136, 64);
 		}
 		if ( keystatus[SDLK_g] )
@@ -1442,7 +1444,7 @@ void duckAnimate(Entity* my, Stat* myStats, double dist)
 							{
 								if ( waterTile )
 								{
-									createWaterSplash(my->x, my->y, 30);
+									createWaterSplash(my->x, my->y, 30, my);
 									playSoundEntityLocal(my, 136, 64);
 								}
 							}
@@ -2116,7 +2118,7 @@ void duckAnimate(Entity* my, Stat* myStats, double dist)
 		{
 			if ( waterTile )
 			{
-				createWaterSplash(my->x, my->y, 30);
+				createWaterSplash(my->x, my->y, 30, my);
 				playSoundEntityLocal(my, 136, 64);
 			}
 		}

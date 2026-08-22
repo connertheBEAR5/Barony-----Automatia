@@ -533,6 +533,21 @@ typedef struct map_t
 
 #define MAPLAYERS 32
 // number of layers contained in a single map ^
+
+/*
+ * Authoritative structural-height lookup for the authored map stack.
+ *
+ * This converts an authored map-layer index to entity/world Z units. It does
+ * not convert or describe Entity::z, which is always a local model/animation
+ * offset. Clamp at this boundary so malformed spatial context cannot address
+ * outside the authored 0..MAPLAYERS-1 stack.
+ */
+inline real_t mapLayerWorldZ(const int authoredMapLayer)
+{
+	const int clampedLayer = std::clamp(authoredMapLayer, 0, MAPLAYERS - 1);
+	return -16.0 * static_cast<real_t>(clampedLayer);
+}
+
 #define FLOORLAYER 0
 #define CEILINGLAYER 2
 

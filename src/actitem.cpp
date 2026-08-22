@@ -1167,7 +1167,7 @@ void actItem(Entity* my)
 						if ( splash )
 						{
 							playSoundEntity(my, 136, 64);
-							createWaterSplash(my->x, my->y, 30);
+							createWaterSplash(my->x, my->y, 30, my);
 						}
 					}
 				}

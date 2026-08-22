@@ -128,6 +128,22 @@ bool Entity::transitionToPlayableFloor(
         return false;
     }
 
+    // The Z3 authored-layer stack is the explicit exception where a gameplay
+    // floor transition also moves a runtime actor to the corresponding
+    // structural layer. Keep destinationZ local: world height remains
+    // local-z + mapLayerWorldZ(authoredMapLayer).
+    if (map.playableFloorUsesAuthoredLayerStack(newPlayableFloor))
+    {
+        authoredMapLayer = static_cast<Sint16>(std::clamp<int>(
+            static_cast<int>(newPlayableFloor), 0, MAPLAYERS - 1));
+    }
+    else
+    {
+        // Explicit legacy FLOR geometry is a separate local floor buffer, not
+        // a height inside the shared authored map-layer stack.
+        authoredMapLayer = 0;
+    }
+
     x = destinationX;
     y = destinationY;
     z = destinationZ;
@@ -11044,14 +11060,14 @@ void Entity::attack(int pose, int charge, Entity* target)
 				Entity* entity = nullptr;
 				if ( myStats->weapon->type == SLING )
 				{
-					entity = newEntity(78, 1, map.entities, nullptr); // rock
+					entity = newEntityWithSpatialContext(78, 1, map.entities, nullptr, this); // rock
 					playSoundEntity(this, 239 + local_rng.rand() % 3, 96);
 				}
 				else if ( myStats->weapon->type == CROSSBOW 
 					|| myStats->weapon->type == HEAVY_CROSSBOW
 					|| myStats->weapon->type == BLACKIRON_CROSSBOW )
 				{
-					entity = newEntity(167, 1, map.entities, nullptr); // bolt
+					entity = newEntityWithSpatialContext(167, 1, map.entities, nullptr, this); // bolt
 					if ( myStats->weapon->type == HEAVY_CROSSBOW )
 					{
 						playSoundEntity(this, 411 + local_rng.rand() % 3, 128);
@@ -11067,7 +11083,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 				}
 				else
 				{
-					entity = newEntity(166, 1, map.entities, nullptr); // arrow
+					entity = newEntityWithSpatialContext(166, 1, map.entities, nullptr, this); // arrow
 					playSoundEntity(this, 239 + local_rng.rand() % 3, 96);
 				}
 				if ( !entity )
@@ -11189,7 +11205,8 @@ void Entity::attack(int pose, int charge, Entity* target)
 				if ( drankPotion )
 				{
 					Item* emptyBottle = newItem(POTION_EMPTY, myStats->weapon->status, myStats->weapon->beatitude, 1, myStats->weapon->appearance, myStats->weapon->appearance, nullptr);
-					entity = newEntity(itemModel(emptyBottle), 1, map.entities, nullptr); // thrown item
+					entity = newEntityWithSpatialContext(
+						itemModel(emptyBottle), 1, map.entities, nullptr, this); // thrown item
 					entity->parent = uid;
 					entity->x = x;
 					entity->y = y;
@@ -11209,7 +11226,8 @@ void Entity::attack(int pose, int charge, Entity* target)
 				}
 				else
 				{
-					entity = newEntity(itemModel(myStats->weapon), 1, map.entities, nullptr); // thrown item
+					entity = newEntityWithSpatialContext(
+						itemModel(myStats->weapon), 1, map.entities, nullptr, this); // thrown item
 					entity->parent = uid;
 					entity->x = x;
 					entity->y = y;
@@ -16794,7 +16812,7 @@ void Entity::attack(int pose, int charge, Entity* target)
 							}
 							for ( int c = 0; c < 5; c++ )
 							{
-								Entity* entity = newEntity(78, 1, map.entities, nullptr); //Particle entity.
+								Entity* entity = newEntityWithSpatialContext(78, 1, map.entities, nullptr, this); //Particle entity.
 								entity->sizex = 1;
 								entity->sizey = 1;
 								entity->x = hit.x + (-4 + local_rng.rand() % 9);

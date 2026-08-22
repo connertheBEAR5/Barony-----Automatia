@@ -2078,7 +2078,8 @@ bool playerGreasyDropItem(const int player, Item* const item)
 
 	if ( multiplayer != CLIENT && players[player]->entity )
 	{
-		Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+		Entity* entity = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, players[player]->entity); //Item entity.
 		entity->flags[INVISIBLE] = true;
 		entity->flags[UPDATENEEDED] = true;
 		entity->x = players[player]->entity->x;
@@ -2276,7 +2277,8 @@ bool dropItem(Item* const item, const int player, const bool notifyMessage, cons
 			qtyToDrop = item->count;
 		}
 
-		Entity* entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+		Entity* entity = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, players[player]->entity); //Item entity.
 		entity->flags[INVISIBLE] = true;
 		entity->flags[UPDATENEEDED] = true;
 		entity->x = players[player]->entity->x;
@@ -2531,7 +2533,8 @@ Entity* dropItemMonster(Item* const item, Entity* const monster, Stat* const mon
 	if ( itemDroppable )
 	{
 		//TODO: Spawn multiple entities for count...
-		entity = newEntity(-1, 1, map.entities, nullptr); //Item entity.
+		entity = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, monster); //Item entity.
 		entity->flags[INVISIBLE] = true;
 		entity->flags[UPDATENEEDED] = true;
 		entity->x = monster->x;

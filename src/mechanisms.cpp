@@ -2799,7 +2799,8 @@ void Entity::actWind()
 
 		if ( ticks % 10 == 0 )
 		{
-			Entity* fx = newEntity(982, 1, map.entities, nullptr);
+			Entity* fx = newEntityWithSpatialContext(
+				982, 1, map.entities, nullptr, this);
 			fx->x = eff_x - 8.0 * cos(yaw) + (-4.0 + local_rng.rand() % 9) * cos(yaw + PI / 2);
 			fx->y = eff_y - 8.0 * sin(yaw) + (-4.0 + local_rng.rand() % 9) * sin(yaw + PI / 2);
 			fx->z = 4.0 - local_rng.rand() % 9;

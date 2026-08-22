@@ -104,8 +104,8 @@ public:
 	 * Editor-authored structural map layer. This is intentionally separate from
 	 * Entity::z: legacy/runtime sprites often use z for local model elevation, so
 	 * inferring gameplay floors from an arbitrary runtime z value is unsafe.
-	 * V4.9 maps persist this through the optional ELYR chunk. Legacy maps default
-	 * to layer 0 and therefore remain on playable floor Z0.
+	 * V4.9/PZLV maps persist this through ELYR. Legacy maps default to layer 0
+	 * and therefore remain on playable floor Z0.
 	 */
 	Sint16 authoredMapLayer = 0;
 
@@ -126,8 +126,8 @@ public:
 
 	/*
 	 * Layer-authored vertical stair marker. Unlike the older ZTRN endpoint
-	 * model, this is tied directly to the existing Zed map layer stored in
-	 * Entity::z. +1 means one editor layer up, -1 means one layer down.
+	 * model, this is tied directly to authoredMapLayer, the existing Zed map
+	 * layer. +1 means one editor layer up, -1 means one layer down.
 	 * Runtime traversal is wired in the next vertical-layer stage; the marker
 	 * is persisted now so authoring never needs a separate playable-floor UI.
 	 */
@@ -222,57 +222,50 @@ public:
 	}
 	void applySpatialSpawnContext(const SpatialSpawnContext& context)
 	{
-		playableFloor = context.playableFloor;
+		if (playableFloor != context.playableFloor)
+		{
+		#ifndef EDITOR
+			// Keep TileEntityList floor ownership coherent for helpers that inherit
+			// context after they have already entered the spatial index.
+			setPlayableFloor(context.playableFloor);
+		#else
+			// Zed has no runtime TileEntityList; it still shares this context API.
+			playableFloor = context.playableFloor;
+		#endif
+		}
 		spatialRevision = context.spatialRevision;
 		authoredMapLayer = static_cast<Sint16>(std::clamp<int>(
 			static_cast<int>(context.authoredMapLayer), 0, MAPLAYERS - 1));
 	}
 	void inheritSpatialContextFrom(const Entity* source)
 	{
-		if (source)
-		{
-			playableFloor = source->playableFloor;
-			spatialRevision = source->spatialRevision;
-			authoredMapLayer = static_cast<Sint16>(source->structuralMapLayer());
-		}
-		else
-		{
-			playableFloor = DEFAULT_PLAYABLE_FLOOR;
-			spatialRevision = 0;
-			authoredMapLayer = 0;
-		}
+		applySpatialSpawnContext(
+			source ? source->spatialSpawnContext() : SpatialSpawnContext{});
 	}
 
 	/*
-	 * Z3.4C: runtime Entity::z is local model elevation again. Structural
-	 * placement is carried explicitly and folded into render/light coordinates
-	 * only when needed. Ordinary entities follow their current playable floor;
-	 * a vertical stair is the intentional boundary-object exception and renders
-	 * on its authored layer above the source floor.
+	 * Entity::z is local model elevation. authoredMapLayer is the sole structural
+	 * height source for ordinary authored sprites and for the stair boundary
+	 * exception alike; playableFloor remains gameplay/spatial membership only.
 	 */
 	int structuralMapLayer() const
 	{
-		/*
-		 * Ordinary sprites live on the same structural layer as their playable
-		 * floor. Vertical stairs are the one authored boundary object whose model
-		 * intentionally sits one layer above its source gameplay floor.
-		 */
-		const int layer = verticalLayerTransitionDelta != 0
-			? static_cast<int>(authoredMapLayer)
-			: static_cast<int>(playableFloor);
-		return std::clamp(layer, 0, MAPLAYERS - 1);
+		return std::clamp(
+			static_cast<int>(authoredMapLayer), 0, MAPLAYERS - 1);
 	}
+	// Canonical entity world Z: local model offset plus structural map height.
 	real_t worldRenderZ() const
 	{
-		return z - 16.0 * static_cast<real_t>(structuralMapLayer());
+		return z + mapLayerWorldZ(structuralMapLayer());
 	}
 	int structuralLightmapLayer() const
 	{
-		return clampLightmapLayer(
-			structuralMapLayer() + entityZToLightmapLayer(z));
+		// Convert canonical world Z once; clamping a local contribution before
+		// adding authoredMapLayer would lose downward offsets on upper layers.
+		return entityZToLightmapLayer(worldRenderZ());
 	}
 	Uint32 ticks;                  // duration of the entity's existence
-	real_t x, y, z;                // world coordinates
+	real_t x, y, z;                // x/y are world coordinates; z is a local model/animation offset
 	real_t yaw, pitch, roll;       // rotation
 	real_t focalx, focaly, focalz; // focal point for rotation, movement, etc.
 	real_t scalex, scaley, scalez; // stretches/squashes the entity visually

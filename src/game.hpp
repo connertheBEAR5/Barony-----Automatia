@@ -1089,7 +1089,7 @@ void actSignalGateAND(Entity* my);
 void actWallLock(Entity* my);
 void actWallButton(Entity* my);
 void actWind(Entity* my);
-void createWaterSplash(real_t x, real_t y, int lifetime);
+void createWaterSplash(real_t x, real_t y, int lifetime, const Entity* source = nullptr);
 
 void startMessages();
 bool frameRateLimit(Uint32 maxFrameRate, bool resetAccumulator = true, bool sleep = false);

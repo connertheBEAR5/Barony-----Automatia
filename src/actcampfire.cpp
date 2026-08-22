@@ -38,6 +38,7 @@
 void actCampfire(Entity* my)
 {
 	int i;
+	const int lightLayer = my->structuralLightmapLayer();
 
 	// init
 	if ( !CAMPFIRE_INIT )
@@ -109,6 +110,7 @@ void actCampfire(Entity* my)
 			my->light = addLight(
 				my->x / 16,
 				my->y / 16,
+				lightLayer,
 				CAMPFIRE_LIGHTING == 2 ? "campfire_flicker" : "campfire");
 			if ( !CAMPFIRE_LIGHTING )
 			{
@@ -127,12 +129,12 @@ void actCampfire(Entity* my)
 			if (CAMPFIRE_LIGHTING == 1)
 			{
 				my->removeLightField();
-				my->light = addLight(my->x / 16, my->y / 16, "campfire");
+				my->light = addLight(my->x / 16, my->y / 16, lightLayer, "campfire");
 			}
 			else
 			{
 				my->removeLightField();
-				my->light = addLight(my->x / 16, my->y / 16, "campfire_flicker");
+				my->light = addLight(my->x / 16, my->y / 16, lightLayer, "campfire_flicker");
 			}
 			CAMPFIRE_FLICKER = 2 + local_rng.rand() % 7;
 		}
@@ -181,6 +183,7 @@ void actCampfire(Entity* my)
 
 void actCauldron(Entity* my)
 {
+	const int lightLayer = my->structuralLightmapLayer();
 	if ( !CAMPFIRE_INIT )
 	{
 		CAMPFIRE_INIT = 1;
@@ -250,6 +253,7 @@ void actCauldron(Entity* my)
 			my->light = addLight(
 				my->x / 16,
 				my->y / 16,
+				lightLayer,
 				CAMPFIRE_LIGHTING == 2 ? "campfire_flicker" : "campfire");
 			if ( !CAMPFIRE_LIGHTING )
 			{
@@ -268,12 +272,12 @@ void actCauldron(Entity* my)
 			if ( CAMPFIRE_LIGHTING == 1 )
 			{
 				my->removeLightField();
-				my->light = addLight(my->x / 16, my->y / 16, "campfire");
+				my->light = addLight(my->x / 16, my->y / 16, lightLayer, "campfire");
 			}
 			else
 			{
 				my->removeLightField();
-				my->light = addLight(my->x / 16, my->y / 16, "campfire_flicker");
+				my->light = addLight(my->x / 16, my->y / 16, lightLayer, "campfire_flicker");
 			}
 			CAMPFIRE_FLICKER = 2 + local_rng.rand() % 7;
 		}

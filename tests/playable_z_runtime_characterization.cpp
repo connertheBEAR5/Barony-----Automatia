@@ -18,8 +18,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -241,6 +243,43 @@ bool writeSyntheticMap(
     output.close();
     EXPECT(output.good());
     return true;
+}
+
+bool rewritePlayableZExtensionVersion(
+    const std::filesystem::path& path,
+    const std::uint16_t version)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input.good())
+    {
+        return false;
+    }
+    const std::vector<char> bytes{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()};
+    input.close();
+
+    const std::array<char, 4> magic{{'P', 'Z', 'L', 'V'}};
+    const auto marker = std::find_end(
+        bytes.begin(), bytes.end(), magic.begin(), magic.end());
+    if (marker == bytes.end()
+        || static_cast<std::size_t>(bytes.end() - marker) < 6)
+    {
+        return false;
+    }
+
+    std::fstream output(path, std::ios::binary | std::ios::in | std::ios::out);
+    if (!output.good())
+    {
+        return false;
+    }
+    output.seekp((marker - bytes.begin()) + 4);
+    const std::array<char, 2> encoded{{
+        static_cast<char>(version & 0xffU),
+        static_cast<char>((version >> 8U) & 0xffU)}};
+    output.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
+    output.close();
+    return output.good();
 }
 
 void clearLoadedMap(map_t& loaded, list_t& entities, list_t& creatures)
@@ -484,6 +523,48 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     }
     clearLoadedMap(loaded, entities, creatures);
 
+    /*
+     * PZLV v1 identifies the Z3.4A/B/C baked-Z representation explicitly.
+     * ELYR layer 5 must unbake -80 from serialized Z and must override the
+     * deliberately stale EFLR floor 4 assignment for this ordinary sprite.
+     */
+    EXPECT(resetGlobalMapHarness(2, 2, 1));
+    std::snprintf(map.name, sizeof(map.name), "%s", "Phase 1 v1 migration");
+    std::snprintf(map.author, sizeof(map.author), "%s", "Automatia");
+    EXPECT(map.ensurePlayableFloorGeometry(4, false));
+    Entity* legacyBaked = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(legacyBaked != nullptr);
+    legacyBaked->persistentID = 901;
+    legacyBaked->authoredMapLayer = 5;
+    legacyBaked->playableFloor = 4;
+    legacyBaked->x = 8.0;
+    legacyBaked->y = 8.0;
+    legacyBaked->z = 7.5 + mapLayerWorldZ(5);
+    EXPECT(saveMap("phase1_legacy_baked") == 0);
+    const std::filesystem::path legacyBakedPath =
+        temporary.mapPath("phase1_legacy_baked.lmp");
+    EXPECT(rewritePlayableZExtensionVersion(legacyBakedPath, 1));
+
+    map_t migrated{};
+    list_t migratedEntities{};
+    list_t migratedCreatures{};
+    migrated.entities = &migratedEntities;
+    migrated.creatures = &migratedCreatures;
+    EXPECT(loadMap(
+        "phase1_legacy_baked.lmp",
+        &migrated,
+        &migratedEntities,
+        &migratedCreatures,
+        nullptr) == 1);
+    EXPECT(list_Size(&migratedEntities) == 1);
+    Entity* migratedEntity = static_cast<Entity*>(migratedEntities.first->element);
+    EXPECT(migratedEntity != nullptr);
+    EXPECT(migratedEntity->authoredMapLayer == 5);
+    EXPECT(migratedEntity->playableFloor == 5);
+    EXPECT(migratedEntity->z == 7.5);
+    EXPECT(migratedEntity->worldRenderZ() == -72.5);
+    clearLoadedMap(migrated, migratedEntities, migratedCreatures);
+
     // V4.9 must reject truncated extension data instead of silently flattening.
     const std::filesystem::path validPath =
         temporary.mapPath("stage4b_roundtrip.lmp");
@@ -645,6 +726,20 @@ bool testPlayableFloorCollisionIsolation()
     EXPECT(entityInsideEntity(lower, upper));
     EXPECT(entityDist(lower, upper) == 0.0);
     EXPECT(checkObstacle(24, 24, lower, nullptr, true, false, false) == 1);
+
+    // Generic child/context propagation must use the same atomic reindexing
+    // path when the child has already entered TileEntityList.
+    upper->applySpatialSpawnContext(SpatialSpawnContext{1, 42, 1});
+    EXPECT(upper->playableFloor == 1);
+    EXPECT(upper->spatialRevision == 42);
+    EXPECT(upper->authoredMapLayer == 1);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 1);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, 1)) == 1);
+    upper->inheritSpatialContextFrom(lower);
+    EXPECT(upper->playableFloor == DEFAULT_PLAYABLE_FLOOR);
+    EXPECT(upper->authoredMapLayer == 0);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 2);
+    EXPECT(list_Size(TileEntityList.getTileList(1, 1, 1)) == 0);
     return true;
 }
 
@@ -800,6 +895,44 @@ bool testLocalElevationAndRuntimeSpawns()
     multiplayer = CLIENT;
     EXPECT(resetGlobalMapHarness(4, 4, 0));
 
+    EXPECT(mapLayerWorldZ(0) == 0.0);
+    EXPECT(mapLayerWorldZ(1) == -16.0);
+    EXPECT(mapLayerWorldZ(2) == -32.0);
+    EXPECT(mapLayerWorldZ(5) == -80.0);
+    EXPECT(mapLayerWorldZ(-1) == 0.0);
+    EXPECT(mapLayerWorldZ(MAPLAYERS) == mapLayerWorldZ(MAPLAYERS - 1));
+
+    Entity* worldZExample = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(worldZExample != nullptr);
+    worldZExample->z = 7.5;
+    worldZExample->authoredMapLayer = 5;
+    worldZExample->playableFloor = 2;
+    EXPECT(worldZExample->structuralMapLayer() == 5);
+    EXPECT(worldZExample->worldRenderZ() == -72.5);
+    EXPECT(worldZExample->structuralLightmapLayer() == 5);
+    worldZExample->z = 16.0;
+    EXPECT(worldZExample->worldRenderZ() == -64.0);
+    EXPECT(worldZExample->structuralLightmapLayer() == 4);
+    worldZExample->z = 7.5;
+
+    // Ordinary authored sprites retain one local model height. Structural
+    // layer selection alone supplies their world-Z ladder.
+    constexpr real_t localSpriteZ = 7.5;
+    const std::array<std::pair<int, real_t>, 5> worldZByLayer{{
+        {0, 7.5}, {1, -8.5}, {2, -24.5}, {5, -72.5}, {10, -152.5},
+    }};
+    for (const auto& [layer, expectedWorldZ] : worldZByLayer)
+    {
+        Entity* ordinarySprite = newEntity(0, 1, map.entities, nullptr);
+        EXPECT(ordinarySprite != nullptr);
+        ordinarySprite->z = localSpriteZ;
+        ordinarySprite->authoredMapLayer = static_cast<Sint16>(layer);
+        EXPECT(ordinarySprite->z == localSpriteZ);
+        EXPECT(ordinarySprite->worldRenderZ() == expectedWorldZ);
+    }
+    EXPECT(worldZByLayer[0].second - worldZByLayer[1].second == 16.0);
+    EXPECT(worldZByLayer[1].second - worldZByLayer[2].second == 16.0);
+
     Stat levitationStats(0);
     levitationStats.type = HUMAN;
     levitationStats.setEffectValueUnsafe(EFF_LEVITATING, 0);
@@ -813,10 +946,39 @@ bool testLocalElevationAndRuntimeSpawns()
     parent->y = 48;
     parent->z = 20;
     parent->playableFloor = 3;
-    parent->authoredMapLayer = 0;
+    parent->authoredMapLayer = 3;
     parent->spatialRevision = 77;
     EXPECT(parent->structuralMapLayer() == 3);
     EXPECT(parent->worldRenderZ() == -28.0);
+
+    // A movement through the derived authored-layer stack changes structural
+    // context without baking the destination layer into the actor's local z.
+    map.tiles[tileIndex(1, 1, 2, map.height)] = 71;
+    EXPECT(map.ensurePlayableFloorGeometry(2, false));
+    Entity* floorMover = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(floorMover != nullptr);
+    floorMover->x = 24.0;
+    floorMover->y = 24.0;
+    floorMover->z = 7.5;
+    EXPECT(floorMover->transitionToPlayableFloor(2, 24.0, 24.0, 7.5));
+    EXPECT(floorMover->playableFloor == 2);
+    EXPECT(floorMover->authoredMapLayer == 2);
+    EXPECT(floorMover->z == 7.5);
+    EXPECT(floorMover->worldRenderZ() == -24.5);
+
+    // An explicit legacy FLOR buffer is gameplay-separated but structurally
+    // local; leaving the authored stack must not retain its old layer offset.
+    EXPECT(map.ensurePlayableFloorGeometry(3, true));
+    EXPECT(map.setTileAt(1, 1, FLOORLAYER, 71, 3));
+    EXPECT(map.setTileAt(1, 1, OBSTACLELAYER, 0, 3));
+    map.setTileAttribute(
+        1, 1, FLOORLAYER, map_t::TILE_ATTRIBUTE_SLIPPERY, true, 3);
+    EXPECT(!map.playableFloorUsesAuthoredLayerStack(3));
+    EXPECT(floorMover->transitionToPlayableFloor(3, 24.0, 24.0, 7.5));
+    EXPECT(floorMover->playableFloor == 3);
+    EXPECT(floorMover->authoredMapLayer == 0);
+    EXPECT(floorMover->z == 7.5);
+    EXPECT(floorMover->worldRenderZ() == 7.5);
 
     Entity* inherited = newEntityWithSpatialContext(
         0, 1, map.entities, nullptr, parent);
@@ -831,6 +993,9 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(explicitContext->playableFloor == -2);
     EXPECT(explicitContext->spatialRevision == 19);
     EXPECT(explicitContext->authoredMapLayer == 0);
+    const SpatialSpawnContext gameplayOnlyContext{3, 21};
+    EXPECT(gameplayOnlyContext.playableFloor == 3);
+    EXPECT(gameplayOnlyContext.authoredMapLayer == 0);
 
     // Parent-aware runtime spawns must inherit the complete spatial context.
     // Coordinate-only/network reconstruction helpers remain explicit Z0 seams
@@ -997,12 +1162,13 @@ bool testZ2CRuntimeFloorIsolation()
     // Bare runtime spawns now inherit the scoped entity simulation context.
     Entity* scopedEntity = nullptr;
     {
-        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{1, 91});
+        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{1, 91, 1});
         scopedEntity = newEntity(0, 1, map.entities, nullptr);
     }
     EXPECT(scopedEntity != nullptr);
     EXPECT(scopedEntity->playableFloor == 1);
     EXPECT(scopedEntity->spatialRevision == 91);
+    EXPECT(scopedEntity->authoredMapLayer == 1);
 
     Entity* legacyEntity = newEntity(0, 1, map.entities, nullptr);
     EXPECT(legacyEntity != nullptr);

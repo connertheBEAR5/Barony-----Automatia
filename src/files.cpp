@@ -61,7 +61,8 @@ int currentLoadedMapVersion = 0;
 namespace
 {
 constexpr char kPlayableZExtensionMagic[4] = {'P', 'Z', 'L', 'V'};
-constexpr std::uint16_t kPlayableZExtensionVersion = 1;
+constexpr std::uint16_t kPlayableZLegacyBakedEntityZVersion = 1;
+constexpr std::uint16_t kPlayableZExtensionVersion = 2;
 constexpr std::size_t kPlayableZExtensionHeaderBytes = 12;
 constexpr std::size_t kPlayableZMaximumPayloadBytes = 512U * 1024U * 1024U;
 
@@ -279,10 +280,9 @@ bool savePlayableZExtension(File* fp, const map_t& loadedMap)
     appendPlayableZChunk(payload, "EFLR", assignments);
 
     /*
-     * Z3.4A explicit editor-layer identity. Entity::z is runtime/local
-     * elevation after assignActions(), so structural ownership must not be
-     * reconstructed from arbitrary z values. Persist the authoring layer by
-     * stable entity ID. This chunk is optional for older V4.9 maps.
+     * Explicit editor-layer identity. PZLV version 2 stores Entity::z as local
+     * elevation, so structural ownership must never be reconstructed from it.
+     * Persist the authoring layer by stable entity ID.
      */
     std::vector<std::uint8_t> authoredLayers;
     std::uint32_t authoredLayerCount = 0;
@@ -551,7 +551,8 @@ bool loadPlayableZExtension(
     if (!readPlayableZU16(header, headerOffset, version)
         || !readPlayableZU16(header, headerOffset, reserved)
         || !readPlayableZU32(header, headerOffset, payloadLength)
-        || version != kPlayableZExtensionVersion
+        || version < kPlayableZLegacyBakedEntityZVersion
+        || version > kPlayableZExtensionVersion
         || reserved != 0
         || payloadLength > kPlayableZMaximumPayloadBytes)
     {
@@ -897,6 +898,11 @@ bool loadPlayableZExtension(
         printlog("[Playable Z] Map '%s' is missing the required EFLR chunk.", filename);
         return false;
     }
+    if (version >= kPlayableZExtensionVersion && !sawAuthoredLayers)
+    {
+        printlog("[Playable Z] Map '%s' is missing the required local-Z ELYR chunk.", filename);
+        return false;
+    }
 
     std::unordered_map<Sint32, Entity*> entityByPersistentId;
     std::unordered_set<Sint32> duplicatePersistentIds;
@@ -907,6 +913,7 @@ bool loadPlayableZExtension(
         {
             continue;
         }
+        entity->authoredMapLayer = 0;
         entity->playableFloor = DEFAULT_PLAYABLE_FLOOR;
         entity->spatialRevision = 0;
         entity->verticalLayerTransitionDelta = 0;
@@ -1003,6 +1010,99 @@ bool loadPlayableZExtension(
                 source->second->skill[i] |= static_cast<Sint32>(
                     transition.interactText[stairTextOffset++]) << (c * 8);
             }
+        }
+    }
+
+    /*
+     * PZLV v1 is the only on-disk representation that baked structural map
+     * height into Entity::z. ELYR is authoritative whenever present: remove
+     * exactly that recorded layer height and leave the remainder as local Z.
+     * PZLV v2 and later already store local Z and need no conversion.
+     */
+    std::unordered_set<Entity*> entitiesWithAuthoredLayer;
+    entitiesWithAuthoredLayer.reserve(authoredLayerPersistentIds.size());
+    for (const Sint32 persistentId : authoredLayerPersistentIds)
+    {
+        const auto found = entityByPersistentId.find(persistentId);
+        if (found != entityByPersistentId.end() && found->second)
+        {
+            entitiesWithAuthoredLayer.insert(found->second);
+        }
+    }
+
+    if (version == kPlayableZLegacyBakedEntityZVersion)
+    {
+        if (sawAuthoredLayers)
+        {
+            for (Entity* entity : entitiesWithAuthoredLayer)
+            {
+                entity->z -= mapLayerWorldZ(entity->structuralMapLayer());
+            }
+        }
+        else if (sawLayerTransitions)
+        {
+            /*
+             * The pre-ELYR ZLDR format has no structural-layer field. Its Zed
+             * editor stored placed sprites at exact -16-unit layer steps, so a
+             * numeric recovery is unavoidable for those files. Constrain the
+             * fallback to PZLV v1 maps with ZLDR, no ELYR, and an exact in-range
+             * layer step; arbitrary legacy/local z values are never rounded.
+             */
+            const real_t layerStep = -mapLayerWorldZ(1);
+            for (node_t* node = entities ? entities->first : nullptr;
+                node; node = node->next)
+            {
+                Entity* entity = static_cast<Entity*>(node->element);
+                if (!entity || layerStep <= 0.0)
+                {
+                    continue;
+                }
+                const real_t layerCoordinate = -entity->z / layerStep;
+                if (!std::isfinite(static_cast<double>(layerCoordinate)))
+                {
+                    continue;
+                }
+                const long nearestLayer = std::lround(layerCoordinate);
+                if (nearestLayer < 0 || nearestLayer >= MAPLAYERS
+                    || std::fabs(layerCoordinate
+                        - static_cast<real_t>(nearestLayer)) > 0.000001)
+                {
+                    continue;
+                }
+                entity->authoredMapLayer = static_cast<Sint16>(nearestLayer);
+                entity->z -= mapLayerWorldZ(entity->structuralMapLayer());
+                entitiesWithAuthoredLayer.insert(entity);
+            }
+        }
+    }
+
+    /*
+     * ELYR wins over stale Z3.4A/B/C EFLR assignments for layer-authored
+     * content. Stairs keep their established boundary semantics: the model is
+     * on authoredMapLayer while its gameplay/source floor is one layer below.
+     * Layer-0 entities retain explicit legacy FLOR/EFLR membership.
+     */
+    for (Entity* entity : entitiesWithAuthoredLayer)
+    {
+        const int authoredLayer = entity->structuralMapLayer();
+        if (authoredLayer <= 0 && entity->verticalLayerTransitionDelta == 0)
+        {
+            continue;
+        }
+        const PlayableFloorId authoredPlayableFloor =
+            entity->verticalLayerTransitionDelta != 0
+                ? static_cast<PlayableFloorId>(std::max(0, authoredLayer - 1))
+                : static_cast<PlayableFloorId>(authoredLayer);
+        entity->playableFloor = authoredPlayableFloor;
+        if (authoredPlayableFloor != DEFAULT_PLAYABLE_FLOOR
+            && !loadedMap.playableFloors.hasFloor(authoredPlayableFloor)
+            && !loadedMap.ensurePlayableFloorGeometry(
+                authoredPlayableFloor, false))
+        {
+            printlog(
+                "[Playable Z] Map '%s' cannot create geometry for ELYR layer %d.",
+                filename, authoredLayer);
+            return false;
         }
     }
 
@@ -4551,20 +4651,11 @@ fp->read(&numentities, sizeof(Uint32), 1);
 		}
 
 		/*
-		 * Z3.4A: never infer a gameplay floor from arbitrary legacy Entity::z
-		 * inside assignActions(). Older maps used z as local model elevation and
-		 * procedural submaps still contain those values. Only V4.9 maps belong to
-		 * the layer-authoring era; ELYR below overrides this compatibility guess.
+		 * Structural ownership is restored only from explicit PZLV metadata.
+		 * Pre-V4.9 maps remain layer 0 regardless of their local model Z. The
+		 * version-1 baked-Z migration, if needed, is isolated in the PZLV loader.
 		 */
-		if ( editorVersion >= 49 )
-		{
-			entity->authoredMapLayer = static_cast<Sint16>(std::max(0, std::min(
-				MAPLAYERS - 1, static_cast<int>(std::round(-entity->z / 16.0)))));
-		}
-		else
-		{
-			entity->authoredMapLayer = 0;
-		}
+		entity->authoredMapLayer = 0;
 
 		mapHashData += (sprite * c);
 	}
@@ -5406,7 +5497,7 @@ int saveMap(const char* filename2)
 			fp->write(&x, sizeof(Sint32), 1);
 			fp->write(&y, sizeof(Sint32), 1);
 
-			// V4.1 stores the entity's true vertical world position.
+			// PZLV v2 stores local entity Z; older formats are migrated on load.
 			fp->write(&entity->z, sizeof(real_t), 1);
 		}
 		if (!savePlayableZExtension(fp, map))

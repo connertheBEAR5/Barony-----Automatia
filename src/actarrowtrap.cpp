@@ -233,7 +233,8 @@ void actArrowTrap(Entity* my)
 				int index = checky * MAPLAYERS + checkx * MAPLAYERS * map.height;
 				if ( !map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor) )
 				{
-					Entity* entity = newEntity(166, 1, map.entities, nullptr); // arrow
+					Entity* entity = newEntityWithSpatialContext(
+						166, 1, map.entities, nullptr, my); // arrow
 					playSoundEntity(my, 239 + local_rng.rand() % 3, 96);
 					entity->parent = my->getUID();
 					entity->x = my->x + x;

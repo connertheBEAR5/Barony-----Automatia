@@ -754,7 +754,11 @@ bool testZ33LayerAuthoringCorrectionContracts()
     const std::string actLadder = readFile(sourcePath("src/actladder.cpp"));
     const std::string collisionSource = readFile(sourcePath("src/collision.cpp"));
     const std::string torchSource = readFile(sourcePath("src/acttorch.cpp"));
+    const std::string flameSource = readFile(sourcePath("src/actflame.cpp"));
+    const std::string campfireSource = readFile(sourcePath("src/actcampfire.cpp"));
+    const std::string spriteSource = readFile(sourcePath("src/actsprite.cpp"));
     const std::string netSource = readFile(sourcePath("src/net.cpp"));
+    const std::string entitySource = readFile(sourcePath("src/entity.cpp"));
 
     // The existing Zed layer selector is the only vertical authoring control.
     EXPECT(!contains(editorHeader, "editorPlayableFloor"));
@@ -765,7 +769,7 @@ bool testZ33LayerAuthoringCorrectionContracts()
     // Dedicated stairs are authored directly on the ordinary drawlayer.
     EXPECT(contains(editor, "Z STAIR UP (next map layer)"));
     EXPECT(contains(editor, "Z STAIR DOWN (previous map layer)"));
-    EXPECT(contains(editor, "entity->z = spriteLayerToEntityZ(entity->authoredMapLayer)"));
+    EXPECT(!contains(editor, "spriteLayerToEntityZ"));
     EXPECT(contains(editor, "entity->verticalLayerTransitionDelta = 1"));
     EXPECT(contains(editor, "entity->verticalLayerTransitionDelta = -1"));
     EXPECT(contains(editor,
@@ -810,7 +814,7 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(maps, "entity->verticalLayerTransitionDelta != 0"));
     EXPECT(contains(maps, "static_cast<PlayableFloorId>(std::max(0, authoredMapLayer - 1))"));
     EXPECT(contains(maps, "static_cast<PlayableFloorId>(authoredMapLayer)"));
-    EXPECT(contains(maps, "entity->z += 16.0 * static_cast<real_t>(authoredMapLayer)"));
+    EXPECT(!contains(maps, "entity->z += 16.0 * static_cast<real_t>(authoredMapLayer)"));
     EXPECT(contains(maps, "ScopedPlayableFloorRuntimeContext authoredFloorContext"));
 
     // ZLDR stairs now perform a real one-layer transition without paired ZTRN
@@ -840,8 +844,9 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(draw, "tilesForPlayableFloorRendering"));
     EXPECT(contains(opengl, "tilesForPlayableFloorRendering"));
     EXPECT(contains(draw, "entity->playableFloor <= cameraFloor"));
-    EXPECT(contains(player, "playableFloorCameraOffset"));
-    EXPECT(contains(player, "-32.0 * static_cast<real_t>(my->playableFloor)"));
+    EXPECT(contains(player, "structuralCameraOffset"));
+    EXPECT(contains(player, "mapLayerWorldZ(my->structuralMapLayer())"));
+    EXPECT(!contains(player, "-32.0 * static_cast<real_t>(my->playableFloor)"));
     EXPECT(contains(light, "map.playableFloorUsesAuthoredLayerStack(playableFloor)"));
 
     // Z3.3D/Z3.3E repairs the first real upstairs rendering regressions.
@@ -852,7 +857,10 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(opengl, "const float topHeight = z * 32.f - 16.f"));
     EXPECT(!contains(opengl, "authoredStackHudCameraZ"));
     EXPECT(contains(draw, "getCameraHudLocalZ"));
-    EXPECT(contains(draw, "+ 32.0 * static_cast<real_t>(floor)"));
+    EXPECT(contains(
+        draw,
+        "- 2.0 * mapLayerWorldZ(playerEntity->structuralMapLayer())"));
+    EXPECT(!contains(draw, "+ 32.0 * static_cast<real_t>(floor)"));
     EXPECT(contains(hudWeapon, "getCameraHudLocalZ(HUDWEAPON_PLAYERNUM)"));
     EXPECT(contains(hudWeapon, "getCameraHudLocalZ(HUDSHIELD_PLAYERNUM)"));
     EXPECT(contains(handMagic, "getCameraHudLocalZ(HANDMAGIC_PLAYERNUM)"));
@@ -871,6 +879,8 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(files, "\"ELYR\""));
     EXPECT(contains(files, "editorVersion >= 49"));
     EXPECT(contains(files, "entity->authoredMapLayer = 0"));
+    EXPECT(contains(files, "kPlayableZLegacyBakedEntityZVersion"));
+    EXPECT(contains(files, "entity->z -= mapLayerWorldZ(entity->structuralMapLayer())"));
     EXPECT(contains(maps, "static_cast<int>(entity->authoredMapLayer)"));
     EXPECT(!contains(section(maps, "void assignActions(", "int loadMainMenuMap("),
         "std::round(-entity->z / 16.0)"));
@@ -905,6 +915,10 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(door, "entity->playableFloor != my->playableFloor"));
     EXPECT(contains(gate, "entity->playableFloor != playableFloor"));
     EXPECT(contains(arrowTrap, "map.tileAt(checkx, checky, OBSTACLELAYER, my->playableFloor)"));
+    EXPECT(contains(arrowTrap, "newEntityWithSpatialContext("));
+    EXPECT(contains(mechanisms, "newEntityWithSpatialContext("));
+    EXPECT(contains(maps, "newEntityWithSpatialContext(186, 0, map->entities, nullptr, entity)"));
+    EXPECT(contains(maps, "newEntityWithSpatialContext(doorFrameSprite(), 0, map->entities, nullptr, entity)"));
     EXPECT(contains(bearTrap, "entity->playableFloor != my->playableFloor"));
     const std::string breakableFactory = section(
         general, "Entity* Entity::createBreakableCollider(", "void actColliderDecoration(");
@@ -940,28 +954,57 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(itemTool, "summon->persistentDynamicMonster = true"));
     EXPECT(contains(itemsSource, "newEntityWithSpatialContext("));
     EXPECT(contains(itemsSource, "players[player]->entity); // thrown duck inherits the player's floor"));
+    EXPECT(contains(itemsSource, "-1, 1, map.entities, nullptr, players[player]->entity"));
+    EXPECT(contains(itemTool, "sprite, 1, map.entities, nullptr, thrown"));
+    EXPECT(contains(duck, "newEntityWithSpatialContext(2229, 1, map.entities, nullptr, my)"));
+    EXPECT(contains(duck, "createWaterSplash(real_t x, real_t y, int lifetime, const Entity* source)"));
     EXPECT(contains(player, "duckPersistedInWorld"));
 
     // Z3.4C makes structural ownership universal instead of treating stairs as
     // the only editor object that understands drawlayer. Every palette-created
     // sprite records drawlayer explicitly; selection/copy/group tools use that
     // identity rather than reverse-engineering it from model-height Z. Runtime
-    // action conversion removes serialized structural Z once and rendering adds
-    // the current structural layer back for ordinary entities.
+    // local Entity::z survives creation/loading and world placement adds the
+    // explicit authored structural layer for ordinary entities and stairs.
     EXPECT(contains(editor, "entity->authoredMapLayer = static_cast<Sint16>("));
     EXPECT(contains(editor, "std::min(drawlayer, MAPLAYERS - 1)"));
     EXPECT(contains(editor, "entityAuthoredSpriteLayer("));
     EXPECT(!contains(editor, "entityZToSpriteLayer("));
+    EXPECT(contains(editor, "snapshot->playableFloor ="));
+    EXPECT(contains(editor, "pastedEntity->playableFloor ="));
     EXPECT(contains(maps, "authoredMapLayer > 0 || entity->verticalLayerTransitionDelta != 0"));
     EXPECT(contains(maps, "entity->playableFloor = authoredPlayableFloor;"));
+    EXPECT(contains(mainHeader, "mapLayerWorldZ"));
     EXPECT(contains(entityHeader, "int structuralMapLayer() const"));
-    EXPECT(contains(entityHeader, "return z - 16.0 * static_cast<real_t>(structuralMapLayer())"));
+    EXPECT(contains(entityHeader, "return z + mapLayerWorldZ(structuralMapLayer())"));
     EXPECT(contains(opengl, "entity->worldRenderZ()"));
     EXPECT(contains(opengl, "entityRenderZ(entity)"));
+    EXPECT(contains(opengl, "entityRenderZ(entity) + zOffset"));
+    const std::string entityRenderZ = section(
+        opengl, "static real_t entityRenderZ(", "void glDrawVoxel(");
+    EXPECT(!contains(entityRenderZ, "#ifndef EDITOR"));
+    EXPECT(contains(draw, "entity->structuralMapLayer() != drawlayer"));
+    EXPECT(contains(draw, "entity->structuralLightmapLayer()"));
+    EXPECT(!contains(draw, "-entity->z / 16.0"));
+    EXPECT(!contains(draw, "entityZToEditorLayer"));
     EXPECT(contains(playableZHeader, "activeRuntimeStructuralMapLayer"));
     EXPECT(contains(light, "activeRuntimeStructuralMapLayer()"));
     EXPECT(contains(torchSource, "my->structuralLightmapLayer()"));
-    EXPECT(contains(netSource, "context.authoredMapLayer = static_cast<std::int16_t>(context.playableFloor)"));
+    EXPECT(contains(flameSource, "parentent->structuralLightmapLayer()"));
+    EXPECT(contains(flameSource, "newEntityWithSpatialContext("));
+    EXPECT(contains(campfireSource, "my->structuralLightmapLayer()"));
+    EXPECT(contains(spriteSource, "my->inheritSpatialContextFrom(parent)"));
+    EXPECT(contains(netSource, "receivedAuthoredMapLayerForFloor"));
+    EXPECT(contains(netSource, "map.playableFloorUsesAuthoredLayerStack(playableFloor)"));
+    EXPECT(contains(netSource, "candidate->playableFloor != packetPlayableFloor"));
+    EXPECT(contains(entitySource, "map.playableFloorUsesAuthoredLayerStack(newPlayableFloor)"));
+    EXPECT(contains(entitySource, "local-z + mapLayerWorldZ(authoredMapLayer)"));
+    EXPECT(contains(entitySource, "newEntityWithSpatialContext(166, 1, map.entities, nullptr, this)"));
+    EXPECT(contains(entitySource, "itemModel(myStats->weapon), 1, map.entities, nullptr, this"));
+    EXPECT(contains(netSource, "entity->applySpatialSpawnContext(receivedSpatialContext)"));
+    EXPECT(contains(game, "authored_map_layer"));
+    EXPECT(contains(game, "applyPersistentDynamicSpatialContext("));
+    EXPECT(contains(game, "savedState.authoredMapLayer"));
 
     // The editor's 3D preview must honor authored sky/skybox state even when
     // smooth lighting is disabled; otherwise Chunk::build synthesizes a false

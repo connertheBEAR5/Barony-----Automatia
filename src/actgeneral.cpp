@@ -459,7 +459,8 @@ void actStatue(Entity* my)
 				std::string directionString = StatueManager.directionKeys[my->statueDir];
 				for ( auto& limb : StatueManager.allStatues[my->statueId].limbs[directionString] )
 				{
-					Entity* childEntity = newEntity(limb.sprite, 1, map.entities, nullptr);
+					Entity* childEntity = newEntityWithSpatialContext(
+						limb.sprite, 1, map.entities, nullptr, my);
 					childEntity->parent = my->getUID();
 					childEntity->x = my->x - limb.x;
 					childEntity->y = my->y - limb.y;
@@ -525,7 +526,7 @@ void actStatueAnimator(Entity* my)
 		if ( !players[1]->entity )
 		{
 			client_disconnected[1] = false;
-			Entity* entity = newEntity(0, 1, map.entities, nullptr);
+			Entity* entity = newEntityWithSpatialContext(0, 1, map.entities, nullptr, my);
 			entity->behavior = &actPlayer;
 			entity->addToCreatureList(map.creatures);
 
@@ -1889,7 +1890,8 @@ void actColliderDecoration(Entity* my)
 			{
 				collidersToRaiseToHeight.insert(my->getUID());
 				my->z = 16.0;
-				Entity* entity = newEntity(my->sprite + 1, 1, map.entities, nullptr); //Sprite entity.
+				Entity* entity = newEntityWithSpatialContext(
+					my->sprite + 1, 1, map.entities, nullptr, my); //Sprite entity.
 				entity->x = my->x;
 				entity->y = my->y;
 				entity->z = my->z - 7.0;
@@ -5548,7 +5550,7 @@ void spawnMagicEffectParticlesBell(Entity* my, Uint32 sprite)
 	const int numParticles = 64;
 	for ( int c = 0; c < numParticles; c++ )
 	{
-		Entity* entity = newEntity(1479, 1, map.entities, nullptr); //Particle entity.
+		Entity* entity = newEntityWithSpatialContext(1479, 1, map.entities, nullptr, my); //Particle entity.
 		entity->x = posx + 24.0 * cos(2 * PI * (c / (real_t)numParticles));
 		entity->y = posy + 24.0 * sin(2 * PI * (c / (real_t)numParticles));
 		entity->z = z;
@@ -5705,7 +5707,7 @@ void actBell(Entity* my)
 		BELL_INIT = 1;
 
 		{
-			Entity* childEntity = newEntity(1476, 1, map.entities, nullptr); // clapper
+			Entity* childEntity = newEntityWithSpatialContext(1476, 1, map.entities, nullptr, my); // clapper
 			childEntity->parent = my->getUID();
 			childEntity->x = my->x;
 			childEntity->y = my->y;
@@ -5726,7 +5728,7 @@ void actBell(Entity* my)
 			tempNode->size = sizeof(Entity*);
 		}
 		{
-			Entity* childEntity = newEntity(1477, 1, map.entities, nullptr); // headstock
+			Entity* childEntity = newEntityWithSpatialContext(1477, 1, map.entities, nullptr, my); // headstock
 			childEntity->parent = my->getUID();
 			childEntity->x = my->x;
 			childEntity->y = my->y;

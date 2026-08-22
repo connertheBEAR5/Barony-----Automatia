@@ -31,14 +31,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
-#ifdef EDITOR
-static int entityZToEditorLayer(real_t z)
-{
-	const int layer = static_cast<int>(std::lround(-z / 16.0));
-	return std::max(0, std::min(layer, MAPLAYERS - 1));
-}
-#endif
-
 const std::unordered_map<Mesh::BufferType, int> Mesh::ElementsPerVBO = {
 	{Mesh::BufferType::Position, 3},
 	{Mesh::BufferType::TexCoord, 2},
@@ -256,8 +248,8 @@ real_t getCameraHudLocalZ(int player)
 		&& players[player]
 		&& players[player]->entity )
 	{
-		const PlayableFloorId floor =
-			players[player]->entity->playableFloor;
+		const Entity* playerEntity = players[player]->entity;
+		const PlayableFloorId floor = playerEntity->playableFloor;
 		if ( map.playableFloorUsesAuthoredLayerStack(floor) )
 		{
 			/*
@@ -266,7 +258,7 @@ real_t getCameraHudLocalZ(int player)
 			 * coordinates and must continue to see the legacy local camera Z.
 			 */
 			return cameras[player].z
-				+ 32.0 * static_cast<real_t>(floor);
+				- 2.0 * mapLayerWorldZ(playerEntity->structuralMapLayer());
 		}
 		return cameras[player].z;
 	}
@@ -2287,10 +2279,10 @@ void drawClearBuffers()
 static int cameraStructuralLayer(const view_t& camera)
 {
     /*
-     * Player camera Z is approximately entity.z * 2 - 2.5. Entity Z advances
-     * one structural light/map layer per -16 units, so invert both transforms.
-     * Race-height and bob adjustments are small enough that rounding keeps the
-     * camera on the player's actual floor.
+     * Camera Z is already a world-space render coordinate and advances one
+     * structural light/map layer per -32 GL units. Race-height and bob
+     * adjustments are small enough that rounding keeps the camera on the
+     * player's actual structural layer.
      */
     return std::max(
         0,
@@ -2848,14 +2840,7 @@ void drawEntities3D(view_t* camera, int mode)
             {
                 const int x = entity->x / 16;
                 const int y = entity->y / 16;
-				const int entityLayer =
-	clampLightmapLayer(
-		static_cast<int>(
-			std::lround(
-				-entity->z / 16.0
-			)
-		)
-	);
+				const int entityLayer = entity->structuralLightmapLayer();
 if ( x >= 0
 	&& y >= 0
 	&& x < map.width
@@ -3252,10 +3237,10 @@ void drawEntities2D(long camx, long camy)
 	for ( node = map.entities->first; node != nullptr; node = node->next )
 	{
 		entity = (Entity*)node->element;
-			if ( entityZToEditorLayer(entity->z) != drawlayer )
-	{
-		continue;
-	}
+		if ( entity->structuralMapLayer() != drawlayer )
+		{
+			continue;
+		}
 		if ( entity->flags[INVISIBLE] )
 		{
 			continue;
@@ -3437,7 +3422,7 @@ void drawEntities2D(long camx, long camy)
 		)
 	{
 		entity = (Entity*)node->element;
-		if ( entityZToEditorLayer(entity->z) != drawlayer )
+		if ( entity->structuralMapLayer() != drawlayer )
 		{
 			continue;
 		}

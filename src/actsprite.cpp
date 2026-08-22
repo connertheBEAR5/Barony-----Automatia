@@ -165,6 +165,9 @@ void actSpriteWorldTooltip(Entity* my)
 	Entity* parent = uidToEntity(my->parent);
 	if ( parent )
 	{
+		// Tooltip Z is local to its parent; keep the parent's structural/spatial
+		// context in sync when an item or actor changes playable floors.
+		my->inheritSpatialContextFrom(parent);
 		my->x = parent->x;
 		my->y = parent->y;
 

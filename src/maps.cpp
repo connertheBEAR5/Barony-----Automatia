@@ -7310,14 +7310,6 @@ void assignActions(
 			map->ensurePlayableFloorGeometry(entity->playableFloor, false);
 		}
 
-		/*
-		 * Serialized editor Z stores the authored structural layer. Legacy action
-		 * conversion code expects Entity::z to be a local model elevation. Remove
-		 * the structural component exactly once before the sprite switch; rendering
-		 * and lighting add it back from authoredMapLayer/playableFloor explicitly.
-		 */
-		entity->z += 16.0 * static_cast<real_t>(authoredMapLayer);
-
 		ScopedPlayableFloorRuntimeContext authoredFloorContext(
 			entity->spatialSpawnContext());
 

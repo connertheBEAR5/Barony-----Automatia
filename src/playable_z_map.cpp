@@ -270,10 +270,17 @@ bool map_t::setTileAt(
 	{
 		return false;
 	}
-	if ( playableFloor != DEFAULT_PLAYABLE_FLOOR
-		&& !ensurePlayableFloorGeometry(playableFloor, false) )
+	if ( playableFloor != DEFAULT_PLAYABLE_FLOOR )
 	{
-		return false;
+		PlayableFloorData* existingFloor = playableFloors.find(playableFloor);
+		if ( (!existingFloor
+				|| existingFloor->tiles.size() != playableFloorTileCount())
+			&& !ensurePlayableFloorGeometry(
+				playableFloor,
+				existingFloor && !existingFloor->derivedFromMapLayers) )
+		{
+			return false;
+		}
 	}
 
 	PlayableFloorData* floor = playableFloor == DEFAULT_PLAYABLE_FLOOR
@@ -401,7 +408,12 @@ void map_t::setTileAttribute(
 		}
 		return;
 	}
-	if ( !ensurePlayableFloorGeometry(playableFloor, false) )
+	PlayableFloorData* existingFloor = playableFloors.find(playableFloor);
+	if ( (!existingFloor
+			|| existingFloor->tiles.size() != playableFloorTileCount())
+		&& !ensurePlayableFloorGeometry(
+			playableFloor,
+			existingFloor && !existingFloor->derivedFromMapLayers) )
 	{
 		return;
 	}

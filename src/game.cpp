@@ -318,6 +318,7 @@ struct PersistentChestItemState
 struct PersistentWorldItemState
 {
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    Sint16 authoredMapLayer = -1;
     std::string stableId;
     Sint32 type = 0;
     Sint32 status = 0;
@@ -360,6 +361,7 @@ struct PersistentWorldItemState
 struct PersistentGoldBagState
 {
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    Sint16 authoredMapLayer = -1;
     Sint32 amount = 0;
     Sint32 amountBonus = 0;
 
@@ -464,6 +466,7 @@ enum class Kind : Uint8
 
     Kind kind = Kind::None;
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    Sint16 authoredMapLayer = -1;
 
     // Ordinary lever.
     Sint32 switchPower = 0;
@@ -822,6 +825,7 @@ enum class Kind : Uint8
 struct PersistentBoulderState
 {
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    Sint16 authoredMapLayer = -1;
     Sint32 sourceTrapPersistentID = 0;
     Sint32 sprite = 0;
 
@@ -2087,6 +2091,81 @@ bool savedJsonPlayableFloor(
     }
 }
 
+bool savedJsonOptionalAuthoredMapLayer(
+    const AutomatiaSave::Json& object,
+    const char* key,
+    Sint16& value)
+{
+    value = -1;
+    if (!object.is_object() || !object.contains(key))
+    {
+        // Saves written before the local-Z correction have no structural field.
+        return object.is_object();
+    }
+    Sint32 parsed = 0;
+    if (!savedJsonInt(object, key, parsed)
+        || parsed < 0 || parsed >= MAPLAYERS)
+    {
+        return false;
+    }
+    value = static_cast<Sint16>(parsed);
+    return true;
+}
+
+Sint16 persistentDynamicAuthoredMapLayer(
+    const Sint16 savedAuthoredMapLayer,
+    const PlayableFloorId playableFloor)
+{
+    if (savedAuthoredMapLayer >= 0 && savedAuthoredMapLayer < MAPLAYERS)
+    {
+        return savedAuthoredMapLayer;
+    }
+
+    /*
+     * Legacy persistent snapshots predate authored_map_layer. Recover only
+     * from explicit derived-stack map metadata; an ordinary legacy FLOR floor
+     * is structurally local to layer 0 even when its gameplay ID is nonzero.
+     */
+    if (map.playableFloorUsesAuthoredLayerStack(playableFloor))
+    {
+        return static_cast<Sint16>(std::clamp<int>(
+            static_cast<int>(playableFloor), 0, MAPLAYERS - 1));
+    }
+    return 0;
+}
+
+void applyPersistentDynamicSpatialContext(
+    Entity& entity,
+    const PlayableFloorId playableFloor,
+    const Sint16 savedAuthoredMapLayer)
+{
+    entity.applySpatialSpawnContext(SpatialSpawnContext{
+        playableFloor,
+        0,
+        persistentDynamicAuthoredMapLayer(
+            savedAuthoredMapLayer, playableFloor)});
+}
+
+void applyPersistentOriginalSpatialMembership(
+    Entity& entity,
+    const PlayableFloorId savedPlayableFloor)
+{
+    const int authoredLayer = entity.structuralMapLayer();
+    if (authoredLayer > 0 || entity.verticalLayerTransitionDelta != 0)
+    {
+        // ELYR/ZLDR loaded from the map is authoritative over persistent state.
+        entity.playableFloor = entity.verticalLayerTransitionDelta != 0
+            ? static_cast<PlayableFloorId>(std::max(0, authoredLayer - 1))
+            : static_cast<PlayableFloorId>(authoredLayer);
+    }
+    else
+    {
+        // Layer-0 legacy FLOR maps retain their explicitly saved membership.
+        entity.playableFloor = savedPlayableFloor;
+    }
+    entity.spatialRevision = 0;
+}
+
 bool savedJsonUint(const AutomatiaSave::Json& object, const char* key, Uint32& value)
 {
     if (!object.is_object() || !object.contains(key))
@@ -2307,7 +2386,7 @@ bool restoreMonsterItemState(
 
 AutomatiaSave::Json saveWorldItemState(const PersistentWorldItemState& item)
 {
-    return AutomatiaSave::Json{
+    AutomatiaSave::Json saved{
         {"playable_floor", item.playableFloor},
         {"stable_id", item.stableId},
         {"legacy_type", item.type},
@@ -2329,6 +2408,11 @@ AutomatiaSave::Json saveWorldItemState(const PersistentWorldItemState& item)
         {"burning", item.burning},
         {"burnable", item.burnable}
     };
+    if (item.authoredMapLayer >= 0 && item.authoredMapLayer < MAPLAYERS)
+    {
+        saved["authored_map_layer"] = item.authoredMapLayer;
+    }
+    return saved;
 }
 
 bool restoreWorldItemState(
@@ -2337,6 +2421,8 @@ bool restoreWorldItemState(
 )
 {
     if (!savedJsonPlayableFloor(saved, "playable_floor", item.playableFloor)
+        || !savedJsonOptionalAuthoredMapLayer(
+            saved, "authored_map_layer", item.authoredMapLayer)
         || !savedJsonInt(saved, "legacy_type", item.type)
         || !savedJsonInt(saved, "status", item.status)
         || !savedJsonInt(saved, "beatitude", item.beatitude)
@@ -2369,7 +2455,7 @@ bool restoreWorldItemState(
 
 AutomatiaSave::Json saveGoldState(const PersistentGoldBagState& gold)
 {
-    return AutomatiaSave::Json{
+    AutomatiaSave::Json saved{
         {"playable_floor", gold.playableFloor},
         {"amount", gold.amount},
         {"bonus", gold.amountBonus},
@@ -2382,6 +2468,11 @@ AutomatiaSave::Json saveGoldState(const PersistentGoldBagState& gold)
         {"passable", gold.passable},
         {"invisible", gold.invisible}
     };
+    if (gold.authoredMapLayer >= 0 && gold.authoredMapLayer < MAPLAYERS)
+    {
+        saved["authored_map_layer"] = gold.authoredMapLayer;
+    }
+    return saved;
 }
 
 bool restoreGoldState(
@@ -2390,6 +2481,8 @@ bool restoreGoldState(
 )
 {
     if (!savedJsonPlayableFloor(saved, "playable_floor", gold.playableFloor)
+        || !savedJsonOptionalAuthoredMapLayer(
+            saved, "authored_map_layer", gold.authoredMapLayer)
         || !savedJsonInt(saved, "amount", gold.amount)
         || !savedJsonInt(saved, "bonus", gold.amountBonus)
         || gold.amount <= 0
@@ -2560,6 +2653,10 @@ AutomatiaSave::Json saveMechanismState(
         {"summon_player_proximity", state.summonTrapPlayerProximity},
         {"passable", state.passable}
     };
+    if (state.authoredMapLayer >= 0 && state.authoredMapLayer < MAPLAYERS)
+    {
+        saved["authored_map_layer"] = state.authoredMapLayer;
+    }
 
     saved["chest_inventory"] = AutomatiaSave::Json::array();
     for (const PersistentChestItemState& item : state.chestSavedInventory)
@@ -2609,7 +2706,9 @@ bool restoreMechanismState(
         return false;
     }
     state.kind = static_cast<PersistentMechanismState::Kind>(kind);
-    if (!savedJsonPlayableFloor(saved, "playable_floor", state.playableFloor))
+    if (!savedJsonPlayableFloor(saved, "playable_floor", state.playableFloor)
+        || !savedJsonOptionalAuthoredMapLayer(
+            saved, "authored_map_layer", state.authoredMapLayer))
     {
         return false;
     }
@@ -3428,6 +3527,10 @@ void hydratePreservedAutomatiaWorldDocument()
                     PersistentWorldItemState item;
                     if (!savedJsonPlayableFloor(
                             savedItem, "playable_floor", item.playableFloor)
+                        || !savedJsonOptionalAuthoredMapLayer(
+                            savedItem,
+                            "authored_map_layer",
+                            item.authoredMapLayer)
                         || !restoredFloorExists(item.playableFloor)
                         || !savedJsonInt(savedItem, "legacy_type", item.type)
                         || !savedJsonInt(savedItem, "status", item.status)
@@ -3474,6 +3577,10 @@ void hydratePreservedAutomatiaWorldDocument()
                     PersistentGoldBagState gold;
                     if (!savedJsonPlayableFloor(
                             savedGold, "playable_floor", gold.playableFloor)
+                        || !savedJsonOptionalAuthoredMapLayer(
+                            savedGold,
+                            "authored_map_layer",
+                            gold.authoredMapLayer)
                         || !restoredFloorExists(gold.playableFloor)
                         || !savedJsonInt(savedGold, "amount", gold.amount)
                         || !savedJsonInt(savedGold, "bonus", gold.amountBonus)
@@ -3505,6 +3612,10 @@ void hydratePreservedAutomatiaWorldDocument()
                     PersistentBoulderState boulder;
                     if (!savedJsonPlayableFloor(
                             savedBoulder, "playable_floor", boulder.playableFloor)
+                        || !savedJsonOptionalAuthoredMapLayer(
+                            savedBoulder,
+                            "authored_map_layer",
+                            boulder.authoredMapLayer)
                         || !restoredFloorExists(boulder.playableFloor)
                         || !savedJsonInt(
                             savedBoulder,
@@ -5224,7 +5335,7 @@ static bool captureAutomatiaPersistentWorldDocument(
         persistent["dynamic_world_items"] = Json::array();
         for (const PersistentWorldItemState& item : state.dynamicWorldItems)
         {
-            persistent["dynamic_world_items"].push_back(Json{
+            Json savedItem{
                 {"playable_floor", item.playableFloor},
                 {"stable_id", item.stableId},
                 {"legacy_type", item.type},
@@ -5245,13 +5356,19 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"invisible", item.invisible},
                 {"burning", item.burning},
                 {"burnable", item.burnable}
-            });
+            };
+            if (item.authoredMapLayer >= 0
+                && item.authoredMapLayer < MAPLAYERS)
+            {
+                savedItem["authored_map_layer"] = item.authoredMapLayer;
+            }
+            persistent["dynamic_world_items"].push_back(std::move(savedItem));
         }
 
         persistent["dynamic_gold_bags"] = Json::array();
         for (const PersistentGoldBagState& gold : state.dynamicGoldBags)
         {
-            persistent["dynamic_gold_bags"].push_back(Json{
+            Json savedGold{
                 {"playable_floor", gold.playableFloor},
                 {"amount", gold.amount},
                 {"bonus", gold.amountBonus},
@@ -5263,13 +5380,19 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"velocity", {gold.velX, gold.velY, gold.velZ}},
                 {"passable", gold.passable},
                 {"invisible", gold.invisible}
-            });
+            };
+            if (gold.authoredMapLayer >= 0
+                && gold.authoredMapLayer < MAPLAYERS)
+            {
+                savedGold["authored_map_layer"] = gold.authoredMapLayer;
+            }
+            persistent["dynamic_gold_bags"].push_back(std::move(savedGold));
         }
 
         persistent["dynamic_boulders"] = Json::array();
         for (const PersistentBoulderState& boulder : state.dynamicBoulders)
         {
-            persistent["dynamic_boulders"].push_back(Json{
+            Json savedBoulder{
                 {"playable_floor", boulder.playableFloor},
                 {"source_trap_id", boulder.sourceTrapPersistentID},
                 {"sprite", boulder.sprite},
@@ -5285,7 +5408,13 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"initialized", boulder.initialized},
                 {"lava_explode_timer", boulder.lavaExplodeTimer},
                 {"passable", boulder.passable}
-            });
+            };
+            if (boulder.authoredMapLayer >= 0
+                && boulder.authoredMapLayer < MAPLAYERS)
+            {
+                savedBoulder["authored_map_layer"] = boulder.authoredMapLayer;
+            }
+            persistent["dynamic_boulders"].push_back(std::move(savedBoulder));
         }
 
         persistent["mechanisms"] = Json::array();
@@ -5961,6 +6090,8 @@ void syncAutomatiaPlayerSpatialAttachments(
     const int playerIndex,
     Entity& playerEntity)
 {
+    const SpatialSpawnContext playerSpatialContext =
+        playerEntity.spatialSpawnContext();
     for (Entity* bodypart : playerEntity.bodyparts)
     {
         if (!bodypart)
@@ -5971,7 +6102,7 @@ void syncAutomatiaPlayerSpatialAttachments(
         {
             bodypart->setPlayableFloor(playerEntity.playableFloor);
         }
-        bodypart->spatialRevision = playerEntity.spatialRevision;
+        bodypart->applySpatialSpawnContext(playerSpatialContext);
         bodypart->bNeedsRenderPositionInit = true;
     }
 
@@ -5993,7 +6124,7 @@ void syncAutomatiaPlayerSpatialAttachments(
         {
             attached->setPlayableFloor(playerEntity.playableFloor);
         }
-        attached->spatialRevision = playerEntity.spatialRevision;
+        attached->applySpatialSpawnContext(playerSpatialContext);
         attached->bNeedsRenderPositionInit = true;
     }
 
@@ -12013,8 +12144,10 @@ if ( multiplayer != CLIENT )
             continue;
         }
 
-        restoredMonster->playableFloor = savedState.playableFloor;
-        restoredMonster->spatialRevision = 0;
+        applyPersistentDynamicSpatialContext(
+            *restoredMonster,
+            savedState.playableFloor,
+            savedState.authoredMapLayer);
 
         restoredMonster->persistentID =
             dynamicPersistentID;
@@ -12588,6 +12721,8 @@ static bool capturePersistentGoldBagState(
     }
 
     savedState.playableFloor = entity->playableFloor;
+    savedState.authoredMapLayer = static_cast<Sint16>(
+        entity->structuralMapLayer());
 
     savedState.amount =
         entity->goldAmount;
@@ -12687,9 +12822,6 @@ static bool applyPersistentGoldBagState(
      */
     entity->goldAmbience = 0;
     entity->goldTelepathy = 0;
-
-    entity->playableFloor = savedState.playableFloor;
-    entity->spatialRevision = 0;
 
     entity->x =
         savedState.x;
@@ -12793,6 +12925,8 @@ static bool capturePersistentWorldItemState(
     }
 
     savedState.playableFloor = entity->playableFloor;
+    savedState.authoredMapLayer = static_cast<Sint16>(
+        entity->structuralMapLayer());
 
     savedState.type =
         entity->skill[10];
@@ -12923,9 +13057,6 @@ static bool applyPersistentWorldItemState(
      * ordinary first-tick presentation state.
      */
     entity->skill[16] = 0;
-
-    entity->playableFloor = savedState.playableFloor;
-    entity->spatialRevision = 0;
 
     entity->x =
         savedState.x;
@@ -13379,6 +13510,8 @@ static void capturePersistentMechanismStates()
 
     PersistentMechanismState mechanismState;
     mechanismState.playableFloor = entity->playableFloor;
+    mechanismState.authoredMapLayer = static_cast<Sint16>(
+        entity->structuralMapLayer());
 
         if ( entity->behavior == &actSwitch )
         {
@@ -14386,6 +14519,8 @@ static void capturePersistentMechanismStates()
 
         PersistentBoulderState boulderState;
         boulderState.playableFloor = boulder->playableFloor;
+        boulderState.authoredMapLayer = static_cast<Sint16>(
+            boulder->structuralMapLayer());
 
         boulderState.sourceTrapPersistentID =
             sourceTrap->persistentID;
@@ -14834,8 +14969,8 @@ PersistentMapRemovalState& mapState =
 		const PersistentMechanismState& savedState =
             stateIterator->second;
 
-        entity->playableFloor = savedState.playableFloor;
-        entity->spatialRevision = 0;
+        applyPersistentOriginalSpatialMembership(
+            *entity, savedState.playableFloor);
 
         switch ( savedState.kind )
         {
@@ -16146,8 +16281,10 @@ PersistentMapRemovalState& mapState =
 
             boulder->parent =
                 sourceTrap->getUID();
-            boulder->playableFloor = savedBoulder.playableFloor;
-            boulder->spatialRevision = 0;
+            applyPersistentDynamicSpatialContext(
+                *boulder,
+                savedBoulder.playableFloor,
+                savedBoulder.authoredMapLayer);
 
             boulder->x =
                 savedBoulder.x;
@@ -16273,6 +16410,11 @@ PersistentMapRemovalState& mapState =
                 continue;
             }
 
+            applyPersistentDynamicSpatialContext(
+                *itemEntity,
+                savedItem.playableFloor,
+                savedItem.authoredMapLayer);
+
             ++restoredDynamicWorldItems;
         }
         /*
@@ -16314,6 +16456,11 @@ PersistentMapRemovalState& mapState =
 
                 continue;
             }
+
+            applyPersistentDynamicSpatialContext(
+                *goldEntity,
+                savedGold.playableFloor,
+                savedGold.authoredMapLayer);
 
             ++restoredDynamicGoldBags;
         }
@@ -16681,8 +16828,12 @@ bool applyPersistentMonsterLivingState(
     const PersistentMechanismState& savedState =
         stateIterator->second;
 
-    monsterEntity->playableFloor = savedState.playableFloor;
-    monsterEntity->spatialRevision = 0;
+    if (!(monsterEntity->persistentID < 0
+        && monsterEntity->persistentDynamicMonster))
+    {
+        applyPersistentOriginalSpatialMembership(
+            *monsterEntity, savedState.playableFloor);
+    }
 
     /*
      * Shopkeepers retain ShopkeeperInventory as their kind because
@@ -25422,7 +25573,7 @@ void drawAllPlayerCameras() {
 								Player::getPlayerInteractEntity(i);
 							camera.x = sharedViewEntity->x / 16.0;
 							camera.y = sharedViewEntity->y / 16.0;
-							camera.z = sharedViewEntity->z * 2.0 - 2.5;
+							camera.z = sharedViewEntity->worldRenderZ() * 2.0 - 2.5;
 							camera.ang = sharedViewEntity->yaw;
 							raycast(camera, minimap, false); // update minimap from other players' perspectives, player or ghost
 							camera.x = x;

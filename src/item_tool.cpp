@@ -1490,7 +1490,8 @@ void Item::applyBomb(Entity* parent, ItemType type, ItemBombPlacement placement,
 	{
 		if ( thrown )
 		{
-			Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Beartrap entity.
+			Entity* entity = newEntityWithSpatialContext(
+				sprite, 1, map.entities, nullptr, thrown); //Beartrap entity.
 			entity->behavior = &actBomb;
 			entity->flags[PASSABLE] = true;
 			entity->flags[UPDATENEEDED] = true;
@@ -1555,7 +1556,8 @@ void Item::applyBomb(Entity* parent, ItemType type, ItemBombPlacement placement,
 	{
 		if ( thrown )
 		{
-			Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Beartrap entity.
+			Entity* entity = newEntityWithSpatialContext(
+				sprite, 1, map.entities, nullptr, thrown); //Beartrap entity.
 			entity->behavior = &actBomb;
 			entity->flags[PASSABLE] = true;
 			entity->flags[UPDATENEEDED] = true;
@@ -1705,7 +1707,8 @@ void Item::applyBomb(Entity* parent, ItemType type, ItemBombPlacement placement,
 	{
 		if ( thrown && onEntity && (hit.entity == onEntity) )
 		{
-			Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Beartrap entity.
+			Entity* entity = newEntityWithSpatialContext(
+				sprite, 1, map.entities, nullptr, thrown); //Beartrap entity.
 			entity->behavior = &actBomb;
 			entity->flags[PASSABLE] = true;
 			entity->flags[UPDATENEEDED] = true;
@@ -2078,7 +2081,8 @@ void Item::applyTinkeringCreation(Entity* parent, Entity* thrown)
 	}
 	if ( type == TOOL_DECOY )
 	{
-		Entity* entity = newEntity(894, 1, map.entities, nullptr); //Decoy box.
+		Entity* entity = newEntityWithSpatialContext(
+			894, 1, map.entities, nullptr, thrown); //Decoy box.
 		entity->behavior = &actDecoyBox;
 		entity->flags[PASSABLE] = true;
 		entity->flags[UPDATENEEDED] = true;

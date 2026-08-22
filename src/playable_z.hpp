@@ -27,6 +27,7 @@ struct SpatialSpawnContext
 {
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
     std::uint64_t spatialRevision = 0;
+    // Structural authored index; deliberately not inferred from playableFloor.
     std::int16_t authoredMapLayer = 0;
 
     SpatialSpawnContext() = default;
@@ -34,13 +35,10 @@ struct SpatialSpawnContext
     SpatialSpawnContext(
         const PlayableFloorId floor,
         const std::uint64_t revision,
-        const std::int16_t authoredLayer = -1)
+        const std::int16_t authoredLayer = 0)
         : playableFloor(floor)
         , spatialRevision(revision)
-        , authoredMapLayer(
-            authoredLayer >= 0
-                ? authoredLayer
-                : static_cast<std::int16_t>(floor))
+        , authoredMapLayer(authoredLayer)
     {
     }
 };

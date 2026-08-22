@@ -11947,16 +11947,6 @@ static bool questEditorWriteStarterJSON(
 
 	return true;
 }
-// Convert an editor map layer into Barony's entity Z coordinate.
-// Layer 0 is ground level. Higher layers use increasingly negative Z.
-static real_t spriteLayerToEntityZ(int layer)
-{
-	layer = std::max(0, std::min(layer, MAPLAYERS - 1));
-
-	// One complete map layer equals 16 entity-Z units.
-	return -16.0 * static_cast<real_t>(layer);
-}
-
 // Structural ownership is explicit as of V4.9/ELYR. Editor selection/copy
 // must not infer a sprite layer from model-height Z because decoration offsets
 // and runtime-local Z are independent of the authored layer.
@@ -12205,8 +12195,22 @@ void editorRoomCopySelection()
 				sourceLayer - roomSelectBottomLayer;
 			snapshot->authoredMapLayer =
 				static_cast<Sint16>(clipboardLocalLayer);
-			snapshot->z =
-				spriteLayerToEntityZ(clipboardLocalLayer);
+			/*
+			 * Normalize gameplay membership along with the clipboard-relative
+			 * authored layer. Otherwise an upper ordinary sprite pasted back to
+			 * layer 0 can retain stale EFLR membership from its source layer.
+			 * Preserve explicit legacy FLOR membership only for genuine authored
+			 * layer-0 content.
+			 */
+			if ( sourceLayer > 0
+				|| source->verticalLayerTransitionDelta != 0 )
+			{
+				snapshot->playableFloor =
+					source->verticalLayerTransitionDelta != 0
+						? static_cast<PlayableFloorId>(
+							std::max(0, clipboardLocalLayer - 1))
+						: static_cast<PlayableFloorId>(clipboardLocalLayer);
+			}
 			snapshot->persistentID = 0;
 
 			++roomClipboardEntityCount;
@@ -12367,8 +12371,15 @@ void editorRoomPlaceClipboard(
 			pastedEntity->y =
 				destinationY * 16 + snapshot->y;
 			pastedEntity->authoredMapLayer = static_cast<Sint16>(destinationLayer);
-			pastedEntity->z =
-				spriteLayerToEntityZ(destinationLayer);
+			if ( destinationLayer > 0
+				|| pastedEntity->verticalLayerTransitionDelta != 0 )
+			{
+				pastedEntity->playableFloor =
+					pastedEntity->verticalLayerTransitionDelta != 0
+						? static_cast<PlayableFloorId>(
+							std::max(0, destinationLayer - 1))
+						: static_cast<PlayableFloorId>(destinationLayer);
+			}
 			pastedEntity->persistentID = 0;
 		}
 	}
@@ -24975,7 +24986,6 @@ int main(int argc, char** argv)
                     setSpriteAttributes(entity, nullptr, nullptr);
                     entity->authoredMapLayer = static_cast<Sint16>(
                         std::max(0, std::min(drawlayer, MAPLAYERS - 1)));
-                    entity->z = spriteLayerToEntityZ(entity->authoredMapLayer);
                     if ( objectIndex == EDITOR_VIRTUAL_Z_STAIR_UP )
                     {
                         entity->verticalLayerTransitionDelta = 1;

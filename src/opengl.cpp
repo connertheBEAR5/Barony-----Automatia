@@ -1685,12 +1685,10 @@ static real_t entityRenderZ(const Entity* entity)
     {
         return 0.0;
     }
-#ifndef EDITOR
     if (!entity->flags[OVERDRAW])
     {
         return entity->worldRenderZ();
     }
-#endif
     return entity->z;
 }
 
@@ -2279,7 +2277,7 @@ void glDrawWorldUISprite(view_t* camera, Entity* entity, int mode)
         && player >= 0 && players[player]->entity) ? players[player]->worldUI.modifiedTooltipDrawHeight : 0.0;
 
     // model matrix
-    v = vec4(entity->x * 2, -(entity->z + zOffset) * 2 - 1, entity->y * 2, 0.f);
+    v = vec4(entity->x * 2, -(entityRenderZ(entity) + zOffset) * 2 - 1, entity->y * 2, 0.f);
     (void)translate_mat(&m, &t, &v); t = m;
     (void)rotate_mat(&m, &t, -90.f - camera->ang * (180.f / PI), &i.y); t = m;
     (void)rotate_mat(&m, &t, -camera->vang * (180.f / PI), &i.x); t = m;

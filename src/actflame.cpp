@@ -168,7 +168,7 @@ Entity* spawnFlame(Entity* parentent, Sint32 sprite )
 				&& y < map.height )
 			{
 				const int parentLayer =
-					entityZToLightmapLayer(parentent->z);
+					parentent->structuralLightmapLayer();
 
 				bool visibleToAnyLocalPlayer = false;
 
@@ -223,7 +223,8 @@ Entity* spawnFlame(Entity* parentent, Sint32 sprite )
 	}
 
 	double vel;
-	Entity* entity = newEntity(sprite, 1, map.entities, nullptr); // flame particle
+	Entity* entity = newEntityWithSpatialContext(
+		sprite, 1, map.entities, nullptr, parentent); // flame particle
 	if ( intro )
 	{
 		entity->setUID(0);

@@ -2562,11 +2562,11 @@ void actDeathGhost(Entity* my)
 		real_t camx, camy, camz, camang, camvang;
 		camx = my->x / 16.f;
 		camy = my->y / 16.f;
-		const real_t playableFloorCameraOffset =
+		const real_t structuralCameraOffset =
 			map.playableFloorUsesAuthoredLayerStack(my->playableFloor)
-				? -32.0 * static_cast<real_t>(my->playableFloor)
+				? 2.0 * mapLayerWorldZ(my->structuralMapLayer())
 				: 0.0;
-		camz = my->z * 2.f + GHOSTCAM_BOB + playableFloorCameraOffset;
+		camz = my->z * 2.f + GHOSTCAM_BOB + structuralCameraOffset;
 
 		if ( player->ghost.isSpiritGhost() )
 		{
@@ -5000,12 +5000,12 @@ void Player::PlayerMovement_t::handlePlayerCameraPosition(bool useRefreshRateDel
 			TimerExperiments::cameraCurrentState[PLAYER_NUM].y.velocity = TimerExperiments::lerpFactor * (my->y / 16.0 - TimerExperiments::cameraCurrentState[PLAYER_NUM].y.position);
 		}
 
-		const real_t playableFloorCameraOffset =
+		const real_t structuralCameraOffset =
 			map.playableFloorUsesAuthoredLayerStack(my->playableFloor)
-				? -32.0 * static_cast<real_t>(my->playableFloor)
+				? 2.0 * mapLayerWorldZ(my->structuralMapLayer())
 				: 0.0;
 		real_t cameraSetpointZ = (my->z * 2) - 2.5
-			+ playableFloorCameraOffset + (swimming ? 1 : 0);
+			+ structuralCameraOffset + (swimming ? 1 : 0);
 		if ( swimming && (playerRace == RAT || playerRace == SPIDER) )
 		{
 			cameraSetpointZ -= 0.5; // float a little higher.
@@ -9829,18 +9829,18 @@ void actPlayer(Entity* my)
 					playSoundPlayer(PLAYER_NUM, 249, 128);
 					cameravars[PLAYER_NUM].shakex += .1;
 					cameravars[PLAYER_NUM].shakey += 10;
-					createWaterSplash(my->x, my->y, 30);
+					createWaterSplash(my->x, my->y, 30, my);
 				}
 				else if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] && stats[PLAYER_NUM]->type == AUTOMATON )
 				{
 					messagePlayer(PLAYER_NUM, MESSAGE_STATUS, Language::get(3702));
 					playSound(136, 128);
-					createWaterSplash(my->x, my->y, 30);
+					createWaterSplash(my->x, my->y, 30, my);
 				}
 				else if ( swimmingtiles[map.tileAt(x, y, FLOORLAYER, my->playableFloor)] )
 				{
 					playSound(136, 128);
-					createWaterSplash(my->x, my->y, 30);
+					createWaterSplash(my->x, my->y, 30, my);
 				}
 			}
 
