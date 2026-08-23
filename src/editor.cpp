@@ -13900,7 +13900,13 @@ void processCommandLine(int argc, char** argv)
 		{
 			if ( argv[c] != nullptr )
 			{
-				if ( !strncmp(argv[c], "-map=", 5) )
+				if ( !strcmp(argv[c], "--nosteam") )
+				{
+#ifdef STEAMWORKS
+					steamRuntimeDisableByCommandLine();
+#endif
+				}
+				else if ( !strncmp(argv[c], "-map=", 5) )
 				{
 					strcpy(maptoload, argv[c] + 5);
 					loadingmap = true;
@@ -14288,7 +14294,10 @@ int main(int argc, char** argv)
 	}
 	
 #ifdef STEAMWORKS
-	g_SteamStatistics->RequestStats();
+	if ( steamRuntimeAvailable() && g_SteamStatistics )
+	{
+		g_SteamStatistics->RequestStats();
+	}
 #endif // STEAMWORKS
 
 
@@ -14820,13 +14829,17 @@ int main(int argc, char** argv)
 		(void)handleEvents();
 
 #ifdef STEAMWORKS
-		SteamAPI_RunCallbacks();
-		if ( SteamUser()->BLoggedOn() && !achievementCartographer )
+		if ( steamRuntimeAvailable() )
 		{
-			SteamUserStats()->SetAchievement("BARONY_ACH_CARTOGRAPHER");
-			achievementCartographer = true;
-			SteamUserStats()->StoreStats();
-			//printlog("STEAM ACHIEVEMENT\n");
+			SteamAPI_RunCallbacks();
+			if ( SteamUser() && SteamUserStats()
+				&& SteamUser()->BLoggedOn() && !achievementCartographer )
+			{
+				SteamUserStats()->SetAchievement("BARONY_ACH_CARTOGRAPHER");
+				achievementCartographer = true;
+				SteamUserStats()->StoreStats();
+				//printlog("STEAM ACHIEVEMENT\n");
+			}
 		}
 #endif
 
@@ -15376,13 +15389,16 @@ int main(int argc, char** argv)
 						);
 
 					/*
-					 * Only floor decorations and collider decorations use
-					 * voxel models in the editor's 3D preview. Every other
-					 * editor entity remains a flat sprite.
+					 * Runtime model-backed decorations use voxel models in the
+					 * editor's 3D preview. Other editor entities remain flat
+					 * sprites.
 					 *
+					 * 10 = legacy/modern ceiling tile model
 					 * 13 = floor decoration
 					 * 27 = collider decoration
 					 */
+					const bool isCeilingTile =
+						editorSpriteType == 10;
 					const bool isFloorDecoration =
 						editorSpriteType == 13;
 					const bool isColliderDecoration =
@@ -15393,7 +15409,14 @@ int main(int argc, char** argv)
 					int editor3DModelIndex =
 						entity->sprite;
 
-					if ( isFloorDecoration )
+					if ( isCeilingTile )
+					{
+						editor3DModelIndex =
+							entity->ceilingTileModel != 0
+								? entity->ceilingTileModel
+								: 621;
+					}
+					else if ( isFloorDecoration )
 					{
 						editor3DModelIndex =
 							entity->floorDecorationModel;
@@ -15410,7 +15433,8 @@ int main(int argc, char** argv)
 
 					const bool hasEditorPreviewModel =
 						editor3DModelsEnabled
-						&& (isFloorDecoration
+						&& (isCeilingTile
+							|| isFloorDecoration
 							|| isColliderDecoration
 							|| isVerticalLayerStair)
 						&& editor3DModelIndex >= 0
@@ -15429,7 +15453,15 @@ int main(int argc, char** argv)
 						entity->sprite =
 							editor3DModelIndex;
 
-						if ( isFloorDecoration
+						if ( isCeilingTile )
+						{
+							// Match assignActions(): -24 is the ceiling model's
+							// local height. worldRenderZ() adds authoredMapLayer
+							// exactly once for a modern Playable-Z placement.
+							entity->z = -24;
+							entity->yaw = entity->ceilingTileDir * (PI / 2);
+						}
+						else if ( isFloorDecoration
 							|| isColliderDecoration
 							|| isVerticalLayerStair )
 						{

@@ -40,8 +40,10 @@ Plain --headless fails closed and opens no socket.
 The plaintext password is never written to logs or the status file.
 --late-join explicitly enables the experimental direct-connect LAN runtime JOIN
 path. The versioned snapshot handshake, S.A.M. catalog fingerprint check, and
-pre-authorization simulation gate are implemented. A deterministic new-player
-UDP probe passes; normal two-client and returning-player acceptance remain. The option does not enable public,
+pre-authorization simulation gate are implemented. Bounded incremental catch-up,
+explicit abort/timeout cleanup, and per-slot reconnect bearer tokens are also
+present. Contained new-player UDP probes pass; normal graphical two-client and
+token-matched returning-player acceptance remain. The option does not enable public,
 password-protected, Steam, or EOS late joining.
 
 STATUS
@@ -55,8 +57,10 @@ The process still creates a hidden OpenGL context because game resource initiali
 There is no public lobby registration or password challenge-response. Direct-LAN
 in-progress late join still needs a two-client acceptance run. Dedicated slot
 save and recovery have passed a Linux start/save/restart/resave runtime test,
-but still need divergent-player and Windows verification. Reconnect identity remains a session
-slot plus the legacy compatible-save keys, not a durable authenticated account.
+but still need divergent-player and Windows verification. Reconnect now has a
+per-slot 128-bit bearer identity stored in compatible saves; the corrected
+token-matched returning-player branch still needs a current live acceptance run,
+and the token is not a durable platform account identity.
 These are not represented as complete or secure.
 
 DEVELOPER REQUIREMENTS
@@ -95,15 +99,17 @@ The following options remain intentionally unavailable or limited:
   gameplay packet.
 * In-progress late join is limited to explicit direct-connect LAN hosting. Its
   versioned map-instance snapshot, bounded reliable chunks, S.A.M. fingerprint,
-  ready/authorize/go handshake, and live-output gate are build-tested. Live
-  two-client acceptance, timeout/catch-up stress, Steam/EOS transport, and a
-  durable authenticated reconnect identity remain required.
+  ready/authorize/go handshake, live-output gate, bounded catch-up, abort/timeouts,
+  and reconnect bearer tokens are implemented. Live two-client and returning-
+  player acceptance, adversarial transport stress, and Steam/EOS transport
+  remain required.
 * True renderless operation: simulation data loading is still coupled to an
   OpenGL-backed resource startup path. The current server uses a hidden context.
 * Restart recovery is limited to an explicitly selected numeric LAN-server save
   slot. Linux start/save/restart/resave acceptance passes for a single occupied
   map. Divergent-player and Windows acceptance remain, and recovery supplies only
-  compatible session-slot placement, not durable authenticated reconnect identity.
+  compatible session-slot placement plus its saved bearer token, not a platform
+  account identity.
 
 LINUX RUNTIME ACCEPTANCE
 ========================
@@ -112,7 +118,8 @@ On 2026-07-31, the FMOD build passed an isolated direct-LAN runtime cycle:
 1. Open a UDP listener with --LAN --late-join and autostart.
 2. Load start.lmp#world and enter live gameplay.
 3. Execute the administrator shutdown command.
-4. Write the normal server save and schema-v1 Automatia companion atomically.
+4. Write the normal server save and schema-v3 Automatia companion atomically,
+   with the same transaction ID under savegames/host/.
 5. Restart from the same numeric slot.
 6. Validate the slot, restore the Automatia map record and mechanism state, and
    enter live gameplay again.
@@ -166,3 +173,58 @@ Build portability requirements:
 - Do not introduce pthread-only, fork(), daemon(), or Unix-domain-socket assumptions into the shared server loop.
 - Use SDL and SDL_net abstractions for networking and timing where practical.
 - Test MinGW and Visual Studio builds separately because their runtime and console behavior can differ.
+
+CURRENT SPATIAL SAVE CONTRACT
+=============================
+
+The dedicated server is authoritative for both divergent MapInstances and the
+playable-Z stack inside each instance. Persistent player and dynamic-entity
+records keep these values distinct:
+
+  map_file + instance_id   which world instance owns the record
+  playable_floor          gameplay/spatial slice
+  authored_map_layer      physical structural layer, 0..31
+  position z              local entity/model Z
+
+Tile overrides additionally include playable floor, X, Y, and geometry layer,
+so identical coordinates on two floors remain independent. The companion
+validator rejects unknown schema-v3 floors, invalid structural layers,
+non-finite local positions, and duplicate tile keys. Older records without an
+authored layer use only explicit derived-stack migration semantics.
+
+A headless server does not treat process slot 0 as a player. Per-character save
+modes keep disconnected remote character state in the character file; normal
+world-companion records and divergent return histories retain their exact map
+instance and playable-Z coordinates.
+
+CURRENT VALIDATION SNAPSHOT (2026-08-23)
+========================================
+
+The maintained Linux build is the Steamworks-enabled 15-player
+build-super-posix profile. Build it with:
+
+  cmake --build build-super-posix -j6
+
+The most recent source-validation run passed that build, all 6 configured CTest
+tests, and the Stage 4D/Z3 executable characterization. The contained direct-LAN
+new-player late-join probes and the single-occupied-map Linux
+start/save/restart/resave cycle also pass.
+
+Those results do not replace the remaining live acceptance work: a normal
+graphical two-client late join, token-matched returning-player reconnect,
+divergent multi-map/floor save and restart, Windows recovery, Steam/EOS
+transport, and adversarial loss/reordering stress are not yet runtime verified.
+
+Playable-Z rendering and persistence remain deliberately separate. A headless
+save records MapInstance, playableFloor, authoredMapLayer, and local entity Z;
+the legacy one-floor visualLightmapLayer() compatibility rule for ceiling
+models is renderer-only and does not reinterpret saved spatial state.
+
+STEAM/OFFLINE BOUNDARY
+======================
+
+--nosteam is a local runtime mode that skips SteamAPI initialization. It does
+not verify Steam base-game ownership, and Steam DLC remains unavailable. It
+does not read or reproduce Steam's offline cache. For an offline session that
+must retain owned DLC, start the real Steam client in Offline Mode and launch
+without --nosteam so Steamworks remains the entitlement authority.

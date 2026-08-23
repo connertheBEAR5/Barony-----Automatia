@@ -120,13 +120,16 @@ Save the map after placing new persistent objects before testing persistence.
 
 
 ======================================================================
-5. SESSION-BASED PERSISTENT WORLD
+5. PERSISTENT WORLD STATE
 ======================================================================
 
-Status: Implemented for many entity types.
+Status: Disk-backed companion persistence is implemented for supported state;
+real divergent multiplayer and dedicated-server restart acceptance is still
+in progress.
 
-When players leave a map and return during the same session, many changes remain
-instead of resetting.
+When players leave a map and return, many changes remain instead of resetting.
+The versioned Automatia companion document also carries supported state across
+save/reload. Writes are validated and atomically replaced.
 
 Examples:
 
@@ -137,10 +140,15 @@ Examples:
 - Furniture remembers destruction
 - Some tile changes remain applied
 
+Spatial records keep map instance, playable floor, authored structural layer,
+and local Z separate. Tile changes are keyed by map instance, playable floor,
+X, Y, and geometry layer so equal coordinates on two floors do not collide.
+
 Current limitation:
 
-Persistence is mainly session-based. A full global cross-session world-save
-system is still planned.
+Not every gameplay object has a complete serializer. Real two-client divergent
+routes, same-X/Y objects on different floors, reconnect, and a full headless
+save/restart cycle remain required release tests.
 
 
 ======================================================================
@@ -287,9 +295,9 @@ Planned or active areas include:
 15. PEDESTALS, SOCKETS, AND RECEPTORS
 ======================================================================
 
-Status: Part of the persistence roadmap.
+Status: Persistent state paths implemented; broad runtime verification pending.
 
-These systems are intended to remember:
+These systems can remember supported state including:
 
 - Inserted items
 - Activation
@@ -301,12 +309,15 @@ These systems are intended to remember:
 16. CHESTS, CONTAINERS, AND SHOPKEEPERS
 ======================================================================
 
-Status: Continuing roadmap work.
+Status: Versioned persistence paths implemented; refresh policy and broad
+multiplayer testing remain.
 
-The goal is for containers and merchants to remember meaningful changes such
-as removed items or altered inventory.
+Containers and merchants can record meaningful changes such as removed items
+or altered inventory. Dynamic dropped items, gold bags, and boulders also have
+versioned persistent collections.
 
-Dynamic dropped-item persistence is still a later stage.
+Unusual custom items and object-specific generation rules still need regression
+testing.
 
 
 ======================================================================
@@ -348,7 +359,9 @@ Dialogue can check conditions such as:
 - Whether a local quest condition is complete
 - Whether a persistent object changed state
 
-Cross-map and cross-session checks still need a larger global save system.
+Basic persistent dialogue/quest records can cross save/reload. Compound
+cross-instance evaluation and complete multiplayer regression coverage remain
+unfinished.
 
 
 ======================================================================
@@ -632,8 +645,8 @@ Still unfinished or experimental:
 
 - Flame-specific editor culling
 - Temporary diagnostic-log cleanup
-- Dynamic dropped-item persistence
-- Global cross-session quest state
+- Unsupported dynamic/custom persistence edge cases
+- True party/world quest ownership and broad reconnect/save acceptance
 - Cross-map global dialogue checks
 - Full magic-hotbar save verification
 - Broad multiplayer regression testing
@@ -701,7 +714,7 @@ Complete or mostly complete:
 - New map versions
 - Custom two-way exits
 - Persistent entity IDs
-- Major session-persistence foundation
+- Versioned persistent-world companion save for supported state
 - Many persistent mechanisms
 - Dialogue and quest foundations
 - Enemy squads and named elites
@@ -722,10 +735,10 @@ Active testing or polish:
 
 Planned:
 
-- Dynamic dropped-item persistence
-- Full global world-save system
-- Cross-session quest state
-- Mass sprite copy/paste
+- Remaining unsupported dynamic/custom persistence edge cases
+- Real divergent/headless world-save restart acceptance
+- Party/world quest ownership and complete multiplayer quest persistence tests
+- Complete mass-selection/copy-paste regression coverage
 - Flame-specific culling improvements
 
 
@@ -888,8 +901,8 @@ Late Join Developer Guide.txt" for the remaining acceptance work.
 35. PROJECT COMPLETION STATUS
 ======================================================================
 
-Audit date: 2026-07-31
-Audited revision: f231f0d8 (maindev)
+Status synchronization date: 2026-08-23
+Source basis: current dirty tree in /home/conner/Barony-----Automatia
 
 This matrix records verified implementation state rather than the intended
 roadmap. A feature described elsewhere as implemented can remain unverified
@@ -962,8 +975,8 @@ Phase 1 - Divergent paths
 
 Phase 2 - Persistent save files
     Status: Partially implemented.
-    Extensive session-only map/entity/story persistence and stable custom-item
-    save metadata exist. A production-linked schema-v1 world-save envelope now
+    Extensive map/entity/story persistence and stable custom-item save metadata
+    exist. The production-linked schema-v3 world-save envelope now
     validates canonical map identities and players, rejects malformed or future
     incompatible saves, caps input size, writes and flushes a same-directory
     temporary file, validates it again, and atomically replaces the destination.
@@ -988,18 +1001,20 @@ Phase 2 - Persistent save files
     active map are bounds- and obstacle-checked before they are applied.
     Persistent chest, shop, monster-equipment, and floor-item records
     now retain S.A.M. stable IDs and resolve those before legacy numeric IDs.
-    Player records currently use explicit session-slot identity. On restart,
-    connected players are selectively spawned only in their saved instance;
+    Live player records still use process slots, while dedicated per-character
+    saves and compatible reconnect records carry the selected character's story
+    state and a per-slot 128-bit bearer token. On restart, connected players are
+    selectively spawned only in their saved instance;
     other saved instances are loaded and initialized once, validated positions
     use the normal Player Start as a fallback, and character-save followers are
-    restored while their owner's instance is active. Durable account or
-    authenticated reconnect identity and unknown-item placeholder rehydration
-    are not complete. Timed
+    restored while their owner's instance is active. The bearer token is not a
+    durable platform-account identity; token-matched live reconnect acceptance
+    and unknown-item placeholder rehydration are not complete. Timed
     headless autosave and graceful-shutdown save hooks now use the same atomic
     companion writer. Explicit numeric LAN-server slots are restored before
     start and fail closed on existing invalid data. A Linux FMOD direct-LAN
     acceptance run passes new-session startup, administrator shutdown save,
-    same-slot restart, schema-v1 companion restore, live map entry, resave, and
+    same-slot restart, schema-v3 companion restore, live map entry, resave, and
     clean shutdown. That run exposed and fixed a timing-dependent headless title-
     fade crash caused by indexing an uninitialized intro-music array while sound
     was suppressed. Divergent-player and Windows recovery testing remains open.
@@ -1016,7 +1031,7 @@ Phase 3 - Late join and reconnect
     bounds, per-chunk and whole-snapshot
     CRC-32, out-of-order reassembly, duplicate-content suppression, incorrect
     transfer identity, authorization ordering, and byte-total mismatch. The
-    existing validated schema-v1 capture path can serialize a compact 16 MiB-
+    existing validated schema-v3 capture path can serialize a compact 16 MiB-
     bounded snapshot containing only the selected active instance; client
     staging validates its schema and session ID before accepting it. The reliable
     direct-LAN runtime JOIN path queues begin/chunk/completion records, suppresses live map
@@ -1031,11 +1046,14 @@ Phase 3 - Late join and reconnect
     start.lmp#world; unloaded maps are loaded, persistent state and pathing are
     initialized once, and a Player Start supplies the safe fallback. The connected
     path has passed a deterministic direct-LAN new-player UDP probe with a
-    seven-chunk scoped snapshot. It has not yet passed a normal two-client
-    runtime, the corrected returning-player branch, loss/reordering stress, or
-    Windows acceptance. P2P late join, durable authenticated reconnect
-    identity, and a post-snapshot incremental delta/catch-up protocol remain
-    unavailable.
+    seven-chunk scoped snapshot, and later contained probes exercised the
+    current snapshot/catch-up/start sequence through higher player slots. It has
+    not yet passed a normal graphical two-client run, the corrected token-
+    matched returning-player branch, loss/reordering stress, or Windows
+    acceptance. P2P late join remains unavailable. Bounded LJCB/LJCC/LJCE
+    incremental catch-up, LJAB/30-second abort cleanup, and per-slot 128-bit
+    reconnect bearer identities are implemented in the direct-LAN foundation;
+    those bearer identities are not platform account authentication.
 
 Phase 4 - Headless server
     Status: Linux single-map LAN/restart acceptance passes; broader coverage pending.
@@ -1052,16 +1070,19 @@ Phase 4 - Headless server
 
 Phase 5 - Remaining persistent world features
     Status: Partially implemented.
-    Many mechanisms persist within a session. Dynamic dropped-item persistence,
-    full container/shop state, shop visit-based refresh, and several roadmap
-    mechanisms still require implementation or verification.
+    Supported mechanisms, dynamic world items/gold/boulders, monsters, tile
+    overrides, containers/shops, and spatial player placement have versioned
+    companion-save paths. Complete coverage for every object type, shop refresh
+    policy, and real divergent/headless restart scenarios still requires
+    implementation or runtime verification.
 
 Phase 6 - Dialogue and quests
     Status: Partially implemented.
-    JSON dialogue, guided editor tools, per-player session quest state, journal,
-    objectives, actions, and host-authoritative choice handling exist. Stable
-    saved-player identity, cross-session serialization, party/world scope,
-    compound conditions, cross-instance evaluation, and complete multiplayer
+    JSON dialogue, guided editor tools, per-player quest state, journal,
+    objectives, actions, host-authoritative choice handling, companion-save
+    serialization, and dedicated per-character story export/import exist.
+    True party/world ownership, durable platform-account identity, compound
+    conditions, cross-instance evaluation, and complete multiplayer/reconnect
     regression tests remain.
 
 Phase 7 - Editor roadmap
@@ -1073,15 +1094,17 @@ Phase 7 - Editor roadmap
 
 Phase 8 - Release readiness
     Status: Not started.
-    The primary Linux FMOD compile gate passes. Windows, graphical runtime,
-    editor runtime, headless LAN, divergent-map, late-join, reconnect, restart,
-    save migration, and S.A.M. mismatch acceptance tests remain required.
+    The primary Linux Steamworks/FMOD compile gate passes. A contained Linux
+    single-map headless start/save/restart/resave cycle and direct-LAN
+    new-player probes pass. Windows, graphical/editor runtime, real two-client
+    divergent-map, token-matched reconnect, multi-map restart, broad save
+    migration, and S.A.M. mismatch acceptance remain required.
 
 Foundation regression target
     Configure with BUILD_TESTING=ON and run:
 
-        cmake --build build --target automatia_foundation_tests
-        ctest --test-dir build --output-on-failure
+        cmake --build build-super-posix --target automatia_foundation_tests -j6
+        ctest --test-dir build-super-posix --output-on-failure
 
     The current test covers canonical map-instance identity validation,
     revision behavior, map-local packet classification, global chat exclusion,
@@ -1089,3 +1112,86 @@ Foundation regression target
     hardened against byte-count overflow, invalid seeks, partial I/O offset
     corruption, and release-build retry hangs before persistent disk saves are
     layered on top of it.
+
+CURRENT PLAYABLE-Z, LIGHTING, AND PERSISTENCE CONTRACT (2026-08-23)
+==================================================================
+
+This section supersedes older descriptions that treated structural height,
+playable floor, or entity Z as interchangeable:
+
+    authoredMapLayer = physical authored structural layer, 0..31
+    playableFloor    = gameplay/spatial simulation membership
+    Entity::z        = local model/animation elevation
+    worldZ           = Entity::z - 16 * authoredMapLayer
+
+All derived authored floors share one rendered vertical world while collision,
+interaction, traps, mechanisms, and simulation remain floor-local. Ordinary
+upper-floor lights sample the obstacle layer above their authored floor rather
+than treating the floor tile itself as a wall. Dynamic light can cross open
+authored planes with 3D attenuation; opaque floors/ceilings block it. Upper-to-
+lower falling resolves the complete destination collision footprint and moves a
+ledge-edge coordinate inward before the authoritative floor transaction.
+
+The N + OBSTACLELAYER horizontal-shadow rule is restricted to maps that
+actually contain a derived authored-floor stack. Legacy one-floor maps,
+including main-menu maps, keep their historical nonzero-layer wall lookup so a
+ceiling layer cannot produce a black wall band. First-person casting hands and
+the inventory portrait camera select the player's current structural slice. A
+stacked light's wall lookup uses its absolute authored layer without applying
+playableFloor as another physical offset.
+Player-bound sustained Light and Deep Shade orbs follow PZTR stair transitions
+and recreate their light field on the destination slice; ordinary projectiles
+remain on the source floor.
+
+Authored-stack entity light sampling is anchored to authoredMapLayer. Normal
+local model heights on opposite sides of the old z=8 rounding boundary remain
+in one slice, so the lever base at local Z 7.5 and handle at local Z 8.5 receive
+the same structural lighting. Only a complete 16-unit local traversal changes
+the authored-stack sample. Legacy one-floor and isolated-FLOR entity shaders
+instead retain the original base-slice visual convention; source/CPU light
+height lookups remain separate and keep their existing world-Z conversion.
+
+The important historical model case is editor sprite 119, CEILING TILE MODEL.
+assignActions() gives it fixed local Z -24, converts it to configured model ID
+(default 621), and makes it passable/non-sight-blocking. The affected
+mainmenu3.lmp uses models 1219 and 1220. Those are real decorative model faces,
+not tile-light occluders: interpreting -24 as light slice 2 made them black while
+the room torches illuminated legacy slice 0. Legacy maps are selected by the
+absence of a derived authored-floor stack; no numerical Z heuristic is used.
+A modern sprite 119 on authored layer N keeps local Z -24 and renders at
+-24 + mapLayerWorldZ(N), with structural light sampling enabled for that real
+stack. Zed now previews this runtime voxel/height/direction, though its temporary
+all-layer camera lights remain a readability aid rather than game-equivalent
+lighting.
+
+Project Spirit inherits the living caster's complete spatial context. The
+server resolves a legacy GHOS request from its authoritative player entity, and
+the spirit cosmetic camera adds the same structural offset after applying its
+local animation height. No client-provided floor field or new packet is used.
+
+The post-death camera likewise preserves the dying player's authored structural
+context while keeping its orbit height local. Its per-frame camera Z adds the
+canonical structural offset; spectator targeting follows the selected player or
+ghost's authoritative context, and an independent camera retains the captured
+death floor when that target disappears. The client automaton-death path also
+inherits its source player instead of defaulting the camera entity to layer zero.
+The ordinary multiplayer death notification resolves the local authoritative
+player or ghost in the same way, without adding a client-trusted network field.
+The focused upper-floor death-camera correction has been manually verified;
+remote cross-floor spectator cycling remains part of broader multiplayer
+acceptance.
+
+World persistence now treats map instance, playable floor, authored layer, and
+local Z as independent saved values. Divergent route return points preserve the
+same axes. Tile overrides are unique by map instance, playable floor, X, Y, and
+geometry layer. Schema-v3 validation checks these spatial fields while schema-1
+and schema-2 saves remain readable through explicit legacy semantics.
+
+The primary build is build-super-posix and uses:
+
+    cmake --build build-super-posix -j6
+
+--nosteam retains local gameplay and Steam-independent LAN/direct-connect
+capabilities, but disables Steam services and Steam DLC. It does not read a
+Steam cache or verify ownership. Steam client Offline Mode plus a normal launch
+is the supported offline path when Steam entitlements are needed.

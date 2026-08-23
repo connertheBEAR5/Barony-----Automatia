@@ -164,7 +164,10 @@ bool remountBaseDataFolders() {
 -------------------------------------------------------------------------------*/
 
 FILE* logfile = nullptr;
-bool steam_init = false;
+#ifdef STEAMWORKS
+bool steam_initialized = false;
+bool steam_disabled_by_command_line = false;
+#endif
 
 int initApp(char const * const title, int fullscreen)
 {
@@ -260,22 +263,40 @@ int initApp(char const * const title, int fullscreen)
 
 	// init steamworks
 #ifdef STEAMWORKS
-	SteamAPI_RestartAppIfNecessary(STEAM_APPID);
-	if ( !SteamAPI_Init() )
+	steam_initialized = false;
+	if ( steamRuntimeDisabledByCommandLine() )
 	{
-		printlog("error: failed to initialize Steamworks!\n");
-		printlog(" make sure your steam client is running before attempting to start again.\n");
-		return 1;
+		printlog("Steam disabled by --nosteam; continuing in offline/non-Steam mode.\n");
 	}
-	steam_init = true;
-	g_SteamLeaderboards = new CSteamLeaderboards();
-	g_SteamWorkshop = new CSteamWorkshop();
-	g_SteamStatistics = new CSteamStatistics(g_SteamStats, g_SteamAPIGlobalStats, NUM_STEAM_STATISTICS);
-    if (xres == 1280 && yres == 720 && SteamUtils()->IsSteamRunningOnSteamDeck()) {
-        // default steam deck native resolution
-        xres = 1280;
-        yres = 800;
-    }
+	else
+	{
+		// Restart through Steam only when the client is already running. This
+		// preserves the normal Steam launch path without starting Steam solely
+		// because Barony was launched for local/offline play.
+		if ( SteamAPI_IsSteamRunning() )
+		{
+			SteamAPI_RestartAppIfNecessary(STEAM_APPID);
+		}
+		if ( !SteamAPI_Init() )
+		{
+			printlog("Steam unavailable; continuing in offline/non-Steam mode.\n");
+		}
+		else
+		{
+			steam_initialized = true;
+			printlog("Steam initialized successfully.\n");
+			g_SteamLeaderboards = new CSteamLeaderboards();
+			g_SteamWorkshop = new CSteamWorkshop();
+			g_SteamStatistics = new CSteamStatistics(g_SteamStats, g_SteamAPIGlobalStats, NUM_STEAM_STATISTICS);
+			if ( xres == 1280 && yres == 720 && SteamUtils()
+				&& SteamUtils()->IsSteamRunningOnSteamDeck() )
+			{
+				// default steam deck native resolution
+				xres = 1280;
+				yres = 800;
+			}
+		}
+	}
 #ifdef PANDORA
     if (xres == 1280 && yres == 720) {
         // Pandora native resolution
@@ -1400,19 +1421,25 @@ int deinitApp()
 
 	// shutdown steamworks
 #ifdef STEAMWORKS
-	if (steam_init) {
+	if (steam_initialized) {
 		printlog("storing user stats to Steam...\n");
-		SteamUserStats()->StoreStats();
+		if (SteamUserStats()) {
+			SteamUserStats()->StoreStats();
+		}
 		if (g_SteamLeaderboards) {
 			delete g_SteamLeaderboards;
+			g_SteamLeaderboards = nullptr;
 		}
 		if (g_SteamWorkshop) {
 			delete g_SteamWorkshop;
+			g_SteamWorkshop = nullptr;
 		}
 		if (g_SteamStatistics) {
 			delete g_SteamStatistics;
+			g_SteamStatistics = nullptr;
 		}
 		SteamAPI_Shutdown();
+		steam_initialized = false;
 	}
 #endif
 

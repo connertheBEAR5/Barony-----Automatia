@@ -684,7 +684,8 @@ void openURLTryWithOverlay(const std::string& url, bool forceSystemBrowser)
 	if ( !forceSystemBrowser )
 	{
 #ifdef STEAMWORKS
-		if ( SteamUtils()->IsOverlayEnabled() )
+		if ( steamRuntimeAvailable() && SteamUtils() && SteamFriends()
+			&& SteamUtils()->IsOverlayEnabled() )
 		{
 			SteamFriends()->ActivateGameOverlayToWebPage(url.c_str());
 		}

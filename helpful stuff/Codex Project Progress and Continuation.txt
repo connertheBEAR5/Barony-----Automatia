@@ -10,15 +10,27 @@ existing Automatia, S.A.M., editor, audio, persistence, late-join, and
 headless work unless a specific task requires a narrower change.
 
 Current status:
-- The Linux game, editor, and foundation tests are building successfully.
-- The active build configuration is FMOD enabled and OpenAL disabled.
+- The primary Linux target is the existing Steamworks-enabled 15-player
+  `build-super-posix`; build it with `cmake --build build-super-posix -j6`.
+- The game, editor, all six registered tests, and the Stage 4D/Z3 executable
+  characterization pass in that build. FMOD remains enabled and OpenAL remains
+  outside the supported current profile.
 - The latest stabilization work covered late-join, reconnect, persistence,
-  headless diagnostics, and runtime character/lobby flow.
+  headless diagnostics, runtime character/lobby flow, and the complete
+  Playable-Z local-Z/structural-layer correction.
+- The latest Playable-Z follow-ups cover full vertical rendering, structural
+  lighting and legacy ceiling models, lower-floor landing, upper-floor HUD and
+  cameras, Project Spirit, sustained Light/Deep Shade, persistence, and Zed
+  ceiling-model preview. Remaining graphical and multi-client checks are
+  explicitly documented rather than claimed complete.
 - The remaining work should be validated with the FMOD build path and relevant
   automated tests before claiming completion.
 
 Build expectations:
-- Prefer the FMOD build configuration: `FMOD_ENABLED=ON`, `OPENAL_ENABLED=OFF`.
+- Use only `cmake --build build-super-posix -j6` on the current development
+  host; unrestricted `$(nproc)` builds have caused system instability.
+- Preserve the Steamworks-enabled 15-player/FMOD profile. Do not create a
+  separate four-player or no-Steam build for ordinary validation.
 - Verify changes with the relevant build and test commands before reporting
   success.
 - Keep the existing FMOD linkage and runtime behavior intact while making
@@ -26,17 +38,17 @@ Build expectations:
 - When significant progress is made, update this document with the new status,
   validated results, and remaining blockers so the master prompt stays current.
 
-Last updated: 2026-08-02
+Last updated: 2026-08-23
 
 CURRENT CHECKPOINT
 ==================
 
-The current divergent-map, persistence, late-join, and headless architecture has
-been statically audited and strengthened. The Linux FMOD game, editor, and
-foundation tests build successfully. This checkpoint is ready for the manual
-two-client acceptance test below, but divergent paths, restart persistence,
-late joining, and reconnect are not declared complete without that runtime
-evidence.
+The current divergent-map, persistence, late-join, headless, and Playable-Z
+architecture has been statically audited and strengthened. The primary Linux
+game/editor build and deterministic suite pass. This checkpoint is ready for
+the manual graphical Playable-Z checks and complete two-client acceptance test
+below; divergent paths, multi-map restart persistence, token-matched reconnect,
+and renderer appearance are not declared complete without that evidence.
 
 WORK COMPLETED
 ==============
@@ -1288,3 +1300,239 @@ Confirm both players see one another continuously while moving, attacking,
 and casting in both arrival orders. Also confirm projectiles and ordinary
 destination entities remain visible. Divergent paths remain enabled for this
 focused retest; runtime success is still unconfirmed.
+
+
+2026-08-22 PLAYABLE-Z LIGHT/FALL/PERSISTENCE FOLLOW-UP
+======================================================
+
+The source-of-truth coordinate model remains unchanged:
+
+* authoredMapLayer is physical structural height.
+* playableFloor is gameplay/spatial membership.
+* Entity::z is local model/animation elevation.
+* world Z is local Z plus mapLayerWorldZ(authoredMapLayer).
+
+Upper authored lights previously traced horizontal shadows against their own
+floor tile instead of the obstacle layer above it. They now use authored layer
+N + OBSTACLELAYER. On maps with a real derived authored-floor stack, dynamic
+lights also contribute to other structural light slices using 3D attenuation;
+each crossed authored plane must be open. Legacy one-floor and explicit-FLOR
+light buffers do not receive this multi-slice expansion.
+
+Upper-to-lower fall placement now validates the player's full collision
+footprint. It preserves the ledge X/Y when safe and otherwise clamps the landing
+inside the lower tile with wall clearance before the existing authoritative
+PZTR transaction. Runtime characterization covers both a wall-adjacent clamp
+(31.50 to 27.95 for size 4) and an unchanged clear-adjacent landing.
+
+Player character metadata, shared-world player records, and divergent return
+history now preserve authoredMapLayer separately from playableFloor and local
+Z. Spatial save validation covers persistent dynamic collections and unique
+map-instance/floor/X/Y/geometry-layer tile records. Old records without the
+authored field remain valid and migrate only through explicit derived-stack
+semantics. Headless saves remain in savegames/host/, share a transaction ID
+with their companion, use atomic validation/replacement, and omit process slot
+0.
+
+Steam mode clarification: --nosteam keeps local gameplay and existing
+Steam-independent LAN/direct-connect paths but disables Steam services and all
+Steam DLC. It does not inspect a Steam offline cache or verify ownership. Steam
+client Offline Mode with a normal launch is the entitlement-preserving offline
+path.
+
+Validation:
+
+* cmake --build build-super-posix -j6: PASS.
+* ctest --test-dir build-super-posix --output-on-failure: PASS, 6/6.
+* --automatia-stage4d-z3-transition-characterization: PASS.
+* Graphical lighting, real two-client divergent persistence, dedicated-server
+  restart, and Steam Offline Mode entitlement behavior still require manual
+  runtime acceptance.
+
+2026-08-22 SECOND-FLOOR HUD/SPELL AND LEGACY MENU-LIGHT FOLLOW-UP
+================================================================
+
+Three second-floor visual attachment regressions and one legacy-map lighting
+regression received focused corrections without changing the playable-Z model:
+
+* The HUD-owned left casting hand is not in the player's bodypart list and has
+  no parent UID. PZTR attachment synchronization now explicitly moves it (plus
+  the other HUD magic helpers) to the player's current playable/authored
+  context, preventing it from sampling the old structural light slice.
+* The inventory character preview camera now uses worldRenderZ(), with its
+  nominal framing base derived from mapLayerWorldZ(structuralMapLayer()). The
+  model and preview camera therefore remain in the same coordinate space on an
+  upper floor.
+* Player-bound sustained Light and Deep Shade balls (actMagiclightBall sprites
+  174 and 1800) follow the caster through PZTR. Their old light field is removed
+  and recreated on the destination structural layer. Ordinary projectiles are
+  intentionally excluded and stay on the source floor.
+* The stacked-floor horizontal light-wall rule is now gated by
+  hasAuthoredPlayableFloorStack(). A legacy one-floor/main-menu light on a
+  nonzero slice keeps using that slice as its historical wall mask instead of
+  incorrectly treating the next ceiling layer as a wall and producing a black
+  band.
+* Stacked-light wall tests now index the shared authored tile array directly.
+  Their input layer is already absolute; the prior floor-relative tile accessor
+  added playableFloor again, so a floor-1 wall at authored layer 2 could be read
+  incorrectly from layer 3.
+
+Automated coverage exercises the HUD hand and sustained-light transition,
+preserved local Z, stale-light removal, ordinary-projectile exclusion, preview
+world-Z source contract, and the legacy nonzero-light-layer ceiling regression.
+The -j6 build, all 6 CTest targets, and the Stage 4D/Z3.4C executable
+characterization pass. Actual inventory/HUD rendering, main-menu appearance,
+and sustained Light/Deep Shade visuals across stairs still require manual
+graphical confirmation.
+
+2026-08-23 UPPER LEVER LIGHT AND PROJECT SPIRIT FOLLOW-UP
+=========================================================
+
+Manual upper-floor testing exposed two further local-Z boundary errors:
+
+* A normal lever is multipart: its base uses local Z 7.5 and its handle uses
+  local Z 8.5. The old structuralLightmapLayer() converted complete world Z
+  with nearest-layer rounding, placing those two pieces in adjacent light
+  slices despite their shared authoredMapLayer. Authored-stack sampling now
+  starts from authoredMapLayer and changes slice only after a complete 16-unit
+  local traversal. Legacy one-floor/explicit-FLOR lookup is unchanged.
+* A local Project Spirit ghost already inherited the caster, but the cosmetic
+  camera override replaced the camera Z with a local duck-limb height and lost
+  the authored structural offset. It now applies the local animation/clamp and
+  then adds the ghost's structural camera offset.
+* A remote client requests its ghost through the legacy GHOS packet, which has
+  no floor field. The server previously constructed that ghost with plain
+  newEntity(), defaulting it to Z0. The server now inherits floor, authored
+  layer, and revision from its authoritative living player entity. A genuine
+  death ghost with no remaining body retains the legacy Z0 fallback; no packet
+  or client-trusted floor value was added.
+
+Focused coverage verifies the lever base and handle inherit one spatial context,
+sample one authored light slice, and retain legacy Z0 light conversion. Source
+characterization locks the authoritative GHOS spawn and Project Spirit camera
+offset paths.
+
+Validation:
+
+* cmake --build build-super-posix -j6: PASS.
+* ctest --test-dir build-super-posix --output-on-failure: PASS, 6/6.
+* --automatia-stage4d-z3-transition-characterization: PASS.
+
+The lever appearance and Project Spirit presentation on a real upper floor are
+graphical manual checks and are not claimed runtime-verified by the automated
+harness.
+
+2026-08-23 UPPER-FLOOR DEATH CAMERA FOLLOW-UP
+==============================================
+
+Manual testing found that normal gameplay stayed on the correct upper
+structural floor, but entering the post-death camera visually returned to the
+base layer. The death-camera entity already inherited the dying player's
+spatial context in the ordinary creation paths; actDeathCam() then discarded
+that context every frame by rebuilding camera.z from local Entity::z alone.
+
+actDeathCam() now adds the same authored structural camera offset used by the
+normal player and Project Spirit camera paths. While spectating a live player
+or ghost, the death-camera entity also follows that target's authoritative
+spatial context. If the target disappears, it retains its previously captured
+death-floor context. The separate client automaton-death packet path now creates
+its death camera with the dying player as spatial parent instead of defaulting
+to layer zero. The ordinary client UDIE path had the same default-layer bug and
+now inherits the local authoritative player or ghost context as well; the wire
+packet remains unchanged.
+
+Focused source characterization locks both creation and per-frame camera paths.
+The runtime characterization verifies the layer-2 example: local death-camera
+Z -2 plus doubled authored structural offset -64 produces camera Z -68. A real
+upper-floor death, automaton death, and cross-floor spectator cycle remain
+manual graphical checks.
+
+Validation after this follow-up:
+
+* cmake --build build-super-posix -j6: PASS.
+* ctest --test-dir build-super-posix --output-on-failure: PASS, 6/6.
+* --automatia-stage4d-z3-transition-characterization: PASS.
+* git diff --check: PASS.
+
+2026-08-23 LEGACY CEILING-MODEL LIGHTING COMPATIBILITY
+======================================================
+
+The remaining main-menu black regions were traced to runtime ceiling models,
+not Playable-Z map misclassification. Editor sprite 119 is converted by
+assignActions() to model 621 by default (mainmenu3.lmp configures models 1219
+and 1220), with fixed local Z -24. It is passable and non-sight-blocking and
+does not cast tile-light shadows or participate in ordinary collision.
+
+Before Playable-Z, entity shaders always sampled slice 0 of their floor-owned
+light texture. The structural-light refactor made the legacy ceiling model's
+-24 local height select slice 2 while the scene's torches still illuminated
+slice 0. The black band was therefore the actual high ceiling/wall model face
+sampling the wrong slice, not a duplicate dark face over lit tile geometry.
+The old main-menu maps contain no PZLV/ELYR/EFLR data and
+hasAuthoredPlayableFloorStack() correctly remains false.
+
+Entity GPU presentation now uses a dedicated visualLightmapLayer() rule. A
+genuine derived authored stack samples structuralLightmapLayer(); legacy
+one-floor and isolated-FLOR rendering uses historical visual slice 0. Light
+source placement, CPU structural lookup, 3D cross-layer propagation, and real
+floor/ceiling blocking remain unchanged. The decision is metadata-driven and
+does not infer anything from negative Entity::z.
+
+Zed previously made this discrepancy hard to diagnose: it added a temporary
+camera light to every active layer and left sprite 119 as a flat editor icon.
+It now previews sprite 119 as its configured runtime voxel at local Z -24 and
+the configured quarter-turn. Its temporary lighting still intentionally favors
+editor readability, so final photometric appearance remains a game-side manual
+test.
+
+Focused coverage now includes legacy classification with ceiling sprite 119,
+historical visual slice 0, modern authored-layer placement and structural
+sampling, current-format ceiling local-Z/ELYR save-reload, the exact runtime
+assignActions contract, and the Zed model-preview contract.
+
+Validation after this follow-up:
+
+* cmake --build build-super-posix -j6: PASS.
+* ctest --test-dir build-super-posix --output-on-failure: PASS, 6/6.
+* --automatia-stage4d-z3-transition-characterization: PASS.
+* git diff --check: PASS.
+
+The exact main-menu appearance, runtime/Zed model agreement, modern layer
+0/2/5 ceiling placement, open-versus-sealed vertical light behavior, upper
+lever, campfire, and an ordinary legacy dungeon remain manual graphical checks.
+
+2026-08-23 DOCUMENTATION-ONLY SYNCHRONIZATION
+=============================================
+
+No source, test, CMake, map, Steamworks, audio, networking, or build artifact was
+changed in this pass. The maintained documentation was reconciled with the
+current dirty source tree:
+
+* `build-super-posix` with `-j6` is now stated consistently as the primary
+  Steamworks-enabled 15-player build.
+* The Playable-Z invariant, legacy ceiling visual-slice rule, modern ceiling
+  placement, ELYR/PZLV persistence, Zed preview behavior, and required graphical
+  checks are consistent across README, feature, developer, headless, and local
+  AI-handoff documentation.
+* Late-join documents no longer describe LJCB/LJCC/LJCE incremental catch-up,
+  LJAB/30-second cleanup, or reconnect bearer tokens as unimplemented. They do
+  continue to state that a normal graphical two-client run, the corrected
+  token-matched returning-player path, Windows coverage, loss/reordering stress,
+  and P2P integration are not accepted yet.
+* Headless documents distinguish the passed contained Linux single-map
+  start/save/restart/resave cycle from the still-unverified divergent multi-map
+  restart and real-client recovery scenarios.
+* Dialogue/quest documentation now reflects the implemented journal UI,
+  companion/per-character story serialization, and repeatable-player reset
+  path. It continues to identify true party/world ownership, durable platform
+  identity, and broad reconnect testing as unfinished.
+* The local AI handoff records the user's manual verification of the focused
+  upper-floor death-camera fix; remote spectator cycling remains an acceptance
+  scenario rather than a claim of completed coverage.
+* `--nosteam` remains documented as Steam-services-off and DLC-locked. It does
+  not parse a Steam cache, verify ownership, or fabricate entitlements.
+
+The last source validation remains the immediately preceding `-j6` build,
+6/6 CTest pass, Stage 4D/Z3 characterization pass, and `git diff --check` pass.
+This documentation-only synchronization intentionally did not rerun or alter
+that source validation.

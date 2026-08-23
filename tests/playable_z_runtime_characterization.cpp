@@ -7,6 +7,7 @@
 #include "../src/magic/magic.hpp"
 #include "../src/monster.hpp"
 #include "../src/light.hpp"
+#include "../src/player.hpp"
 
 #include <array>
 #include <chrono>
@@ -398,10 +399,16 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     }
     EXPECT(map.playableFloors.addFloor(std::move(upperFloor)));
 
+    // Include a model-backed ceiling editor sprite in the current-format
+    // round-trip. Its fixed -24 runtime height is local; ELYR owns the
+    // structural layer independently from the stair fixtures.
+    constexpr real_t ceilingLocalZ = -24.0;
     Entity* saved = newEntity(0, 1, map.entities, nullptr);
     Entity* lowerTransition = newEntity(0, 1, map.entities, nullptr);
+    Entity* savedCeiling = newEntity(119, 1, map.entities, nullptr);
     EXPECT(saved != nullptr);
     EXPECT(lowerTransition != nullptr);
+    EXPECT(savedCeiling != nullptr);
     saved->persistentID = 77;
     saved->authoredMapLayer = 3;
     saved->x = 21.75;
@@ -439,6 +446,17 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     saved->floorDecorationXOffset = -3;
     saved->floorDecorationYOffset = 7;
     saved->floorDecorationDestroyIfNoWall = -1;
+
+    savedCeiling->persistentID = 79;
+    savedCeiling->authoredMapLayer = 2;
+    savedCeiling->playableFloor = 2;
+    savedCeiling->x = 12.0;
+    savedCeiling->y = 27.0;
+    savedCeiling->z = ceilingLocalZ;
+    savedCeiling->ceilingTileModel = 1219;
+    savedCeiling->ceilingTileDir = 3;
+    savedCeiling->ceilingTileAllowTrap = 1;
+    savedCeiling->ceilingTileBreakable = 1;
     EXPECT(saveMap("stage4b_roundtrip") == 0);
 
     std::ifstream output(
@@ -457,11 +475,12 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
         &loaded,
         &entities,
         &creatures,
-        nullptr) == 2);
+        nullptr) == 3);
     EXPECT(loaded.numLayers == MAPLAYERS);
-    EXPECT(list_Size(&entities) == 2);
+    EXPECT(list_Size(&entities) == 3);
     Entity* restored = nullptr;
     Entity* restoredLowerTransition = nullptr;
+    Entity* restoredCeiling = nullptr;
     for (node_t* node = entities.first; node; node = node->next)
     {
         Entity* candidate = static_cast<Entity*>(node->element);
@@ -473,9 +492,14 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
         {
             restoredLowerTransition = candidate;
         }
+        else if (candidate && candidate->persistentID == 79)
+        {
+            restoredCeiling = candidate;
+        }
     }
     EXPECT(restored != nullptr);
     EXPECT(restoredLowerTransition != nullptr);
+    EXPECT(restoredCeiling != nullptr);
     // Existing LMP x/y are integral even though runtime coordinates are real_t.
     EXPECT(restored->x == 21.0);
     EXPECT(restored->y == 14.0);
@@ -509,6 +533,16 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(restoredLowerTransition->floorDecorationDestroyIfNoWall == 4);
     EXPECT(restoredLowerTransition->skill[8] == static_cast<Sint32>(0x52494154));
     EXPECT(restoredLowerTransition->skill[9] == static_cast<Sint32>(0x00000053));
+    EXPECT(restoredCeiling->sprite == 119);
+    EXPECT(restoredCeiling->z == ceilingLocalZ);
+    EXPECT(restoredCeiling->authoredMapLayer == 2);
+    EXPECT(restoredCeiling->playableFloor == 2);
+    EXPECT(restoredCeiling->worldRenderZ()
+        == ceilingLocalZ + mapLayerWorldZ(2));
+    EXPECT(restoredCeiling->ceilingTileModel == 1219);
+    EXPECT(restoredCeiling->ceilingTileDir == 3);
+    EXPECT(restoredCeiling->ceilingTileAllowTrap == 1);
+    EXPECT(restoredCeiling->ceilingTileBreakable == 1);
     EXPECT(loaded.playableFloors.floors.size() == 2);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
     const PlayableFloorData* restoredUpper = loaded.playableFloors.find(2);
@@ -910,10 +944,32 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(worldZExample->structuralMapLayer() == 5);
     EXPECT(worldZExample->worldRenderZ() == -72.5);
     EXPECT(worldZExample->structuralLightmapLayer() == 5);
+	// Ordinary local model offsets on opposite sides of z=8 remain in their
+	// authored light slice. This is the lever base (7.5) / handle (8.5) case.
+	worldZExample->z = 8.5;
+	EXPECT(worldZExample->structuralLightmapLayer() == 5);
+	worldZExample->z = -8.5;
+	EXPECT(worldZExample->structuralLightmapLayer() == 5);
     worldZExample->z = 16.0;
     EXPECT(worldZExample->worldRenderZ() == -64.0);
     EXPECT(worldZExample->structuralLightmapLayer() == 4);
+	worldZExample->z = -16.0;
+	EXPECT(worldZExample->structuralLightmapLayer() == 6);
     worldZExample->z = 7.5;
+
+	// Sprite 119 is the old fixed-height ceiling model. Its source/CPU structural
+	// lookup may resolve z=-24 to slice 2, but legacy entity shaders historically
+	// sampled slice 0. Merely containing this sprite cannot classify the map as
+	// a modern authored stack.
+	Entity* legacyLightHeight = newEntity(119, 1, map.entities, nullptr);
+	EXPECT(legacyLightHeight != nullptr);
+	legacyLightHeight->z = -24.0;
+	EXPECT(legacyLightHeight->authoredMapLayer == 0);
+	EXPECT(!map.hasAuthoredPlayableFloorStack());
+	EXPECT(legacyLightHeight->worldRenderZ() == -24.0);
+	EXPECT(legacyLightHeight->structuralLightmapLayer()
+		== entityZToLightmapLayer(-24.0));
+	EXPECT(legacyLightHeight->visualLightmapLayer() == 0);
 
     // Ordinary authored sprites retain one local model height. Structural
     // layer selection alone supplies their world-Z ladder.
@@ -966,6 +1022,34 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(floorMover->z == 7.5);
     EXPECT(floorMover->worldRenderZ() == -24.5);
 
+	// The same ceiling model in a genuine authored stack keeps -24 local and
+	// receives the layer-2 structural height exactly once. Its visual shader now
+	// uses the structural light lookup instead of the legacy slice-0 rule.
+	Entity* modernCeiling = newEntity(119, 1, map.entities, nullptr);
+	EXPECT(modernCeiling != nullptr);
+	modernCeiling->z = -24.0;
+	modernCeiling->playableFloor = 2;
+	modernCeiling->authoredMapLayer = 2;
+	EXPECT(map.hasAuthoredPlayableFloorStack());
+	EXPECT(modernCeiling->z == -24.0);
+	EXPECT(modernCeiling->worldRenderZ() == -56.0);
+	EXPECT(modernCeiling->visualLightmapLayer()
+		== modernCeiling->structuralLightmapLayer());
+
+	// A death camera keeps its own local orbit height while inheriting the
+	// player's structural slice. Camera Z is expressed in doubled entity-Z
+	// units, matching the normal player and Project Spirit camera paths.
+	Entity* deathCamera = newEntityWithSpatialContext(
+		-1, 1, map.entities, nullptr, floorMover);
+	EXPECT(deathCamera != nullptr);
+	deathCamera->z = -2.0;
+	EXPECT(deathCamera->playableFloor == 2);
+	EXPECT(deathCamera->authoredMapLayer == 2);
+	const real_t deathCameraStructuralOffset =
+		2.0 * mapLayerWorldZ(deathCamera->structuralMapLayer());
+	EXPECT(deathCameraStructuralOffset == -64.0);
+	EXPECT(deathCamera->z * 2.0 + deathCameraStructuralOffset == -68.0);
+
     // An explicit legacy FLOR buffer is gameplay-separated but structurally
     // local; leaving the authored stack must not retain its old layer offset.
     EXPECT(map.ensurePlayableFloorGeometry(3, true));
@@ -979,6 +1063,7 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(floorMover->authoredMapLayer == 0);
     EXPECT(floorMover->z == 7.5);
     EXPECT(floorMover->worldRenderZ() == 7.5);
+	EXPECT(floorMover->visualLightmapLayer() == 0);
 
     Entity* inherited = newEntityWithSpatialContext(
         0, 1, map.entities, nullptr, parent);
@@ -1095,14 +1180,123 @@ bool testZ34CStructuralLayersAndFalling()
     EXPECT(structuralLight->layer == 2);
     list_RemoveNode(structuralLight->node);
 
-    // Falling searches the original authored stack downward. With layers 1 and
-    // 2 empty, falling from floor 2 reaches floor 0 and crosses two blocks.
+    // The immediate upper-to-lower case is the manual regression: a missing
+    // floor-1 surface above a valid floor-0 surface lands one level down.
     const std::size_t x = 1;
     const std::size_t y = 1;
     map.tiles[tileIndex(x, y, 1, map.height)] = 0;
     map.tiles[tileIndex(x, y, 2, map.height)] = 0;
+	// The destination tile is clear, but its eastern neighbor is a lower-floor
+	// wall. A ledge-edge position must be moved inward far enough for the
+	// player's complete collision footprint, not merely its center point.
+	map.tiles[tileIndex(x + 1, y, 1, map.height)] = 71;
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
     PlayableFloorId landingFloor = -1;
     int floorsFallen = -1;
+    EXPECT(map.findLowerPlayableFloorLanding(
+        static_cast<int>(x), static_cast<int>(y), 1,
+        landingFloor, floorsFallen));
+    EXPECT(landingFloor == 0);
+    EXPECT(floorsFallen == 1);
+
+    // Exercise the authoritative same-map transaction, not only the lookup.
+    // It must retain local z, move gameplay/structural context to floor 0, and
+    // report the one structural step used by actPlayer's damage calculation.
+    EXPECT(players[0] == nullptr);
+    const int previousClientnum = clientnum;
+    const bool previousIntro = intro;
+    {
+        Player fallingPlayer(0, false);
+        Entity* fallingEntity = newEntity(0, 1, map.entities, nullptr);
+        EXPECT(fallingEntity != nullptr);
+        fallingEntity->x = 31.5;
+        fallingEntity->y = 24.0;
+        fallingEntity->z = 7.5;
+		fallingEntity->sizex = 4;
+		fallingEntity->sizey = 4;
+        fallingEntity->playableFloor = 1;
+        fallingEntity->authoredMapLayer = 1;
+        fallingPlayer.entity = fallingEntity;
+        players[0] = &fallingPlayer;
+        clientnum = 1;
+        intro = false;
+
+		// The left casting hand is HUD-owned rather than parent/bodypart-owned.
+		// It must still follow the player's structural camera slice through PZTR.
+		Entity* leftCastingHand = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, fallingEntity);
+		EXPECT(leftCastingHand != nullptr);
+		leftCastingHand->behavior = &actLeftHandMagic;
+		leftCastingHand->flags[NOUPDATE] = true;
+		leftCastingHand->skill[2] = 0;
+		fallingPlayer.hud.magicLeftHand = leftCastingHand;
+
+		// Sustained Light/Deep Shade are caster attachments, unlike ordinary
+		// projectiles. Their local model Z moves to the destination structural
+		// slice and their old light field is removed for next-tick recreation.
+		Entity* sustainedLight = newEntityWithSpatialContext(
+			174, 1, map.entities, nullptr, fallingEntity);
+		EXPECT(sustainedLight != nullptr);
+		sustainedLight->behavior = &actMagiclightBall;
+		sustainedLight->parent = fallingEntity->getUID();
+		sustainedLight->z = -5.5;
+		sustainedLight->light = lightSphereOnPlayableFloor(
+			0, 1, 1, 1, 1, 1, 1.f, 1.f, 1.f, 0.f, 1.f);
+		EXPECT(sustainedLight->light != nullptr);
+
+		Entity* ordinaryProjectile = newEntityWithSpatialContext(
+			168, 1, map.entities, nullptr, fallingEntity);
+		EXPECT(ordinaryProjectile != nullptr);
+		ordinaryProjectile->parent = fallingEntity->getUID();
+		ordinaryProjectile->z = 7.5;
+
+        int appliedFloorsFallen = 0;
+        EXPECT(fallAutomatiaPlayerToLowerPlayableFloor(
+            0, appliedFloorsFallen));
+        EXPECT(appliedFloorsFallen == 1);
+        EXPECT(fallingEntity->playableFloor == 0);
+        EXPECT(fallingEntity->authoredMapLayer == 0);
+        EXPECT(fallingEntity->z == 7.5);
+		EXPECT(fallingEntity->x <= 27.96);
+		EXPECT(fallingEntity->x + fallingEntity->sizex < 32.0);
+		EXPECT(leftCastingHand->playableFloor == 0);
+		EXPECT(leftCastingHand->authoredMapLayer == 0);
+		EXPECT(sustainedLight->playableFloor == 0);
+		EXPECT(sustainedLight->authoredMapLayer == 0);
+		EXPECT(sustainedLight->z == -5.5);
+		EXPECT(sustainedLight->light == nullptr);
+		EXPECT(ordinaryProjectile->playableFloor == 1);
+		EXPECT(ordinaryProjectile->authoredMapLayer == 1);
+		EXPECT(ordinaryProjectile->z == 7.5);
+
+		// When the adjacent lower tile is clear, the same ledge coordinate is a
+		// valid footprint and must remain unchanged.
+		EXPECT(map.setTileAt(
+			static_cast<int>(x + 1), static_cast<int>(y),
+			OBSTACLELAYER, 0, DEFAULT_PLAYABLE_FLOOR));
+		EXPECT(fallingEntity->setPlayableFloor(1));
+		fallingEntity->authoredMapLayer = 1;
+		fallingEntity->x = 31.5;
+		fallingEntity->y = 24.0;
+		fallingEntity->z = 7.5;
+		appliedFloorsFallen = 0;
+		EXPECT(fallAutomatiaPlayerToLowerPlayableFloor(
+			0, appliedFloorsFallen));
+		EXPECT(appliedFloorsFallen == 1);
+		EXPECT(fallingEntity->x == 31.5);
+		EXPECT(fallingEntity->y == 24.0);
+
+		fallingPlayer.hud.magicLeftHand = nullptr;
+        fallingPlayer.entity = nullptr;
+    }
+    // Player teardown expects its global slot to remain valid while it closes
+    // UI state; detach the stack fixture only after the destructor has run.
+    players[0] = nullptr;
+    clientnum = previousClientnum;
+    intro = previousIntro;
+
+    // Falling searches the original authored stack downward. With layers 1 and
+    // 2 empty, falling from floor 2 reaches floor 0 and crosses two blocks.
     EXPECT(map.findLowerPlayableFloorLanding(
         static_cast<int>(x), static_cast<int>(y), 2,
         landingFloor, floorsFallen));
@@ -1136,6 +1330,26 @@ bool testZ2CRuntimeFloorIsolation()
     multiplayer = SINGLE;
     EXPECT(resetGlobalMapHarness(4, 4, 1));
 
+	// Legacy one-floor maps can still author lights on a nonzero light slice.
+	// They use that same layer as the horizontal wall mask; layer + 1 may be a
+	// ceiling. Applying the stacked-floor N + OBSTACLELAYER rule here produced
+	// the large black wall band seen in main-menu maps.
+	EXPECT(!map.hasAuthoredPlayableFloorStack());
+	EXPECT(map.setTileAt(2, 1, 2, 71, DEFAULT_PLAYABLE_FLOOR));
+	auto& legacyLightmap = lightmapForPlayableFloor(
+		0, DEFAULT_PLAYABLE_FLOOR, map.width, map.height);
+	std::fill(legacyLightmap.begin(), legacyLightmap.end(), vec4_t{});
+	light_t* legacyLayerOneLight = lightSphereShadowOnPlayableFloor(
+		0, 1, 1, DEFAULT_PLAYABLE_FLOOR, 1,
+		5, 1.f, 1.f, 1.f, 0.f, 1.f);
+	EXPECT(legacyLayerOneLight != nullptr);
+	const std::size_t legacyLitIndex = lightmapIndex3D(
+		3, 1, 1, map.width, map.height);
+	EXPECT(legacyLightmap[legacyLitIndex].x > 0.f);
+	list_RemoveNode(legacyLayerOneLight->node);
+	EXPECT(legacyLightmap[legacyLitIndex].x == 0.f);
+	EXPECT(map.setTileAt(2, 1, 2, 0, DEFAULT_PLAYABLE_FLOOR));
+
     // Z3.3B: a nonzero runtime floor can be derived from the existing authored
     // layer stack. Floor 1 sees authored layer 1 as its floor and layer 2 as
     // its obstacle layer; no second editor-owned geometry stack is required.
@@ -1147,6 +1361,11 @@ bool testZ2CRuntimeFloorIsolation()
     const PlayableFloorData* derivedFloor = map.playableFloors.find(1);
     EXPECT(derivedFloor != nullptr);
     EXPECT(derivedFloor->derivedFromMapLayers);
+    EXPECT(map.hasAuthoredPlayableFloorStack());
+    EXPECT(map.playableFloorsShareRenderedWorld(0, 1));
+    EXPECT(map.playableFloorsShareRenderedWorld(1, 0));
+    EXPECT(playableFloorsShareRuntimeScope(1, 1));
+    EXPECT(!playableFloorsShareRuntimeScope(0, 1));
 
     // The older explicit-copy compatibility path remains available, but the
     // layer-authored stair path returns to the derived shared-world view.
@@ -1154,6 +1373,8 @@ bool testZ2CRuntimeFloorIsolation()
     const PlayableFloorData* explicitFloor = map.playableFloors.find(1);
     EXPECT(explicitFloor != nullptr);
     EXPECT(!explicitFloor->derivedFromMapLayers);
+    EXPECT(!map.hasAuthoredPlayableFloorStack());
+    EXPECT(!map.playableFloorsShareRenderedWorld(0, 1));
     EXPECT(map.ensurePlayableFloorGeometry(1, false));
     derivedFloor = map.playableFloors.find(1);
     EXPECT(derivedFloor != nullptr);
@@ -1174,8 +1395,6 @@ bool testZ2CRuntimeFloorIsolation()
     EXPECT(legacyEntity != nullptr);
     EXPECT(legacyEntity->playableFloor == DEFAULT_PLAYABLE_FLOOR);
     EXPECT(legacyEntity->spatialRevision == 0);
-    EXPECT(playableFloorsShareRuntimeScope(1, 1));
-    EXPECT(!playableFloorsShareRuntimeScope(0, 1));
 
     // Z3.3C: layer-authored floors are one visible/lightable structure. Their
     // collision scopes remain distinct, but their render light volume is shared.
@@ -1186,34 +1405,100 @@ bool testZ2CRuntimeFloorIsolation()
     EXPECT(&lowerLightmap == &upperLightmap);
     std::fill(lowerLightmap.begin(), lowerLightmap.end(), vec4_t{});
 
-    // A floor-1 light writes into the same shared volume. The light's existing
-    // layer coordinate is preserved; authored static lights already derive it
-    // from Entity::z while runtime-local lights remain backward compatible.
+    // Entity light sampling uses authored structural height, not gameplay
+    // membership. Keep playableFloor fixed while changing only authored layer.
+    Entity* sampledEntity = newEntity(0, 1, map.entities, nullptr);
+    EXPECT(sampledEntity != nullptr);
+    sampledEntity->x = 24.0;
+    sampledEntity->y = 24.0;
+    sampledEntity->z = 7.5;
+    sampledEntity->playableFloor = DEFAULT_PLAYABLE_FLOOR;
+    const std::size_t layerZeroSample = lightmapIndex3D(
+        1, 1, 0, map.width, map.height);
+    const std::size_t layerOneSample = lightmapIndex3D(
+        1, 1, 1, map.width, map.height);
+    lowerLightmap[layerZeroSample] = vec4_t{30.f, 30.f, 30.f, 0.f};
+    lowerLightmap[layerOneSample] = vec4_t{90.f, 90.f, 90.f, 0.f};
+    sampledEntity->authoredMapLayer = 0;
+    EXPECT(sampledEntity->structuralLightmapLayer() == 0);
+    EXPECT(sampledEntity->entityLight() == 30);
+    sampledEntity->authoredMapLayer = 1;
+    EXPECT(sampledEntity->structuralLightmapLayer() == 1);
+    EXPECT(sampledEntity->entityLight() == 90);
+
+	// A multipart lever shares one authored light slice even though the normal
+	// local origins of its base and handle straddle z=8.
+	Entity* leverBase = newEntity(184, 1, map.entities, nullptr);
+	EXPECT(leverBase != nullptr);
+	leverBase->x = 24.0;
+	leverBase->y = 24.0;
+	leverBase->z = 7.5;
+	leverBase->playableFloor = 1;
+	leverBase->authoredMapLayer = 1;
+	Entity* leverHandle = newEntityWithSpatialContext(
+		185, 1, map.entities, nullptr, leverBase);
+	EXPECT(leverHandle != nullptr);
+	leverHandle->x = leverBase->x;
+	leverHandle->y = leverBase->y;
+	leverHandle->z = 8.5;
+	EXPECT(leverHandle->playableFloor == leverBase->playableFloor);
+	EXPECT(leverHandle->authoredMapLayer == leverBase->authoredMapLayer);
+	EXPECT(leverBase->structuralLightmapLayer() == 1);
+	EXPECT(leverHandle->structuralLightmapLayer() == 1);
+	EXPECT(leverBase->entityLight() == 90);
+	EXPECT(leverHandle->entityLight() == 90);
+
+    // A floor-1 light writes horizontally across the walkable space above
+    // authored floor layer 1. Those floor tiles must not be mistaken for the
+    // floor's wall layer (authored layer 2), which caused black upper sprites.
+	EXPECT(map.setTileAt(3, 1, 1, 71, DEFAULT_PLAYABLE_FLOOR));
     light_t* upperLight = lightSphereShadowOnPlayableFloor(
-        0, 1, 1, 1, 0, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
+        0, 1, 1, 1, 1, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
     EXPECT(upperLight != nullptr);
     EXPECT(upperLight->playableFloor == 1);
     const std::size_t litIndex =
-        lightmapIndex3D(3, 1, 0, map.width, map.height);
+        lightmapIndex3D(3, 1, 1, map.width, map.height);
     EXPECT(upperLightmap[litIndex].x > 0.f);
     EXPECT(lowerLightmap[litIndex].x > 0.f);
+	list_RemoveNode(upperLight->node);
+	EXPECT(lowerLightmap[litIndex].x == 0.f);
 
-    // A lower-floor light adds to that same volume rather than disappearing
-    // when the camera's collision slice moves upstairs. The sample used above
-    // sits behind the intentional floor-0 wall at (2,1), so a floor-0 shadowed
-    // light must NOT be expected to reach it. Sample the unobstructed source
-    // tile instead while keeping the wall-shadow characterization intact.
-    const std::size_t sharedLightIndex =
-        lightmapIndex3D(1, 1, 0, map.width, map.height);
-    const float beforeLowerLight = lowerLightmap[sharedLightIndex].x;
+	// Structural light layers are absolute authored indices. The wall lookup
+	// must read authored layer 2 directly here; passing layer 2 through the
+	// floor-1 relative tile accessor would incorrectly inspect authored layer 3.
+	EXPECT(map.setTileAt(2, 1, 2, 77, DEFAULT_PLAYABLE_FLOOR));
+	light_t* upperBlockedLight = lightSphereShadowOnPlayableFloor(
+		0, 1, 1, 1, 1, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
+	EXPECT(upperBlockedLight != nullptr);
+	EXPECT(lowerLightmap[litIndex].x == 0.f);
+	list_RemoveNode(upperBlockedLight->node);
+	EXPECT(map.setTileAt(2, 1, 2, 0, DEFAULT_PLAYABLE_FLOOR));
+
+    // An authored-stack light also spills into another structural slice when
+    // the connecting floor plane has an opening. Distance includes the vertical
+    // structural step, and deleting the light removes both slice contributions.
+	const std::size_t sharedLightIndex =
+		lightmapIndex3D(3, 2, 1, map.width, map.height);
+	EXPECT(lowerLightmap[sharedLightIndex].x == 0.f);
     light_t* lowerLight = lightSphereShadowOnPlayableFloor(
-        0, 1, 1, 0, 0, 5, 1.f, 1.f, 1.f, 0.f, 1.f);
+        0, 1, 2, 0, 0, 5, 1.f, 1.f, 1.f, 0.f, 0.5f);
     EXPECT(lowerLight != nullptr);
-    EXPECT(lowerLightmap[sharedLightIndex].x > beforeLowerLight);
+	EXPECT(lowerLight->contributionLayerCount > 1);
+	EXPECT(lowerLightmap[sharedLightIndex].x > 0.f);
     EXPECT(upperLightmap[sharedLightIndex].x == lowerLightmap[sharedLightIndex].x);
-
     list_RemoveNode(lowerLight->node);
-    list_RemoveNode(upperLight->node);
+	EXPECT(lowerLightmap[sharedLightIndex].x == 0.f);
+
+	// A solid authored floor plane at the ray crossing blocks vertical spill;
+	// this is not a fullbright or lower-lightmap-copy workaround.
+	EXPECT(map.setTileAt(2, 3, 1, 71, DEFAULT_PLAYABLE_FLOOR));
+	const std::size_t blockedUpperIndex =
+		lightmapIndex3D(3, 3, 1, map.width, map.height);
+	light_t* blockedLowerLight = lightSphereOnPlayableFloor(
+		0, 1, 3, 0, 0, 5, 1.f, 1.f, 1.f, 0.f, 0.5f);
+	EXPECT(blockedLowerLight != nullptr);
+	EXPECT(lowerLightmap[blockedUpperIndex].x == 0.f);
+	list_RemoveNode(blockedLowerLight->node);
     return true;
 }
 
@@ -1291,6 +1576,8 @@ bool testPersistentMinimapAndPlacement()
         "village.lmp",
         "world",
         17,
+		2,
+		5,
         128.25,
         96.5,
         -1.75,
@@ -1304,6 +1591,9 @@ bool testPersistentMinimapAndPlacement()
     EXPECT(!stageAutomatiaCharacterSavedPlacement(
         1, "village.lmp", "world", 17,
         1, 2, std::numeric_limits<real_t>::infinity(), 4, 5, 6));
+	EXPECT(!stageAutomatiaCharacterSavedPlacement(
+		1, "village.lmp", "world", 17,
+		2, MAPLAYERS, 1, 2, 3, 4, 5, 6));
     consumeAutomatiaSavedPlayerPlacement(1);
     EXPECT(!automatiaHasSavedPlayerPlacement(1));
     return true;

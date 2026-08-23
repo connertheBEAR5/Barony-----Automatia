@@ -3302,7 +3302,10 @@ void pollNetworkForShutdown() {
 		}
 	}
 #ifdef STEAMWORKS
-	SteamAPI_RunCallbacks();
+	if ( steamRuntimeAvailable() )
+	{
+		SteamAPI_RunCallbacks();
+	}
 #endif // STEAMWORKS
 #ifdef USE_EOS
 	if (EOS.PlatformHandle) {
@@ -3349,7 +3352,8 @@ int sendPacket(UDPsocket sock, int channel, UDPpacket* packet, int hostnum, bool
 		if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM )
 		{
 #ifdef STEAMWORKS
-			if ( steamIDRemote[hostnum] )
+			if ( steamRuntimeAvailable() && SteamNetworking()
+				&& steamIDRemote[hostnum] )
 			{
 				return SteamNetworking()->SendP2PPacket(*static_cast<CSteamID* >(steamIDRemote[hostnum]), packet->data, packet->len, tryReliable? k_EP2PSendReliable : k_EP2PSendUnreliable, 0);
 			}
@@ -3406,7 +3410,8 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM )
 		{
 #ifdef STEAMWORKS
-			if ( !steamIDRemote[hostnum] )
+			if ( !steamRuntimeAvailable() || !SteamNetworking()
+				|| !steamIDRemote[hostnum] )
 			{
 				return 0;
 			}
@@ -3489,7 +3494,8 @@ int sendPacketSafe(UDPsocket sock, int channel, UDPpacket* packet, int hostnum)
 		if ( LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM )
 		{
 #ifdef STEAMWORKS
-			if ( steamIDRemote[hostnum] )
+			if ( steamRuntimeAvailable() && SteamNetworking()
+				&& steamIDRemote[hostnum] )
 			{
 				return SteamNetworking()->SendP2PPacket(*static_cast<CSteamID* >(steamIDRemote[hostnum]), packetsend->packet->data, packetsend->packet->len, k_EP2PSendReliable, 0);
 			}
@@ -9797,18 +9803,20 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 							{
 								// this is me dying, setup the deathcam.
 								entity->playerCreatedDeathCam = 1;
-								Entity* entity = newEntity(-1, 1, map.entities, nullptr);
-								entity->x = cameras[clientnum].x * 16;
-								entity->y = cameras[clientnum].y * 16;
-								entity->z = -2;
-								entity->flags[NOUPDATE] = true;
-								entity->flags[PASSABLE] = true;
-								entity->flags[INVISIBLE] = true;
-								entity->behavior = &actDeathCam;
-								entity->skill[2] = clientnum;
-								entity->yaw = cameras[clientnum].ang;
-								entity->pitch = PI / 8;
-								players[clientnum]->ghost.initTeleportLocations(entity->x / 16, entity->y / 16);
+								Entity* deathcam = newEntityWithSpatialContext(
+									-1, 1, map.entities, nullptr, entity);
+								deathcam->x = cameras[clientnum].x * 16;
+								deathcam->y = cameras[clientnum].y * 16;
+								deathcam->z = -2;
+								deathcam->flags[NOUPDATE] = true;
+								deathcam->flags[PASSABLE] = true;
+								deathcam->flags[INVISIBLE] = true;
+								deathcam->behavior = &actDeathCam;
+								deathcam->skill[2] = clientnum;
+								deathcam->yaw = cameras[clientnum].ang;
+								deathcam->pitch = PI / 8;
+								players[clientnum]->ghost.initTeleportLocations(
+									deathcam->x / 16, deathcam->y / 16);
 							}
 						}
 					}
@@ -11376,18 +11384,22 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		}
 		else
 		{
-			Entity* entity = newEntity(-1, 1, map.entities, nullptr);
-			entity->x = cameras[clientnum].x * 16;
-			entity->y = cameras[clientnum].y * 16;
-			entity->z = -2;
-			entity->flags[NOUPDATE] = true;
-			entity->flags[PASSABLE] = true;
-			entity->flags[INVISIBLE] = true;
-			entity->behavior = &actDeathCam;
-			entity->skill[2] = clientnum;
-			entity->yaw = cameras[clientnum].ang;
-			entity->pitch = PI / 8;
-			players[clientnum]->ghost.initTeleportLocations(entity->x / 16, entity->y / 16);
+			const Entity* deathCameraSource =
+				Player::getPlayerInteractEntity(clientnum);
+			Entity* deathcam = newEntityWithSpatialContext(
+				-1, 1, map.entities, nullptr, deathCameraSource);
+			deathcam->x = cameras[clientnum].x * 16;
+			deathcam->y = cameras[clientnum].y * 16;
+			deathcam->z = -2;
+			deathcam->flags[NOUPDATE] = true;
+			deathcam->flags[PASSABLE] = true;
+			deathcam->flags[INVISIBLE] = true;
+			deathcam->behavior = &actDeathCam;
+			deathcam->skill[2] = clientnum;
+			deathcam->yaw = cameras[clientnum].ang;
+			deathcam->pitch = PI / 8;
+			players[clientnum]->ghost.initTeleportLocations(
+				deathcam->x / 16, deathcam->y / 16);
 		}
 
 		//deleteSaveGame(multiplayer); // stops save scumming c: //Not here, because it'll make the game unresumable if the game crashes but not all players have died.
@@ -16808,7 +16820,14 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 
 		// deathcam
 		int sprite = Player::Ghost_t::getSpriteForPlayer(player);
-		Entity* entity = newEntity(sprite, 1, map.entities, nullptr); //Ghost entity.
+		/*
+		 * GHOS predates playable-Z and carries only map X/Y. Project Spirit is
+		 * requested while the player's authoritative body still exists, so that
+		 * body is the canonical source for floor, authored layer, and revision.
+		 * A true death ghost with no remaining body retains the legacy Z0 default.
+		 */
+		Entity* entity = newEntityWithSpatialContext(
+			sprite, 1, map.entities, nullptr, players[player]->entity); //Ghost entity.
 		players[player]->ghost.my = entity;
 		players[player]->ghost.uid = entity->getUID();
 		entity->x = (x * 16) + 8;
@@ -20612,6 +20631,10 @@ void NetHandler::toggleMultithreading(bool disableMultithreading)
 void NetHandler::initializeMultithreadedPacketHandling()
 {
 #ifdef STEAMWORKS
+	if ( !steamRuntimeAvailable() )
+	{
+		return;
+	}
 
 	printlog("Initializing multithreaded packet handling.");
 
@@ -20748,7 +20771,7 @@ int steamPacketThread(void* data)
 {
 #ifdef STEAMWORKS
 
-	if (!data)
+	if (!data || !steamRuntimeAvailable() || !SteamUser() || !SteamNetworking())
 	{
 		return -1;    //Some generic error?
 	}

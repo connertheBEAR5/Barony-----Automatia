@@ -355,7 +355,7 @@ private:
 
 void SteamClientConsumeAuthTicket()
 {
-	if ( steam_server_client_wrapper )
+	if ( steamRuntimeAvailable() && steam_server_client_wrapper )
 	{
 		steam_server_client_wrapper->consumeAuthTicket();
 	}
@@ -363,6 +363,12 @@ void SteamClientConsumeAuthTicket()
 
 void SteamServerClientWrapper::consumeAuthTicket()
 {
+	if ( !steamRuntimeAvailable() || !SteamUser() )
+	{
+		authTicketHandle = k_HAuthTicketInvalid;
+		authTicket = "";
+		return;
+	}
 	if ( authTicketHandle != k_HAuthTicketInvalid )
 	{
 		SteamUser()->CancelAuthTicket(authTicketHandle);
@@ -373,7 +379,7 @@ void SteamServerClientWrapper::consumeAuthTicket()
 
 std::string SteamClientRequestAuthTicket()
 {
-	if ( steam_server_client_wrapper )
+	if ( steamRuntimeAvailable() && steam_server_client_wrapper )
 	{
 		return steam_server_client_wrapper->requestAuthTicket();
 	}
@@ -382,7 +388,8 @@ std::string SteamClientRequestAuthTicket()
 
 std::string SteamServerClientWrapper::requestAuthTicket()
 {
-	if ( !SteamUser()->BLoggedOn() )
+	if ( !steamRuntimeAvailable() || !SteamUser()
+		|| !SteamUser()->BLoggedOn() )
 	{
 		printlog("[STEAM]: requestAuthTicket() not logged in");
 		return "";
@@ -704,6 +711,11 @@ void SteamServerClientWrapper::m_SteamCallResultEncryptedAppTicket_Set(SteamAPIC
 
 SteamAPICall_t cpp_SteamMatchmaking_RequestAppTicket()
 {
+	if ( !steamRuntimeAvailable() || !SteamUser()
+		|| !steam_server_client_wrapper )
+	{
+		return k_uAPICallInvalid;
+	}
 	char someData[] = "data";
 	SteamAPICall_t m_SteamCallResultEncryptedAppTicket = SteamUser()->RequestEncryptedAppTicket(someData, sizeof(someData));
 	steam_server_client_wrapper->m_SteamCallResultEncryptedAppTicket_Set(m_SteamCallResultEncryptedAppTicket);
@@ -712,6 +724,12 @@ SteamAPICall_t cpp_SteamMatchmaking_RequestAppTicket()
 
 SteamAPICall_t cpp_SteamMatchmaking_RequestLobbyList(const char* roomkey)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !SteamUtils()
+		|| !steam_server_client_wrapper )
+	{
+		requestingLobbies = false;
+		return k_uAPICallInvalid;
+	}
     if (roomkey) {
         SteamMatchmaking()->AddRequestLobbyListStringFilter("roomkey", roomkey, ELobbyComparison::k_ELobbyComparisonEqual);
         roomkey_cached = roomkey;
@@ -730,6 +748,11 @@ SteamAPICall_t cpp_SteamMatchmaking_RequestLobbyList(const char* roomkey)
 
 SteamAPICall_t cpp_SteamMatchmaking_JoinLobby(CSteamID steamIDLobby)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking()
+		|| !steam_server_client_wrapper )
+	{
+		return k_uAPICallInvalid;
+	}
 	SteamAPICall_t steamAPICall = SteamMatchmaking()->JoinLobby(steamIDLobby);
 	steam_server_client_wrapper->m_SteamCallResultLobbyEntered_Set(steamAPICall);
 	return steamAPICall;
@@ -737,6 +760,12 @@ SteamAPICall_t cpp_SteamMatchmaking_JoinLobby(CSteamID steamIDLobby)
 
 SteamAPICall_t cpp_SteamMatchmaking_CreateLobby(ELobbyType eLobbyType, int cMaxMembers)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking()
+		|| !steam_server_client_wrapper )
+	{
+		steamAwaitingLobbyCreation = false;
+		return k_uAPICallInvalid;
+	}
     auto old_lobby = static_cast<CSteamID*>(currentLobby);
 	if ( old_lobby )
 	{
@@ -764,6 +793,10 @@ void cpp_SteamServerClientWrapper_Destroy()
 // Make the asynchronous request to receive the number of current players.
 void SteamServerClientWrapper::GetNumberOfCurrentPlayers()
 {
+	if ( !steamRuntimeAvailable() || !SteamUserStats() )
+	{
+		return;
+	}
 	//printlog("Getting Number of Current Players\n");
 	SteamAPICall_t hSteamAPICall = SteamUserStats()->GetNumberOfCurrentPlayers();
 	m_NumberOfCurrentPlayersCallResult.Set(hSteamAPICall, this, &SteamServerClientWrapper::OnGetNumberOfCurrentPlayers);
@@ -816,6 +849,12 @@ bool achievementUnlocked(const char* achName)
 
 void steamAchievement(const char* achName)
 {
+#ifdef STEAMWORKS
+	if ( !steamRuntimeAvailable() || !SteamUserStats() )
+	{
+		return;
+	}
+#endif
 #ifdef DEBUG_ACHIEVEMENTS
 	static ConsoleVariable<bool> cvar_achievements_debug("/achievements_debug", false);
 	if ( *cvar_achievements_debug )
@@ -911,7 +950,10 @@ void steamUnsetAchievement(const char* achName)
 	return;
 #else
 #ifdef DEBUG_ACHIEVEMENTS
-	SteamUserStats()->ClearAchievement(achName);
+	if ( steamRuntimeAvailable() && SteamUserStats() )
+	{
+		SteamUserStats()->ClearAchievement(achName);
+	}
 #endif // DEBUG_ACHIEVEMENTS
 #endif
 }
@@ -969,6 +1011,12 @@ void steamAchievementEntity(Entity* my, const char* achName)
 
 void steamStatisticUpdate(int statisticNum, ESteamStatTypes type, int value)
 {
+#ifdef STEAMWORKS
+	if ( !steamRuntimeAvailable() || !g_SteamStatistics )
+	{
+		return;
+	}
+#endif
 	if ( gameModeManager.getMode() == GameModeManager_t::GAME_MODE_TUTORIAL )
 	{
 		if ( !achievementObserver.bIsStatisticAllowedDuringTutorial(static_cast<SteamStatIndexes>(statisticNum)) )
@@ -1397,7 +1445,10 @@ void steamStatisticUpdateClient(int player, int statisticNum, ESteamStatTypes ty
 void indicateAchievementProgressAndUnlock(const char* achName, int currentValue, int maxValue)
 {
 #ifdef STEAMWORKS
-	SteamUserStats()->IndicateAchievementProgress(achName, currentValue, maxValue);
+	if ( steamRuntimeAvailable() && SteamUserStats() )
+	{
+		SteamUserStats()->IndicateAchievementProgress(achName, currentValue, maxValue);
+	}
 #elif (defined USE_EOS || defined LOCAL_ACHIEVEMENTS)
 	UIToastNotificationManager.createStatisticUpdateNotification(achName, currentValue, maxValue);
 #endif
@@ -1412,6 +1463,13 @@ void steamIndicateStatisticProgress(int statisticNum, ESteamStatTypes type)
 #if (!defined STEAMWORKS && !defined USE_EOS && !defined LOCAL_ACHIEVEMENTS)
 	return;
 #else
+
+#ifdef STEAMWORKS
+	if ( !steamRuntimeAvailable() || !SteamUserStats() )
+	{
+		return;
+	}
+#endif
 
 	if ( statisticNum >= NUM_STEAM_STATISTICS || statisticNum < 0 )
 	{
@@ -1598,6 +1656,10 @@ void* cpp_P2PSessionRequest_t_m_steamIDRemote(void* P2PSessionRequest_t_instance
 
 void steam_OnP2PSessionRequest( void* p_Callback )
 {
+	if ( !steamRuntimeAvailable() || !SteamNetworking() || !p_Callback )
+	{
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "OnP2PSessionRequest\n" );
 #endif
@@ -1615,6 +1677,10 @@ void cpp_Free_CSteamID(void* steamID)
 //Helper func. //TODO: Bugger.
 void* cpp_SteamMatchmaking_GetLobbyByIndex(int iLobby)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() )
+	{
+		return nullptr;
+	}
 	CSteamID* id = new CSteamID();
 	*id = SteamMatchmaking()->GetLobbyByIndex(iLobby);
 	return id;
@@ -1622,8 +1688,10 @@ void* cpp_SteamMatchmaking_GetLobbyByIndex(int iLobby)
 
 void steam_OnLobbyMatchListCallback( void* pCallback, bool bIOFailure )
 {
-	if ( !requestingLobbies )
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !pCallback
+		|| !requestingLobbies )
 	{
+		requestingLobbies = false;
 		return;
 	}
 
@@ -1709,6 +1777,10 @@ void* cpp_LobbyDataUpdated_pCallback_m_ulSteamIDLobby(void* pCallback)
 
 void steam_OnLobbyDataUpdatedCallback( void* pCallback )
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !pCallback )
+	{
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "OnLobbyDataUpdatedCallback\n" );
 #endif
@@ -1813,6 +1885,12 @@ static std::string generateRoomKey(Uint32 key)
 
 void steam_OnLobbyCreated( void* pCallback, bool bIOFailure )
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !SteamFriends()
+		|| !SteamUtils() || !pCallback )
+	{
+		steamAwaitingLobbyCreation = false;
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "OnLobbyCreated\n" );
 #endif
@@ -1931,6 +2009,10 @@ void steam_OnLobbyCreated( void* pCallback, bool bIOFailure )
 #ifdef USE_EOS
 void steam_OnRequestEncryptedAppTicket(void* pCallback, bool bIOFailure)
 {
+	if ( !steamRuntimeAvailable() || !SteamUser() || !pCallback )
+	{
+		return;
+	}
 	if ( bIOFailure )
 	{
 		printlog("OnRequestEncryptedAppTicket failure");
@@ -1992,6 +2074,10 @@ void steam_OnRequestEncryptedAppTicket(void* pCallback, bool bIOFailure)
 
 bool processLobbyInvite(void* lobbyToConnectTo)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !lobbyToConnectTo )
+	{
+		return false;
+	}
     assert(lobbyToConnectTo);
 	auto lobby = static_cast<CSteamID*>(lobbyToConnectTo);
 	const char* pchLoadingSaveGame = SteamMatchmaking()->GetLobbyData(*lobby, "loadingsavegame");
@@ -2061,6 +2147,10 @@ void* cpp_GameJoinRequested_m_steamIDLobby(void* pCallback)
 
 void steam_OnGameJoinRequested( void* pCallback )
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !pCallback )
+	{
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "OnGameJoinRequested\n" );
 #endif
@@ -2079,6 +2169,10 @@ void steam_OnGameJoinRequested( void* pCallback )
 //Helper func. //TODO: Bugger.
 void cpp_SteamMatchmaking_JoinLobbyPCH(const char* pchLobbyID)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !pchLobbyID )
+	{
+		return;
+	}
 	CSteamID steamIDLobby(std::stoull(std::string(pchLobbyID)));
 	if (steamIDLobby.IsValid()) {
 	    //The invite is not actually passed to the rest of the game right here.
@@ -2093,6 +2187,10 @@ void cpp_SteamMatchmaking_JoinLobbyPCH(const char* pchLobbyID)
 // checks command line arg for a connect lobby command
 void steam_ConnectToLobby(const char* arg)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !arg )
+	{
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "ConnectToLobby\n" );
 #endif
@@ -2125,6 +2223,12 @@ void* cpp_pCallback_m_ulSteamIDLobby( void* pCallback )
 
 void steam_OnLobbyEntered( void* pCallback, bool bIOFailure )
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !pCallback )
+	{
+		connectingToLobby = false;
+		connectingToLobbyWindow = false;
+		return;
+	}
 #ifdef STEAMDEBUG
 	printlog( "OnLobbyEntered\n" );
 #endif
@@ -2241,7 +2345,8 @@ void steam_OnP2PSessionConnectFail( void* pCallback )
 
 void CSteamLeaderboards::FindLeaderboard(const char *pchLeaderboardName)
 {
-	if ( !SteamUser()->BLoggedOn() )
+	if ( !steamRuntimeAvailable() || !SteamUser() || !SteamUserStats()
+		|| !SteamUser()->BLoggedOn() )
 	{
 		return;
 	}
@@ -2269,7 +2374,7 @@ void CSteamLeaderboards::OnFindLeaderboard(LeaderboardFindResult_t *pCallback, b
 
 bool CSteamLeaderboards::DownloadScores(ELeaderboardDataRequest dataRequestType, int rangeStart, int rangeEnd)
 {
-	if ( !m_CurrentLeaderboard )
+	if ( !steamRuntimeAvailable() || !SteamUserStats() || !m_CurrentLeaderboard )
 	{
 		return false;
 	}
@@ -2286,7 +2391,8 @@ bool CSteamLeaderboards::DownloadScores(ELeaderboardDataRequest dataRequestType,
 
 void CSteamLeaderboards::OnDownloadScore(LeaderboardScoresDownloaded_t *pCallback, bool bIOFailure)
 {
-	if ( !bIOFailure )
+	if ( steamRuntimeAvailable() && SteamUserStats() && SteamFriends()
+		&& !bIOFailure )
 	{
 		m_nLeaderboardEntries = std::min(pCallback->m_cEntryCount, (int)CSteamLeaderboards::k_numEntriesToRetrieve);
 		for ( int i = 0; i < m_nLeaderboardEntries; ++i )
@@ -2301,7 +2407,7 @@ void CSteamLeaderboards::OnDownloadScore(LeaderboardScoresDownloaded_t *pCallbac
 
 void CSteamLeaderboards::UploadScore(int scoreToSet, int tags[k_numLeaderboardTags])
 {
-	if ( !m_CurrentLeaderboard )
+	if ( !steamRuntimeAvailable() || !SteamUserStats() || !m_CurrentLeaderboard )
 	{
 		return;
 	}
@@ -2356,7 +2462,8 @@ void CSteamLeaderboards::ClearUploadData()
 
 void CSteamLeaderboards::ProcessLeaderboardUpload()
 {
-	if ( LeaderboardUpload.status == LEADERBOARD_STATE_NONE )
+	if ( !steamRuntimeAvailable()
+		|| LeaderboardUpload.status == LEADERBOARD_STATE_NONE )
 	{
 		return;
 	}

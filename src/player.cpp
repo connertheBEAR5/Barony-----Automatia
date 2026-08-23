@@ -7480,6 +7480,9 @@ const char* Player::getAccountName() const {
     } else {
 		if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
 #ifdef STEAMWORKS
+			if (!steamRuntimeAvailable() || !SteamFriends() || !SteamMatchmaking()) {
+				return unknown;
+			}
 			if (isLocalPlayer()) {
 				return SteamFriends()->GetPersonaName();
 			} else {

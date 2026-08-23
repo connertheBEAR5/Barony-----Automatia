@@ -108,6 +108,7 @@ struct AutomatiaPlayerReturnPlacement
 {
 	bool valid = false;
 	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	Sint16 authoredMapLayer = -1;
 	double x = 0.0;
 	double y = 0.0;
 	double z = 0.0;
@@ -125,6 +126,7 @@ struct AutomatiaPlayerLevelVisit
 	bool hasReturnAnchor = false;
 	Sint32 returnAnchorPersistentID = 0;
 	PlayableFloorId returnAnchorPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
+	Sint16 returnAnchorAuthoredMapLayer = -1;
 	double returnAnchorX = 0.0;
 	double returnAnchorY = 0.0;
 	double returnAnchorZ = 0.0;
@@ -740,8 +742,9 @@ bool applyAutomatiaPlayableFloorPlacement(
 );
 
 // Drops a non-levitating player through a missing authored floor to the nearest
-// lower valid playable floor at the same X/Y. Returns the number of floors
-// crossed; damage policy remains in actPlayer.
+// lower valid playable floor, preserving X/Y where the lower-floor footprint is
+// clear and otherwise moving inward within that landing tile. Returns the number
+// of floors crossed; damage policy remains in actPlayer.
 bool fallAutomatiaPlayerToLowerPlayableFloor(
     int playerIndex,
     int& floorsFallen
@@ -762,12 +765,25 @@ bool stageAutomatiaCharacterSavedPlacement(
     const std::string& instanceId,
     Uint64 revision,
     PlayableFloorId playableFloor,
+    Sint16 authoredMapLayer,
     real_t x,
     real_t y,
     real_t z,
     real_t yaw,
-    real_t pitch,
-    real_t roll);
+	real_t pitch,
+	real_t roll);
+bool stageAutomatiaCharacterSavedPlacement(
+	int playerIndex,
+	const std::string& mapFile,
+	const std::string& instanceId,
+	Uint64 revision,
+	PlayableFloorId playableFloor,
+	real_t x,
+	real_t y,
+	real_t z,
+	real_t yaw,
+	real_t pitch,
+	real_t roll);
 bool stageAutomatiaCharacterSavedPlacement(
     int playerIndex,
     const std::string& mapFile,

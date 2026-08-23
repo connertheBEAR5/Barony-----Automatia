@@ -138,87 +138,91 @@ void lightDeconstructor(void* data)
 				map.height
 			);
 
-		for ( int localY = 0;
-			localY < diameter;
-			++localY )
+		for ( int contribution = 0;
+			contribution < std::max(1, light->contributionLayerCount);
+			++contribution )
 		{
-			for ( int localX = 0;
-				localX < diameter;
-				++localX )
+			const int contributionLayer =
+				contribution < light->contributionLayerCount
+					? light->contributionLayers[contribution]
+					: light->layer;
+			for ( int localY = 0;
+				localY < diameter;
+				++localY )
 			{
-				const int soff =
-					localY
-					+ localX * diameter;
-
-				if ( soff < 0
-					|| soff >= lightsize )
+				for ( int localX = 0;
+					localX < diameter;
+					++localX )
 				{
-					continue;
-				}
+					const int localOffset =
+						localY + localX * diameter;
+					const int soff =
+						contribution * lightsize + localOffset;
 
-				const int mapX =
-					localX
-					+ light->x
-					- light->radius;
+					const int mapX =
+						localX
+							+ light->x
+							- light->radius;
 
-				const int mapY =
-					localY
-					+ light->y
-					- light->radius;
+					const int mapY =
+						localY
+							+ light->y
+							- light->radius;
 
-				if ( mapX < 0
-					|| mapY < 0
-					|| mapX >= map.width
-					|| mapY >= map.height )
-				{
-					continue;
-				}
+					if ( mapX < 0
+						|| mapY < 0
+						|| mapX >= map.width
+						|| mapY >= map.height )
+					{
+						continue;
+					}
 
-				const size_t doff =
-					lightmapIndex3D(
-						mapX,
-						mapY,
-						light->layer,
-						map.width,
-						map.height
-					);
+					const size_t doff =
+						lightmapIndex3D(
+							mapX,
+							mapY,
+							contributionLayer,
+							map.width,
+							map.height
+						);
 
-				if ( doff >= mapsize )
-				{
-					continue;
-				}
+					if ( doff >= mapsize )
+					{
+						continue;
+					}
 
-				const auto& source =
-					light->tiles[soff];
+					const auto& source =
+						light->tiles[soff];
 
-				if ( light->index )
-				{
-					auto& destination =
-						lightmapForPlayableFloor(
-							light->index, light->playableFloor, map.width, map.height)[doff];
-
-					// A lightmap can be rebuilt independently of its entity list
-					// during a late map activation. Never let removal of a stale
-					// light field drive overlapping live illumination negative.
-					destination.x = std::max(0.f, destination.x - source.x);
-					destination.y = std::max(0.f, destination.y - source.y);
-					destination.z = std::max(0.f, destination.z - source.z);
-					destination.w = std::max(0.f, destination.w - source.w);
-				}
-				else
-				{
-					for ( int player = 0;
-						player < MAXPLAYERS + 1;
-						++player )
+					if ( light->index )
 					{
 						auto& destination =
 							lightmapForPlayableFloor(
-								player, light->playableFloor, map.width, map.height)[doff];
+								light->index, light->playableFloor, map.width, map.height)[doff];
 
+						// A lightmap can be rebuilt independently of its entity list
+						// during a late map activation. Never let removal of a stale
+						// light field drive overlapping live illumination negative.
 						destination.x = std::max(0.f, destination.x - source.x);
 						destination.y = std::max(0.f, destination.y - source.y);
 						destination.z = std::max(0.f, destination.z - source.z);
 						destination.w = std::max(0.f, destination.w - source.w);
+					}
+					else
+					{
+						for ( int player = 0;
+							player < MAXPLAYERS + 1;
+							++player )
+						{
+							auto& destination =
+								lightmapForPlayableFloor(
+									player, light->playableFloor, map.width, map.height)[doff];
+
+							destination.x = std::max(0.f, destination.x - source.x);
+							destination.y = std::max(0.f, destination.y - source.y);
+							destination.z = std::max(0.f, destination.z - source.z);
+							destination.w = std::max(0.f, destination.w - source.w);
+						}
 					}
 				}
 			}
@@ -442,6 +446,12 @@ light_t* newLightOnPlayableFloor(
 	light->y = y;
 	light->layer =
 		clampLightmapLayer(layer);
+	light->contributionLayerCount = 1;
+	light->contributionLayers[0] = light->layer;
+	for ( int contribution = 1; contribution < MAPLAYERS; ++contribution )
+	{
+		light->contributionLayers[contribution] = 0;
+	}
 	light->radius = radius;
 
 	if ( light->radius > 0 )

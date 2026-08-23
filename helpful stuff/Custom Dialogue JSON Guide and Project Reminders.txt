@@ -2,6 +2,14 @@ BARONY AUTOMATIA CUSTOM DIALOGUE JSON GUIDE
 AND PROJECT REMINDERS
 ============================================================
 
+STATUS NOTE (2026-08-23)
+------------------------
+This is a compact historical quick reference. The maintained authoring guide is
+"Custom Dialogue and Quest Editor Guide.txt"; the complete implementation and
+remaining-work summary is in "Barony Automatia Complete Features Guide.txt".
+Where this quick reference and those guides differ, use the maintained guides
+and current source tree.
+
 PER-PLAYER QUEST FOUNDATION
 ---------------------------
 Quest state is separate for every multiplayer player slot.
@@ -9,9 +17,15 @@ A completed quest is one-time per player: Player A completing Quest A
 does not stop Player C from accepting and completing it, but neither
 player can accept it again after their own completion.
 
-Current key: player_<slot>:<normalized quest ID>
-Limitations: session-only; slot identity; repeatable resets, party/world
-scope, save serialization, and permanent character identity come later.
+Runtime key: player_<slot>:<normalized quest ID>
+Current persistence: world-companion saves serialize quest/dialogue state, and
+dedicated per-character saves export/import the selected player's story state.
+The in-memory runtime key remains slot-based; the save/reconnect layer is
+responsible for restoring the correct character's state to its current slot.
+Party/world quest ownership is still not implemented: authored party/world
+values load safely as player scope. Repeatable player quests support the
+explicit reset path; complete multiplayer and reconnect regression coverage
+remains outstanding.
 
 JSON ROOT
 ---------
@@ -79,11 +93,15 @@ more empty layers below the sky plane.
 Shopkeeper restock reminder: formerly near src/game.cpp line 6073;
 search the restock logic because line numbers move.
 
-ROADMAP
--------
-Quest save serialization; stable saved-player identity; repeatable reset
-rules; party/world scopes; quest metadata and journal UI.
-Persistent dynamic dropped entities later.
-Editor rectangular mass tile/sprite selection and cross-layer copy/paste.
+CURRENT STATUS / ROADMAP
+------------------------
+Implemented: quest metadata and journal UI, per-player quest/dialogue save
+serialization, explicit repeatable-player reset handling, persistent dynamic
+items/gold/boulders/monsters for covered entity types, and cross-layer editor
+copy/paste paths.
+
+Remaining: true party/world quest ownership, durable platform-level player
+identity beyond the saved reconnect/session mechanisms, unsupported dynamic
+entity edge cases, and broad graphical/multiplayer save-reload verification.
 Shopkeepers later restock after roughly 2-6 distinct map visits, without
 repeatedly counting alternation between the same maps.

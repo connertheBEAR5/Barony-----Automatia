@@ -1,10 +1,13 @@
-QUEST JOURNAL BACKEND
-=====================
+QUEST JOURNAL BACKEND AND CURRENT UI STATUS
+===========================================
 
 Purpose
 -------
-This milestone prepares the data layer for an inventory quest-journal
-tab. It does not draw the UI yet.
+This document originally described the data-layer milestone. The inventory
+quest-journal UI now exists and consumes this backend. It provides the quest
+list, objectives, tracking information, controller navigation, camera/input
+locking, and inventory-safe close behavior. The API and entry semantics below
+remain the backend contract.
 
 Public API
 ----------
@@ -79,3 +82,11 @@ after its dialogue definition has been loaded, normally when its NPC is
 first interacted with.
 
 A future quest manifest can preload every authored quest definition.
+
+Persistence and scope status (2026-08-23)
+-----------------------------------------
+Quest and dialogue state is serialized through the Automatia companion save;
+dedicated per-character saves export/import the selected player's story state.
+Player scope is the only quest ownership mode currently executed by the
+dialogue runtime. Authored party/world scope values are accepted by the editor
+but load safely as player scope until real party/world ownership is implemented.

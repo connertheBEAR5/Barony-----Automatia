@@ -164,21 +164,24 @@ int initGame()
 
 	// steam stuff
 #ifdef STEAMWORKS
-	cpp_SteamServerWrapper_Instantiate(); //TODO: Remove these wrappers.
-	cpp_SteamServerClientWrapper_Instantiate();
+	if ( steamRuntimeAvailable() )
+	{
+		cpp_SteamServerWrapper_Instantiate(); //TODO: Remove these wrappers.
+		cpp_SteamServerClientWrapper_Instantiate();
 
-	cpp_SteamServerClientWrapper_OnP2PSessionRequest = &steam_OnP2PSessionRequest;
-	//cpp_SteamServerClientWrapper_OnGameOverlayActivated = &steam_OnGameOverlayActivated;
-	cpp_SteamServerClientWrapper_OnLobbyCreated = &steam_OnLobbyCreated;
-	cpp_SteamServerClientWrapper_OnGameJoinRequested = &steam_OnGameJoinRequested;
-	cpp_SteamServerClientWrapper_OnLobbyEntered = &steam_OnLobbyEntered;
-	cpp_SteamServerClientWrapper_GameServerPingOnServerResponded = &steam_GameServerPingOnServerResponded;
-	cpp_SteamServerClientWrapper_OnLobbyMatchListCallback = &steam_OnLobbyMatchListCallback;
-	cpp_SteamServerClientWrapper_OnP2PSessionConnectFail = &steam_OnP2PSessionConnectFail;
-	cpp_SteamServerClientWrapper_OnLobbyDataUpdate = &steam_OnLobbyDataUpdatedCallback;
+		cpp_SteamServerClientWrapper_OnP2PSessionRequest = &steam_OnP2PSessionRequest;
+		//cpp_SteamServerClientWrapper_OnGameOverlayActivated = &steam_OnGameOverlayActivated;
+		cpp_SteamServerClientWrapper_OnLobbyCreated = &steam_OnLobbyCreated;
+		cpp_SteamServerClientWrapper_OnGameJoinRequested = &steam_OnGameJoinRequested;
+		cpp_SteamServerClientWrapper_OnLobbyEntered = &steam_OnLobbyEntered;
+		cpp_SteamServerClientWrapper_GameServerPingOnServerResponded = &steam_GameServerPingOnServerResponded;
+		cpp_SteamServerClientWrapper_OnLobbyMatchListCallback = &steam_OnLobbyMatchListCallback;
+		cpp_SteamServerClientWrapper_OnP2PSessionConnectFail = &steam_OnP2PSessionConnectFail;
+		cpp_SteamServerClientWrapper_OnLobbyDataUpdate = &steam_OnLobbyDataUpdatedCallback;
  #ifdef USE_EOS
-	cpp_SteamServerClientWrapper_OnRequestEncryptedAppTicket = &steam_OnRequestEncryptedAppTicket;
+		cpp_SteamServerClientWrapper_OnRequestEncryptedAppTicket = &steam_OnRequestEncryptedAppTicket;
  #endif //USE_EOS
+	}
 #endif
 #ifdef USE_PLAYFAB
 	playfabUser.init();
@@ -856,11 +859,17 @@ void deinitGame()
 
 	// steam stuff
 #ifdef STEAMWORKS
-	cpp_SteamServerWrapper_Destroy();
-	cpp_SteamServerClientWrapper_Destroy();
+	if ( steamRuntimeAvailable() )
+	{
+		cpp_SteamServerWrapper_Destroy();
+		cpp_SteamServerClientWrapper_Destroy();
+	}
 	if ( currentLobby )
 	{
-		SteamMatchmaking()->LeaveLobby(*static_cast<CSteamID*>(currentLobby));
+		if ( steamRuntimeAvailable() && SteamMatchmaking() )
+		{
+			SteamMatchmaking()->LeaveLobby(*static_cast<CSteamID*>(currentLobby));
+		}
 		cpp_Free_CSteamID(currentLobby); //TODO: Remove these bodges.
 		currentLobby = NULL;
 	}
@@ -1111,7 +1120,8 @@ void loadAchievementData(const char* path) {
 void sortAchievementsForDisplay()
 {
 #ifdef STEAMWORKS
-	if ( Compendium_t::AchievementData_t::achievementsNeedFirstData )
+	if ( steamRuntimeAvailable() && SteamUserStats()
+		&& Compendium_t::AchievementData_t::achievementsNeedFirstData )
 	{
 		//if ( SteamUser()->BLoggedOn() )
 		{

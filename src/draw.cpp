@@ -445,6 +445,7 @@ void createCommonDrawResources() {
 		"uniform vec4 uCameraPos;"
 		"uniform sampler2D uLightmap;"
 		"uniform vec2 uMapDims;"
+		"uniform float uLightLayer;"
 		"uniform float uFogDistance;"
 		"uniform vec4 uFogColor;"
 		"out vec4 FragColor;"
@@ -456,7 +457,7 @@ void createCommonDrawResources() {
 		"    (uColorRemap[2].rgb * Color.b);"
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
+"LightCoord.y = (WorldPos.z / 32.0 + uLightLayer * uMapDims.y)"
 "/ (uMapDims.y * 32.0);"
 "vec4 Lightmap = texture(uLightmap, LightCoord);"
 "FragColor = vec4(Remapped, 1.0) * uLightFactor * (Lightmap + uLightColor) + uColorAdd;"
@@ -517,6 +518,7 @@ void createCommonDrawResources() {
 		"uniform vec4 uCameraPos;"
 		"uniform sampler2D uLightmap;"
 		"uniform vec2 uMapDims;"
+		"uniform float uLightLayer;"
 		"uniform float uFogDistance;"
 		"uniform vec4 uFogColor;"
 		"out vec4 FragColor;"
@@ -541,7 +543,7 @@ void createCommonDrawResources() {
 		"    (uColorRemap[2].rgb * Color.b);"
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
+"LightCoord.y = (WorldPos.z / 32.0 + uLightLayer * uMapDims.y)"
 "/ (uMapDims.y * 32.0);"
 "vec4 Lightmap = texture(uLightmap, LightCoord);"
 "FragColor = vec4(Remapped, 1.0) * uLightFactor * (Lightmap + uLightColor) + uColorAdd;"
@@ -1128,6 +1130,7 @@ void createCommonDrawResources() {
         "uniform sampler2D uTexture;"
         "uniform sampler2D uLightmap;"
         "uniform vec2 uMapDims;"
+        "uniform float uLightLayer;"
         "uniform float uFogDistance;"
         "uniform vec4 uFogColor;"
         "out vec4 FragColor;"
@@ -1136,7 +1139,7 @@ void createCommonDrawResources() {
         "vec4 Texture = texture(uTexture, TexCoord);"
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
+"LightCoord.y = (WorldPos.z / 32.0 + uLightLayer * uMapDims.y)"
 "/ (uMapDims.y * 32.0);"
 		"vec4 Lightmap = texture(uLightmap, LightCoord);"
         "FragColor = Texture * uLightFactor * (Lightmap + uLightColor) + uColorAdd;"
@@ -1165,6 +1168,7 @@ void createCommonDrawResources() {
         "uniform sampler2D uTexture;"
         "uniform sampler2D uLightmap;"
         "uniform vec2 uMapDims;"
+        "uniform float uLightLayer;"
         "uniform float uFogDistance;"
         "uniform vec4 uFogColor;"
         "out vec4 FragColor;"
@@ -1186,7 +1190,7 @@ void createCommonDrawResources() {
         "vec4 Texture = texture(uTexture, TexCoord);"
 "vec2 LightCoord;"
 "LightCoord.x = WorldPos.x / (uMapDims.x * 32.0);"
-"LightCoord.y = (WorldPos.z / 32.0)"
+"LightCoord.y = (WorldPos.z / 32.0 + uLightLayer * uMapDims.y)"
 "/ (uMapDims.y * 32.0);"
 "vec4 Lightmap = texture(uLightmap, LightCoord);"
         "FragColor = Texture * uLightFactor * (Lightmap + uLightColor) + uColorAdd;"
@@ -2713,12 +2717,9 @@ void drawEntities3D(view_t* camera, int mode)
 #ifndef EDITOR
 		if ( currentPlayerViewport >= 0 )
 		{
-			const bool authoredStackVisual =
-				map.playableFloorUsesAuthoredLayerStack(cameraFloor)
-				&& map.playableFloorUsesAuthoredLayerStack(entity->playableFloor);
-			const bool entityVisibleOnCameraFloor = authoredStackVisual
-				? entity->playableFloor <= cameraFloor
-				: entity->playableFloor == cameraFloor;
+			const bool entityVisibleOnCameraFloor =
+				map.playableFloorsShareRenderedWorld(
+					cameraFloor, entity->playableFloor);
 			if ( !entityVisibleOnCameraFloor )
 			{
 				const bool viewportGlobal = entity->flags[OVERDRAW]
@@ -5177,18 +5178,17 @@ void occlusionCulling(map_t& map, view_t& camera)
 	const int size = map.width * map.height;
 	const PlayableFloorId playableFloor = getCameraPlayableFloor(&camera);
 	/*
-	 * Z3.3E correctness gate: the legacy 2D/height-mask occlusion solver was
-	 * designed around the base 0/1/2 structural band. On an authored-stack
-	 * upper floor it can incorrectly erase lower cumulative geometry while the
-	 * player looks around. Until the later full 3D occlusion pass, keep upper
-	 * authored floors conservative and submit all layers; the depth buffer still
-	 * provides correct visual hiding.
+	 * Correctness gate: the legacy CPU solver projects columns into a mostly 2D
+	 * mask. Once a map has a derived authored stack, that approximation can hide
+	 * valid geometry both above and below the camera. Submit the complete stack
+	 * from every camera floor and let normal depth/geometry provide occlusion.
+	 * Legacy one-floor and explicit-FLOR maps retain the original CPU culling.
 	 */
-	const bool authoredStackUpperFloor =
-		playableFloor > DEFAULT_PLAYABLE_FLOOR
-		&& map.playableFloorUsesAuthoredLayerStack(playableFloor);
+	const bool authoredStackWorld =
+		map.playableFloorUsesAuthoredLayerStack(playableFloor)
+		&& map.hasAuthoredPlayableFloorStack();
 	bool rendererCullingDisabled =
-		*disabled || authoredStackUpperFloor;
+		*disabled || authoredStackWorld;
 if ( rendererCullingDisabled )
 {
 	memset(

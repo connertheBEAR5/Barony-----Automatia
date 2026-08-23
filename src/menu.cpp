@@ -61,6 +61,10 @@
 //Helper func. //TODO: Bugger.
 void* cpp_SteamMatchmaking_GetLobbyOwner(void* steamIDLobby)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !steamIDLobby )
+	{
+		return nullptr;
+	}
 	CSteamID* id = new CSteamID();
 	*id = SteamMatchmaking()->GetLobbyOwner(*static_cast<CSteamID*>(steamIDLobby));
 	return id; //Still don't like this method.
@@ -68,6 +72,11 @@ void* cpp_SteamMatchmaking_GetLobbyOwner(void* steamIDLobby)
 // get player names in a lobby
 void* cpp_SteamMatchmaking_GetLobbyMember(void* steamIDLobby, int index)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() || !steamIDLobby
+		|| !currentLobby )
+	{
+		return nullptr;
+	}
 	CSteamID* id = new CSteamID();
 	*id = SteamMatchmaking()->GetLobbyMemberByIndex(*static_cast<CSteamID*>(currentLobby), index);
 	return id;
@@ -362,6 +371,10 @@ void changeSettingsTab(int option)
 bool isAchievementUnlockedForClassUnlock(int race)
 {
 #ifdef STEAMWORKS
+	if ( !steamRuntimeAvailable() || !SteamUserStats() )
+	{
+		return false;
+	}
 	bool unlocked = false;
 	if ( enabledDLCPack1 && race == RACE_SKELETON && SteamUserStats()->GetAchievement("BARONY_ACH_BONY_BARON", &unlocked) )
 	{
@@ -11283,7 +11296,8 @@ void buttonStartServer(button_t* my)
 void buttonInviteFriends(button_t* my)
 {
 #ifdef STEAMWORKS
-	if (SteamUser()->BLoggedOn() && currentLobby)
+	if (steamRuntimeAvailable() && SteamUser() && SteamFriends()
+		&& SteamUser()->BLoggedOn() && currentLobby)
 	{
 		SteamFriends()->ActivateGameOverlayInviteDialog(*static_cast<CSteamID*>(currentLobby));
 	}
@@ -12297,7 +12311,8 @@ void buttonGamemodsSelectDirectoryForUpload(button_t* my)
 
 void buttonGamemodsPrepareWorkshopItemUpload(button_t* my)
 {
-	if ( SteamUser()->BLoggedOn() && g_SteamWorkshop )
+	if ( steamRuntimeAvailable() && SteamUser()
+		&& SteamUser()->BLoggedOn() && g_SteamWorkshop )
 	{
 		g_SteamWorkshop->CreateItem();
 		gamemods_uploadStatus = 1;
@@ -12311,7 +12326,8 @@ void buttonGamemodsCancelModifyFileContents(button_t* my)
 
 void buttonGamemodsPrepareWorkshopItemUpdate(button_t* my)
 {
-	if ( SteamUser()->BLoggedOn() && g_SteamWorkshop )
+	if ( steamRuntimeAvailable() && SteamUser()
+		&& SteamUser()->BLoggedOn() && g_SteamWorkshop )
 	{
 		g_SteamWorkshop->CreateItem();
 		gamemods_uploadStatus = 1;
@@ -12320,7 +12336,8 @@ void buttonGamemodsPrepareWorkshopItemUpdate(button_t* my)
 
 void buttonGamemodsSetWorkshopItemFields(button_t* my)
 {
-	if ( SteamUser()->BLoggedOn() && g_SteamWorkshop )
+	if ( steamRuntimeAvailable() && SteamUser() && SteamUGC()
+		&& SteamUser()->BLoggedOn() && g_SteamWorkshop )
 	{
 		bool itemTagSetSuccess = false;
 		if ( g_SteamWorkshop->UGCUpdateHandle != 0 )
@@ -12441,7 +12458,8 @@ void buttonGamemodsSetWorkshopItemFields(button_t* my)
 
 void buttonGamemodsModifyExistingWorkshopItemFields(button_t* my)
 {
-	if ( SteamUser()->BLoggedOn() && g_SteamWorkshop && g_SteamWorkshop->m_myWorkshopItemToModify.m_nPublishedFileId != 0 )
+	if ( steamRuntimeAvailable() && SteamUser() && SteamUGC()
+		&& SteamUser()->BLoggedOn() && g_SteamWorkshop && g_SteamWorkshop->m_myWorkshopItemToModify.m_nPublishedFileId != 0 )
 	{
 		g_SteamWorkshop->StartItemExistingUpdate(g_SteamWorkshop->m_myWorkshopItemToModify.m_nPublishedFileId);
 		if ( g_SteamWorkshop->UGCUpdateHandle != 0 )
@@ -12557,7 +12575,8 @@ void buttonGamemodsModifyExistingWorkshopItemFields(button_t* my)
 
 void buttonGamemodsStartUploadItem(button_t* my)
 {
-	if ( SteamUser()->BLoggedOn() && g_SteamWorkshop && g_SteamWorkshop->UGCUpdateHandle != 0 )
+	if ( steamRuntimeAvailable() && SteamUser()
+		&& SteamUser()->BLoggedOn() && g_SteamWorkshop && g_SteamWorkshop->UGCUpdateHandle != 0 )
 	{
 		if ( gamemods_window == 5 )
 		{
@@ -12882,7 +12901,7 @@ void gamemodsDrawWorkshopItemTagToggle(std::string tagname, int x, int y)
 
 bool gamemodsCheckIfSubscribedAndDownloadedFileID(uint64 fileID)
 {
-	if ( directConnect || !currentLobby )
+	if ( directConnect || !currentLobby || !steamRuntimeAvailable() || !SteamUGC() )
 	{
 		return false;
 	}
@@ -12918,7 +12937,8 @@ bool gamemodsCheckFileIDInLoadedPaths(uint64 fileID)
 
 void buttonGamemodsSubscribeToHostsModFiles(button_t* my)
 {
-	if ( !directConnect && currentLobby && g_SteamWorkshop )
+	if ( steamRuntimeAvailable() && SteamMatchmaking() && SteamUGC()
+		&& !directConnect && currentLobby && g_SteamWorkshop )
 	{
 		const char* serverNumModsChar = SteamMatchmaking()->GetLobbyData(*static_cast<CSteamID*>(currentLobby), "svNumMods");
 		int serverNumModsLoaded = atoi(serverNumModsChar);
@@ -12951,7 +12971,8 @@ void buttonGamemodsSubscribeToHostsModFiles(button_t* my)
 
 void buttonGamemodsMountHostsModFiles(button_t* my)
 {
-	if ( !directConnect && currentLobby && g_SteamWorkshop )
+	if ( steamRuntimeAvailable() && SteamMatchmaking() && SteamUGC()
+		&& !directConnect && currentLobby && g_SteamWorkshop )
 	{
 		const char* serverNumModsChar = SteamMatchmaking()->GetLobbyData(*static_cast<CSteamID*>(currentLobby), "svNumMods");
 		int serverNumModsLoaded = atoi(serverNumModsChar);
@@ -13491,6 +13512,10 @@ void gamemodsWorkshopPreloadMod(int fileID, std::string modTitle)
 {
 	char fullpath[PATH_MAX] = "";
 	useModelCache = false;
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	if ( SteamUGC()->GetItemInstallInfo(fileID, NULL, fullpath, PATH_MAX, NULL) )
 	{
 		gamemods_modPreload = true;

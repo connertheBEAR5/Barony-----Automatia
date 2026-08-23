@@ -3915,9 +3915,15 @@ namespace ConsoleCommands {
 		for (int i = STEAM_STAT_TRASH_COMPACTOR; i < 43; ++i)
 		{
 			g_SteamStats[i].m_iValue = 0;
-			SteamUserStats()->SetStat(g_SteamStats[i].m_pchStatName, 0);
+			if ( steamRuntimeAvailable() && SteamUserStats() )
+			{
+				SteamUserStats()->SetStat(g_SteamStats[i].m_pchStatName, 0);
+			}
 		}
-		SteamUserStats()->StoreStats();
+		if ( steamRuntimeAvailable() && SteamUserStats() )
+		{
+			SteamUserStats()->StoreStats();
+		}
 #endif // STEAMWORKS
 		});
 
@@ -7198,4 +7204,3 @@ namespace ConsoleCommands {
 		Player::Inventory_t::Appraisal_t::readFromFile();
 	});
 }
-

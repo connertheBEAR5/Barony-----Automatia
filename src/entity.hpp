@@ -260,9 +260,46 @@ public:
 	}
 	int structuralLightmapLayer() const
 	{
-		// Convert canonical world Z once; clamping a local contribution before
-		// adding authoredMapLayer would lose downward offsets on upper layers.
+		const bool usesAuthoredStackLighting = structuralMapLayer() > 0
+			|| (map.hasAuthoredPlayableFloorStack()
+				&& map.playableFloorUsesAuthoredLayerStack(playableFloor));
+		if ( usesAuthoredStackLighting )
+		{
+			/*
+			 * authoredMapLayer owns the structural light slice. Local model origins
+			 * commonly sit near z=8 (the lever base is 7.5 and its handle is 8.5),
+			 * so nearest-layer rounding would split one multipart object across two
+			 * lightmaps. Only a complete 16-unit local traversal changes slices.
+			 * Integer conversion deliberately truncates toward zero.
+			 */
+			const int localLayerDelta = static_cast<int>(z / 16.0);
+			return clampLightmapLayer(
+				structuralMapLayer() - localLayerDelta);
+		}
+
+		// Preserve existing source/CPU light-height lookup for legacy one-floor
+		// maps and explicit FLOR buffers outside the authored stack.
 		return entityZToLightmapLayer(worldRenderZ());
+	}
+	int visualLightmapLayer() const
+	{
+		/*
+		 * Before Playable-Z, entity shaders sampled the base slice of their
+		 * floor-owned light texture. In particular, legacy ceiling model 119 has
+		 * the fixed local height z=-24; interpreting that height as slice 2 makes
+		 * old menu/dungeon ceilings black while their torches still light slice 0.
+		 *
+		 * Only explicit derived authored stacks use physical structural slices for
+		 * model/sprite presentation. Legacy one-floor maps and isolated FLOR
+		 * buffers retain their historical slice-0 entity rendering. This is driven
+		 * by map metadata, never by a numerical guess about Entity::z.
+		 */
+		if ( map.hasAuthoredPlayableFloorStack()
+			&& map.playableFloorUsesAuthoredLayerStack(playableFloor) )
+		{
+			return structuralLightmapLayer();
+		}
+		return 0;
 	}
 	Uint32 ticks;                  // duration of the entity's existence
 	real_t x, y, z;                // x/y are world coordinates; z is a local model/animation offset

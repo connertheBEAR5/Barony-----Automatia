@@ -56,6 +56,32 @@ bool map_t::playableFloorUsesAuthoredLayerStack(
 	return floor && floor->derivedFromMapLayers;
 }
 
+bool map_t::playableFloorsShareRenderedWorld(
+	const PlayableFloorId first,
+	const PlayableFloorId second) const
+{
+	if ( first == second )
+	{
+		return true;
+	}
+
+	return playableFloorUsesAuthoredLayerStack(first)
+		&& playableFloorUsesAuthoredLayerStack(second);
+}
+
+bool map_t::hasAuthoredPlayableFloorStack() const
+{
+	for ( const PlayableFloorData& floor : playableFloors.floors )
+	{
+		if ( floor.id > DEFAULT_PLAYABLE_FLOOR
+			&& floor.derivedFromMapLayers )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 const Sint32* map_t::tilesForPlayableFloorRendering(
 	const PlayableFloorId playableFloor) const
 {

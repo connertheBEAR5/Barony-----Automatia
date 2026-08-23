@@ -17,8 +17,12 @@ A typical existing-build command is:
 
 ```bash
 cd /home/conner/Barony-----Automatia
-cmake --build build -j"$(nproc)"
+cmake --build build-super-posix -j6
 ```
+
+`build-super-posix` is the supported Steamworks-enabled 15-player build in
+this tree. The six-job limit is intentional on the current development host to
+avoid CPU/RAM instability from an unrestricted parallel build.
 
 ## Expanded maps and rendering
 
@@ -33,13 +37,106 @@ Automatia maps can use up to 32 tile layers instead of the original three. This 
 - Low walls no longer erase or incorrectly hide taller structures above them.
 - Stale visibility and voxel-chunk state is cleared safely during restart and map transitions.
 
+### Playable-Z coordinate model
+
+The current playable-Z implementation keeps physical height separate from
+gameplay membership:
+
+```text
+authoredMapLayer = physical/authored structural layer, 0..31
+playableFloor    = gameplay and spatial-simulation membership
+Entity::z        = local model/animation elevation
+worldZ           = Entity::z + mapLayerWorldZ(authoredMapLayer)
+mapLayerWorldZ(N)= -16 * N
+```
+
+Status snapshot: the current local-Z/structural-layer implementation, legacy
+ceiling-model compatibility, upper/lower rendered-stack visibility, structural
+lighting, lower-floor landing, HUD/camera attachments, ELYR/PZLV persistence,
+and deterministic regressions compile in `build-super-posix`. The latest
+automated run passed all six CTest targets and the Stage 4D/Z3 executable
+characterization. Graphical acceptance items are listed below and are not
+claimed by those deterministic tests.
+
+Layer-authored floors form one vertically stacked rendered world. Geometry,
+sprites, flames, and visual children on both higher and lower floors remain
+eligible for rendering; depth and authored geometry provide occlusion. Collision,
+interaction, mechanisms, and entity simulation remain isolated by
+`playableFloor`.
+
+Dynamic authored-stack lights sample and write the structural light volume at
+their physical layer. Light may spill into adjacent structural layers with
+three-dimensional attenuation when the crossed authored floor/ceiling planes
+are open; opaque geometry blocks that transport. This is not a fullbright or
+lower-floor-lightmap-copy workaround.
+
+Legacy one-floor maps, including the animated main-menu maps, retain their
+historical nonzero-light-layer wall masks. The playable-stack rule that maps a
+light slice to the obstacle layer above it is enabled only when the map actually
+contains a derived authored-floor stack, so an ordinary legacy ceiling cannot
+black out a wall band. On a real stack, that obstacle lookup uses the absolute
+authored layer directly and does not apply `playableFloor` a second time.
+
+Legacy entity presentation also retains its original shader convention: models
+and sprites in a one-floor map sample slice 0 of that map's light texture. This
+matters for editor sprite 119, the ceiling-tile model, whose historical runtime
+height is local Z -24. Treating that local height as light slice 2 made the
+Labyrinth ceiling models (1219/1220) in `mainmenu3.lmp` appear black even though
+nearby slice-0 torches lit the room. This compatibility rule is selected from
+explicit authored-stack metadata, not by guessing from negative Z. Physical
+light-source and CPU height lookups remain separate from this visual rule.
+
+Entity sampling within an authored stack is anchored to
+`authoredMapLayer`. Ordinary local model offsets do not select a neighboring
+light slice merely because they cross the old nearest-layer midpoint: for
+example, a lever base at local Z 7.5 and its handle at local Z 8.5 both sample
+the lever's authored layer. A complete 16-unit local traversal can still move
+the sample to an adjacent structural slice. Legacy one-floor maps keep their
+existing source/CPU world-Z-to-light-layer conversion while their GPU entity
+presentation uses the historical base slice.
+
+First-person casting hands and the inventory character preview keep their
+camera-local presentation while selecting the player's current structural
+slice. Sustained Light and Deep Shade orbs are player-bound spatial attachments:
+an existing PZTR stair transition moves their authored/playable context and
+recreates their emitted light on the destination slice. Ordinary fired
+projectiles deliberately remain on their source floor.
+
+Project Spirit is also structural-context aware. A local ghost inherits the
+caster directly; a remote client's legacy `GHOS` request is resolved from the
+server-authoritative living player entity without adding or trusting a client
+floor field. The spirit cosmetic camera retains that inherited structural
+offset, so casting upstairs does not present the spirit at layer zero.
+
+The post-death camera follows the same rule. It keeps its orbit height as local
+camera Z while adding the followed player or ghost's authored structural offset.
+When its target disappears, the independent camera retains the structural
+context captured at death; the client automaton-death path inherits that context
+at creation instead of constructing a layer-zero camera. The ordinary
+multiplayer death notification does the same using the client's authoritative
+player or ghost entity; no new packet field is required.
+The focused upper-floor death-camera behavior has been manually verified; a
+broader remote spectator-target cycle remains part of multiplayer acceptance.
+
+Walking off an upper ledge searches downward for the nearest valid lower
+authored surface before the legacy void path runs. The authoritative transition
+keeps local Z, moves the full collision footprint inward if the ledge coordinate
+would overlap a lower-floor wall, and applies one existing fall-damage unit per
+structural floor crossed. Levitation continues to prevent the ordinary fall.
+
 ### Configurable map fog
 
 Maps can define fog distance, density, color, and enabled state for caves, outdoor maps, magical areas, and atmospheric campaign environments.
 
 ### Editor previews and lighting
 
-Selected decoration and collider entities receive useful 3D previews. Temporary editor lighting can illuminate active layers without being saved into the map.
+Selected decoration, collider, stair, and ceiling-tile entities receive useful
+3D model previews. Ceiling sprite 119 is previewed with the same default model
+621 (or configured model), local Z -24, and quarter-turn direction used at
+runtime; `worldRenderZ()` adds a modern authored layer exactly once. Temporary
+editor lighting illuminates active layers without being saved into the map, so
+Zed is intentionally a placement/readability preview rather than a pixel-exact
+runtime lighting comparison.
 
 ## Nonlinear travel and divergent routes
 
@@ -54,6 +151,10 @@ Editor sprite 42 is a dedicated reverse ladder that travels to the previous visi
 ### Per-player visited-route history
 
 Each player keeps their own route stack. A reverse ladder follows the route that player actually traveled instead of assuming a fixed dungeon sequence. Skipped branches, including Hell, are not inserted into the return path.
+
+Each saved return point records its map-instance identity, `playableFloor`,
+`authoredMapLayer`, local X/Y/Z, and rotation. These fields are restored as
+separate axes; a local Z value is never used to infer the structural layer.
 
 ### Divergent player paths
 
@@ -91,6 +192,17 @@ Automatia records meaningful world changes instead of fully resetting a previous
 - Dynamic monsters, monster equipment, effects, and follower ownership
 - Dropped items, gold, and stable custom-item metadata where supported
 
+Spatial persistence is scoped by map instance and floor. A persistent dynamic
+entity records `playable_floor`, `authored_map_layer`, and local `position[2]`
+separately. A tile override is identified by map instance plus playable floor,
+X, Y, and geometry layer, so two modified objects or tiles at the same X/Y on
+different floors do not alias.
+
+Older records that predate `authored_map_layer` remain readable. Migration uses
+explicit derived-authored-stack metadata to recover the structural layer; an
+explicit legacy `FLOR` floor remains structurally local to layer zero. The
+loader does not infer current structural state from a numerical local-Z guess.
+
 ### Persistent minimap discovery
 
 Minimap exploration is stored per player and per exact map instance.
@@ -108,6 +220,11 @@ The project includes a versioned Automatia world-state companion save.
 - Unknown JSON fields are preserved for forward compatibility.
 - Unresolved custom items retain their stable metadata instead of being silently deleted or clamped.
 - Map-instance state, minimaps, mechanisms, dialogue, quests, and other persistent records can be restored with the normal character save.
+- Character placement and divergent return records preserve map instance,
+  playable floor, authored layer, and local Z independently.
+- Schema validation rejects out-of-range structural layers, unknown schema-3
+  floor references, non-finite local positions, and duplicate
+  floor/X/Y/geometry-layer tile keys.
 
 ## Custom items and S.A.M. compatibility
 
@@ -194,6 +311,13 @@ Implemented server features include:
 - Terminal commands such as `help`, `status`, `start`, `save`, and `shutdown`
 - Explicit failure for unsupported security modes rather than pretending a server is protected
 
+Headless multiplayer saves use `savegames/host/`. The character save and its
+Automatia world companion carry the same transaction ID; the companion is
+validated and atomically replaced through a temporary file. A dedicated server
+does not serialize its process-only slot 0 as a real player. In per-character
+save modes, disconnected remote characters stay in their own character files
+rather than being resurrected from a shared slot record.
+
 Public lobby publication, password authentication, and a fully renderless startup path remain unavailable. The direct-LAN late-join path is experimental and should be tested with multiple real clients before release use.
 
 ## Late join, reconnect, and character restoration
@@ -201,6 +325,41 @@ Public lobby publication, password authentication, and a fully renderless startu
 The source includes a bounded direct-LAN late-join snapshot protocol with transfer IDs, revision checks, chunk accounting, CRC validation, staged loading, spawn authorization, and a final client-ready barrier.
 
 Character-save work restores authoritative player state including inventory, effects, followers, identity information, and saved placement. Reconnect and divergent-instance behavior should continue to receive real multi-client acceptance testing.
+
+For derived authored-stack maps, current entity packets reconstruct the usual
+`authoredMapLayer == playableFloor` context. The existing packet formats do not
+encode an independent authored layer for a hypothetical dynamic network entity
+whose structural layer intentionally differs from its gameplay floor; that
+case remains a documented future protocol concern rather than being guessed
+from local Z.
+
+## Steam runtime and offline mode
+
+This remains one Steamworks-enabled executable; `--nosteam` is a runtime local
+mode, not a separate build and not an ownership emulator.
+
+- Normal launch attempts `SteamAPI_Init()`. When Steam initializes, existing
+  Steam matchmaking, authentication, friends, achievements, Workshop/cloud,
+  and DLC entitlement checks remain available.
+- If Steam is unavailable and initialization fails, startup continues with the
+  same Steam-services-off/DLC-locked capability set as explicit `--nosteam`.
+- `--nosteam` deliberately skips Steam initialization. Steam-only services are
+  unavailable, and Steam DLC flags remain locked/fail-closed.
+- No Steam authentication ticket, DLC entitlement, offline token, or ownership
+  result is fabricated. The Steam build does not enable the legacy non-Steam
+  `.key`-file DLC path and does not parse Steam's private cache files.
+- To use legitimately owned Steam DLC without network access, start the Steam
+  client in its supported Offline Mode and launch normally without `--nosteam`.
+  Steamworks, not Automatia, remains responsible for interpreting Steam's
+  cached ownership state.
+
+Important limitation: because `--nosteam` intentionally provides no SteamAPI
+ownership signal, it cannot itself prove ownership of the Steam base game. The
+custom executable does not include Barony's proprietary game data, but anyone
+requiring Steam ownership enforcement must distribute/use it only with a
+Steam-initialized launch and must not describe `--nosteam` as ownership
+verification. This is a technical statement, not legal advice; review the
+Barony and Steam distribution terms before publishing binaries.
 
 ## Pit safety and movement
 
@@ -301,6 +460,38 @@ The following areas deserve continued testing before a public release:
 - Full editor duplication and persistent-ID collision handling
 - Large S.A.M. catalogs and unresolved custom-item round trips
 - Original-map regression testing with 32 layers and hybrid visibility
+- Cross-floor light appearance and ledge landings on representative authored
+  maps, including narrow openings, thick ceilings, and wall-adjacent pits
+- Legacy ceiling sprite 119 in `mainmenu3.lmp` and an ordinary old dungeon:
+  verify historical lighting, no duplicate/z-fighting face, and agreement with
+  the Zed model preview. Also place the same model on modern authored layers 0,
+  2, and 5.
+- Divergent Paths x Playable Z x persistence with two real clients, including
+  same-X/Y objects on different floors and a full dedicated-server restart
+- Steam client Offline Mode entitlement behavior with each owned/unowned DLC
+  combination; automated tests do not emulate Steam's client-side cache
+
+## Maintained project documentation
+
+- `INSTALL.md` — dependencies, the primary `-j6` build, and Steam runtime modes.
+- `helpful stuff/Barony Automatia Complete Features Guide.txt` — complete
+  feature and implementation-status reference.
+- `helpful stuff/Codex Project Progress and Continuation.txt` — chronological
+  engineering record plus the current checkpoint and acceptance plan.
+- `helpful stuff/Divergent Paths and Late Join Developer Guide.txt` — map
+  instances, packet scope, late join, reconnect, and Playable-Z persistence.
+- `helpful stuff/Headless Server Developer Guide.txt` — supported launch,
+  administration, save/recovery, and fail-closed boundaries.
+- `helpful stuff/Headless Remaining Work and Security Requirements.txt` — work
+  that must still be completed or runtime-accepted before broader deployment.
+- `helpful stuff/Custom Dialogue and Quest Editor Guide.txt` — authoritative
+  dialogue/quest authoring and editor reference.
+- `helpful stuff/Custom Dialogue JSON Guide and Project Reminders.txt` — compact
+  historical quick reference with current-status corrections.
+- `helpful%20stuff/Quest%20Journal%20Backend.txt` — journal backend contract and
+  current UI/persistence status.
+- `build-super-posix/PLAYABLE_Z_CATCH_UP.txt` — ignored, local handoff for an AI
+  agent working from the current dirty development tree.
 
 ## Licensing
 

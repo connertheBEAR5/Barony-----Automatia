@@ -238,6 +238,7 @@ AutomatiaSave::Json makeSpatialWorldDocument()
             {"dynamic_world_items", Json::array({Json{
                 {"stable_id", "core:rock"},
                 {"playable_floor", 2},
+				{"authored_map_layer", 2},
                 {"position", Json::array({12.25, 15.5, -2.75})},
                 {"rotation", Json::array({0.1, 0.2, 0.3})},
                 {"velocity", Json::array({1.0, 2.0, -0.5})}
@@ -245,6 +246,7 @@ AutomatiaSave::Json makeSpatialWorldDocument()
             {"mechanisms", Json::array({Json{
                 {"persistent_id", 91},
                 {"playable_floor", 2},
+				{"authored_map_layer", 2},
                 {"monster_type", 1},
                 {"monster_position", Json::array({40.0, 24.0, 6.0})},
                 {"switch_power", 1},
@@ -253,14 +255,21 @@ AutomatiaSave::Json makeSpatialWorldDocument()
             {"dynamic_boulders", Json::array({Json{
                 {"source_trap_id", 22},
                 {"playable_floor", 2},
+				{"authored_map_layer", 2},
                 {"position", Json::array({32.0, 48.0, -7.0})},
                 {"rotation", Json::array({0.0, 1.5, 0.0})},
                 {"velocity", Json::array({0.5, 0.0, 1.0})}
             }})},
-            {"tile_states", Json::array({Json{
-                {"playable_floor", 2},
-                {"x", 7}, {"y", 9}, {"layer", 19}, {"tile", 1337}
-            }})},
+			{"tile_states", Json::array({
+				Json{
+					{"playable_floor", 0},
+					{"x", 7}, {"y", 9}, {"layer", 19}, {"tile", 42}
+				},
+				Json{
+					{"playable_floor", 2},
+					{"x", 7}, {"y", 9}, {"layer", 19}, {"tile", 1337}
+				}
+			})},
             {"player_minimaps", Json{{
                 "local:alice", Json{{"floors", Json::array({Json{
                     {"playable_floor", 2}, {"width", 2}, {"height", 2},
@@ -277,6 +286,7 @@ AutomatiaSave::Json makeSpatialWorldDocument()
         {"instance_id", "world"},
         {"revision", 17},
         {"playable_floor", 2},
+		{"authored_map_layer", 2},
         {"position", Json::array({128.125, 96.5, -1.75})},
         {"rotation", Json::array({1.25, -0.2, 0.1})}
     });
@@ -303,9 +313,24 @@ bool testWorldSaveAndPlacementContracts()
     EXPECT(AutomatiaSave::validate(schemaThree).ok);
     EXPECT(schemaThree["map_instances"][0]["playable_floors"].size() == 2);
     EXPECT(schemaThree["players"][0]["playable_floor"] == 2);
+	EXPECT(schemaThree["players"][0]["authored_map_layer"] == 2);
+    EXPECT(schemaThree["map_instances"][0]["persistent_state"]
+		["tile_states"].size() == 2);
+
+	// Early schema-3 saves predate the independent authored-layer field. They
+	// remain valid and are migrated only through explicit derived-stack metadata.
+	Json schemaThreeWithoutAuthoredLayer = schemaThree;
+	schemaThreeWithoutAuthoredLayer["players"][0].erase("authored_map_layer");
+	for (const char* collection : {
+		"dynamic_world_items", "dynamic_boulders", "mechanisms"})
+	{
+		schemaThreeWithoutAuthoredLayer["map_instances"][0]
+			["persistent_state"][collection][0].erase("authored_map_layer");
+	}
+	EXPECT(AutomatiaSave::validate(schemaThreeWithoutAuthoredLayer).ok);
 
     // Schema 1/2 remain readable as one implicit floor Z0.
-    Json schemaTwo = schemaThree;
+	Json schemaTwo = schemaThreeWithoutAuthoredLayer;
     schemaTwo["schema_version"] = 2;
     schemaTwo["map_instances"][0].erase("playable_floors");
     schemaTwo["players"][0].erase("playable_floor");
@@ -338,6 +363,28 @@ bool testWorldSaveAndPlacementContracts()
         std::numeric_limits<double>::infinity();
     EXPECT(!AutomatiaSave::validate(invalidPosition));
 
+	Json invalidPlayerLayer = schemaThree;
+	invalidPlayerLayer["players"][0]["authored_map_layer"] =
+		AUTHORED_MAP_LAYER_COUNT;
+	EXPECT(!AutomatiaSave::validate(invalidPlayerLayer));
+
+	Json invalidEntityLayer = schemaThree;
+	invalidEntityLayer["map_instances"][0]["persistent_state"]
+		["dynamic_world_items"][0]["authored_map_layer"] = -1;
+	EXPECT(!AutomatiaSave::validate(invalidEntityLayer));
+
+	Json unknownEntityFloor = schemaThree;
+	unknownEntityFloor["map_instances"][0]["persistent_state"]
+		["dynamic_boulders"][0]["playable_floor"] = 7;
+	EXPECT(!AutomatiaSave::validate(unknownEntityFloor));
+
+	Json duplicateTileKey = schemaThree;
+	duplicateTileKey["map_instances"][0]["persistent_state"]
+		["tile_states"].push_back(
+			duplicateTileKey["map_instances"][0]["persistent_state"]
+				["tile_states"][0]);
+	EXPECT(!AutomatiaSave::validate(duplicateTileKey));
+
     const auto unique =
         std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path directory =
@@ -345,6 +392,9 @@ bool testWorldSaveAndPlacementContracts()
         / ("barony-stage4c-save-" + std::to_string(unique));
     EXPECT(std::filesystem::create_directories(directory));
     EXPECT(writeLoadEqual(directory / "schema3.json", schemaThree));
+	EXPECT(writeLoadEqual(
+		directory / "schema3-pre-authored-layer.json",
+		schemaThreeWithoutAuthoredLayer));
     EXPECT(writeLoadEqual(directory / "schema2.json", schemaTwo));
     EXPECT(writeLoadEqual(directory / "schema1.json", schemaOne));
     std::error_code cleanupError;
@@ -355,7 +405,9 @@ bool testWorldSaveAndPlacementContracts()
     EXPECT(!game.empty());
     EXPECT(contains(game, "struct AutomatiaSavedPlayerPlacement"));
     EXPECT(contains(game, "PlayableFloorId playableFloor"));
+	EXPECT(contains(game, "Sint16 authoredMapLayer"));
     EXPECT(contains(game, "{\"playable_floor\", placement.playableFloor}"));
+	EXPECT(contains(game, "savedPlayer[\"authored_map_layer\"]"));
     EXPECT(contains(game, "applyAutomatiaPlayableFloorPlacement("));
     EXPECT(contains(game, "placement.playableFloor,"));
     EXPECT(contains(game, "placement.z,"));
@@ -759,6 +811,10 @@ bool testZ33LayerAuthoringCorrectionContracts()
     const std::string spriteSource = readFile(sourcePath("src/actsprite.cpp"));
     const std::string netSource = readFile(sourcePath("src/net.cpp"));
     const std::string entitySource = readFile(sourcePath("src/entity.cpp"));
+	const std::string scoresSource = readFile(sourcePath("src/scores.cpp"));
+	const std::string automatiaSaveSource =
+		readFile(sourcePath("src/automatia_save.cpp"));
+	const std::string gameUiSource = readFile(sourcePath("src/ui/GameUI.cpp"));
 
     // The existing Zed layer selector is the only vertical authoring control.
     EXPECT(!contains(editorHeader, "editorPlayableFloor"));
@@ -840,10 +896,13 @@ bool testZ33LayerAuthoringCorrectionContracts()
     // collision floors must not discard lower geometry, entities, or lights.
     EXPECT(contains(mainHeader, "tilesForPlayableFloorRendering"));
     EXPECT(contains(playableZMap, "playableFloorUsesAuthoredLayerStack"));
+    EXPECT(contains(mainHeader, "playableFloorsShareRenderedWorld"));
+    EXPECT(contains(playableZMap, "playableFloorsShareRenderedWorld"));
     EXPECT(contains(playableZMap, "return tilesForPlayableFloor(playableFloor)"));
     EXPECT(contains(draw, "tilesForPlayableFloorRendering"));
     EXPECT(contains(opengl, "tilesForPlayableFloorRendering"));
-    EXPECT(contains(draw, "entity->playableFloor <= cameraFloor"));
+    EXPECT(contains(draw, "cameraFloor, entity->playableFloor"));
+    EXPECT(!contains(draw, "entity->playableFloor <= cameraFloor"));
     EXPECT(contains(player, "structuralCameraOffset"));
     EXPECT(contains(player, "mapLayerWorldZ(my->structuralMapLayer())"));
     EXPECT(!contains(player, "-32.0 * static_cast<real_t>(my->playableFloor)"));
@@ -865,11 +924,11 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(hudWeapon, "getCameraHudLocalZ(HUDSHIELD_PLAYERNUM)"));
     EXPECT(contains(handMagic, "getCameraHudLocalZ(HANDMAGIC_PLAYERNUM)"));
 
-    // Correctness first for upper authored floors: the old 2D occlusion solver
-    // may not erase cumulative lower geometry. Submit all layers upstairs and
-    // rely on the depth buffer until the later true 3D occlusion pass.
-    EXPECT(contains(draw, "authoredStackUpperFloor"));
-    EXPECT(contains(draw, "*disabled || authoredStackUpperFloor"));
+    // Correctness first for the whole authored stack: the old 2D occlusion
+    // solver may not erase geometry above or below any stacked camera floor.
+    EXPECT(contains(draw, "authoredStackWorld"));
+    EXPECT(contains(draw, "map.hasAuthoredPlayableFloorStack()"));
+    EXPECT(contains(draw, "*disabled || authoredStackWorld"));
     EXPECT(contains(draw, "updateRendererVisibilityMap("));
     EXPECT(contains(draw, "true"));
 
@@ -977,6 +1036,12 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(mainHeader, "mapLayerWorldZ"));
     EXPECT(contains(entityHeader, "int structuralMapLayer() const"));
     EXPECT(contains(entityHeader, "return z + mapLayerWorldZ(structuralMapLayer())"));
+	EXPECT(contains(entityHeader, "const int localLayerDelta = static_cast<int>(z / 16.0)"));
+	EXPECT(contains(entityHeader, "structuralMapLayer() - localLayerDelta"));
+	EXPECT(contains(entityHeader, "int visualLightmapLayer() const"));
+	EXPECT(contains(entityHeader, "map.hasAuthoredPlayableFloorStack()"));
+	EXPECT(contains(entityHeader, "return structuralLightmapLayer();"));
+	EXPECT(contains(entityHeader, "return 0;"));
     EXPECT(contains(opengl, "entity->worldRenderZ()"));
     EXPECT(contains(opengl, "entityRenderZ(entity)"));
     EXPECT(contains(opengl, "entityRenderZ(entity) + zOffset"));
@@ -985,10 +1050,20 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(!contains(entityRenderZ, "#ifndef EDITOR"));
     EXPECT(contains(draw, "entity->structuralMapLayer() != drawlayer"));
     EXPECT(contains(draw, "entity->structuralLightmapLayer()"));
+    EXPECT(contains(draw, "uniform float uLightLayer"));
+    EXPECT(contains(
+        draw,
+        "WorldPos.z / 32.0 + uLightLayer * uMapDims.y"));
+    EXPECT(contains(opengl, "entity->visualLightmapLayer()"));
     EXPECT(!contains(draw, "-entity->z / 16.0"));
     EXPECT(!contains(draw, "entityZToEditorLayer"));
     EXPECT(contains(playableZHeader, "activeRuntimeStructuralMapLayer"));
     EXPECT(contains(light, "activeRuntimeStructuralMapLayer()"));
+	EXPECT(contains(light, "blockingLayer = layer + OBSTACLELAYER"));
+	EXPECT(contains(light, "&& map.hasAuthoredPlayableFloorStack()"));
+	EXPECT(contains(light, "lightCrossesOpenStructuralLayers("));
+	EXPECT(contains(light, "light.contributionLayerCount = count"));
+	EXPECT(contains(light, "map.hasAuthoredPlayableFloorStack()"));
     EXPECT(contains(torchSource, "my->structuralLightmapLayer()"));
     EXPECT(contains(flameSource, "parentent->structuralLightmapLayer()"));
     EXPECT(contains(flameSource, "newEntityWithSpatialContext("));
@@ -1002,9 +1077,77 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(entitySource, "newEntityWithSpatialContext(166, 1, map.entities, nullptr, this)"));
     EXPECT(contains(entitySource, "itemModel(myStats->weapon), 1, map.entities, nullptr, this"));
     EXPECT(contains(netSource, "entity->applySpatialSpawnContext(receivedSpatialContext)"));
+
+	// Sprite 119 is the historical ceiling model editor object. Runtime and
+	// Zed preview both treat -24 as its local model height. Old one-floor maps
+	// remain metadata-classified legacy maps, while modern authored placement
+	// receives mapLayerWorldZ() through the ordinary entity render path once.
+	const std::string ceilingAssign = section(
+		maps, "// ceiling tile:", "// spell trap ceiling");
+	EXPECT(contains(ceilingAssign, "case 119:"));
+	EXPECT(contains(ceilingAssign, "entity->z = -24;"));
+	EXPECT(contains(ceilingAssign, "entity->sprite = 621;"));
+	EXPECT(contains(ceilingAssign, "entity->behavior = &actCeilingTile;"));
+	EXPECT(contains(ceilingAssign, "entity->flags[PASSABLE] = true;"));
+	EXPECT(contains(ceilingAssign, "entity->flags[BLOCKSIGHT] = false;"));
+	EXPECT(contains(editor, "const bool isCeilingTile"));
+	EXPECT(contains(editor, "editorSpriteType == 10"));
+	EXPECT(contains(editor, "entity->ceilingTileModel != 0"));
+	EXPECT(contains(editor, ": 621;"));
+	EXPECT(contains(editor, "entity->z = -24;"));
+	EXPECT(contains(editor, "entity->ceilingTileDir * (PI / 2)"));
+	const std::string authoredStackClassifier = section(
+		playableZMap,
+		"bool map_t::hasAuthoredPlayableFloorStack() const",
+		"const Sint32* map_t::tilesForPlayableFloorRendering");
+	EXPECT(contains(authoredStackClassifier, "floor.id > DEFAULT_PLAYABLE_FLOOR"));
+	EXPECT(contains(authoredStackClassifier, "floor.derivedFromMapLayers"));
+	EXPECT(!contains(authoredStackClassifier, "sprite"));
+	const std::string ghostPacketHandler = section(
+		netSource, "{'GHOS', []()", "// tried to update");
+	EXPECT(contains(ghostPacketHandler, "newEntityWithSpatialContext("));
+	EXPECT(contains(ghostPacketHandler, "players[player]->entity"));
+	const std::string spiritGhostCamera = section(
+		player, "if ( player->ghost.isSpiritGhost() )", "camang = my->yaw;");
+	EXPECT(contains(spiritGhostCamera, "camz += structuralCameraOffset;"));
+	const std::string deathCamera = section(
+		player, "void actDeathCam(Entity* my)", "#define PLAYER_INIT");
+	EXPECT(contains(deathCamera, "my->inheritSpatialContextFrom(entity);"));
+	EXPECT(contains(deathCamera,
+		"map.playableFloorUsesAuthoredLayerStack(my->playableFloor)"));
+	EXPECT(contains(deathCamera,
+		"2.0 * mapLayerWorldZ(my->structuralMapLayer())"));
+	EXPECT(contains(deathCamera,
+		"camz = my->z * 2.f + structuralCameraOffset;"));
+	EXPECT(!contains(deathCamera, "camz = my->z * 2.f;"));
+	const std::string automatonDeathCamera = section(
+		netSource, "case PARTICLE_EFFECT_PLAYER_AUTOMATON_DEATH:",
+		"case PARTICLE_EFFECT_ENSEMBLE_OTHER_CAST:");
+	EXPECT(contains(automatonDeathCamera,
+		"Entity* deathcam = newEntityWithSpatialContext("));
+	EXPECT(contains(automatonDeathCamera,
+		"-1, 1, map.entities, nullptr, entity"));
+	EXPECT(!contains(automatonDeathCamera,
+		"Entity* entity = newEntity(-1, 1, map.entities, nullptr);"));
+	const std::string clientDeathCamera = section(
+		netSource, "{'UDIE', []()", "//deleteSaveGame");
+	EXPECT(contains(clientDeathCamera,
+		"Player::getPlayerInteractEntity(clientnum)"));
+	EXPECT(contains(clientDeathCamera,
+		"Entity* deathcam = newEntityWithSpatialContext("));
+	EXPECT(contains(clientDeathCamera,
+		"-1, 1, map.entities, nullptr, deathCameraSource"));
+	EXPECT(!contains(clientDeathCamera,
+		"Entity* entity = newEntity(-1, 1, map.entities, nullptr);"));
     EXPECT(contains(game, "authored_map_layer"));
     EXPECT(contains(game, "applyPersistentDynamicSpatialContext("));
     EXPECT(contains(game, "savedState.authoredMapLayer"));
+	EXPECT(contains(scoresSource, "automatia_character_authored_map_layer"));
+	EXPECT(contains(game, "returnAnchorAuthoredMapLayer"));
+	EXPECT(contains(game, "returnPlacement.authoredMapLayer"));
+	EXPECT(contains(automatiaSaveSource, "validatePersistentSpatialState("));
+	EXPECT(contains(automatiaSaveSource,
+		"duplicate floor/x/y/layer key"));
 
     // The editor's 3D preview must honor authored sky/skybox state even when
     // smooth lighting is disabled; otherwise Chunk::build synthesizes a false
@@ -1036,8 +1179,32 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(collisionSource, "playerHasLowerStackedLanding"));
     EXPECT(contains(gameHeader, "fallAutomatiaPlayerToLowerPlayableFloor"));
     EXPECT(contains(game, "fallAutomatiaPlayerToLowerPlayableFloor("));
+	EXPECT(contains(game, "resolveLowerPlayableFloorLandingPosition("));
+	EXPECT(contains(game, "playableFloorPlacementFootprintIsSafe("));
     EXPECT(contains(game, "broadcastAutomatiaPlayerFloorPlacement(playerIndex)"));
+	EXPECT(contains(game, "players[playerIndex]->hud.magicLeftHand"));
+	EXPECT(contains(game, "playerBoundSustainedLight"));
+	EXPECT(contains(game, "attached->removeLightField()"));
+	EXPECT(contains(gameUiSource, "playerEntity->worldRenderZ() * 2"));
+	EXPECT(contains(gameUiSource,
+		"mapLayerWorldZ(playerEntity->structuralMapLayer()) * 2"));
     EXPECT(contains(player, "const int fallDamage = std::max(1, floorsFallen)"));
+    EXPECT(contains(player, "stackedFallHandledOrPending = true"));
+    EXPECT(contains(
+        player,
+        "!levitating && prevlevitating && !stackedFallHandledOrPending"));
+    const std::string pitHandling = section(
+        player, "bool stackedFallHandledOrPending = false;", "if ( levitating )");
+    EXPECT(contains(pitHandling, "if ( !levitating"));
+    const std::size_t lowerLandingCheck =
+        pitHandling.find("map.findLowerPlayableFloorLanding(");
+    const std::size_t destructivePitDeath =
+        pitHandling.find("stats[PLAYER_NUM]->HP = 0;");
+    EXPECT(lowerLandingCheck != std::string::npos);
+    EXPECT(destructivePitDeath != std::string::npos);
+    EXPECT(lowerLandingCheck < destructivePitDeath);
+    EXPECT(contains(pitHandling, "multiplayer == CLIENT"));
+    EXPECT(contains(pitHandling, "my->structuralMapLayer() > 0"));
     EXPECT(contains(player, "KilledBy::BOTTOMLESS_PIT"));
     return true;
 }

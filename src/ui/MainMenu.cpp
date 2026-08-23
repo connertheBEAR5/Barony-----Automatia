@@ -1306,6 +1306,9 @@ namespace MainMenu {
 	    if (!directConnect) {
 		    if (LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
 #ifdef STEAMWORKS
+				if (!steamRuntimeAvailable() || !SteamNetworking()) {
+					return;
+				}
 		        CSteamID newSteamID;
 
 			    // if we got a packet, flush any remaining packets from the queue.
@@ -2319,6 +2322,19 @@ namespace MainMenu {
 		soundError();
 		return monoPromptGeneric(window_text, okay_text, okay_callback);
 	}
+
+#ifdef STEAMWORKS
+	static void steamUnavailablePrompt()
+	{
+		errorPrompt(
+			"Steam is unavailable. Start Steam and relaunch without --nosteam to use this feature.",
+			"Okay",
+			[](Button&) {
+				soundCancel();
+				closePrompt("mono_prompt");
+			});
+	}
+#endif
 
 	static Frame* monoPrompt(
 	    const char* window_text,
@@ -13708,6 +13724,13 @@ bind_failed:
 			// and it causes the game to crash. So stop it!
 			return;
 		}
+#ifdef STEAMWORKS
+		if (!directConnect
+			&& LobbyHandler.getP2PType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM
+			&& !steamRuntimeAvailable()) {
+			return;
+		}
+#endif
 		const bool lateJoinWasActive =
 			clientLateJoinPacketDeferralActive();
 		clientCheckLateJoinTimeout();
@@ -13889,6 +13912,12 @@ bind_failed:
 	        soundError();
 	        return false;
 	    }
+#if defined(STEAMWORKS) && !defined(USE_EOS)
+		if (lobbyType == LobbyType::LobbyOnline && !steamRuntimeAvailable()) {
+			steamUnavailablePrompt();
+			return false;
+		}
+#endif
 
 	    // reset keepalive
 	    client_keepalive[0] = ticks;
@@ -19604,7 +19633,8 @@ failed:
 			image->draw(nullptr, SDL_Rect{ x - w / 2, y - h / 2, w, h }, viewport);
 #else
 #ifdef STEAMWORKS
-            const bool steamdeck = SteamUtils()->IsSteamRunningOnSteamDeck();
+            const bool steamdeck = steamRuntimeAvailable() && SteamUtils()
+                && SteamUtils()->IsSteamRunningOnSteamDeck();
 #else
             constexpr bool steamdeck = false;
 #endif
@@ -22264,6 +22294,12 @@ failed:
         // Do nothing in DRM-free builds.
         return;
 #endif
+#if defined(STEAMWORKS) && !defined(USE_EOS)
+		if (!steamRuntimeAvailable()) {
+			steamUnavailablePrompt();
+			return;
+		}
+#endif
 
 	    // close current window
 #ifdef STEAMWORKS
@@ -22325,22 +22361,24 @@ failed:
 				names->select();
 
 #if defined(STEAMWORKS)
-	            for (Uint32 c = 0; c < numSteamLobbies; ++c) {
-	                auto lobby = (CSteamID*)lobbyIDs[c];
-	                auto pchFlags = SteamMatchmaking()->GetLobbyData(*lobby, "svFlags");
-	                auto flags = (int)strtol(pchFlags, nullptr, 10);
-	                LobbyInfo info;
-	                info.name = lobbyText[c];
-                    info.version = lobbyVersion[c];
-	                info.players = lobbyPlayers[c];
-					info.numMods = lobbyNumMods[c];
-					info.modsDisableAchievements = lobbyModDisableAchievements[c];
-					info.challengeLid = lobbyChallengeRun[c];
-	                info.ping = 50; // TODO
-	                info.locked = false; // this will always be false because steam only reported joinable lobbies
-	                info.flags = (Uint32)flags;
-	                info.address = "steam:" + std::to_string(c);
-	                addLobby(info);
+	            if (steamRuntimeAvailable() && SteamMatchmaking()) {
+	                for (Uint32 c = 0; c < numSteamLobbies; ++c) {
+	                    auto lobby = (CSteamID*)lobbyIDs[c];
+	                    auto pchFlags = SteamMatchmaking()->GetLobbyData(*lobby, "svFlags");
+	                    auto flags = (int)strtol(pchFlags, nullptr, 10);
+	                    LobbyInfo info;
+	                    info.name = lobbyText[c];
+                        info.version = lobbyVersion[c];
+	                    info.players = lobbyPlayers[c];
+						info.numMods = lobbyNumMods[c];
+						info.modsDisableAchievements = lobbyModDisableAchievements[c];
+						info.challengeLid = lobbyChallengeRun[c];
+	                    info.ping = 50; // TODO
+	                    info.locked = false; // this will always be false because steam only reported joinable lobbies
+	                    info.flags = (Uint32)flags;
+	                    info.address = "steam:" + std::to_string(c);
+	                    addLobby(info);
+	                }
 	            }
 #endif
 #if defined(USE_EOS)
@@ -22385,8 +22423,12 @@ failed:
         // request new lobbies
 	    LobbyHandler.selectedLobbyInList = 0;
 #ifdef STEAMWORKS
-	    requestingLobbies = true;
-	    cpp_SteamMatchmaking_RequestLobbyList(nullptr);
+	    if (steamRuntimeAvailable()) {
+	        requestingLobbies = true;
+	        cpp_SteamMatchmaking_RequestLobbyList(nullptr);
+	    } else {
+	        requestingLobbies = false;
+	    }
 #endif
 #ifdef USE_EOS
 	    EOS.bRequestingLobbies = true;
@@ -24456,6 +24498,10 @@ failed:
 		}
 		else if (LobbyHandler.getHostingType() == LobbyHandler_t::LobbyServiceType::LOBBY_STEAM) {
 #ifdef STEAMWORKS
+			if (!steamRuntimeAvailable()) {
+				steamUnavailablePrompt();
+				return;
+			}
 			for ( int c = 0; c < MAXPLAYERS; c++ ) {
 				if ( steamIDRemote[c] ) {
 					cpp_Free_CSteamID(steamIDRemote[c]);
@@ -24491,6 +24537,13 @@ failed:
 	}
 
 	static void hostOnlineLobby(Button&) {
+#if defined(STEAMWORKS) && !defined(USE_EOS)
+		if (!steamRuntimeAvailable()) {
+			multiplayer = SINGLE;
+			steamUnavailablePrompt();
+			return;
+		}
+#endif
 //#ifndef STEAMWORKS
 //		if ( Mods::numCurrentModsLoaded >= 1 )
 //		{
@@ -29820,15 +29873,15 @@ failed:
 		enabledDLCPack3 = nxCheckDLC(2);
 #endif
 #ifdef STEAMWORKS
-		if ( !enabledDLCPack1 )
+		if ( steamRuntimeAvailable() && SteamApps() && !enabledDLCPack1 )
 		{
 			enabledDLCPack1 = SteamApps()->BIsDlcInstalled(1010820);
 		}
-		if ( !enabledDLCPack2 )
+		if ( steamRuntimeAvailable() && SteamApps() && !enabledDLCPack2 )
 		{
 			enabledDLCPack2 = SteamApps()->BIsDlcInstalled(1010821);
 		}
-		if ( !enabledDLCPack3 )
+		if ( steamRuntimeAvailable() && SteamApps() && !enabledDLCPack3 )
 		{
 			enabledDLCPack3 = SteamApps()->BIsDlcInstalled(1010822);
 		}
@@ -29871,7 +29924,7 @@ failed:
 			}
         } else {
 #ifdef STEAMWORKS
-			if (ticks % 250 == 0) {
+			if (steamRuntimeAvailable() && SteamUserStats() && ticks % 250 == 0) {
 				bool unlocked = false;
 				if (SteamUserStats()->GetAchievement("BARONY_ACH_GUDIPARIAN_BAZI", &unlocked)) {
 					if ( unlocked ) {
@@ -30108,8 +30161,10 @@ failed:
 
 #ifdef STEAMWORKS
 	    if (!cmd_line.empty()) {
-	        printlog(cmd_line.c_str());
-            steam_ConnectToLobby(cmd_line.c_str());
+	        if (steamRuntimeAvailable()) {
+	            printlog(cmd_line.c_str());
+                steam_ConnectToLobby(cmd_line.c_str());
+	        }
             cmd_line = "";
 	    }
 #endif // STEAMWORKS
@@ -30130,8 +30185,11 @@ failed:
         CCallResult<GetPlayersOnline, NumberOfCurrentPlayers_t> result;
         int players = 0;
         Uint32 lastUpdate = 0;
-    public:
+	    public:
         void operator()() {
+			if (!steamRuntimeAvailable() || !SteamUserStats()) {
+				return;
+			}
             if (lastUpdate == ticks) {
                 return;
             }
@@ -30148,6 +30206,10 @@ failed:
 
 	void MainMenu::RichPresence::process()
 	{
+		if ( !steamRuntimeAvailable() || !SteamFriends() )
+		{
+			return;
+		}
 		if ( loading )
 		{
 			return;
@@ -31953,6 +32015,11 @@ failed:
 		if ( isWorkshopMod )
 		{
 #ifdef STEAMWORKS
+			if ( !steamRuntimeAvailable() || !g_SteamWorkshop || !SteamUGC() )
+			{
+				isDownloaded = false;
+				return;
+			}
 			auto itemDetails = g_SteamWorkshop->m_subscribedItemListDetails[index];
 			bool itemDownloaded = SteamUGC()->GetItemInstallInfo(itemDetails.m_nPublishedFileId, NULL, fullpath, PATH_MAX, NULL);
 			isDownloaded = itemDownloaded;
@@ -32594,7 +32661,11 @@ failed:
 
 	static void workshopLoadSubscribedItems(Button& button) {
 #ifdef STEAMWORKS
-		if ( !g_SteamWorkshop ) { return; }
+		if ( !steamRuntimeAvailable() || !g_SteamWorkshop )
+		{
+			steamUnavailablePrompt();
+			return;
+		}
 		mods_loading_tick = ticks;
 		mods_active_tab = "Steam Workshop";
 		auto prompt = monoPrompt(
@@ -32790,7 +32861,11 @@ failed:
 
 	static void workshopLoadMyItems(Button& button) {
 #ifdef STEAMWORKS
-		if ( !g_SteamWorkshop ) { return; }
+		if ( !steamRuntimeAvailable() || !g_SteamWorkshop )
+		{
+			steamUnavailablePrompt();
+			return;
+		}
 		mods_loading_tick = ticks;
 		mods_active_tab = "My Workshop Items";
 		auto prompt = monoPrompt(
@@ -34220,6 +34295,11 @@ failed:
 
 #ifdef STEAMWORKS
 	static void createWorkshopCreateMenu(SteamUGCDetails_t* details) {
+		if ( !steamRuntimeAvailable() || !g_SteamWorkshop )
+		{
+			steamUnavailablePrompt();
+			return;
+		}
 		if ( !details )
 		{
 			Mods::uploadingExistingItem = 0;
@@ -34432,7 +34512,8 @@ failed:
 			button->setBackground("*#images/ui/Main Menus/Mods/Upload/Button_00.png");
 			button->setBackgroundHighlighted("*#images/ui/Main Menus/Mods/Upload/Button_High00.png");
 			button->setBackgroundActivated("*#images/ui/Main Menus/Mods/Upload/Button_Press00.png");
-            if (SteamUtils()->IsSteamRunningOnSteamDeck()) {
+            if (steamRuntimeAvailable() && SteamUtils()
+                && SteamUtils()->IsSteamRunningOnSteamDeck()) {
                 button->setTextColor(makeColorRGB(127, 127, 127));
                 button->setHighlightColor(makeColorRGB(127, 127, 127));
                 button->setColor(makeColorRGB(127, 127, 127));
@@ -34516,7 +34597,8 @@ failed:
 				}
 			});
 			button->setCallback([](Button& button) {
-                if (SteamUtils()->IsSteamRunningOnSteamDeck()) {
+                if (steamRuntimeAvailable() && SteamUtils()
+                    && SteamUtils()->IsSteamRunningOnSteamDeck()) {
                     soundError();
                     return;
                 }
@@ -35556,7 +35638,12 @@ failed:
 
 	static void createWorkshopUploadWindow()
 	{
-		if ( !SteamUser()->BLoggedOn() || !g_SteamWorkshop )
+		if ( !steamRuntimeAvailable() || !SteamUser() || !g_SteamWorkshop )
+		{
+			steamUnavailablePrompt();
+			return;
+		}
+		if ( !SteamUser()->BLoggedOn() )
 		{
 			auto frame = errorPrompt(Language::get(5946), Language::get(5884), [](Button& button) {
 				closeMono();

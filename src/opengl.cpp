@@ -1129,6 +1129,16 @@ static ConsoleVariable<Vector4> cvar_color_reflector_shield("/color_reflector_sh
 #endif
 
 static void uploadLightUniforms(view_t* camera, Shader& shader, Entity* entity, int mode, bool remap) {
+	/*
+	 * The light volume is packed as MAPLAYERS vertical slices in one 2D
+	 * texture. Entity world position supplies map X/Y. Modern derived stacks
+	 * select the canonical structural slice; legacy one-floor/isolated-FLOR
+	 * entity rendering keeps the historical base slice. playableFloor is never
+	 * substituted for physical height.
+	 */
+	GL_CHECK_ERR(glUniform1f(
+		shader.uniform("uLightLayer"),
+		static_cast<GLfloat>(entity->visualLightmapLayer())));
     const float cameraPos[4] = {(float)camera->x * 32.f, -(float)camera->z, (float)camera->y * 32.f, 1.f};
     GL_CHECK_ERR(glUniform4fv(shader.uniform("uCameraPos"), 1, cameraPos));
     if (mode == REALCOLORS) {

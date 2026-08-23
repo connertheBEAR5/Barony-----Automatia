@@ -231,6 +231,8 @@ namespace
         "automatia_character_instance_revision";
     constexpr const char* AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY =
         "automatia_character_playable_floor";
+	constexpr const char* AUTOMATIA_CHARACTER_AUTHORED_MAP_LAYER_KEY =
+		"automatia_character_authored_map_layer";
     constexpr const char* AUTOMATIA_CHARACTER_POSITION_X_KEY =
         "automatia_character_position_x";
     constexpr const char* AUTOMATIA_CHARACTER_POSITION_Y_KEY =
@@ -255,6 +257,7 @@ namespace
         std::string identity;
         WorldInstanceIdentity worldIdentity;
         PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+		Sint16 authoredMapLayer = -1;
         real_t x = 0.0;
         real_t y = 0.0;
         real_t z = 0.0;
@@ -331,7 +334,7 @@ namespace
             }
             else if ((multiplayer == CLIENT
                     || (multiplayer == SERVER && player == 0))
-                && SteamUser())
+                && steamRuntimeAvailable() && SteamUser())
             {
                 identity = std::to_string(
                     SteamUser()->GetSteamID().ConvertToUint64());
@@ -433,6 +436,7 @@ namespace
             || key == AUTOMATIA_CHARACTER_INSTANCE_ID_KEY
             || key == AUTOMATIA_CHARACTER_INSTANCE_REVISION_KEY
             || key == AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY
+			|| key == AUTOMATIA_CHARACTER_AUTHORED_MAP_LAYER_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_X_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_Y_KEY
             || key == AUTOMATIA_CHARACTER_POSITION_Z_KEY
@@ -582,6 +586,10 @@ namespace
                 info,
                 AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY,
                 std::to_string(static_cast<Sint32>(runtime.playableFloor)));
+			setCharacterMetadata(
+				info,
+				AUTOMATIA_CHARACTER_AUTHORED_MAP_LAYER_KEY,
+				std::to_string(static_cast<Sint32>(runtime.authoredMapLayer)));
             setCharacterMetadata(
                 info,
                 AUTOMATIA_CHARACTER_POSITION_X_KEY,
@@ -850,6 +858,7 @@ namespace
         real_t roll = 0.0;
         Uint64 revision = 0;
         Sint32 playableFloorRaw = DEFAULT_PLAYABLE_FLOOR;
+		Sint32 authoredMapLayerRaw = -1;
         (void)parseCharacterSint32Metadata(
             info, AUTOMATIA_CHARACTER_PLAYABLE_FLOOR_KEY, playableFloorRaw);
         if (playableFloorRaw < std::numeric_limits<PlayableFloorId>::min()
@@ -859,6 +868,15 @@ namespace
         }
         const PlayableFloorId playableFloor =
             static_cast<PlayableFloorId>(playableFloorRaw);
+		(void)parseCharacterSint32Metadata(
+			info,
+			AUTOMATIA_CHARACTER_AUTHORED_MAP_LAYER_KEY,
+			authoredMapLayerRaw);
+		if (authoredMapLayerRaw != -1
+			&& (authoredMapLayerRaw < 0 || authoredMapLayerRaw >= MAPLAYERS))
+		{
+			return false;
+		}
         if (!parseCharacterRealMetadata(
                 info, AUTOMATIA_CHARACTER_POSITION_X_KEY, x)
             || !parseCharacterRealMetadata(
@@ -883,6 +901,7 @@ namespace
             instanceId,
             revision,
             playableFloor,
+			static_cast<Sint16>(authoredMapLayerRaw),
             x,
             y,
             z,
@@ -1166,6 +1185,8 @@ bool captureAutomatiaCharacterSaveRuntimeState(int player)
     runtime.identity = identity;
     runtime.worldIdentity = identityState;
     runtime.playableFloor = entity->playableFloor;
+	runtime.authoredMapLayer =
+		static_cast<Sint16>(entity->structuralMapLayer());
 
     // PMOV collision-checks remote clients against new_x/new_y, then restores
     // entity->x/entity->y until actPlayer runs. A periodic save can arrive in
@@ -5912,7 +5933,8 @@ void AchievementObserver::updatePlayerAchievement(int player, Achievement achiev
 			{
 				bool alternateUnlock = false;
 #ifdef STEAMWORKS
-				if ( SteamUser()->BLoggedOn() )
+				if ( steamRuntimeAvailable() && SteamUser() && SteamUserStats()
+					&& SteamUser()->BLoggedOn() )
 				{
 					SteamUserStats()->GetAchievement("BARONY_ACH_LICH_HUNTER", &alternateUnlock);
 				}

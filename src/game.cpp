@@ -1711,6 +1711,7 @@ struct AutomatiaSavedPlayerPlacement
 {
     WorldInstanceIdentity identity;
     PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	Sint16 authoredMapLayer = -1;
     real_t x = 0.0;
     real_t y = 0.0;
     real_t z = 0.0;
@@ -2031,6 +2032,10 @@ static PersistentMinimapState* persistentMinimapStateForPlayer(
 
 namespace
 {
+void syncAutomatiaPlayerSpatialAttachments(
+	const int playerIndex,
+	Entity& playerEntity);
+
 bool savedJsonInt(const AutomatiaSave::Json& object, const char* key, Sint32& value)
 {
     if (!object.is_object() || !object.contains(key)
@@ -3205,9 +3210,14 @@ void hydratePreservedAutomatiaWorldDocument()
             && savedVisit["return_anchor"].is_object())
         {
             const Json& anchor = savedVisit["return_anchor"];
-            savedJsonPlayableFloor(
-                anchor, "playable_floor", visit.returnAnchorPlayableFloor);
-            if (restoreFinite(anchor, "x", visit.returnAnchorX)
+			const bool anchorFloorValid = savedJsonPlayableFloor(
+				anchor, "playable_floor", visit.returnAnchorPlayableFloor);
+			const bool anchorLayerValid = savedJsonOptionalAuthoredMapLayer(
+				anchor,
+				"authored_map_layer",
+				visit.returnAnchorAuthoredMapLayer);
+            if (anchorFloorValid && anchorLayerValid
+				&& restoreFinite(anchor, "x", visit.returnAnchorX)
                 && restoreFinite(anchor, "y", visit.returnAnchorY)
                 && restoreFinite(anchor, "z", visit.returnAnchorZ))
             {
@@ -3230,9 +3240,14 @@ void hydratePreservedAutomatiaWorldDocument()
         {
             const Json& position = savedVisit["return_position"];
             AutomatiaPlayerReturnPlacement placement;
-            savedJsonPlayableFloor(
-                position, "playable_floor", placement.playableFloor);
-            if (restoreFinite(position, "x", placement.x)
+			const bool positionFloorValid = savedJsonPlayableFloor(
+				position, "playable_floor", placement.playableFloor);
+			const bool positionLayerValid = savedJsonOptionalAuthoredMapLayer(
+				position,
+				"authored_map_layer",
+				placement.authoredMapLayer);
+            if (positionFloorValid && positionLayerValid
+				&& restoreFinite(position, "x", placement.x)
                 && restoreFinite(position, "y", placement.y)
                 && restoreFinite(position, "z", placement.z)
                 && restoreFinite(position, "yaw", placement.yaw))
@@ -3957,6 +3972,13 @@ void hydratePreservedAutomatiaWorldDocument()
             {
                 continue;
             }
+			if (!savedJsonOptionalAuthoredMapLayer(
+					savedPlayer,
+					"authored_map_layer",
+					placement.authoredMapLayer))
+			{
+				continue;
+			}
             placement.hasPosition = savedJsonTriplet(
                 savedPlayer,
                 "position",
@@ -4040,6 +4062,16 @@ void applyAutomatiaSavedPlayerPlacements()
                 placement.roll,
                 true))
         {
+			const Sint16 restoredAuthoredLayer =
+				persistentDynamicAuthoredMapLayer(
+					placement.authoredMapLayer,
+					placement.playableFloor);
+			if (entity.authoredMapLayer != restoredAuthoredLayer)
+			{
+				entity.authoredMapLayer = restoredAuthoredLayer;
+				entity.bNeedsRenderPositionInit = true;
+				syncAutomatiaPlayerSpatialAttachments(playerIndex, entity);
+			}
             printlog(
                 "[Character Save] Server applied saved position for player %d "
                 "at %.2f, %.2f, %.2f on floor %d in '%s'.",
@@ -4101,6 +4133,7 @@ bool stageAutomatiaCharacterSavedPlacement(
     const std::string& instanceId,
     Uint64 revision,
     PlayableFloorId playableFloor,
+	Sint16 authoredMapLayer,
     real_t x,
     real_t y,
     real_t z,
@@ -4114,7 +4147,9 @@ bool stageAutomatiaCharacterSavedPlacement(
         || !std::isfinite(static_cast<double>(z))
         || !std::isfinite(static_cast<double>(yaw))
         || !std::isfinite(static_cast<double>(pitch))
-        || !std::isfinite(static_cast<double>(roll)))
+        || !std::isfinite(static_cast<double>(roll))
+		|| (authoredMapLayer != -1
+			&& (authoredMapLayer < 0 || authoredMapLayer >= MAPLAYERS)))
     {
         return false;
     }
@@ -4130,6 +4165,7 @@ bool stageAutomatiaCharacterSavedPlacement(
         automatiaSavedPlayerPlacements[playerIndex];
     placement.identity = identity;
     placement.playableFloor = playableFloor;
+	placement.authoredMapLayer = authoredMapLayer;
     placement.x = x;
     placement.y = y;
     placement.z = z;
@@ -4139,6 +4175,24 @@ bool stageAutomatiaCharacterSavedPlacement(
     placement.hasPosition = true;
     placement.pending = true;
     return true;
+}
+
+bool stageAutomatiaCharacterSavedPlacement(
+	int playerIndex,
+	const std::string& mapFile,
+	const std::string& instanceId,
+	Uint64 revision,
+	PlayableFloorId playableFloor,
+	real_t x,
+	real_t y,
+	real_t z,
+	real_t yaw,
+	real_t pitch,
+	real_t roll)
+{
+	return stageAutomatiaCharacterSavedPlacement(
+		playerIndex, mapFile, instanceId, revision,
+		playableFloor, -1, x, y, z, yaw, pitch, roll);
 }
 
 bool stageAutomatiaCharacterSavedPlacement(
@@ -4155,7 +4209,7 @@ bool stageAutomatiaCharacterSavedPlacement(
 {
     return stageAutomatiaCharacterSavedPlacement(
         playerIndex, mapFile, instanceId, revision,
-        DEFAULT_PLAYABLE_FLOOR, x, y, z, yaw, pitch, roll);
+        DEFAULT_PLAYABLE_FLOOR, -1, x, y, z, yaw, pitch, roll);
 }
 
 bool prepareAutomatiaSavedPlayerSpawnMask(bool playerSpawnMask[MAXPLAYERS])
@@ -4647,6 +4701,8 @@ static bool buildAutomatiaPlayerLevelVisit(
     visit.mapInstanceKey = sourceInstance.key();
     visit.returnPlacement.valid = true;
     visit.returnPlacement.playableFloor = playerEntity.playableFloor;
+	visit.returnPlacement.authoredMapLayer =
+		static_cast<Sint16>(playerEntity.structuralMapLayer());
     visit.returnPlacement.x = playerEntity.x;
     visit.returnPlacement.y = playerEntity.y;
     visit.returnPlacement.z = playerEntity.z;
@@ -4661,6 +4717,8 @@ static bool buildAutomatiaPlayerLevelVisit(
         visit.hasReturnAnchor = true;
         visit.returnAnchorPersistentID = departureEntity->persistentID;
         visit.returnAnchorPlayableFloor = departureEntity->playableFloor;
+		visit.returnAnchorAuthoredMapLayer =
+			static_cast<Sint16>(departureEntity->structuralMapLayer());
         visit.returnAnchorX = departureEntity->x;
         visit.returnAnchorY = departureEntity->y;
         visit.returnAnchorZ = departureEntity->z;
@@ -5167,6 +5225,12 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"y", visit.returnAnchorY},
                 {"z", visit.returnAnchorZ}
             };
+			if (visit.returnAnchorAuthoredMapLayer >= 0
+				&& visit.returnAnchorAuthoredMapLayer < MAPLAYERS)
+			{
+				savedVisit["return_anchor"]["authored_map_layer"] =
+					visit.returnAnchorAuthoredMapLayer;
+			}
         }
         if (visit.returnPlacement.valid)
         {
@@ -5179,6 +5243,12 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"pitch", visit.returnPlacement.pitch},
                 {"roll", visit.returnPlacement.roll}
             };
+			if (visit.returnPlacement.authoredMapLayer >= 0
+				&& visit.returnPlacement.authoredMapLayer < MAPLAYERS)
+			{
+				savedVisit["return_position"]["authored_map_layer"] =
+					visit.returnPlacement.authoredMapLayer;
+			}
         }
         return savedVisit;
     };
@@ -5609,6 +5679,12 @@ static bool captureAutomatiaPersistentWorldDocument(
                 {"revision", placement.identity.revision},
                 {"playable_floor", placement.playableFloor}
             };
+			if (placement.authoredMapLayer >= 0
+				&& placement.authoredMapLayer < MAPLAYERS)
+			{
+				savedPlayer["authored_map_layer"] =
+					placement.authoredMapLayer;
+			}
             if (placement.hasPosition)
             {
                 savedPlayer["position"] = {
@@ -5646,6 +5722,9 @@ static bool captureAutomatiaPersistentWorldDocument(
         if (savedEntity)
         {
             const Entity& entity = *savedEntity;
+			savedPlayer["playable_floor"] = entity.playableFloor;
+			savedPlayer["authored_map_layer"] =
+				entity.structuralMapLayer();
             savedPlayer["position"] = {entity.x, entity.y, entity.z};
             savedPlayer["rotation"] = {entity.yaw, entity.pitch, entity.roll};
         }
@@ -6092,40 +6171,64 @@ void syncAutomatiaPlayerSpatialAttachments(
 {
     const SpatialSpawnContext playerSpatialContext =
         playerEntity.spatialSpawnContext();
+	auto syncAttachment = [&](Entity* attachment)
+	{
+		if (!attachment || attachment == &playerEntity)
+		{
+			return;
+		}
+		if (attachment->playableFloor != playerEntity.playableFloor)
+		{
+			attachment->setPlayableFloor(playerEntity.playableFloor);
+		}
+		attachment->applySpatialSpawnContext(playerSpatialContext);
+		attachment->bNeedsRenderPositionInit = true;
+	};
     for (Entity* bodypart : playerEntity.bodyparts)
     {
-        if (!bodypart)
-        {
-            continue;
-        }
-        if (bodypart->playableFloor != playerEntity.playableFloor)
-        {
-            bodypart->setPlayableFloor(playerEntity.playableFloor);
-        }
-        bodypart->applySpatialSpawnContext(playerSpatialContext);
-        bodypart->bNeedsRenderPositionInit = true;
+		syncAttachment(bodypart);
     }
 
+	/*
+	 * The casting left hand is tracked only through HUD state: unlike the right
+	 * hand it is not in bodyparts, and it has no parent UID. Keep camera-local
+	 * HUD helpers on the camera/player structural slice after PZTR stairs.
+	 */
+	if (playerIndex >= 0 && playerIndex < MAXPLAYERS && players[playerIndex])
+	{
+		syncAttachment(players[playerIndex]->hud.magicLeftHand);
+		syncAttachment(players[playerIndex]->hud.magicRightHand);
+		syncAttachment(players[playerIndex]->hud.magicRangefinder);
+	}
+
     // Nametags and a few local HUD helpers are parented to the player but are
-    // not present in every bodyparts vector. Only migrate NOUPDATE attachments;
-    // projectiles/spells keep their original floor and are intentionally not
-    // pulled through the stairs.
+	// not present in every bodyparts vector. Ordinary projectiles/spells retain
+	// their source floor. The sustained Light and Deep Shade balls are the
+	// explicit exception: they remain attached to their caster while sustained.
     for (node_t* node = map.entities ? map.entities->first : nullptr;
         node; node = node->next)
     {
         Entity* attached = static_cast<Entity*>(node->element);
+		const bool playerBoundSustainedLight = attached
+			&& attached->parent == playerEntity.getUID()
+			&& attached->behavior == &actMagiclightBall
+			&& (attached->sprite == 174 || attached->sprite == 1800);
         if (!attached || attached == &playerEntity
             || attached->parent != playerEntity.getUID()
-            || !attached->flags[NOUPDATE])
+			|| (!attached->flags[NOUPDATE]
+				&& !playerBoundSustainedLight))
         {
             continue;
         }
-        if (attached->playableFloor != playerEntity.playableFloor)
-        {
-            attached->setPlayableFloor(playerEntity.playableFloor);
-        }
-        attached->applySpatialSpawnContext(playerSpatialContext);
-        attached->bNeedsRenderPositionInit = true;
+		if (playerBoundSustainedLight
+			&& (attached->playableFloor != playerEntity.playableFloor
+				|| attached->structuralMapLayer()
+					!= playerEntity.structuralMapLayer()))
+		{
+			// The behavior recreates this field on its new structural slice.
+			attached->removeLightField();
+		}
+		syncAttachment(attached);
     }
 
     if (playerIndex >= 0 && playerIndex < MAXPLAYERS && players[playerIndex])
@@ -6173,8 +6276,106 @@ bool playableFloorPlacementTileIsSafe(
     }
     const Sint32 tileX = static_cast<Sint32>(x / 16.0);
     const Sint32 tileY = static_cast<Sint32>(y / 16.0);
-    return map.tileAt(tileX, tileY, FLOORLAYER, playableFloor) != 0
-        && map.tileAt(tileX, tileY, OBSTACLELAYER, playableFloor) == 0;
+	return map.tileAt(tileX, tileY, FLOORLAYER, playableFloor) != 0
+		&& map.tileAt(tileX, tileY, OBSTACLELAYER, playableFloor) == 0;
+}
+
+bool playableFloorPlacementFootprintIsSafe(
+	const PlayableFloorId playableFloor,
+	const Entity& entity,
+	const real_t x,
+	const real_t y)
+{
+	if (!playableFloorPlacementTileIsSafe(playableFloor, x, y))
+	{
+		return false;
+	}
+	constexpr real_t edgeEpsilon = 0.01;
+	const real_t halfWidth = std::max<real_t>(0.0, entity.sizex);
+	const real_t halfHeight = std::max<real_t>(0.0, entity.sizey);
+	const int minimumX = static_cast<int>(std::floor(
+		(x - halfWidth + edgeEpsilon) / 16.0));
+	const int maximumX = static_cast<int>(std::floor(
+		(x + halfWidth - edgeEpsilon) / 16.0));
+	const int minimumY = static_cast<int>(std::floor(
+		(y - halfHeight + edgeEpsilon) / 16.0));
+	const int maximumY = static_cast<int>(std::floor(
+		(y + halfHeight - edgeEpsilon) / 16.0));
+	if (minimumX < 0 || minimumY < 0
+		|| maximumX >= map.width || maximumY >= map.height)
+	{
+		return false;
+	}
+	for (int tileX = minimumX; tileX <= maximumX; ++tileX)
+	{
+		for (int tileY = minimumY; tileY <= maximumY; ++tileY)
+		{
+			if (map.tileAt(
+					tileX, tileY, OBSTACLELAYER, playableFloor) != 0)
+			{
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool resolveLowerPlayableFloorLandingPosition(
+	const PlayableFloorId playableFloor,
+	const Entity& entity,
+	const Sint32 landingTileX,
+	const Sint32 landingTileY,
+	real_t& landingX,
+	real_t& landingY)
+{
+	const real_t tileCenterX = landingTileX * 16.0 + 8.0;
+	const real_t tileCenterY = landingTileY * 16.0 + 8.0;
+	if (!playableFloorPlacementTileIsSafe(
+			playableFloor, tileCenterX, tileCenterY))
+	{
+		return false;
+	}
+	landingX = entity.x;
+	landingY = entity.y;
+	if (playableFloorPlacementFootprintIsSafe(
+		playableFloor, entity, landingX, landingY))
+	{
+		return true;
+	}
+
+	/*
+	 * The source-floor ledge can end halfway through the player's footprint.
+	 * Preserve X/Y whenever possible, but constrain the destination footprint
+	 * inside the valid lower tile before changing spatial membership. This
+	 * prevents an exact ledge-edge coordinate from embedding the player in the
+	 * neighboring lower-floor wall.
+	 */
+	constexpr real_t wallClearance = 0.05;
+	const real_t halfWidth = std::max<real_t>(0.0, entity.sizex);
+	const real_t halfHeight = std::max<real_t>(0.0, entity.sizey);
+	const real_t minimumX = landingTileX * 16.0 + halfWidth + wallClearance;
+	const real_t maximumX = (landingTileX + 1) * 16.0
+		- halfWidth - wallClearance;
+	const real_t minimumY = landingTileY * 16.0 + halfHeight + wallClearance;
+	const real_t maximumY = (landingTileY + 1) * 16.0
+		- halfHeight - wallClearance;
+	if (minimumX > maximumX || minimumY > maximumY)
+	{
+		return false;
+	}
+
+	landingX = std::clamp(entity.x, minimumX, maximumX);
+	landingY = std::clamp(entity.y, minimumY, maximumY);
+	if (playableFloorPlacementFootprintIsSafe(
+			playableFloor, entity, landingX, landingY))
+	{
+		return true;
+	}
+
+	landingX = tileCenterX;
+	landingY = tileCenterY;
+	return playableFloorPlacementFootprintIsSafe(
+		playableFloor, entity, landingX, landingY);
 }
 
 void broadcastAutomatiaPlayerFloorPlacement(const int playerIndex)
@@ -6376,17 +6577,25 @@ bool fallAutomatiaPlayerToLowerPlayableFloor(
         return false;
     }
 
-    if (!map.ensurePlayableFloorGeometry(landingFloor, false))
+	if (!map.ensurePlayableFloorGeometry(landingFloor, false))
     {
         floorsFallen = 0;
         return false;
-    }
+	}
 
-    const PlayableFloorId sourceFloor = playerEntity->playableFloor;
-    if (!applyAutomatiaPlayableFloorPlacement(
-            playerIndex, landingFloor, 0,
-            playerEntity->x, playerEntity->y, playerEntity->z,
-            playerEntity->yaw, playerEntity->pitch, playerEntity->roll, true))
+	const PlayableFloorId sourceFloor = playerEntity->playableFloor;
+	real_t landingX = playerEntity->x;
+	real_t landingY = playerEntity->y;
+	if (!resolveLowerPlayableFloorLandingPosition(
+			landingFloor, *playerEntity, tileX, tileY, landingX, landingY))
+	{
+		floorsFallen = 0;
+		return false;
+	}
+	if (!applyAutomatiaPlayableFloorPlacement(
+			playerIndex, landingFloor, 0,
+			landingX, landingY, playerEntity->z,
+			playerEntity->yaw, playerEntity->pitch, playerEntity->roll, true))
     {
         floorsFallen = 0;
         return false;
@@ -6394,12 +6603,14 @@ bool fallAutomatiaPlayerToLowerPlayableFloor(
 
     broadcastAutomatiaPlayerFloorPlacement(playerIndex);
     printlog(
-        "[Playable Z] Player %d fell through authored floors: floor %d -> %d (%d floor%s).",
-        playerIndex,
-        static_cast<int>(sourceFloor),
-        static_cast<int>(landingFloor),
-        floorsFallen,
-        floorsFallen == 1 ? "" : "s");
+		"[Playable Z] Player %d fell through authored floors: floor %d -> %d (%d floor%s), safe landing=(%.2f, %.2f).",
+		playerIndex,
+		static_cast<int>(sourceFloor),
+		static_cast<int>(landingFloor),
+		floorsFallen,
+		floorsFallen == 1 ? "" : "s",
+		landingX,
+		landingY);
     return true;
 }
 
@@ -17641,6 +17852,15 @@ static bool placePlayerAtAutomatiaReturn(
         return false;
     }
     Entity* playerEntity = players[playerIndex]->entity;
+	const Sint16 restoredAuthoredLayer = persistentDynamicAuthoredMapLayer(
+		destination.returnPlacement.authoredMapLayer,
+		destination.returnPlacement.playableFloor);
+	if (playerEntity->authoredMapLayer != restoredAuthoredLayer)
+	{
+		playerEntity->authoredMapLayer = restoredAuthoredLayer;
+		playerEntity->bNeedsRenderPositionInit = true;
+		syncAutomatiaPlayerSpatialAttachments(playerIndex, *playerEntity);
+	}
 
     if (multiplayer == SERVER
         && playerIndex > 0
@@ -23943,7 +24163,8 @@ bool handleEvents(void)
 				}
 #ifdef STEAMWORKS
                 // on steam deck, player 1 always needs a controller.
-                if (SteamUtils()->IsSteamRunningOnSteamDeck()) {
+                if (steamRuntimeAvailable() && SteamUtils()
+                    && SteamUtils()->IsSteamRunningOnSteamDeck()) {
                     if (id >= 0 && !inputs.hasController(0)) {
                         bindControllerToPlayer(id, 0);
                     }
@@ -26205,12 +26426,21 @@ int main(int argc, char** argv)
 			for (c = 1; c < argc; c++)
 			{
 #ifdef STEAMWORKS
-			    cmd_line += argv[c];
-			    cmd_line += " ";
+			    if ( argv[c] && strcmp(argv[c], "--nosteam") )
+			    {
+				    cmd_line += argv[c];
+				    cmd_line += " ";
+			    }
 #endif
 				if ( argv[c] != NULL )
 				{
-                    if ( !strcmp(argv[c], "--headless") || !strcmp(argv[c], "-headless") )
+                    if ( !strcmp(argv[c], "--nosteam") )
+                    {
+#ifdef STEAMWORKS
+						steamRuntimeDisableByCommandLine();
+#endif
+					}
+                    else if ( !strcmp(argv[c], "--headless") || !strcmp(argv[c], "-headless") )
                     {
                         headless = true;
                         no_sound = true;
@@ -26669,11 +26899,14 @@ int main(int argc, char** argv)
 #endif
 			// handle steam callbacks
 #ifdef STEAMWORKS
-			if ( g_SteamLeaderboards )
+			if ( steamRuntimeAvailable() && g_SteamLeaderboards )
 			{
 				g_SteamLeaderboards->ProcessLeaderboardUpload();
 			}
-			SteamAPI_RunCallbacks();
+			if ( steamRuntimeAvailable() )
+			{
+				SteamAPI_RunCallbacks();
+			}
 #endif
 #ifdef USE_PLAYFAB
 			PlayFab::PlayFabClientAPI::Update();

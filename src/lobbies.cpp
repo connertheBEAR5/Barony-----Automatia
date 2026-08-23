@@ -148,6 +148,14 @@ std::string LobbyHandler_t::getLobbyJoinFailedConnectString(int result)
 #ifdef STEAMWORKS
 bool LobbyHandler_t::validateSteamLobbyDataOnJoin()
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() )
+	{
+		connectingToLobbyStatus = LobbyHandler_t::EResult_LobbyFailures::LOBBY_UNHANDLED_ERROR;
+		connectingToLobbyWindow = false;
+		connectingToLobby = false;
+		multiplayer = SINGLE;
+		return false;
+	}
 	bool errorOnJoin = false;
 	const char* lsgStr = SteamMatchmaking()->GetLobbyData(steamLobbyToValidate, "loadingsavegame");
 	const char* lukStr = SteamMatchmaking()->GetLobbyData(steamLobbyToValidate, "lobbyuniquekey");
@@ -257,6 +265,13 @@ void LobbyHandler_t::handleLobbyListRequests()
 	if ( joiningType == LOBBY_STEAM )
 	{
 #ifdef STEAMWORKS
+		if ( !steamRuntimeAvailable() || !SteamMatchmaking() )
+		{
+			connectingToLobbyWindow = false;
+			connectingToLobby = false;
+			multiplayer = SINGLE;
+			return;
+		}
 		// lobby entered
 		if ( connectingToLobbyStatus != EResult::k_EResultOK )
 		{
@@ -486,6 +501,13 @@ Sint32 LobbyHandler_t::getDisplayedResultLobbyIndex(int selection)
 #ifdef STEAMWORKS
 void LobbyHandler_t::steamValidateAndJoinLobby(CSteamID& id)
 {
+	if ( !steamRuntimeAvailable() || !SteamMatchmaking() )
+	{
+		connectingToLobbyStatus = LobbyHandler_t::EResult_LobbyFailures::LOBBY_UNHANDLED_ERROR;
+		connectingToLobbyWindow = false;
+		connectingToLobby = false;
+		return;
+	}
 	steamLobbyToValidate.Set(id.GetAccountID(), id.GetEUniverse(), id.GetEAccountType());
 	steamLobbyToValidate.SetAccountInstance(id.GetUnAccountInstance());
 	if ( !SteamMatchmaking()->RequestLobbyData(steamLobbyToValidate) )

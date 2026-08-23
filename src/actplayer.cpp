@@ -2585,6 +2585,9 @@ void actDeathGhost(Entity* my)
 								{
 									camz = std::min(camz, 4.0 * 2.f);
 								}
+								// The cosmetic supplies a local camera height only. Keep the
+								// owning ghost's authored structural offset on upper floors.
+								camz += structuralCameraOffset;
 							}
 						}
 					}
@@ -3576,6 +3579,10 @@ void actDeathCam(Entity* my)
 		{
 			my->x = entity->x;
 			my->y = entity->y;
+			// A followed player/ghost owns the camera's structural slice. If the
+			// target disappears, the independent death camera retains the context
+			// captured when it was created instead of falling back to layer zero.
+			my->inheritSpatialContextFrom(entity);
 		}
 		else
 		{
@@ -3595,7 +3602,11 @@ void actDeathCam(Entity* my)
 	real_t camx, camy, camz, camang, camvang;
 	camx = my->x / 16.f;
 	camy = my->y / 16.f;
-	camz = my->z * 2.f;
+	const real_t structuralCameraOffset =
+		map.playableFloorUsesAuthoredLayerStack(my->playableFloor)
+			? 2.0 * mapLayerWorldZ(my->structuralMapLayer())
+			: 0.0;
+	camz = my->z * 2.f + structuralCameraOffset;
 	camang = my->yaw;
 	camvang = my->pitch;
 
@@ -9475,7 +9486,7 @@ void actPlayer(Entity* my)
 		// levitation
 		levitating = isLevitating(stats[PLAYER_NUM]);
 		players[PLAYER_NUM]->mechanics.previouslyLevitating = levitating;
-		bool waitingForStackedFallAuthority = false;
+		bool stackedFallHandledOrPending = false;
 
 		if ( !levitating
 			&& stats[PLAYER_NUM]->HP > 0 )
@@ -9516,7 +9527,7 @@ void actPlayer(Entity* my)
 
 				if ( hasLowerStackedLanding )
 				{
-					waitingForStackedFallAuthority = multiplayer == CLIENT;
+					stackedFallHandledOrPending = true;
 					/*
 					 * Authored stacked floors are real vertical space, not bottomless
 					 * pits. The server/single-player authority moves the actor to the
@@ -9558,6 +9569,18 @@ void actPlayer(Entity* my)
 							}
 						}
 					}
+				}
+				else if ( multiplayer == CLIENT
+					&& my->playableFloor > DEFAULT_PLAYABLE_FLOOR
+					&& my->structuralMapLayer() > 0 )
+				{
+					/*
+					 * A client can observe its local derived-floor view one tick before
+					 * the server's authoritative PZTR decision. Never commit irreversible
+					 * pit death for a physically upper-stack player on that client tick;
+					 * the server will either send the lower landing or the normal death.
+					 */
+					stackedFallHandledOrPending = true;
 				}
 				else
 				{
@@ -9628,7 +9651,7 @@ void actPlayer(Entity* my)
 
 		my->creatureHandleLiftZ();
 
-		if ( !levitating && prevlevitating && !waitingForStackedFallAuthority )
+		if ( !levitating && prevlevitating && !stackedFallHandledOrPending )
 		{
 			int x, y, u, v;
 			x = std::min(std::max<unsigned int>(1, my->x / 16), map.width - 2);

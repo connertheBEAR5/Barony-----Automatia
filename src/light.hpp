@@ -133,8 +133,17 @@ typedef struct light_t
 	Sint32 x, y;
 	Sint32 radius;
 	Sint32 layer;
+	/*
+	 * One authored-stack light can contribute to several structural slices.
+	 * Slice zero is always `layer`, preserving the legacy light->tiles access
+	 * used by torch repair code. Remaining slices are attenuated, geometry-
+	 * gated spill into adjacent authored layers; explicit FLOR worlds retain a
+	 * single isolated slice.
+	 */
+	Sint32 contributionLayerCount;
+	Sint32 contributionLayers[MAPLAYERS];
 	PlayableFloorId playableFloor;
-	vec4_t* tiles;
+	vec4_t* tiles; // layer-major: contribution slice, then local x/y tile
 	int index; // which lightmap this actually exists in
 
 	// a pointer to the light's location in a list

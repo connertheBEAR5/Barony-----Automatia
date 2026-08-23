@@ -11,6 +11,30 @@
 
 #pragma once
 
+/*
+ * Runtime Steam capability state for the Steamworks-enabled executable.
+ * A Steamworks build is not the same thing as a successfully initialized
+ * Steam client: every Steam-only operation must use steamRuntimeAvailable()
+ * before dereferencing a Steam API interface.
+ */
+extern bool steam_initialized;
+extern bool steam_disabled_by_command_line;
+
+inline bool steamRuntimeAvailable()
+{
+	return steam_initialized;
+}
+
+inline bool steamRuntimeDisabledByCommandLine()
+{
+	return steam_disabled_by_command_line;
+}
+
+inline void steamRuntimeDisableByCommandLine()
+{
+	steam_disabled_by_command_line = true;
+}
+
 //TODO: Bugger all void pointers and helper funcs on these.
 void steam_OnP2PSessionRequest(void* p_Callback); //TODO: Finalize porting.
 //void steam_OnGameOverlayActivated(void *callback);

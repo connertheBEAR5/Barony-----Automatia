@@ -22,6 +22,9 @@ using PlayableFloorId = std::int16_t;
 
 constexpr PlayableFloorId DEFAULT_PLAYABLE_FLOOR = 0;
 constexpr std::size_t MAX_PLAYABLE_FLOORS_PER_MAP = 64;
+// Persistent schemas cannot include main.hpp's legacy MAPLAYERS macro.
+// This is the serialized authored structural-layer range: indices 0..31.
+constexpr std::size_t AUTHORED_MAP_LAYER_COUNT = 32;
 
 struct SpatialSpawnContext
 {

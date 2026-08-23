@@ -22,12 +22,16 @@ Opening a UDP socket is not public-listing support.
 The explicit direct-connect LAN path now has a versioned, bounded authoritative
 map-instance snapshot; per-chunk and whole-transfer checksums; reliable
 begin/data/complete records; S.A.M. fingerprint validation; and a
-ready/authorize/client-go barrier before live output. It is build- and
-foundation-tested, not yet live-verified. Required remaining work includes a
-real server/two-client run, loss/reordering and timeout stress, incremental delta
-catch-up, malformed-client testing, Windows coverage, P2P transport integration,
-and durable authenticated reconnect identity. Public or password-protected late
-join must remain unavailable until their authentication requirements are met.
+ready/authorize/client-go barrier before live output. Bounded LJCB/LJCC/LJCE
+incremental catch-up, LJAB aborts, 30-second progress timeouts, and per-slot
+128-bit reconnect bearer identities are implemented. Contained direct-LAN
+new-player probes pass the current snapshot/catch-up/start sequence, but this is
+not a complete graphical two-client acceptance. Required remaining work includes
+that real server/two-client run, a current token-matched returning-player run,
+loss/reordering and timeout stress, malformed-client testing, Windows coverage,
+and P2P transport integration. Public or password-protected late join must
+remain unavailable until their authentication requirements are met. Reconnect
+bearer tokens are session/save credentials, not platform account identity.
 
 4. TRUE RENDERLESS STARTUP
 --------------------------
@@ -37,16 +41,42 @@ short simulated session with no DISPLAY/Wayland server.
 
 5. SAVE AND RESTART RECOVERY
 ----------------------------
-The numeric-slot Linux LAN path uses the versioned persistent-world companion,
-atomic temporary write plus rename, stable custom-item identity, graceful
-shutdown save, and fail-closed validation. A single-map FMOD
+The numeric-slot Linux LAN path writes multiplayer saves under
+savegames/host/ and uses the versioned schema-v3 persistent-world companion,
+matching character/world transaction IDs, atomic temporary write plus rename,
+stable custom-item identity, graceful shutdown save, and fail-closed validation.
+The headless process-only slot 0 is not serialized as a player. Player and
+dynamic-entity spatial records preserve map instance, playable floor, authored
+structural layer, and local Z separately. A single-map FMOD
 start/save/restart/resave acceptance cycle passes. Remaining work is divergent-
 player recovery, unknown-item removal/rehydration acceptance, corrupted-save
 fixtures, clean-shutdown/crash markers, migration coverage, and Windows runtime
 verification.
+
+Steam note: --nosteam skips SteamAPI and therefore disables Steam ownership and
+DLC checks rather than emulating them. DLC remains locked. Use the Steam
+client's supported Offline Mode and launch without --nosteam when Steam
+entitlement is required. No server code may parse private Steam cache files or
+fabricate an offline entitlement.
 
 6. TESTING
 ----------
 Test pre-game join, disconnect, autostart, terminal start/shutdown, invalid
 ports, occupied ports, malformed packets, catalog mismatch, long runtimes, and
 vanilla graphical startup. Unsupported options must fail closed.
+
+CURRENT VALIDATION SNAPSHOT (2026-08-23)
+----------------------------------------
+The primary build is the Steamworks-enabled 15-player `build-super-posix` and
+must use `cmake --build build-super-posix -j6` on the current host. The latest
+source validation passed that build, all six CTest targets, and the Stage 4D/Z3
+Playable-Z characterization. The Linux single-map headless
+start/save/restart/resave cycle and contained direct-LAN new-player probes are
+runtime evidence already recorded; divergent multi-map restart, normal
+graphical two-client late join, token-matched returning reconnect, and Windows
+headless acceptance remain open.
+
+Playable-Z persistence keeps map instance, playable floor, authored structural
+layer, and local Z separate. Legacy ceiling-model visual-light compatibility is
+a client renderer rule and does not alter headless save records, floor scoping,
+or map classification.

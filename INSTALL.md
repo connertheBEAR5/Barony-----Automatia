@@ -101,11 +101,36 @@ You can then remove the installation files.
 
 You can do something along the following lines:
 ```
-mkdir build
-cd build
-cmake ..
-make -j
+cmake --build build-super-posix -j6
 ```
+
+For the Automatia checkout, `build-super-posix` is the primary existing
+Steamworks-enabled 15-player build. Do not use an unrestricted `make -j` or
+`-j$(nproc)` on the current development host; use six parallel jobs to avoid
+system instability. Configure a new build directory only when intentionally
+changing the build profile.
+
+Current Automatia validation snapshot (2026-08-23): this build produces the
+Steamworks-enabled 15-player game and editor. The most recent source validation
+completed the `-j6` build, all six registered CTest targets, and
+`--automatia-stage4d-z3-transition-characterization`. This documentation-only
+sync does not change the build profile or require reconfiguration.
+
+### Steam runtime modes
+
+Launching normally attempts Steamworks initialization. Steam's own Offline
+Mode is the supported way to retain Steam ownership/DLC checks without network
+access: start Steam in Offline Mode, then launch without `--nosteam`.
+
+If Steam initialization fails, the executable continues in the same local,
+Steam-services-off and DLC-locked state used by explicit `--nosteam`.
+
+`--nosteam` skips Steam initialization and permits only the executable's
+non-Steam-dependent local/LAN paths. Steam lobbies, authentication, friends,
+achievements, Workshop/cloud, and Steam DLC are unavailable. It does not read
+Steam cache files or fabricate an entitlement, and therefore it also cannot
+prove Steam base-game ownership. Do not use `--nosteam` where Steam ownership
+enforcement is a distribution requirement.
 
 # Build Flags
 

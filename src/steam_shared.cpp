@@ -48,6 +48,10 @@ CSteamStatistics::CSteamStatistics(SteamStat_t* gStats, SteamGlobalStat_t* gGlob
 
 void CSteamWorkshop::CreateItem()
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	SteamAPICall_t hSteamAPICall = SteamUGC()->CreateItem(STEAM_APPID, k_EWorkshopFileTypeCommunity);
 	m_callResultCreateItem.Set(hSteamAPICall, this,
 		&CSteamWorkshop::OnCreateItem);
@@ -66,6 +70,10 @@ void CSteamWorkshop::OnCreateItem(CreateItemResult_t *pResult, bool bIOFailure)
 
 void CSteamWorkshop::StartItemUpdate()
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	if ( createItemResult.m_nPublishedFileId != 0 )
 	{
 		UGCUpdateHandle = SteamUGC()->StartItemUpdate(STEAM_APPID, createItemResult.m_nPublishedFileId);
@@ -77,6 +85,10 @@ void CSteamWorkshop::StartItemUpdate()
 
 void CSteamWorkshop::StartItemExistingUpdate(PublishedFileId_t fileId)
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	if ( fileId != 0 )
 	{
 		UGCUpdateHandle = SteamUGC()->StartItemUpdate(STEAM_APPID, fileId);
@@ -88,6 +100,10 @@ void CSteamWorkshop::StartItemExistingUpdate(PublishedFileId_t fileId)
 
 void CSteamWorkshop::SubmitItemUpdate(const char *const changeNote)
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	if ( UGCUpdateHandle != 0 )
 	{
 		SteamAPICall_t hSteamAPICall = SteamUGC()->SubmitItemUpdate(UGCUpdateHandle, changeNote);
@@ -109,6 +125,11 @@ void CSteamWorkshop::OnSubmitItemUpdate(SubmitItemUpdateResult_t *pResult, bool 
 
 void CSteamWorkshop::CreateQuerySubscribedItems(EUserUGCList itemListType, EUGCMatchingUGCType searchType, EUserUGCListSortOrder sortOrder)
 {
+	if ( !steamRuntimeAvailable() || !SteamUser() || !SteamUGC() )
+	{
+		subscribedCallStatus = 0;
+		return;
+	}
 	// searchType can look for all results, items only, guides only etc.
 	// sortOrder will sort results by creation date, subscribed date etc.
 	CSteamID steamID = SteamUser()->GetSteamID();
@@ -148,6 +169,10 @@ void CSteamWorkshop::OnSendQueryUGCRequest(SteamUGCQueryCompleted_t *pResult, bo
 
 void CSteamWorkshop::ReadSubscribedItems()
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	if ( SteamUGCQueryCompleted.m_eResult == k_EResultOK )
 	{
 		for ( int i = 0; i < SteamUGCQueryCompleted.m_unNumResultsReturned; ++i )
@@ -171,6 +196,10 @@ void CSteamWorkshop::ReadSubscribedItems()
 
 void CSteamWorkshop::UnsubscribeItemFileID(PublishedFileId_t fileId)
 {
+	if ( !steamRuntimeAvailable() || !SteamUGC() )
+	{
+		return;
+	}
 	SteamAPICall_t hSteamAPICall = SteamUGC()->UnsubscribeItem(fileId);
 	m_callResultUnsubscribeItemRequest.Set(hSteamAPICall, this,
 		&CSteamWorkshop::OnUnsubscribeItemRequest);
@@ -201,7 +230,7 @@ void CSteamWorkshop::StoreResultMessage(std::string message, EResult result)
 bool CSteamStatistics::RequestStats()
 {
 	// Is Steam loaded? If not we can't get stats.
-	if ( NULL == SteamUserStats() || NULL == SteamUser() )
+	if ( !steamRuntimeAvailable() || NULL == SteamUserStats() || NULL == SteamUser() )
 	{
 		return false;
 	}
@@ -224,7 +253,7 @@ bool CSteamStatistics::RequestStats()
 bool CSteamStatistics::RequestGlobalStats()
 {
 	// Is Steam loaded? If not we can't get stats.
-	if ( NULL == SteamUserStats() || NULL == SteamUser() )
+	if ( !steamRuntimeAvailable() || NULL == SteamUserStats() || NULL == SteamUser() )
 	{
 		return false;
 	}
@@ -280,7 +309,7 @@ void CSteamStatistics::OnUserStatsReceived(UserStatsReceived_t *pCallback)
 
 bool CSteamStatistics::StoreStats()
 {
-	if ( m_bInitialized )
+	if ( steamRuntimeAvailable() && SteamUserStats() && m_bInitialized )
 	{
 		// load stats
 		for ( int iStat = 0; iStat < m_iNumStats; ++iStat )
@@ -386,7 +415,7 @@ void CSteamStatistics::OnGlobalStatsReceived(GlobalStatsReceived_t *pCallback, b
 
 bool CSteamStatistics::ClearAllStats()
 {
-	if ( m_bInitialized )
+	if ( steamRuntimeAvailable() && SteamUserStats() && m_bInitialized )
 	{
 		if ( SteamUserStats()->ResetAllStats(false) )
 		{

@@ -125,20 +125,222 @@ static inline bool lightWallBlocksAtLayer(
 
 	layer = clampLightmapLayer(layer);
 
-	// Preserve the original ground-floor wall behavior.
-	const int blockingLayer =
-		layer == 0
-			? OBSTACLELAYER
-			: layer;
+	const bool authoredStackLighting =
+		map.playableFloorUsesAuthoredLayerStack(playableFloor)
+		&& map.hasAuthoredPlayableFloorStack();
+	int blockingLayer = layer == 0 ? OBSTACLELAYER : layer;
+	if ( authoredStackLighting )
+	{
+		/*
+		 * A structural light slice N illuminates the walkable space above
+		 * authored floor N. Its horizontal walls therefore live on N +
+		 * OBSTACLELAYER. Treating authored floor N itself as the wall made an
+		 * upstairs light stop at the first otherwise ordinary floor tile.
+		 * Keep the legacy layer-N rule for ordinary one-floor maps (including
+		 * main-menu maps), where nonzero light layers predate playable Z and
+		 * layer N + 1 may be a ceiling rather than that light's wall mask.
+		 */
+		blockingLayer = layer + OBSTACLELAYER;
+		if ( blockingLayer >= MAPLAYERS )
+		{
+			return false;
+		}
+	}
 
-	const Sint32 tile = map.tileAt(
-		x,
-		y,
-		blockingLayer,
-		playableFloor);
+	Sint32 tile = 0;
+	if ( authoredStackLighting )
+	{
+		/*
+		 * `layer` and blockingLayer are absolute authored structural indices.
+		 * map.tileAt(..., playableFloor) accepts a floor-relative layer for a
+		 * derived floor, so using it here would add playableFloor a second time
+		 * (floor 1 wall layer 2 would incorrectly read authored layer 3).
+		 */
+		const Sint32* structuralTiles =
+			map.tilesForPlayableFloorRendering(playableFloor);
+		if ( !structuralTiles )
+		{
+			return true;
+		}
+		const std::size_t index = static_cast<std::size_t>(blockingLayer)
+			+ static_cast<std::size_t>(y) * MAPLAYERS
+			+ static_cast<std::size_t>(x) * MAPLAYERS * map.height;
+		tile = structuralTiles[index];
+	}
+	else
+	{
+		tile = map.tileAt(x, y, blockingLayer, playableFloor);
+	}
 
 	return tile != 0
 		&& tile != TRANSPARENT_TILE;
+}
+
+static bool lightTileVisibleAtLayer(
+	const int sourceX,
+	const int sourceY,
+	const int targetX,
+	const int targetY,
+	const int layer,
+	const PlayableFloorId playableFloor)
+{
+	const int dx = targetX - sourceX;
+	const int dy = targetY - sourceY;
+	const int dxabs = abs(dx);
+	const int dyabs = abs(dy);
+	real_t a0 = dyabs * .5;
+	real_t b0 = dxabs * .5;
+	int rayX = targetX;
+	int rayY = targetY;
+
+	if ( dxabs >= dyabs )
+	{
+		for ( int i = 0; i < dxabs; ++i )
+		{
+			rayX -= sgn(dx);
+			b0 += dyabs;
+			if ( b0 >= dxabs )
+			{
+				b0 -= dxabs;
+				rayY -= sgn(dy);
+			}
+			if ( lightWallBlocksAtLayer(
+					rayX, rayY, layer, playableFloor) )
+			{
+				return rayX == targetX && rayY == targetY;
+			}
+		}
+	}
+	else
+	{
+		for ( int i = 0; i < dyabs; ++i )
+		{
+			rayY -= sgn(dy);
+			a0 += dxabs;
+			if ( a0 >= dyabs )
+			{
+				a0 -= dyabs;
+				rayX -= sgn(dx);
+			}
+			if ( lightWallBlocksAtLayer(
+					rayX, rayY, layer, playableFloor) )
+			{
+				return rayX == targetX && rayY == targetY;
+			}
+		}
+	}
+	return true;
+}
+
+static bool lightCrossesOpenStructuralLayers(
+	const int sourceX,
+	const int sourceY,
+	const int targetX,
+	const int targetY,
+	const int sourceLayer,
+	const int targetLayer,
+	const PlayableFloorId playableFloor)
+{
+	if ( sourceLayer == targetLayer )
+	{
+		return true;
+	}
+	if ( !map.playableFloorUsesAuthoredLayerStack(playableFloor) )
+	{
+		return false;
+	}
+	if ( !map.hasAuthoredPlayableFloorStack() )
+	{
+		return false;
+	}
+	const Sint32* structuralTiles =
+		map.tilesForPlayableFloorRendering(playableFloor);
+	if ( !structuralTiles )
+	{
+		return false;
+	}
+
+	const int direction = targetLayer > sourceLayer ? 1 : -1;
+	const int crossings = abs(targetLayer - sourceLayer);
+	for ( int step = 1; step <= crossings; ++step )
+	{
+		/*
+		 * Sample each crossed structural plane along the 3D ray, rather than
+		 * copying a lower light straight upward at the target column. This lets
+		 * openings form attenuated cones while solid authored floors/ceilings
+		 * continue to block light transport.
+		 */
+		const real_t interpolation =
+			(static_cast<real_t>(step) - 0.5) / crossings;
+		const int sampleX = static_cast<int>(std::floor(
+			sourceX + (targetX - sourceX) * interpolation + 0.5));
+		const int sampleY = static_cast<int>(std::floor(
+			sourceY + (targetY - sourceY) * interpolation + 0.5));
+		if ( sampleX < 0 || sampleY < 0
+			|| sampleX >= map.width || sampleY >= map.height )
+		{
+			return false;
+		}
+		const int boundaryLayer = direction > 0
+			? sourceLayer + step
+			: sourceLayer - step + 1;
+		const Sint32 boundaryTile = structuralTiles[
+			static_cast<std::size_t>(boundaryLayer)
+			+ static_cast<std::size_t>(sampleY) * MAPLAYERS
+			+ static_cast<std::size_t>(sampleX) * MAPLAYERS * map.height];
+		if ( boundaryTile != 0 && boundaryTile != TRANSPARENT_TILE )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static void prepareLightContributionLayers(light_t& light, const float falloffExp)
+{
+	if ( light.radius <= 0
+		|| !map.playableFloorUsesAuthoredLayerStack(light.playableFloor)
+		|| !map.hasAuthoredPlayableFloorStack() )
+	{
+		return;
+	}
+
+	int count = 1;
+	for ( int candidate = 0; candidate < MAPLAYERS; ++candidate )
+	{
+		if ( candidate == light.layer )
+		{
+			continue;
+		}
+		const float verticalDistance = powf(
+			static_cast<float>((candidate - light.layer) * (candidate - light.layer)),
+			falloffExp);
+		if ( verticalDistance < light.radius )
+		{
+			light.contributionLayers[count++] = candidate;
+		}
+	}
+	if ( count <= 1 )
+	{
+		return;
+	}
+
+	const std::size_t tilesPerLayer = static_cast<std::size_t>(
+		(light.radius * 2 + 1) * (light.radius * 2 + 1));
+	const std::size_t oldBytes = sizeof(vec4_t) * tilesPerLayer;
+	const std::size_t newBytes = oldBytes * static_cast<std::size_t>(count);
+	void* resized = std::realloc(light.tiles, newBytes);
+	if ( !resized )
+	{
+		printlog("failed to expand structural light contribution storage!\n");
+		exit(1);
+	}
+	light.tiles = static_cast<vec4_t*>(resized);
+	memset(
+		reinterpret_cast<Uint8*>(light.tiles) + oldBytes,
+		0,
+		newBytes - oldBytes);
+	light.contributionLayerCount = count;
 }
 light_t* lightSphereShadow(
 	int index,
@@ -190,6 +392,7 @@ light_t* lightSphereShadowOnPlayableFloor(
 			layer,
 			radius
 		);
+	prepareLightContributionLayers(*light, exp);
 
 	r *= 255.f;
 	g *= 255.f;
@@ -214,119 +417,60 @@ light_t* lightSphereShadowOnPlayableFloor(
 
 			const int dx = u - x;
 			const int dy = v - y;
-			const int dxabs = abs(dx);
-			const int dyabs = abs(dy);
-
-			real_t a0 = dyabs * .5;
-			real_t b0 = dxabs * .5;
-
-			int u2 = u;
-			int v2 = v;
-
-bool wallhit = false;
-
-			if ( dxabs >= dyabs )
+			if ( !lightTileVisibleAtLayer(
+					x, y, u, v, light->layer, light->playableFloor) )
 			{
-				for ( int i = 0;
-					i < dxabs;
-					++i )
-				{
-					u2 -= sgn(dx);
-					b0 += dyabs;
-
-					if ( b0 >= dxabs )
-					{
-						b0 -= dxabs;
-						v2 -= sgn(dy);
-					}
-
-if ( lightWallBlocksAtLayer(
-		u2,
-		v2,
-		light->layer,
-		light->playableFloor
-	) )
-{
-	wallhit = true;
-	break;
-}
-				}
-			}
-			else
-			{
-				for ( int i = 0;
-					i < dyabs;
-					++i )
-				{
-					v2 -= sgn(dy);
-					a0 += dxabs;
-
-					if ( a0 >= dyabs )
-					{
-						a0 -= dyabs;
-						u2 -= sgn(dx);
-					}
-
-if ( lightWallBlocksAtLayer(
-		u2,
-		v2,
-		light->layer,
-		light->playableFloor
-	) )
-{
-	wallhit = true;
-	break;
-}
-				}
+				continue;
 			}
 
-			if ( !wallhit
-				|| (wallhit && u2 == u && v2 == v) )
+			const int localOffset =
+				(dy + radius)
+				+ (dx + radius) * (radius * 2 + 1);
+			const int tilesPerLayer =
+				(radius * 2 + 1) * (radius * 2 + 1);
+			for ( int contribution = 0;
+				contribution < light->contributionLayerCount;
+				++contribution )
 			{
-				const float distanceSquared =
-					static_cast<float>(
-						dx * dx + dy * dy
-					);
+				const int targetLayer =
+					light->contributionLayers[contribution];
+				if ( targetLayer != light->layer
+					&& (!lightCrossesOpenStructuralLayers(
+						x, y, u, v, light->layer, targetLayer,
+						light->playableFloor)
+						|| !lightTileVisibleAtLayer(
+							x, y, u, v, targetLayer,
+							light->playableFloor)) )
+				{
+					continue;
+				}
 
-				const float dist =
-					exp != 1.f
+				const int dz = targetLayer - light->layer;
+				const float distanceSquared = static_cast<float>(
+					dx * dx + dy * dy + dz * dz);
+				const float distance = exp != 1.f
 					? powf(distanceSquared, exp)
 					: distanceSquared;
+				const float falloff = std::min<float>(
+					distance / radius, 1.0f);
+				if ( falloff >= 1.f )
+				{
+					continue;
+				}
 
-				const float falloff =
-					std::min<float>(
-						dist / radius,
-						1.0f
-					);
-
-				const int soff =
-					(dy + radius)
-					+ (dx + radius)
-						* (radius * 2 + 1);
-
-				auto& source =
-					light->tiles[soff];
-
+				auto& source = light->tiles[
+					contribution * tilesPerLayer + localOffset];
 				source.x += r - r * falloff;
 				source.y += g - g * falloff;
 				source.z += b - b * falloff;
 				source.w += a - a * falloff;
 
-				const size_t doff =
-					lightmapIndex3D(
-						u,
-						v,
-						light->layer,
-						map.width,
-						map.height
-					);
-
+				const size_t doff = lightmapIndex3D(
+					u, v, targetLayer, map.width, map.height);
 				if ( index )
 				{
-					auto& destination =
-						lightmapForPlayableFloor(
-							index, light->playableFloor, map.width, map.height)[doff];
-
+					auto& destination = lightmapForPlayableFloor(
+						index, light->playableFloor, map.width, map.height)[doff];
 					destination.x += source.x;
 					destination.y += source.y;
 					destination.z += source.z;
@@ -334,14 +478,10 @@ if ( lightWallBlocksAtLayer(
 				}
 				else
 				{
-					for ( int player = 0;
-						player < MAXPLAYERS + 1;
-						++player )
+					for ( int player = 0; player < MAXPLAYERS + 1; ++player )
 					{
-						auto& destination =
-							lightmapForPlayableFloor(
-								player, light->playableFloor, map.width, map.height)[doff];
-
+						auto& destination = lightmapForPlayableFloor(
+							player, light->playableFloor, map.width, map.height)[doff];
 						destination.x += source.x;
 						destination.y += source.y;
 						destination.z += source.z;
@@ -432,6 +572,7 @@ light_t* lightSphereOnPlayableFloor(
 			layer,
 			radius
 		);
+	prepareLightContributionLayers(*light, exp);
 
 	r *= 255.f;
 	g *= 255.f;
@@ -457,69 +598,65 @@ light_t* lightSphereOnPlayableFloor(
 			const int dx = u - x;
 			const int dy = v - y;
 
-			const float distanceSquared =
-				static_cast<float>(
-					dx * dx + dy * dy
-				);
-
-			const float dist =
-				exp != 1.f
-					? powf(distanceSquared, exp)
-					: distanceSquared;
-
-			const float falloff =
-				std::min<float>(
-					dist / radius,
-					1.0f
-				);
-
-			const int soff =
+			const int localOffset =
 				(dy + radius)
 				+ (dx + radius)
 					* (radius * 2 + 1);
-
-			auto& source =
-				light->tiles[soff];
-
-			source.x += r - r * falloff;
-			source.y += g - g * falloff;
-			source.z += b - b * falloff;
-			source.w += a - a * falloff;
-
-			const size_t doff =
-				lightmapIndex3D(
-					u,
-					v,
-					light->layer,
-					map.width,
-					map.height
-				);
-
-			if ( index )
+			const int tilesPerLayer =
+				(radius * 2 + 1) * (radius * 2 + 1);
+			for ( int contribution = 0;
+				contribution < light->contributionLayerCount;
+				++contribution )
 			{
-				auto& destination =
-					lightmapForPlayableFloor(
-						index, light->playableFloor, map.width, map.height)[doff];
-
-				destination.x += source.x;
-				destination.y += source.y;
-				destination.z += source.z;
-				destination.w += source.w;
-			}
-			else
-			{
-				for ( int player = 0;
-					player < MAXPLAYERS + 1;
-					++player )
+				const int targetLayer =
+					light->contributionLayers[contribution];
+				if ( targetLayer != light->layer
+					&& !lightCrossesOpenStructuralLayers(
+						x, y, u, v, light->layer, targetLayer,
+						light->playableFloor) )
 				{
-					auto& destination =
-						lightmapForPlayableFloor(
-							player, light->playableFloor, map.width, map.height)[doff];
-
+					continue;
+				}
+				const int dz = targetLayer - light->layer;
+				const float distanceSquared = static_cast<float>(
+					dx * dx + dy * dy + dz * dz);
+				const float distance = exp != 1.f
+					? powf(distanceSquared, exp)
+					: distanceSquared;
+				const float falloff = std::min<float>(
+					distance / radius, 1.0f);
+				if ( falloff >= 1.f )
+				{
+					continue;
+				}
+				auto& source = light->tiles[
+					contribution * tilesPerLayer + localOffset];
+				source.x += r - r * falloff;
+				source.y += g - g * falloff;
+				source.z += b - b * falloff;
+				source.w += a - a * falloff;
+				const size_t doff = lightmapIndex3D(
+					u, v, targetLayer, map.width, map.height);
+				if ( index )
+				{
+					auto& destination = lightmapForPlayableFloor(
+						index, light->playableFloor, map.width, map.height)[doff];
 					destination.x += source.x;
 					destination.y += source.y;
 					destination.z += source.z;
 					destination.w += source.w;
+				}
+				else
+				{
+					for ( int player = 0; player < MAXPLAYERS + 1; ++player )
+					{
+						auto& destination = lightmapForPlayableFloor(
+							player, light->playableFloor, map.width, map.height)[doff];
+						destination.x += source.x;
+						destination.y += source.y;
+						destination.z += source.z;
+						destination.w += source.w;
+					}
 				}
 			}
 		}

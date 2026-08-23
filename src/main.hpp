@@ -493,6 +493,14 @@ typedef struct map_t
 	 * geometry continues to render from its isolated floor-owned buffer.
 	 */
 	bool playableFloorUsesAuthoredLayerStack(PlayableFloorId playableFloor) const;
+	/*
+	 * Rendering membership is deliberately broader than gameplay membership.
+	 * Two derived floors occupy the same authored vertical world even though
+	 * collision, interaction, and TileEntityList routing remain floor-local.
+	 */
+	bool playableFloorsShareRenderedWorld(
+		PlayableFloorId first, PlayableFloorId second) const;
+	bool hasAuthoredPlayableFloorStack() const;
 	const Sint32* tilesForPlayableFloorRendering(PlayableFloorId playableFloor) const;
 	bool ensurePlayableFloorGeometry(PlayableFloorId playableFloor, bool copyDefaultGeometry = false);
 	bool findLowerPlayableFloorLanding(

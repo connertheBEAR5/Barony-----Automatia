@@ -20,18 +20,22 @@ LJRD client-ready, LJOK spawn authorization, and LJGO client-go records. It uses
 900-byte payloads, network-byte-order sequence/revision fields, per-chunk CRC-32,
 whole-snapshot CRC-32, strict packet lengths, duplicate-content comparison, and
 ordered reassembly after out-of-order receipt. The authoritative save capture
-can now emit the same validated schema-v1 state as a compact network snapshot;
+can now emit the same validated schema-v3 state as a compact network snapshot;
 that snapshot is restricted to the selected active map instance and capped at
 16 MiB before transmission. Client staging revalidates the schema and session
 ID and the S.A.M. catalog fingerprint. An explicit direct-connect LAN server
 started with --late-join now connects this transaction to gameplay JOIN: HELO
 establishes the slot before LJHI requests transfer, LJRD confirms validated
 staging, LJOK authorizes spawn, LJGO confirms client readiness, and an extended
-STRT supplies the selected map identity. A deterministic direct-LAN new-player
-probe passed a seven-chunk scoped snapshot and authorization sequence. Normal
-two-client and corrected returning-player acceptance remain, so the feature is
-not complete. It remains disabled for P2P, public, password-protected, and
-ordinary servers.
+STRT supplies the selected map identity. Bounded LJCB/LJCC/LJCE incremental
+catch-up replays map-local updates produced after snapshot capture and before
+spawn; LJAB plus 30-second progress timeouts clean up incomplete transactions.
+Per-slot 128-bit reconnect bearer identities are issued and validated without
+being logged. Contained direct-LAN new-player probes have passed the current
+snapshot/catch-up/start sequence through higher player slots. Normal graphical
+two-client and corrected token-matched returning-player acceptance remain, so
+the feature is not complete. It remains disabled for P2P, public,
+password-protected, and ordinary servers.
 
 Server-side placement for that future handshake is implemented separately. A
 returning session slot selects its pending saved identity and validated position;
@@ -118,19 +122,24 @@ REQUIRED DEVELOPMENT ORDER
 5. DIVERGENT-1E - save/unload empty instances and restore on entry. Implemented
    but unverified.
 6. DIVERGENT-1F - per-player saved location and restart placement. Implemented;
-   live multi-map verification and authenticated reconnect identity remain.
+   live multi-map verification and a complete token-matched reconnect run
+   remain. Saved reconnect bearer tokens are implemented but are not a platform
+   account identity.
 7. LATEJOIN-1A - connection handshake and catalog validation during gameplay.
    Implemented for explicit direct LAN; runtime acceptance remains.
 8. LATEJOIN-1B - map-instance snapshot transfer. Bounded transaction state and
    pre-authorization live-update gate, wire codec, reassembly, and scoped
-   schema-v1 snapshot serialization implemented. Reliable begin/chunk/complete,
+   schema-v3 snapshot serialization implemented. Reliable begin/chunk/complete,
    client-ready/authorization/client-go transport, gameplay JOIN, and selected-map
-   startup are connected for explicit direct LAN. Live acceptance, timeout and
-   loss stress, and incremental post-snapshot catch-up remain.
+   startup are connected for explicit direct LAN. Incremental post-snapshot
+   catch-up, explicit aborts, and progress timeouts are implemented. Normal
+   two-client acceptance, returning-player acceptance, loss/reordering stress,
+   Windows coverage, and P2P transport remain.
 9. LATEJOIN-1C - entity, mechanism, quest, follower, shop, chest, and item sync.
 10. LATEJOIN-1D - new players begin at start.lmp; compatible returning session
-    slots resume their saved map instance. Implemented; runtime acceptance and
-    durable authenticated identity remain.
+    slots resume their saved map instance. Implemented with saved per-slot
+    reconnect bearer tokens; current token-matched returning-player and full
+    two-client runtime acceptance remain.
 11. HEADLESS-PERSIST - restart recovery and automatic server saves.
 
 NETWORKING INVARIANT
@@ -158,13 +167,38 @@ Save data must store mapFile and instanceId separately for every player and
 MapInstance. Runtime pointers, entity list addresses, and temporary network IDs
 must never be used as persistent map identity.
 
+Playable-Z adds two independent spatial axes inside that MapInstance:
+
+    playableFloor     gameplay/spatial membership
+    authoredMapLayer  physical structural layer, 0..31
+    Entity::z          local model/animation elevation only
+
+Player placements, dynamic entities, and divergent return records preserve the
+floor, authored layer, and local Z separately. Tile persistence is keyed by map
+instance plus playable floor, X, Y, and geometry layer. Never infer an authored
+layer from local Z, and never use playableFloor as ordinary physical height.
+
+Rendering remains independent of packet/simulation membership. A derived
+authored stack is one visible structural world even while gameplay packets and
+entity simulation remain map-instance/floor scoped. Modern entity visuals use
+their structural light slice. Legacy one-floor and isolated-FLOR entity visuals
+retain historical light slice 0 through `visualLightmapLayer()`; this does not
+change their persistent coordinates or turn an old map into a Playable-Z stack.
+Editor ceiling sprite 119 keeps local Z -24 and ELYR owns its modern structural
+layer. No divergent or late-join code may reconstruct that layer from negative
+local Z.
+
 CURRENT SAVE/RESTORE BOUNDARY
 -----------------------------
-The schema-v1 companion save restores validated tile and entity removals,
+The schema-v3 companion save restores validated tile and entity removals,
 dynamic items, gold, boulders, minimaps, story state, dialogue memory, and
-versioned mechanism payloads. Player coordinates for the currently active map
-are restored only after bounds and obstacle validation. Player identity is
-still the session slot, so this is not yet an authenticated reconnect identity.
+versioned mechanism payloads. It validates structural-layer bounds, schema-v3
+floor membership, finite local positions, and unique floor/X/Y/geometry-layer
+tile keys. Schema 1 and 2 remain readable as legacy one-floor records. Missing
+authored-layer fields migrate only through explicit derived-stack metadata.
+Player coordinates for the currently active map are restored only after bounds
+and obstacle validation. Player identity is still the session slot, so this is
+not yet an authenticated reconnect identity.
 
 Restart recovery now builds a saved-player spawn mask before runtime assignment.
 Players belonging to another map are not created in the foreground instance.
@@ -175,6 +209,12 @@ instance, and returns to the original foreground map. This path is build-tested
 but still requires the multi-map restart acceptance run.
 Players saved on an unloaded map remain pending until instance loading and the
 occupied-map scheduler are complete.
+
+The existing entity/visual wire formats reconstruct the normal derived-stack
+case where a dynamic actor's authored layer follows playableFloor. They cannot
+yet encode an independently different authoredMapLayer for a hypothetical
+network entity; do not guess that value from local Z. Treat that as a future
+versioned-protocol concern.
 
 S.A.M. INVARIANT
 ----------------

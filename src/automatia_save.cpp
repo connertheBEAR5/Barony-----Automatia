@@ -77,6 +77,12 @@ bool validPlayableFloor(const Json& value)
     }
     try
     {
+		if (value.is_number_unsigned())
+		{
+			return value.get<std::uint64_t>()
+				<= static_cast<std::uint64_t>(
+					std::numeric_limits<PlayableFloorId>::max());
+		}
         const std::int64_t floor = value.get<std::int64_t>();
         return floor >= std::numeric_limits<PlayableFloorId>::min()
             && floor <= std::numeric_limits<PlayableFloorId>::max();
@@ -85,6 +91,28 @@ bool validPlayableFloor(const Json& value)
     {
         return false;
     }
+}
+
+bool validAuthoredMapLayer(const Json& value)
+{
+	if (!value.is_number_integer())
+	{
+		return false;
+	}
+	try
+	{
+		if (value.is_number_unsigned())
+		{
+			return value.get<std::uint64_t>() < AUTHORED_MAP_LAYER_COUNT;
+		}
+		const std::int64_t layer = value.get<std::int64_t>();
+		return layer >= 0
+			&& layer < static_cast<std::int64_t>(AUTHORED_MAP_LAYER_COUNT);
+	}
+	catch (const std::exception&)
+	{
+		return false;
+	}
 }
 
 bool finiteNumber(const Json& value)
@@ -110,6 +138,118 @@ bool finiteTriplet(const Json& value)
         && finiteNumber(value[0])
         && finiteNumber(value[1])
         && finiteNumber(value[2]);
+}
+
+Result validatePersistentSpatialState(
+	const Json& persistent,
+	const std::unordered_set<std::int64_t>& playableFloors,
+	const std::uint64_t schemaVersion,
+	const std::string& location)
+{
+	auto validateSpatialCollection = [&](const char* key) -> Result
+	{
+		if (!persistent.contains(key))
+		{
+			return success();
+		}
+		const Json& collection = persistent[key];
+		if (!collection.is_array() || collection.size() > 1048576)
+		{
+			return failure(location + "." + key + " is not a bounded array");
+		}
+		for (const Json& record : collection)
+		{
+			if (!record.is_object())
+			{
+				return failure(location + "." + key + " contains a non-object record");
+			}
+			if (record.contains("playable_floor"))
+			{
+				if (!validPlayableFloor(record["playable_floor"]))
+				{
+					return failure(location + "." + key + " contains an invalid playable floor");
+				}
+				if (schemaVersion >= 3
+					&& playableFloors.count(
+						record["playable_floor"].get<std::int64_t>()) == 0)
+				{
+					return failure(location + "." + key + " refers to an unknown playable floor");
+				}
+			}
+			if (record.contains("authored_map_layer")
+				&& !validAuthoredMapLayer(record["authored_map_layer"]))
+			{
+				return failure(location + "." + key + " contains an invalid authored map layer");
+			}
+			if (record.contains("position")
+				&& !finiteTriplet(record["position"]))
+			{
+				return failure(location + "." + key + " contains an invalid local position");
+			}
+		}
+		return success();
+	};
+
+	for (const char* key : {
+		"dynamic_world_items", "dynamic_gold_bags", "dynamic_boulders",
+		"mechanisms"})
+	{
+		const Result result = validateSpatialCollection(key);
+		if (!result)
+		{
+			return result;
+		}
+	}
+
+	if (persistent.contains("tile_states"))
+	{
+		const Json& tiles = persistent["tile_states"];
+		if (!tiles.is_array() || tiles.size() > 1048576)
+		{
+			return failure(location + ".tile_states is not a bounded array");
+		}
+		std::unordered_set<std::string> tileKeys;
+		for (const Json& tile : tiles)
+		{
+			if (!tile.is_object()
+				|| !tile.contains("x") || !tile["x"].is_number_integer()
+				|| !tile.contains("y") || !tile["y"].is_number_integer()
+				|| !tile.contains("layer") || !tile["layer"].is_number_integer()
+				|| !tile.contains("tile") || !tile["tile"].is_number_integer())
+			{
+				return failure(location + ".tile_states contains an invalid tile record");
+			}
+			if (!validAuthoredMapLayer(tile["layer"]))
+			{
+				return failure(location + ".tile_states contains an invalid geometry layer");
+			}
+			const std::int64_t layer = tile["layer"].is_number_unsigned()
+				? static_cast<std::int64_t>(tile["layer"].get<std::uint64_t>())
+				: tile["layer"].get<std::int64_t>();
+			std::int64_t playableFloor = DEFAULT_PLAYABLE_FLOOR;
+			if (tile.contains("playable_floor"))
+			{
+				if (!validPlayableFloor(tile["playable_floor"]))
+				{
+					return failure(location + ".tile_states contains an invalid playable floor");
+				}
+				playableFloor = tile["playable_floor"].get<std::int64_t>();
+			}
+			if (schemaVersion >= 3 && playableFloors.count(playableFloor) == 0)
+			{
+				return failure(location + ".tile_states refers to an unknown playable floor");
+			}
+			const std::string key = std::to_string(playableFloor) + ":"
+				+ tile["x"].dump() + ":"
+				+ tile["y"].dump() + ":"
+				+ std::to_string(layer);
+			if (!tileKeys.insert(key).second)
+			{
+				return failure(location + ".tile_states contains a duplicate floor/x/y/layer key");
+			}
+		}
+	}
+	return success();
 }
 
 Result validateIdentity(const Json& object, const std::string& location)
@@ -346,6 +486,18 @@ Result validate(const Json& document)
                 return failure("world save map instance is missing playable floor Z0");
             }
         }
+		if (instance.contains("persistent_state"))
+		{
+			const Result spatialResult = validatePersistentSpatialState(
+				instance["persistent_state"],
+				validatedFloorIds,
+				version,
+				"map_instances[" + std::to_string(index) + "].persistent_state");
+			if (!spatialResult)
+			{
+				return spatialResult;
+			}
+		}
         if (instance.contains("players_present"))
         {
             const Json& occupants = instance["players_present"];
@@ -446,6 +598,13 @@ Result validate(const Json& document)
                 "players[" + std::to_string(index)
                 + "] has an invalid playable floor");
         }
+		if (player.contains("authored_map_layer")
+			&& !validAuthoredMapLayer(player["authored_map_layer"]))
+		{
+			return failure(
+				"players[" + std::to_string(index)
+				+ "] has an invalid authored map layer");
+		}
         const Result identityResult = validateIdentity(
             player,
             "players[" + std::to_string(index) + "]"

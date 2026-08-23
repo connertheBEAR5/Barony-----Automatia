@@ -25691,20 +25691,26 @@ void drawCharacterPreview(const int player, SDL_Rect pos, int fov, real_t offset
             + (*cvar_char_portrait_static_angle ? playerEntity->yaw : 0)));
         view.y = playerEntity->y / 16.0 + (.92 * sin(offsetyaw
             + (*cvar_char_portrait_static_angle ? playerEntity->yaw : 0)));
-        view.z = playerEntity->z * 2;
+		/*
+		 * Portrait entities use the normal worldRenderZ() transform. Keep the
+		 * preview camera in that same structural world space while retaining the
+		 * entity's local model/animation offset.
+		 */
+		view.z = playerEntity->worldRenderZ() * 2;
         if ( playerEntity->behavior == &actDeathGhostLimb )
         {
             if ( auto node = list_Node(&playerEntity->children, 2) )
             {
                 if ( Entity* entity = (Entity*)node->element )
                 {
-                    view.z = entity->z * 2;
+					view.z = entity->worldRenderZ() * 2;
                 }
             }
         }
         else if ( playerEntity->behavior == &actPlayer )
         {
-            real_t nominalHeight = 0.0;
+			const real_t nominalHeight =
+				mapLayerWorldZ(playerEntity->structuralMapLayer()) * 2;
             view.z = std::min(nominalHeight, view.z);
         }
 

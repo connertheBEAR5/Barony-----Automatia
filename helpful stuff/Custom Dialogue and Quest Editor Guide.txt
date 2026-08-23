@@ -5,6 +5,13 @@ This is the single maintained guide for the custom dialogue/quest
 system. Future packages update this file instead of adding a new
 documentation file for every code change.
 
+Current integration status (2026-08-23): the quest journal UI is implemented;
+Automatia companion saves serialize quest/dialogue state; and dedicated
+per-character saves export/import player-scoped story state. The live dialogue
+runtime still executes only player ownership. Authored party/world scope values
+are retained by the editor but load safely as player scope until those ownership
+models are implemented. Broad multiplayer/reconnect acceptance remains open.
+
 
 1. FILE LOCATION AND DIALOGUE IDS
 =================================
