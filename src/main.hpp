@@ -459,6 +459,24 @@ extern list_t light_l;
 // game world structure
 typedef struct map_t
 {
+	struct AmbienceProperties
+	{
+		bool enabled = false;
+		bool loop = true;
+		Uint8 volume = 100;
+		Uint16 fadeInMilliseconds = 0;
+		Uint16 fadeOutMilliseconds = 0;
+		char resource[256] = "";
+	};
+	struct AmbientLightProperties
+	{
+		// A map-wide RGB lightmap base, like the authored Hell-map lighting.
+		bool enabled = false;
+		Uint8 red = 0;
+		Uint8 green = 0;
+		Uint8 blue = 0;
+	};
+
 	char name[32];   // name of the map
 	char author[32]; // author of the map
 	unsigned int width, height, skybox;  // size of the map + skybox
@@ -475,6 +493,10 @@ typedef struct map_t
 	std::set<int> liquidSfxPlayedTiles;
 	std::map<int, Uint32> tileAttributes;
 	PlayableFloorTable playableFloors;
+	// Optional V4.10 map metadata. This is environmental audio, not music.
+	AmbienceProperties ambience;
+	// Optional V4.10 map metadata. This is visual ambient light, not fog.
+	AmbientLightProperties ambientLight;
 	/*
 	 * Stage Z2B: floor-qualified geometry access.
 	 *

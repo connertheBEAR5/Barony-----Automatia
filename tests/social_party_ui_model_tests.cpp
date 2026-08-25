@@ -1,5 +1,7 @@
 #include "social_party_ui_model.hpp"
 
+#include "party_manager.hpp"
+
 #include <cstdint>
 #include <iostream>
 #include <string>

@@ -13676,7 +13676,12 @@ void EnemyHPDamageBarHandler::EnemyHPDetails::updateWorldCoordinates()
 		{
 			worldX = entity->lerpRenderState.x.position * 16.0;
 			worldY = entity->lerpRenderState.y.position * 16.0;
-			worldZ = entity->lerpRenderState.z.position + enemyBarSettings.getHeightOffset(entity);
+			// Render interpolation stores local model Z. Health bars are world
+			// sprites, so a stacked-floor actor must include its structural map
+			// height or its bar overlaps the actor/bar on the floor below.
+			worldZ = entity->lerpRenderState.z.position
+				+ mapLayerWorldZ(entity->structuralMapLayer())
+				+ enemyBarSettings.getHeightOffset(entity);
 			if ( entity->behavior == &actMonster && entity->getMonsterTypeFromSprite() == BAT_SMALL )
 			{
 				if ( entity->bodyparts.size() > 0 )
@@ -13689,7 +13694,7 @@ void EnemyHPDamageBarHandler::EnemyHPDetails::updateWorldCoordinates()
 		{
 			worldX = entity->x;
 			worldY = entity->y;
-			worldZ = entity->z + enemyBarSettings.getHeightOffset(entity);
+			worldZ = entity->worldRenderZ() + enemyBarSettings.getHeightOffset(entity);
 			if ( entity->behavior == &actMonster && entity->getMonsterTypeFromSprite() == BAT_SMALL )
 			{
 				if ( entity->bodyparts.size() > 0 )
@@ -29454,7 +29459,10 @@ void CalloutRadialMenu::CalloutParticle_t::init(const int player)
 		return;
 	}
 
-	z = parent->z - 4;
+	playableFloor = parent->playableFloor;
+	structuralMapLayer = parent->structuralMapLayer();
+	localZ = parent->z - 4;
+	z = parent->worldRenderZ() - 4;
 
 	type = CalloutRadialMenu::getCalloutTypeForEntity(player, parent);
 }
@@ -29583,6 +29591,14 @@ void CalloutRadialMenu::drawCallouts(const int playernum)
 	{
 		for ( auto& callout : CalloutMenu[i].callouts )
 		{
+			Entity* viewingEntity = Player::getPlayerInteractEntity(playernum);
+			if ( viewingEntity
+				&& callout.second.playableFloor != viewingEntity->playableFloor )
+			{
+				// A top-down marker belongs to one physical floor. Do not project an
+				// upstairs callout into the local player's lower-floor view.
+				continue;
+			}
 			bool selfCallout = false;
 			if ( uidMatchesPlayer(playernum, callout.second.entityUid) )
 			{
@@ -30007,11 +30023,19 @@ void CalloutRadialMenu::update()
 		callout.animate();
 		if ( entity )
 		{
+			callout.playableFloor = entity->playableFloor;
+			callout.structuralMapLayer = entity->structuralMapLayer();
 			if ( TimerExperiments::bUseTimerInterpolation && entity->bUseRenderInterpolation )
 			{
 				callout.x = entity->lerpRenderState.x.position * 16.0;
 				callout.y = entity->lerpRenderState.y.position * 16.0;
-				callout.z = entity->lerpRenderState.z.position + enemyBarSettings.getHeightOffset(entity);
+				// The interpolated Z is local to the model. Radial callouts are
+				// world sprites and therefore need the entity's structural height.
+				callout.localZ = entity->lerpRenderState.z.position
+					+ enemyBarSettings.getHeightOffset(entity) - 4;
+				callout.z = entity->lerpRenderState.z.position
+					+ mapLayerWorldZ(entity->structuralMapLayer())
+					+ enemyBarSettings.getHeightOffset(entity);
 				callout.z -= 4;
 				if ( entity->behavior == &actMonster && entity->getMonsterTypeFromSprite() == BAT_SMALL )
 				{
@@ -30025,7 +30049,9 @@ void CalloutRadialMenu::update()
 			{
 				callout.x = entity->x;
 				callout.y = entity->y;
-				callout.z = entity->z + enemyBarSettings.getHeightOffset(entity);
+				callout.localZ = entity->z
+					+ enemyBarSettings.getHeightOffset(entity) - 4;
+				callout.z = entity->worldRenderZ() + enemyBarSettings.getHeightOffset(entity);
 				callout.z -= 4;
 				if ( entity->behavior == &actMonster && entity->getMonsterTypeFromSprite() == BAT_SMALL )
 				{
@@ -30173,6 +30199,7 @@ bool CalloutRadialMenu::createParticleCallout(Entity* entity, CalloutRadialMenu:
 			if ( i == getPlayer() ) { continue; } // don't send clients their own callout
 			if ( players[i]->isLocalPlayer() ) { continue; }
 			if ( client_disconnected[i] ) { continue; }
+			if ( !serverPlayerCanReceiveActiveMapUpdates(i) ) { continue; }
 
 			strcpy((char*)net_packet->data, "CALL");
 			net_packet->data[4] = getPlayer();
@@ -30197,7 +30224,8 @@ bool CalloutRadialMenu::createParticleCallout(Entity* entity, CalloutRadialMenu:
 
 	return callout.doMessage;
 }
-bool CalloutRadialMenu::createParticleCallout(real_t x, real_t y, real_t z, Uint32 uid, CalloutRadialMenu::CalloutCommand _cmd)
+bool CalloutRadialMenu::createParticleCallout(real_t x, real_t y, real_t z, Uint32 uid,
+	CalloutRadialMenu::CalloutCommand _cmd, int requestedPlayableFloor)
 {
 	if ( _cmd == CALLOUT_CMD_CANCEL ) { return false; }
 
@@ -30220,6 +30248,23 @@ bool CalloutRadialMenu::createParticleCallout(real_t x, real_t y, real_t z, Uint
 	auto& callout = callouts[uid];
 
 	callout = CalloutRadialMenu::CalloutParticle_t(getPlayer(), x, y, z, uid, _cmd);
+	Entity* sourcePlayer = Player::getPlayerInteractEntity(getPlayer());
+	if ( requestedPlayableFloor >= DEFAULT_PLAYABLE_FLOOR
+		&& map.playableFloors.hasFloor(requestedPlayableFloor) )
+	{
+		callout.playableFloor = static_cast<PlayableFloorId>(requestedPlayableFloor);
+		callout.structuralMapLayer = map.playableFloorUsesAuthoredLayerStack(
+			callout.playableFloor)
+			? static_cast<Sint16>(callout.playableFloor)
+			: 0;
+	}
+	else if ( sourcePlayer )
+	{
+		callout.playableFloor = sourcePlayer->playableFloor;
+		callout.structuralMapLayer = sourcePlayer->structuralMapLayer();
+	}
+	callout.localZ = z;
+	callout.z = callout.localZ + mapLayerWorldZ(callout.structuralMapLayer);
 	if ( existingMessageSent > 0 && multiplayer != CLIENT )
 	{
 		if ( (callout.messageSentTick - existingMessageSent) < (TICKS_PER_SECOND * 3.5) )
@@ -30287,6 +30332,7 @@ bool CalloutRadialMenu::createParticleCallout(real_t x, real_t y, real_t z, Uint
 			if ( i == getPlayer() ) { continue; } // don't send clients their own callout
 			if ( players[i]->isLocalPlayer() ) { continue; }
 			if ( client_disconnected[i] ) { continue; }
+			if ( !serverPlayerCanReceiveActiveMapUpdates(i) ) { continue; }
 
 			strcpy((char*)net_packet->data, "CALL");
 			net_packet->data[4] = getPlayer();
@@ -30300,7 +30346,10 @@ bool CalloutRadialMenu::createParticleCallout(real_t x, real_t y, real_t z, Uint
 				Uint16 _y = std::min<Uint16>(std::max<int>(0.0, y / 16), map.height - 1);
 				SDLNet_Write16(_x, &net_packet->data[14]);
 				SDLNet_Write16(_y, &net_packet->data[16]);
-				net_packet->len = 18;
+				SDLNet_Write16(
+					static_cast<Uint16>(callout.playableFloor),
+					&net_packet->data[18]);
+				net_packet->len = 20;
 			}
 			net_packet->address.host = net_clients[i - 1].host;
 			net_packet->address.port = net_clients[i - 1].port;
@@ -30340,7 +30389,13 @@ void CalloutRadialMenu::sendCalloutText(CalloutRadialMenu::CalloutCommand cmd)
 			Uint16 _y = std::min<Uint16>(std::max<int>(0.0, moveToY / 16), map.height - 1);
 			SDLNet_Write16(_x, &net_packet->data[14]);
 			SDLNet_Write16(_y, &net_packet->data[16]);
-			net_packet->len = 18;
+			const Entity* sourcePlayer = Player::getPlayerInteractEntity(getPlayer());
+			SDLNet_Write16(
+				static_cast<Uint16>(sourcePlayer
+					? sourcePlayer->playableFloor
+					: DEFAULT_PLAYABLE_FLOOR),
+				&net_packet->data[18]);
+			net_packet->len = 20;
 		}
 		net_packet->address.host = net_server.host;
 		net_packet->address.port = net_server.port;

@@ -314,6 +314,8 @@ std::vector<std::string> getLinesFromDataFile(std::string filename);
 int loadMainMenuMap(bool blessedAdditionMaps, bool forceVictoryMap, int forcemap = -1);
 int physfsLoadMapFile(int levelToLoad, Uint32 seed, bool useRandSeed, int *checkMapHash = nullptr);
 std::list<std::string> physfsGetFileNamesInDirectory(const char* dir);
+// Applies an authored map-wide ambient-light base to the active lightmaps.
+void initializeMapAmbientLightmap(const map_t& loadedMap);
 std::string physfsFormatMapName(char const * const levelfilename);
 bool physfsModelIndexUpdate(int &start, int &end);
 bool physfsSearchModelsToUpdate();

@@ -1100,6 +1100,20 @@ list_t* Entity::getPowerableNeighbors()
 	getPowerablesOnTile(tx + 1, ty, &return_val, playableFloor); //Check tile to the right.
 	getPowerablesOnTile(tx, ty - 1, &return_val, playableFloor); //Check tile up.
 	getPowerablesOnTile(tx, ty + 1, &return_val, playableFloor); //Check tile down.
+	/*
+	 * A wire may climb one structural floor at the same map tile. Do not search
+	 * beyond the immediately adjacent floors: floor 1 can drive floor 2, and a
+	 * second wire on floor 2 can continue that circuit to floor 3, but floor 1
+	 * never connects directly to floor 3.
+	 */
+	for ( const PlayableFloorId verticalFloor : { playableFloor - 1, playableFloor + 1 } )
+	{
+		if ( verticalFloor >= DEFAULT_PLAYABLE_FLOOR
+			&& map.playableFloors.hasFloor(verticalFloor) )
+		{
+			getPowerablesOnTile(tx, ty, &return_val, verticalFloor);
+		}
+	}
 	//getPowerablesOnTile(tx - 1, ty - 1, &return_val); //Check tile diagonal up left.
 	//getPowerablesOnTile(tx + 1, ty - 1, &return_val); //Check tile diagonal up right.
 	//getPowerablesOnTile(tx - 1, ty + 1, &return_val); //Check tile diagonal down left.

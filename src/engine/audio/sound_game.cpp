@@ -1263,6 +1263,175 @@ void* playSoundNotificationPlayer(int player, Uint16 snd, Uint8 vol)
 }
 #endif
 
+namespace
+{
+#ifdef USE_FMOD
+FMOD::Channel* mapAmbienceChannel = nullptr;
+FMOD::Sound* mapAmbienceSound = nullptr;
+std::string mapAmbienceSignature;
+std::string mapAmbienceInstanceKey;
+Uint16 mapAmbienceFadeOutMilliseconds = 0;
+
+bool isSafeAmbienceVfsPath(const char* resource)
+{
+	if (!resource || resource[0] == '\0')
+	{
+		return false;
+	}
+	const std::string path(resource);
+	if (path.front() == '/' || path.front() == '\\'
+		|| path.find('\\') != std::string::npos || path.find(':') != std::string::npos)
+	{
+		return false;
+	}
+	std::size_t begin = 0;
+	while (begin <= path.size())
+	{
+		const std::size_t end = path.find('/', begin);
+		const std::string component = path.substr(begin,
+			end == std::string::npos ? std::string::npos : end - begin);
+		if (component.empty() || component == "." || component == "..")
+		{
+			return false;
+		}
+		if (end == std::string::npos)
+		{
+			break;
+		}
+		begin = end + 1;
+	}
+	return true;
+}
+
+void fadeAndStopMapAmbience(const Uint16 fadeMilliseconds)
+{
+	if (!mapAmbienceChannel)
+	{
+		return;
+	}
+	bool playing = false;
+	mapAmbienceChannel->isPlaying(&playing);
+	if (playing && fadeMilliseconds > 0 && fmod_system)
+	{
+		unsigned long long dspClock = 0;
+		unsigned long long parentClock = 0;
+		int sampleRate = 48000;
+		fmod_system->getSoftwareFormat(&sampleRate, nullptr, nullptr);
+		mapAmbienceChannel->getDSPClock(&dspClock, &parentClock);
+		float currentVolume = 1.f;
+		mapAmbienceChannel->getVolume(&currentVolume);
+		const unsigned long long endClock = dspClock
+			+ static_cast<unsigned long long>(sampleRate)
+			* fadeMilliseconds / 1000U;
+		mapAmbienceChannel->addFadePoint(dspClock, currentVolume);
+		mapAmbienceChannel->addFadePoint(endClock, 0.f);
+		mapAmbienceChannel->setDelay(0, endClock, true);
+	}
+	else
+	{
+		mapAmbienceChannel->stop();
+	}
+	mapAmbienceChannel = nullptr;
+	if (mapAmbienceSound)
+	{
+		mapAmbienceSound->release();
+		mapAmbienceSound = nullptr;
+	}
+}
+#endif
+}
+
+void stopMapAmbience()
+{
+#ifdef USE_FMOD
+	fadeAndStopMapAmbience(0);
+	mapAmbienceSignature.clear();
+	mapAmbienceInstanceKey.clear();
+	mapAmbienceFadeOutMilliseconds = 0;
+#endif
+}
+
+void syncMapAmbience(const map_t& loadedMap, const std::string& mapInstanceKey)
+{
+#ifdef USE_FMOD
+	if (!mapAmbienceCanUseAudio(headless, no_sound) || !fmod_system || !soundEnvironment_group
+		|| !loadedMap.ambience.enabled
+		|| !isSafeAmbienceVfsPath(loadedMap.ambience.resource))
+	{
+		fadeAndStopMapAmbience(mapAmbienceFadeOutMilliseconds);
+		mapAmbienceSignature.clear();
+		mapAmbienceInstanceKey.clear();
+		mapAmbienceFadeOutMilliseconds = 0;
+		return;
+	}
+	const std::string signature = mapInstanceKey + "\n" + loadedMap.ambience.resource
+		+ "\n" + std::to_string(loadedMap.ambience.volume)
+		+ "\n" + std::to_string(loadedMap.ambience.loop)
+		+ "\n" + std::to_string(loadedMap.ambience.fadeInMilliseconds)
+		+ "\n" + std::to_string(loadedMap.ambience.fadeOutMilliseconds);
+	if (!mapAmbienceRequiresRestart(mapAmbienceInstanceKey, mapInstanceKey)
+		&& signature == mapAmbienceSignature)
+	{
+		return;
+	}
+	fadeAndStopMapAmbience(mapAmbienceFadeOutMilliseconds);
+	mapAmbienceSignature.clear();
+	mapAmbienceInstanceKey.clear();
+	mapAmbienceFadeOutMilliseconds = 0;
+
+	const char* realDir = PHYSFS_getRealDir(loadedMap.ambience.resource);
+	if (!realDir)
+	{
+		printlog("[Map Ambience] Resource '%s' is not mounted in the VFS.",
+			loadedMap.ambience.resource);
+		return;
+	}
+	std::string fullPath(realDir);
+	fullPath.append(PHYSFS_getDirSeparator()).append(loadedMap.ambience.resource);
+	fmod_result = fmod_system->createSound(
+		fullPath.c_str(), FMOD_2D | FMOD_CREATESTREAM, nullptr, &mapAmbienceSound);
+	if (FMODErrorCheck() || !mapAmbienceSound)
+	{
+		mapAmbienceSound = nullptr;
+		return;
+	}
+	fmod_result = fmod_system->playSound(
+		mapAmbienceSound, soundEnvironment_group, true, &mapAmbienceChannel);
+	if (FMODErrorCheck() || !mapAmbienceChannel)
+	{
+		mapAmbienceSound->release();
+		mapAmbienceSound = nullptr;
+		mapAmbienceChannel = nullptr;
+		return;
+	}
+	mapAmbienceChannel->setMode(
+		loadedMap.ambience.loop ? FMOD_LOOP_NORMAL : FMOD_LOOP_OFF);
+	const float targetVolume = loadedMap.ambience.volume / 100.f;
+	mapAmbienceChannel->setVolume(
+		loadedMap.ambience.fadeInMilliseconds > 0 ? 0.f : targetVolume);
+	mapAmbienceChannel->setPaused(false);
+	if (loadedMap.ambience.fadeInMilliseconds > 0)
+	{
+		unsigned long long dspClock = 0;
+		unsigned long long parentClock = 0;
+		int sampleRate = 48000;
+		fmod_system->getSoftwareFormat(&sampleRate, nullptr, nullptr);
+		mapAmbienceChannel->getDSPClock(&dspClock, &parentClock);
+		mapAmbienceChannel->addFadePoint(dspClock, 0.f);
+		mapAmbienceChannel->addFadePoint(
+			dspClock + static_cast<unsigned long long>(sampleRate)
+				* loadedMap.ambience.fadeInMilliseconds / 1000U,
+			targetVolume);
+	}
+	mapAmbienceSignature = signature;
+	mapAmbienceInstanceKey = mapInstanceKey;
+	mapAmbienceFadeOutMilliseconds = loadedMap.ambience.fadeOutMilliseconds;
+#else
+	(void)loadedMap;
+	(void)mapInstanceKey;
+#endif
+}
+
 #ifdef USE_FMOD
 VoiceChat_t VoiceChat;
 VoiceChat_t::RingBuffer VoiceChat_t::ringBufferRecord(2048 * 20);

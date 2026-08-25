@@ -53,20 +53,63 @@ static Uint32 sightedPitWarningShakeTicks[MAXPLAYERS] = { 0 };
 static Uint32 sightedPitPushTicks[MAXPLAYERS] = { 0 };
 extern bool playerAllowedToEnterPit[MAXPLAYERS];
 
-static PlayableFloorId playableFloorForPlayerIndex(const int player)
+// The command wheel is a local-player action.  Do not use the base map layer
+// (or an incidental player slot lookup) while projecting its target: on a
+// playable upper floor that makes the marker appear to pass through the wall
+// the player is actually looking at.  Keeping the entity as the reference
+// also makes the chosen surface stable while a floor transition is pending.
+static void projectCommandTargetOnPlayerFloor(
+	const int player,
+	const Entity& floorReference,
+	const bool requireFloor,
+	const real_t startZOffset,
+	const real_t startZLimit,
+	const real_t verticalStepScale,
+	real_t& targetX,
+	real_t& targetY)
 {
-	if ( player >= 0 && player < MAXPLAYERS
-		&& players[player] && players[player]->entity )
+	real_t startX = cameras[player].x * 16.0;
+	real_t startY = cameras[player].y * 16.0;
+	real_t startZ = cameras[player].z + (4.5 - cameras[player].z) / 2.0 + startZOffset;
+	real_t pitch = cameras[player].vang;
+	if ( pitch < 0 || pitch > PI )
 	{
-		return players[player]->entity->playableFloor;
+		pitch = 0;
 	}
-	return DEFAULT_PLAYABLE_FLOOR;
-}
 
-static Sint32 playerMapTileAt(
-	const int player, const int x, const int y, const int layer)
-{
-	return map.tileAt(x, y, layer, playableFloorForPlayerIndex(player));
+	targetX = startX;
+	targetY = startY;
+	const real_t yaw = cameras[player].ang;
+	// A level camera previously produced a zero increment and an unbounded
+	// loop. Keep the old projection behavior for ordinary pitches, but always
+	// make forward progress and cap the scan to the map's useful extent.
+	const real_t verticalStep = std::max<real_t>(
+		0.01,
+		abs(verticalStepScale * tan(pitch)));
+	const int maximumSteps = std::max(1, static_cast<int>(map.width) * static_cast<int>(map.height) * 2);
+	for ( int step = 0; startZ < startZLimit && step < maximumSteps; ++step, startZ += verticalStep )
+	{
+		startX += 0.1 * cos(yaw);
+		startY += 0.1 * sin(yaw);
+		const int tileX = static_cast<int>(startX) >> 4;
+		const int tileY = static_cast<int>(startY) >> 4;
+		if ( tileX < 0 || tileY < 0 || tileX >= map.width || tileY >= map.height )
+		{
+			break;
+		}
+
+		const bool blocked = map.tileAt(tileX, tileY, OBSTACLELAYER, floorReference.playableFloor) != 0;
+		const bool hasFloor = map.tileAt(tileX, tileY, FLOORLAYER, floorReference.playableFloor) != 0;
+		if ( !blocked && (!requireFloor || hasFloor) )
+		{
+			targetX = startX;
+			targetY = startY;
+		}
+		if ( blocked )
+		{
+			break;
+		}
+	}
 }
 
 /*-------------------------------------------------------------------------------
@@ -989,41 +1032,13 @@ void Player::Ghost_t::handleActions()
 					// we're selecting a point for the ally to move to.
 					if ( my )
 					{
-						real_t startx = cameras[player.playernum].x * 16.0;
-						real_t starty = cameras[player.playernum].y * 16.0;
-						real_t startz = cameras[player.playernum].z + (4.5 - cameras[player.playernum].z) / 2.0 + *cvar_followerStartZ;
-						real_t pitch = cameras[player.playernum].vang;
-						if ( pitch < 0 || pitch > PI )
-						{
-							pitch = 0;
-						}
+						real_t previousx = 0.0;
+						real_t previousy = 0.0;
+						projectCommandTargetOnPlayerFloor(player.playernum, *my, true,
+							*cvar_followerStartZ, *cvar_followerStartZLimit,
+							*cvar_followerMoveTo, previousx, previousy);
 
-						// draw line from the players height and direction until we hit the ground.
-						real_t previousx = startx;
-						real_t previousy = starty;
-						int index = 0;
-						const real_t yaw = cameras[player.playernum].ang;
-						for ( ; startz < *cvar_followerStartZLimit; startz += abs((*cvar_followerMoveTo) * tan(pitch)) )
-						{
-							startx += 0.1 * cos(yaw);
-							starty += 0.1 * sin(yaw);
-							const int index_x = static_cast<int>(startx) >> 4;
-							const int index_y = static_cast<int>(starty) >> 4;
-							index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-							if ( playerMapTileAt(player.playernum, index_x, index_y, FLOORLAYER)
-								&& !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-							{
-								// store the last known good coordinate
-								previousx = startx;// + 16 * cos(yaw);
-								previousy = starty;// + 16 * sin(yaw);
-							}
-							if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-							{
-								break;
-							}
-						}
-
-						createParticleFollowerCommand(previousx, previousy, 0, FOLLOWER_TARGET_PARTICLE, 0);
+						createParticleFollowerCommand(previousx, previousy, 0, FOLLOWER_TARGET_PARTICLE, 0, my);
 						followerMenu.optionSelected = ALLY_CMD_MOVETO_CONFIRM;
 						followerMenu.selectMoveTo = false;
 						followerMenu.moveToX = static_cast<int>(previousx) / 16;
@@ -1149,38 +1164,11 @@ void Player::Ghost_t::handleActions()
 						// we're selecting a point in the world
 						if ( my )
 						{
-							real_t startx = cameras[player.playernum].x * 16.0;
-							real_t starty = cameras[player.playernum].y * 16.0;
-							real_t startz = cameras[player.playernum].z + (4.5 - cameras[player.playernum].z) / 2.0 + *cvar_calloutStartZ;
-							real_t pitch = cameras[player.playernum].vang;
-							if ( pitch < 0 || pitch > PI )
-							{
-								pitch = 0;
-							}
-
-							// draw line from the players height and direction until we hit the ground.
-							real_t previousx = startx;
-							real_t previousy = starty;
-							int index = 0;
-							const real_t yaw = cameras[player.playernum].ang;
-							for ( ; startz < *cvar_calloutStartZLimit; startz += abs((*cvar_calloutMoveTo) * tan(pitch)) )
-							{
-								startx += 0.1 * cos(yaw);
-								starty += 0.1 * sin(yaw);
-								const int index_x = static_cast<int>(startx) >> 4;
-								const int index_y = static_cast<int>(starty) >> 4;
-								index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-								if ( !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-								{
-									// store the last known good coordinate
-									previousx = startx;// + 16 * cos(yaw);
-									previousy = starty;// + 16 * sin(yaw);
-								}
-								if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-								{
-									break;
-								}
-							}
+							real_t previousx = 0.0;
+							real_t previousy = 0.0;
+							projectCommandTargetOnPlayerFloor(player.playernum, *my, false,
+								*cvar_calloutStartZ, *cvar_calloutStartZLimit,
+								*cvar_calloutMoveTo, previousx, previousy);
 
 							calloutMenu.moveToX = previousx;
 							calloutMenu.moveToY = previousy;
@@ -1296,38 +1284,11 @@ void Player::Ghost_t::handleActions()
 					// we're selecting a point in the world
 					if ( my )
 					{
-						real_t startx = cameras[player.playernum].x * 16.0;
-						real_t starty = cameras[player.playernum].y * 16.0;
-						real_t startz = cameras[player.playernum].z + (4.5 - cameras[player.playernum].z) / 2.0 + *cvar_calloutStartZ;
-						real_t pitch = cameras[player.playernum].vang;
-						if ( pitch < 0 || pitch > PI )
-						{
-							pitch = 0;
-						}
-
-						// draw line from the players height and direction until we hit the ground.
-						real_t previousx = startx;
-						real_t previousy = starty;
-						int index = 0;
-						const real_t yaw = cameras[player.playernum].ang;
-						for ( ; startz < *cvar_calloutStartZLimit; startz += abs((*cvar_calloutMoveTo) * tan(pitch)) )
-						{
-							startx += 0.1 * cos(yaw);
-							starty += 0.1 * sin(yaw);
-							const int index_x = static_cast<int>(startx) >> 4;
-							const int index_y = static_cast<int>(starty) >> 4;
-							index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-							if ( !playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-							{
-								// store the last known good coordinate
-								previousx = startx;// + 16 * cos(yaw);
-								previousy = starty;// + 16 * sin(yaw);
-							}
-							if ( playerMapTileAt(player.playernum, index_x, index_y, OBSTACLELAYER) )
-							{
-								break;
-							}
-						}
+						real_t previousx = 0.0;
+						real_t previousy = 0.0;
+						projectCommandTargetOnPlayerFloor(player.playernum, *my, false,
+							*cvar_calloutStartZ, *cvar_calloutStartZLimit,
+							*cvar_calloutMoveTo, previousx, previousy);
 
 						calloutMenu.holdWheel = true;
 						if ( showCalloutCommandsOnGamepad )
@@ -10179,41 +10140,14 @@ void actPlayer(Entity* my)
 							// we're selecting a point for the ally to move to.
 							if ( players[PLAYER_NUM] && players[PLAYER_NUM]->entity )
 							{
-								real_t startx = cameras[PLAYER_NUM].x * 16.0;
-								real_t starty = cameras[PLAYER_NUM].y * 16.0;
-								real_t startz = cameras[PLAYER_NUM].z + (4.5 - cameras[PLAYER_NUM].z) / 2.0 + *cvar_followerStartZ;
-								real_t pitch = cameras[PLAYER_NUM].vang;
-								if ( pitch < 0 || pitch > PI )
-								{
-									pitch = 0;
-								}
+								real_t previousx = 0.0;
+								real_t previousy = 0.0;
+								projectCommandTargetOnPlayerFloor(PLAYER_NUM, *players[PLAYER_NUM]->entity, true,
+									*cvar_followerStartZ, *cvar_followerStartZLimit,
+									*cvar_followerMoveTo, previousx, previousy);
 
-								// draw line from the players height and direction until we hit the ground.
-								real_t previousx = startx;
-								real_t previousy = starty;
-								int index = 0;
-								const real_t yaw = cameras[PLAYER_NUM].ang;
-								for ( ; startz < *cvar_followerStartZLimit; startz += abs((*cvar_followerMoveTo) * tan(pitch)) )
-								{
-									startx += 0.1 * cos(yaw);
-									starty += 0.1 * sin(yaw);
-									const int index_x = static_cast<int>(startx) >> 4;
-									const int index_y = static_cast<int>(starty) >> 4;
-									index = (index_y)* MAPLAYERS + (index_x)* MAPLAYERS * map.height;
-									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, FLOORLAYER)
-										&& !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-									{
-										// store the last known good coordinate
-										previousx = startx;// + 16 * cos(yaw);
-										previousy = starty;// + 16 * sin(yaw);
-									}
-									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-									{
-										break;
-									}
-								}
-
-								createParticleFollowerCommand(previousx, previousy, 0, FOLLOWER_TARGET_PARTICLE, 0);
+								createParticleFollowerCommand(previousx, previousy, 0, FOLLOWER_TARGET_PARTICLE, 0,
+									players[PLAYER_NUM]->entity);
 								followerMenu.optionSelected = ALLY_CMD_MOVETO_CONFIRM;
 								followerMenu.selectMoveTo = false;
 								followerMenu.moveToX = static_cast<int>(previousx) / 16;
@@ -10339,38 +10273,11 @@ void actPlayer(Entity* my)
 								// we're selecting a point in the world
 								if ( players[PLAYER_NUM] && players[PLAYER_NUM]->entity )
 								{
-									real_t startx = cameras[PLAYER_NUM].x * 16.0;
-									real_t starty = cameras[PLAYER_NUM].y * 16.0;
-									real_t startz = cameras[PLAYER_NUM].z + (4.5 - cameras[PLAYER_NUM].z) / 2.0 + *cvar_calloutStartZ;
-									real_t pitch = cameras[PLAYER_NUM].vang;
-									if ( pitch < 0 || pitch > PI )
-									{
-										pitch = 0;
-									}
-
-									// draw line from the players height and direction until we hit the ground.
-									real_t previousx = startx;
-									real_t previousy = starty;
-									int index = 0;
-									const real_t yaw = cameras[PLAYER_NUM].ang;
-									for ( ; startz < *cvar_calloutStartZLimit; startz += abs((*cvar_calloutMoveTo) * tan(pitch)) )
-									{
-										startx += 0.1 * cos(yaw);
-										starty += 0.1 * sin(yaw);
-										const int index_x = static_cast<int>(startx) >> 4;
-										const int index_y = static_cast<int>(starty) >> 4;
-										index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-										if ( !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-										{
-											// store the last known good coordinate
-											previousx = startx;// + 16 * cos(yaw);
-											previousy = starty;// + 16 * sin(yaw);
-										}
-										if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-										{
-											break;
-										}
-									}
+									real_t previousx = 0.0;
+									real_t previousy = 0.0;
+									projectCommandTargetOnPlayerFloor(PLAYER_NUM, *players[PLAYER_NUM]->entity, false,
+										*cvar_calloutStartZ, *cvar_calloutStartZLimit,
+										*cvar_calloutMoveTo, previousx, previousy);
 
 									calloutMenu.moveToX = previousx;
 									calloutMenu.moveToY = previousy;
@@ -10489,38 +10396,11 @@ void actPlayer(Entity* my)
 							// we're selecting a point in the world
 							if ( players[PLAYER_NUM] && players[PLAYER_NUM]->entity )
 							{
-								real_t startx = cameras[PLAYER_NUM].x * 16.0;
-								real_t starty = cameras[PLAYER_NUM].y * 16.0;
-								real_t startz = cameras[PLAYER_NUM].z + (4.5 - cameras[PLAYER_NUM].z) / 2.0 + *cvar_calloutStartZ;
-								real_t pitch = cameras[PLAYER_NUM].vang;
-								if ( pitch < 0 || pitch > PI )
-								{
-									pitch = 0;
-								}
-
-								// draw line from the players height and direction until we hit the ground.
-								real_t previousx = startx;
-								real_t previousy = starty;
-								int index = 0;
-								const real_t yaw = cameras[PLAYER_NUM].ang;
-								for ( ; startz < *cvar_calloutStartZLimit; startz += abs((*cvar_calloutMoveTo) * tan(pitch)) )
-								{
-									startx += 0.1 * cos(yaw);
-									starty += 0.1 * sin(yaw);
-									const int index_x = static_cast<int>(startx) >> 4;
-									const int index_y = static_cast<int>(starty) >> 4;
-									index = (index_y)*MAPLAYERS + (index_x)*MAPLAYERS * map.height;
-									if ( !playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-									{
-										// store the last known good coordinate
-										previousx = startx;// + 16 * cos(yaw);
-										previousy = starty;// + 16 * sin(yaw);
-									}
-									if ( playerMapTileAt(PLAYER_NUM, index_x, index_y, OBSTACLELAYER) )
-									{
-										break;
-									}
-								}
+								real_t previousx = 0.0;
+								real_t previousy = 0.0;
+								projectCommandTargetOnPlayerFloor(PLAYER_NUM, *players[PLAYER_NUM]->entity, false,
+									*cvar_calloutStartZ, *cvar_calloutStartZLimit,
+									*cvar_calloutMoveTo, previousx, previousy);
 
 								calloutMenu.holdWheel = true;
 								if ( showCalloutCommandsOnGamepad )

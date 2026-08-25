@@ -42,8 +42,9 @@ void actWallBuster(Entity* my)
 	{
 		Uint16 x = std::min<Uint16>(std::max<int>(0.0, my->x / 16), map.width - 1);
 		Uint16 y = std::min<Uint16>(std::max<int>(0.0, my->y / 16), map.height - 1);
-		map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
-		map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
+		const PlayableFloorId playableFloor = my->playableFloor;
+		map.setTileAt(x, y, OBSTACLELAYER, 0, playableFloor);
+		map.setTileAt(x, y, CEILINGLAYER, 0, playableFloor);
 		spawnExplosion(my->x, my->y, my->z - 8);
 		if ( multiplayer == SERVER )
 		{
@@ -53,12 +54,21 @@ void actWallBuster(Entity* my)
 				{
 					continue;
 				}
-				strcpy((char*)net_packet->data, "WACD");
+				if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+				{
+					strcpy((char*)net_packet->data, "WACD");
+					net_packet->len = 8;
+				}
+				else
+				{
+					strcpy((char*)net_packet->data, "WACZ");
+					SDLNet_Write16(static_cast<Uint16>(playableFloor), &net_packet->data[8]);
+					net_packet->len = 10;
+				}
 				SDLNet_Write16(x, &net_packet->data[4]);
 				SDLNet_Write16(y, &net_packet->data[6]);
 				net_packet->address.host = net_clients[c - 1].host;
 				net_packet->address.port = net_clients[c - 1].port;
-				net_packet->len = 8;
 				sendPacketSafe(net_sock, -1, net_packet, c - 1);
 			}
 		}
@@ -132,7 +142,10 @@ void actWallBuilder(Entity* my)
 		playSoundEntity( my, 182, 64 );
 		Uint16 x = std::min<Uint16>(std::max<int>(0.0, my->x / 16), map.width - 1);
 		Uint16 y = std::min<Uint16>(std::max<int>(0.0, my->y / 16), map.height - 1);
-		map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] = map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height];
+		const PlayableFloorId playableFloor = my->playableFloor;
+		map.setTileAt(
+			x, y, OBSTACLELAYER,
+			map.tileAt(x, y, FLOORLAYER, playableFloor), playableFloor);
 
 		const real_t effectOffset = 2.0;
 		spawnPoof(static_cast<Sint16>(x * 16.0 - effectOffset), static_cast<Sint16>(y * 16.0 - effectOffset), 8, 1.0);
@@ -148,12 +161,21 @@ void actWallBuilder(Entity* my)
 				{
 					continue;
 				}
-				strcpy((char*)net_packet->data, "WALC");
+				if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+				{
+					strcpy((char*)net_packet->data, "WALC");
+					net_packet->len = 8;
+				}
+				else
+				{
+					strcpy((char*)net_packet->data, "WABZ");
+					SDLNet_Write16(static_cast<Uint16>(playableFloor), &net_packet->data[8]);
+					net_packet->len = 10;
+				}
 				SDLNet_Write16(x, &net_packet->data[4]);
 				SDLNet_Write16(y, &net_packet->data[6]);
 				net_packet->address.host = net_clients[c - 1].host;
 				net_packet->address.port = net_clients[c - 1].port;
-				net_packet->len = 8;
 				sendPacketSafe(net_sock, -1, net_packet, c - 1);
 			}
 		}

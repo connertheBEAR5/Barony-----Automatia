@@ -7202,18 +7202,6 @@ void assignActions(
 	arachnophobia_filter = GameplayPreferences_t::getGameConfigValue(GameplayPreferences_t::GOPT_ARACHNOPHOBIA);
 	colorblind_lobby = GameplayPreferences_t::getGameConfigValue(GameplayPreferences_t::GOPT_COLORBLIND);
 
-	// add lava lights
-	for ( int y = 0; y < map->height; ++y )
-	{
-		for ( int x = 0; x < map->width; ++x )
-		{
-			if ( lavatiles[map->tiles[y * MAPLAYERS + x * MAPLAYERS * map->height]] )
-			{
-				addLight(x, y, "lava");
-			}
-		}
-	}
-
 	// seed the random generator
 
 	map_rng.seedBytes(&mapseed, sizeof(mapseed));
@@ -11135,6 +11123,41 @@ void assignActions(
 			}
 			nextnode = node->next;
 			TileEntityList.addEntity(*entity);
+		}
+	}
+
+	/*
+	 * Lava is authored as a floor tile, not as a Z0-only effect.  By this
+	 * point the entity pass has established every authored playable floor in
+	 * use, so light each collision slice through its own floor-relative tile
+	 * view.  Derived floors share the structural light volume, therefore their
+	 * light must retain the absolute authored layer instead of being written to
+	 * the original layer zero.
+	 */
+	auto addLavaLightsForPlayableFloor = [&](const PlayableFloorId playableFloor)
+	{
+		const Sint32 structuralLayer = map->playableFloorUsesAuthoredLayerStack(playableFloor)
+			? playableFloor
+			: 0;
+		for ( int y = 0; y < map->height; ++y )
+		{
+			for ( int x = 0; x < map->width; ++x )
+			{
+				const Sint32 floorTile = map->tileAt(x, y, FLOORLAYER, playableFloor);
+				if ( floorTile && lavatiles[floorTile] )
+				{
+					addLightOnPlayableFloor(
+						x, y, playableFloor, structuralLayer, "lava");
+				}
+			}
+		}
+	};
+	addLavaLightsForPlayableFloor(DEFAULT_PLAYABLE_FLOOR);
+	for ( const PlayableFloorData& floor : map->playableFloors.floors )
+	{
+		if ( floor.id != DEFAULT_PLAYABLE_FLOOR )
+		{
+			addLavaLightsForPlayableFloor(floor.id);
 		}
 	}
 	if ( playerStartsOnly )

@@ -837,6 +837,21 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(!contains(editor,
         "Z STAIR DOWN must be on map layer 2 or above."));
 
+	// Zed uses one normal-radius light on the camera's physical slice. Creating
+	// one light per authored layer would stack their contributions in the shared
+	// Playable-Z light volume and overexpose the 3D preview.
+	const std::string editorPreviewLight = section(
+		editor,
+		"Keep the editor preview light local to the camera's current",
+		"using Editor3DPreviewState");
+	EXPECT(contains(editorPreviewLight, "entityZToLightmapLayer(camera.z)"));
+	EXPECT(contains(editorPreviewLight, "light_t* editor3DCameraLight"));
+	EXPECT(contains(editorPreviewLight, "editor3DCameraLightLayer"));
+	EXPECT(contains(editorPreviewLight, "\"editor\""));
+	EXPECT(!contains(editorPreviewLight, "editor3DActiveLightLayers"));
+	EXPECT(!contains(editorPreviewLight, "for ( int lightLayer"));
+	EXPECT(!contains(editorPreviewLight, "\"editor\",\n"));
+
     // The old always-on hover overlay is gone; normal sprite hover/selection UI
     // owns transient editor feedback instead.
     EXPECT(!contains(draw, "zStairLabel"));
@@ -1209,6 +1224,100 @@ bool testZ33LayerAuthoringCorrectionContracts()
     return true;
 }
 
+bool testStackedFollowerAndWorldSpriteContracts()
+{
+	const std::string game = readFile(sourcePath("src/game.cpp"));
+	const std::string gameUi = readFile(sourcePath("src/ui/GameUI.cpp"));
+	const std::string interfaceSource = readFile(sourcePath("src/interface/interface.cpp"));
+	const std::string interfaceHeader = readFile(sourcePath("src/interface/interface.hpp"));
+	const std::string minimap = readFile(sourcePath("src/interface/drawminimap.cpp"));
+	const std::string net = readFile(sourcePath("src/net.cpp"));
+	const std::string sprites = readFile(sourcePath("src/actsprite.cpp"));
+	const std::string playerActions = readFile(sourcePath("src/actplayer.cpp"));
+	const std::string magicParticles = readFile(sourcePath("src/magic/actmagic.cpp"));
+	EXPECT(!game.empty());
+	EXPECT(!gameUi.empty());
+	EXPECT(!interfaceSource.empty());
+	EXPECT(!interfaceHeader.empty());
+	EXPECT(!minimap.empty());
+	EXPECT(!net.empty());
+	EXPECT(!sprites.empty());
+	EXPECT(!playerActions.empty());
+	EXPECT(!magicParticles.empty());
+
+	// Same-MapInstance playable-floor movement is authoritative on the server,
+	// puts followers on the leader's floor, and scopes passive visual children.
+	const std::string followerFloorTransition = section(
+		game,
+		"void transitionAutomatiaPlayerFollowersToPlayableFloor(",
+		"bool applyAutomatiaPlayableFloorPlacement(");
+	EXPECT(contains(followerFloorTransition, "multiplayer == CLIENT"));
+	EXPECT(contains(followerFloorTransition, "follower->monsterAllyIndex != playerIndex"));
+	EXPECT(contains(followerFloorTransition, "follower->transitionToPlayableFloor("));
+	EXPECT(contains(followerFloorTransition, "playerEntity.playableFloor"));
+	EXPECT(contains(followerFloorTransition, "syncAutomatiaFollowerSpatialAttachments(*follower)"));
+	EXPECT(contains(followerFloorTransition, "sendEntityUDP(follower, recipient, true)"));
+	EXPECT(contains(game, "transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity)"));
+	EXPECT(contains(game, "void translateAutomatiaWorldAttachments("));
+	EXPECT(contains(game, "entity, entity.x - previousX, entity.y - previousY"));
+
+	// Divergent .lmp transitions preserve the copied Stat, but the re-created
+	// follower is clamped to the returning player's active floor/arrival area.
+	const std::string followerMapTransfer = section(
+		game,
+		"struct TransferredFollower",
+		"if ( !worldState.activate(sourceKey) )");
+	EXPECT(contains(followerMapTransfer, "follower->inheritSpatialContextFrom(destinationEntity)"));
+	EXPECT(contains(followerMapTransfer, "destinationEntity->playableFloor"));
+	EXPECT(contains(followerMapTransfer, "playableFloorPlacementFootprintIsSafe("));
+	EXPECT(contains(followerMapTransfer, "follower->x = followerX"));
+
+	// All world-space speech/callout paths use structural world height rather
+	// than a local entity Z, including custom dialogue choices.
+	const std::string dialogueCoordinates = section(
+		gameUi,
+		"void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::updateWorldCoordinates()",
+		"void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::rebuildCustomChoiceText()");
+	EXPECT(contains(dialogueCoordinates, "mapLayerWorldZ(parentEnt->structuralMapLayer())"));
+	EXPECT(contains(dialogueCoordinates, "parentEnt->worldRenderZ()"));
+	EXPECT(contains(gameUi, "enemyDetails->worldZ = entity->worldRenderZ()"));
+	EXPECT(contains(interfaceSource, "mapLayerWorldZ(entity->structuralMapLayer())"));
+	EXPECT(contains(interfaceSource, "callout.z = entity->worldRenderZ()"));
+	const std::string nametag = section(
+		sprites, "void actSpriteNametag(Entity* my)", "void actSpriteWorldTooltip(Entity* my)");
+	EXPECT(contains(nametag, "my->inheritSpatialContextFrom(parent)"));
+
+	// Command-wheel point pings carry a playable floor, render at that
+	// structural height, and are hidden from world/minimap views on another
+	// floor. Existing 18-byte CALL packets remain accepted and derive their
+	// floor from the sender when that actor is present.
+	EXPECT(contains(interfaceHeader, "PlayableFloorId playableFloor"));
+	EXPECT(contains(interfaceSource, "callout.z = callout.localZ + mapLayerWorldZ"));
+	EXPECT(contains(interfaceSource, "static_cast<Uint16>(callout.playableFloor)"));
+	EXPECT(contains(interfaceSource, "net_packet->len = 20"));
+	EXPECT(contains(interfaceSource, "callout.second.playableFloor != viewingEntity->playableFloor"));
+	EXPECT(contains(minimap, "callout.second.playableFloor != localEntity->playableFloor"));
+	EXPECT(contains(net, "net_packet->len >= 20"));
+
+	// Follower move-to and callout ground selection use the current player
+	// entity as their floor reference. The marker itself inherits that same
+	// spatial context instead of silently rendering on floor zero. Guard the
+	// level-camera path as well: it must advance and terminate rather than
+	// looping forever on tan(0).
+	const std::string commandTargeting = section(
+		playerActions,
+		"static void projectCommandTargetOnPlayerFloor(",
+		"/*-------------------------------------------------------------------------------");
+	EXPECT(contains(commandTargeting, "floorReference.playableFloor"));
+	EXPECT(contains(commandTargeting, "std::max<real_t>("));
+	EXPECT(contains(commandTargeting, "step < maximumSteps"));
+	EXPECT(contains(playerActions, "projectCommandTargetOnPlayerFloor(player.playernum, *my, true"));
+	EXPECT(contains(playerActions, "projectCommandTargetOnPlayerFloor(PLAYER_NUM, *players[PLAYER_NUM]->entity, true"));
+	EXPECT(contains(playerActions, "FOLLOWER_TARGET_PARTICLE, 0, my"));
+	EXPECT(contains(magicParticles, "spatialReference ? spatialReference : uidToEntity(uid)"));
+	return true;
+}
+
 }
 
 int main()
@@ -1224,6 +1333,7 @@ int main()
         && testZ2CRuntimeIsolationContracts()
         && testZ3FloorTransitionContracts()
         && testZ33LayerAuthoringCorrectionContracts()
+		&& testStackedFollowerAndWorldSpriteContracts()
         ? 0
         : 1;
 }

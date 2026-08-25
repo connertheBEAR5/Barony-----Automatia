@@ -15018,9 +15018,11 @@ Entity* castStationaryOrbitingMagicMissile(Entity* parent, int spellID, real_t c
 	return entity;
 }
 
-void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uint32 uid)
+void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uint32 uid,
+	const Entity* spatialReference)
 {
-	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, uidToEntity(uid)); //Particle entity.
+	const Entity* contextEntity = spatialReference ? spatialReference : uidToEntity(uid);
+	Entity* entity = newEntityWithSpatialContext(sprite, 1, map.entities, nullptr, contextEntity); //Particle entity.
 	//entity->sizex = 1;
 	//entity->sizey = 1;
 	entity->x = x;
@@ -15049,7 +15051,7 @@ void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uin
 	// boosty boost
 	for ( int c = 0; c < 10; c++ )
 	{
-		entity = newEntityWithSpatialContext(174, 1, map.entities, nullptr, uidToEntity(uid)); //Particle entity.
+		entity = newEntityWithSpatialContext(174, 1, map.entities, nullptr, contextEntity); //Particle entity.
 		entity->x = x - 4 + local_rng.rand() % 9;
 		entity->y = y - 4 + local_rng.rand() % 9;
 		entity->z = z - 0 + local_rng.rand() % 11;

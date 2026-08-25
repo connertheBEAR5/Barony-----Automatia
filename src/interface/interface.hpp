@@ -1911,7 +1911,12 @@ struct CalloutRadialMenu
 	{
 		real_t x = 0.0;
 		real_t y = 0.0;
+		// localZ plus structuralMapLayer determine the world-space marker Z.
+		// Keeping both avoids treating a playable-floor marker as floor zero.
+		real_t localZ = 0.0;
 		real_t z = 0.0;
+		PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
+		Sint16 structuralMapLayer = 0;
 		Uint32 entityUid = 0;
 		Uint32 ticks = 0;
 		Uint32 lifetime = 1;
@@ -1941,6 +1946,7 @@ struct CalloutRadialMenu
 		CalloutParticle_t(const int player, real_t _x, real_t _y, real_t _z, Uint32 _uid, CalloutCommand _cmd) :
 			x(_x),
 			y(_y),
+			localZ(_z),
 			z(_z),
 			entityUid(_uid),
 			cmd(_cmd)
@@ -1963,7 +1969,8 @@ struct CalloutRadialMenu
 	void initCalloutMenuGUICursor(bool openInventory);
 	void closeCalloutMenuGUI();
 	bool allowedInteractEntity(Entity& selectedEntity, bool updateInteractText = true);
-	bool createParticleCallout(real_t x, real_t y, real_t z, Uint32 uid, CalloutCommand _cmd = CALLOUT_CMD_LOOK); // if true, send message
+	bool createParticleCallout(real_t x, real_t y, real_t z, Uint32 uid,
+		CalloutCommand _cmd = CALLOUT_CMD_LOOK, int requestedPlayableFloor = -1); // if true, send message
 	bool createParticleCallout(Entity* entity, CalloutCommand _cmd, Uint32 overrideUID = 0); // if true, send message
 	enum SetCalloutTextTypes : int {
 		SET_CALLOUT_BANNER_TEXT,

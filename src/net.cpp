@@ -11101,6 +11101,26 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		map.setTileAt(x, y, OBSTACLELAYER, 0, playableFloor);
 	}},
 
+	// create wall on an explicit playable floor.
+	{'WABZ', [](){
+		if ( net_packet->len < 10 )
+		{
+			printlog("[NET][Playable Z] refusing malformed WABZ packet.\n");
+			return;
+		}
+		const int y = SDLNet_Read16(&net_packet->data[6]);
+		const int x = SDLNet_Read16(&net_packet->data[4]);
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(SDLNet_Read16(&net_packet->data[8]));
+		if ( x < 0 || x >= map.width || y < 0 || y >= map.height
+			|| playableFloor == DEFAULT_PLAYABLE_FLOOR
+			|| map.tilesForPlayableFloor(playableFloor) == nullptr )
+		{
+			return;
+		}
+		map.setTileAt(x, y, OBSTACLELAYER,
+			map.tileAt(x, y, FLOORLAYER, playableFloor), playableFloor);
+	}},
+
 	// destroy wall + ceiling
 	{'WACD', [](){
 		int y = SDLNet_Read16(&net_packet->data[6]);
@@ -11110,6 +11130,26 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			map.tiles[OBSTACLELAYER + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
 			map.tiles[(MAPLAYERS - 1) + y * MAPLAYERS + x * MAPLAYERS * map.height] = 0;
 		}
+	}},
+
+	// destroy wall and ceiling on an explicit playable floor.
+	{'WACZ', [](){
+		if ( net_packet->len < 10 )
+		{
+			printlog("[NET][Playable Z] refusing malformed WACZ packet.\n");
+			return;
+		}
+		const int y = SDLNet_Read16(&net_packet->data[6]);
+		const int x = SDLNet_Read16(&net_packet->data[4]);
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(SDLNet_Read16(&net_packet->data[8]));
+		if ( x < 0 || x >= map.width || y < 0 || y >= map.height
+			|| playableFloor == DEFAULT_PLAYABLE_FLOOR
+			|| map.tilesForPlayableFloor(playableFloor) == nullptr )
+		{
+			return;
+		}
+		map.setTileAt(x, y, OBSTACLELAYER, 0, playableFloor);
+		map.setTileAt(x, y, CEILINGLAYER, 0, playableFloor);
 	}},
 
 	// monster music
@@ -11603,8 +11643,11 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			{
 				real_t x = SDLNet_Read16(&net_packet->data[14]);
 				real_t y = SDLNet_Read16(&net_packet->data[16]);
+				const int playableFloor = net_packet->len >= 20
+					? static_cast<int>(SDLNet_Read16(&net_packet->data[18]))
+					: -1;
 				CalloutMenu[pnum].createParticleCallout(
-					x * 16.0 + 8.0, y * 16.0 + 8.0, -4, 0, cmd);
+					x * 16.0 + 8.0, y * 16.0 + 8.0, -4, 0, cmd, playableFloor);
 			}
 		}
 	}},
@@ -13592,6 +13635,31 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		Sint32 x = (Sint32)SDLNet_Read32(&net_packet->data[8]);
 		Sint32 y = (Sint32)SDLNet_Read32(&net_packet->data[12]);
 		Uint32 uid = SDLNet_Read32(&net_packet->data[16]);
+		summonMonsterClient(monster, x, y, uid);
+	}},
+
+	// monster summon on an explicit playable floor.
+	{'SUMZ', [](){
+		if ( net_packet->len < 22 )
+		{
+			printlog("[NET][Playable Z] refusing malformed SUMZ packet.\n");
+			return;
+		}
+		const PlayableFloorId playableFloor = static_cast<PlayableFloorId>(
+			SDLNet_Read16(&net_packet->data[20]));
+		if ( playableFloor == DEFAULT_PLAYABLE_FLOOR
+			|| !map.ensurePlayableFloorGeometry(playableFloor, false) )
+		{
+			printlog("[NET][Playable Z] refusing SUMZ for unavailable floor %d.\n",
+				static_cast<int>(playableFloor));
+			return;
+		}
+		const Monster monster = static_cast<Monster>(SDLNet_Read32(&net_packet->data[4]));
+		const Sint32 x = static_cast<Sint32>(SDLNet_Read32(&net_packet->data[8]));
+		const Sint32 y = static_cast<Sint32>(SDLNet_Read32(&net_packet->data[12]));
+		const Uint32 uid = SDLNet_Read32(&net_packet->data[16]);
+		ScopedPlayableFloorRuntimeContext scope(
+			SpatialSpawnContext{playableFloor, 0, playableFloor});
 		summonMonsterClient(monster, x, y, uid);
 	}},
 
@@ -17259,7 +17327,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			{
 				real_t x = SDLNet_Read16(&net_packet->data[14]);
 				real_t y = SDLNet_Read16(&net_packet->data[16]);
-				if ( CalloutMenu[pnum].createParticleCallout(x * 16.0 + 8.0, y * 16.0 + 8.0, -4, 0, cmd) )
+				const int playableFloor = net_packet->len >= 20
+					? static_cast<int>(SDLNet_Read16(&net_packet->data[18]))
+					: -1;
+				if ( CalloutMenu[pnum].createParticleCallout(
+					x * 16.0 + 8.0, y * 16.0 + 8.0, -4, 0, cmd, playableFloor) )
 				{
 					CalloutMenu[pnum].sendCalloutText(cmd);
 				}

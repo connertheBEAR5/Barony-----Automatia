@@ -124,6 +124,10 @@ void actSpriteNametag(Entity* my)
 	Entity* parent = uidToEntity(my->parent);
 	if ( parent )
 	{
+        // Name tags are NOUPDATE visual children, so they do not receive an
+        // ordinary movement packet when their parent changes playable floors.
+        // Keep them on the parent's structural slice every frame.
+        my->inheritSpatialContextFrom(parent);
         my->flags[INVISIBLE] = false;
 		if ( hide_playertags )
 		{

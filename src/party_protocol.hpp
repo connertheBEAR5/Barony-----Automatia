@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include "party_manager.hpp"
+#include "automatia_identity.hpp"
+#include "party_types.hpp"
 
 #include <cstddef>
 #include <cstdint>

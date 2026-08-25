@@ -13976,7 +13976,8 @@ void openMapWindow(int player) {
                             if ( followerMenu.optionSelected == ALLY_CMD_MOVETO_SELECT )
                             {
                                 if (!players[player]->usingCommand() && players[player]->bControlEnabled) {
-                                    createParticleFollowerCommand(newPing.x, newPing.y, 0, FOLLOWER_TARGET_PARTICLE, 0);
+                                    createParticleFollowerCommand(newPing.x, newPing.y, 0, FOLLOWER_TARGET_PARTICLE, 0,
+                                        players[player]->entity);
                                     followerMenu.optionSelected = ALLY_CMD_MOVETO_CONFIRM;
                                     followerMenu.selectMoveTo = false;
                                     followerMenu.moveToX = static_cast<int>(newPing.x);
@@ -35759,7 +35760,7 @@ void Player::HUD_t::updateEnemyBar(Frame* whichFrame)
         {
             enemyDetails->worldX = entity->x;
             enemyDetails->worldY = entity->y;
-            enemyDetails->worldZ = entity->z;
+            enemyDetails->worldZ = entity->worldRenderZ();
         }
     }
     if ( !enemyDetails || enemyDetails->expired == true )
@@ -44496,20 +44497,26 @@ void Player::WorldUI_t::WorldTooltipDialogue_t::Dialogue_t::updateWorldCoordinat
         {
             x = parentEnt->lerpRenderState.x.position * 16.0;
             y = parentEnt->lerpRenderState.y.position * 16.0;
-            z = parentEnt->lerpRenderState.z.position + setting.offsetZ;
+            // Interpolation stores an entity's local model Z. Dialogue is a
+            // world sprite, so include the owning structural slice just as
+            // the model renderer does. This covers both regular NPC chatter
+            // and authored/custom dialogue choices.
+            z = parentEnt->lerpRenderState.z.position
+                + mapLayerWorldZ(parentEnt->structuralMapLayer())
+                + setting.offsetZ;
         }
         else
         {
             x = parentEnt->x;
             y = parentEnt->y;
-            z = parentEnt->z + setting.offsetZ;
+            z = parentEnt->worldRenderZ() + setting.offsetZ;
         }
     }
     else if ( parentEnt )
     {
         x = parentEnt->x;
         y = parentEnt->y;
-        z = parentEnt->z + setting.offsetZ;
+        z = parentEnt->worldRenderZ() + setting.offsetZ;
     }
 }
 

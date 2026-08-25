@@ -10,6 +10,7 @@
 
 #include "entity.hpp"
 #include "draw.hpp"
+#include "engine/audio/sound.hpp"
 #include "files.hpp"
 #include "game.hpp"
 #include "light.hpp"
@@ -282,8 +283,10 @@ void swapLoadedMapState(map_t& first, map_t& second)
     swap(first.lootexcludelocations, second.lootexcludelocations);
     swap(first.liquidSfxPlayedTiles, second.liquidSfxPlayedTiles);
     swap(first.tileAttributes, second.tileAttributes);
-    swap(first.playableFloors, second.playableFloors);
-    swap(first.filename, second.filename);
+	swap(first.playableFloors, second.playableFloors);
+	swap(first.ambience, second.ambience);
+	swap(first.ambientLight, second.ambientLight);
+	swap(first.filename, second.filename);
 }
 }
 
@@ -1016,6 +1019,13 @@ bool WorldState::activate(const std::string& canonicalKey)
             : entity->second;
     }
     ensureActiveLightmapDimensions(map);
+	if (!destination->runtimeInitialized)
+	{
+		initializeMapAmbientLightmap(map);
+	}
+	// A MapInstance switch is the only runtime event that replaces map ambience.
+	// Playable-Z floor changes keep this identity and therefore never restart it.
+	syncMapAmbience(map, destination->key());
 
 	/*
 	 * activate() swaps map storage directly and therefore bypasses loadMap()'s

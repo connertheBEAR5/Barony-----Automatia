@@ -25,6 +25,74 @@ int* pathMapFlying = NULL;
 int* pathMapGrounded = NULL;
 int pathMapZone = 1;
 
+namespace
+{
+bool playableFloorPathTileOpen(
+	const int x, const int y, const PlayableFloorId playableFloor,
+	const bool flying)
+{
+	const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, playableFloor);
+	const Sint32 obstacleTile = map.tileAt(x, y, OBSTACLELAYER, playableFloor);
+	if ( obstacleTile != 0 )
+	{
+		return false;
+	}
+	if ( flying )
+	{
+		return true;
+	}
+	return floorTile != 0
+		&& !swimmingtiles[floorTile]
+		&& !lavatiles[floorTile];
+}
+
+void buildPlayableFloorPathMap(
+	std::vector<int>& pathMap, const PlayableFloorId playableFloor,
+	const bool flying)
+{
+	const std::size_t count = static_cast<std::size_t>(map.width) * map.height;
+	pathMap.assign(count, 0);
+	int zone = 1;
+	static constexpr int dx[4] = {1, -1, 0, 0};
+	static constexpr int dy[4] = {0, 0, 1, -1};
+	for ( int x = 0; x < map.width; ++x )
+	{
+		for ( int y = 0; y < map.height; ++y )
+		{
+			const int start = y + x * map.height;
+			if ( pathMap[start] || !playableFloorPathTileOpen(x, y, playableFloor, flying) )
+			{
+				continue;
+			}
+			std::vector<std::pair<int, int>> pending{{x, y}};
+			pathMap[start] = zone;
+			for ( std::size_t index = 0; index < pending.size(); ++index )
+			{
+				const auto [cx, cy] = pending[index];
+				for ( int direction = 0; direction < 4; ++direction )
+				{
+					const int nx = cx + dx[direction];
+					const int ny = cy + dy[direction];
+					if ( nx < 0 || ny < 0 || nx >= map.width || ny >= map.height )
+					{
+						continue;
+					}
+					const int next = ny + nx * map.height;
+					if ( !pathMap[next]
+						&& playableFloorPathTileOpen(nx, ny, playableFloor, flying) )
+					{
+						pathMap[next] = zone;
+						pending.emplace_back(nx, ny);
+					}
+				}
+			}
+			++zone;
+		}
+	}
+}
+
+}
+
 #define STRAIGHTCOST 10
 #define DIAGONALCOST 14
 
@@ -475,18 +543,31 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 
 	int* pathMap = (int*) calloc(map.width * map.height, sizeof(int));
 	int pathMapType = GateGraph::GATE_GRAPH_GROUNDED;
+	const PlayableFloorId playableFloor = my->playableFloor;
+	const bool usePlayableFloorPathMap = playableFloor != DEFAULT_PLAYABLE_FLOOR;
+	std::vector<int> playableFloorGroundedPathMap;
+	std::vector<int> playableFloorFlyingPathMap;
 	bool waterWalking = my && my->isWaterWalking();
 	bool lavaWalking = my && my->isLavaWalking();
 	if ( !loading )
 	{
+		if ( usePlayableFloorPathMap )
+		{
+			buildPlayableFloorPathMap(playableFloorGroundedPathMap, playableFloor, false);
+			buildPlayableFloorPathMap(playableFloorFlyingPathMap, playableFloor, true);
+		}
 		if ( levitating || playerCheckPathToExit || waterWalking || lavaWalking )
 		{
-			memcpy(pathMap, pathMapFlying, map.width * map.height * sizeof(int));
+			memcpy(pathMap,
+				usePlayableFloorPathMap ? playableFloorFlyingPathMap.data() : pathMapFlying,
+				map.width * map.height * sizeof(int));
 			pathMapType = GateGraph::GATE_GRAPH_FLYING;
 		}
 		else
 		{
-			memcpy(pathMap, pathMapGrounded, map.width * map.height * sizeof(int));
+			memcpy(pathMap,
+				usePlayableFloorPathMap ? playableFloorGroundedPathMap.data() : pathMapGrounded,
+				map.width * map.height * sizeof(int));
 		}
 	}
 
@@ -511,7 +592,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 			}
 			return NULL;
 		}
-		if ( my->behavior == &actMonster )
+		if ( my->behavior == &actMonster && !usePlayableFloorPathMap )
 		{
 			if ( gateGraph[pathMapType].bIsInit )
 			{
@@ -547,7 +628,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 		{
 			for ( int x = 0; x < map.width; ++x )
 			{
-				if ( !map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height] )
+				if ( !map.tileAt(x, y, FLOORLAYER, playableFloor) )
 				{
 					pathMap[y + x * map.height] = 0;
 				}
@@ -560,16 +641,16 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 		{
 			for ( int x = 0; x < map.width; ++x )
 			{
-				int index = y * MAPLAYERS + x * MAPLAYERS * map.height;
-				if ( !map.tiles[index] )
+				const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, playableFloor);
+				if ( !floorTile )
 				{
 					pathMap[y + x * map.height] = 0;
 				}
-				else if ( lavatiles[map.tiles[index]] && !lavaWalking )
+				else if ( lavatiles[floorTile] && !lavaWalking )
 				{
 					pathMap[y + x * map.height] = 0;
 				}
-				else if ( swimmingtiles[map.tiles[index]] && !waterWalking )
+				else if ( swimmingtiles[floorTile] && !waterWalking )
 				{
 					pathMap[y + x * map.height] = 0;
 				}
@@ -581,6 +662,10 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 	for ( auto entityNode = map.entities->first; entityNode != nullptr; entityNode = entityNode->next )
 	{
 		Entity* entity = (Entity*)entityNode->element;
+		if ( entity->playableFloor != playableFloor )
+		{
+			continue;
+		}
 		if ( entity->flags[PASSABLE] )
 		{
 			if ( entity->behavior == &actSpearTrap 
@@ -661,8 +746,8 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 			int x = std::min<unsigned int>(std::max<int>(0, entity->x / 16), map.width - 1);
 			int y = std::min<unsigned int>(std::max<int>(0, entity->y / 16), map.height - 1);
 			if ( entity->sprite == 41
-			|| lavatiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]]
-			|| swimmingtiles[map.tiles[y * MAPLAYERS + x * MAPLAYERS * map.height]] )
+			|| lavatiles[map.tileAt(x, y, FLOORLAYER, playableFloor)]
+			|| swimmingtiles[map.tileAt(x, y, FLOORLAYER, playableFloor)] )
 			{
 				//Fix to make ladders generate in hell.
 				continue;

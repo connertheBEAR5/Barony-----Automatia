@@ -41,6 +41,7 @@ typedef int16_t opus_int16;
 #include "../../interface/consolecommand.hpp"
 
 extern Uint32 numsounds;
+struct map_t;
 bool initSoundEngine(); //If it fails to initialize the sound engine, it'll just disable audio.
 void exitSoundEngine();
 int loadSoundResources(real_t base_load_percent, real_t top_load_percent);
@@ -50,6 +51,24 @@ void setGlobalVolume(real_t master, real_t music, real_t gameplay, real_t ambien
 void setAudioDevice(const std::string& device);
 void setRecordDevice(const std::string& device);
 bool loadMusic();
+// Keeps a single non-spatial environmental loop scoped to the active map instance.
+// The implementation is a no-op for headless/no-audio builds.
+void syncMapAmbience(const map_t& map, const std::string& mapInstanceKey);
+void stopMapAmbience();
+
+// Kept independent of the audio backend so runtime characterizations can prove
+// instance scoping without claiming to verify audible output.
+inline bool mapAmbienceRequiresRestart(
+	const std::string& activeMapInstanceKey,
+	const std::string& requestedMapInstanceKey)
+{
+	return activeMapInstanceKey != requestedMapInstanceKey;
+}
+
+inline bool mapAmbienceCanUseAudio(const bool isHeadless, const bool soundDisabled)
+{
+	return !isHeadless && !soundDisabled;
+}
 
 #ifdef USE_FMOD
 

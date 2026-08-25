@@ -8,6 +8,8 @@
 
 #include "party_chat.hpp"
 
+#include "party_manager.hpp"
+
 #include <algorithm>
 #include <cstring>
 

@@ -8,6 +8,7 @@
 
 #include "automatia_world_save.hpp"
 
+#include "party_persistence.hpp"
 #include "world_state.hpp"
 
 namespace AutomatiaSave
@@ -61,7 +62,9 @@ Json captureWorldState(const std::string& sessionId, const WorldState& world)
             {"persistent_state", Json::object()}
         });
     }
-    document["party"] = world.partyManager().toPersistentJson();
+    document["party"] =
+        AutomatiaParty::PartyPersistence::toPersistentJson(
+            world.partyManager());
     return document;
 }
 }

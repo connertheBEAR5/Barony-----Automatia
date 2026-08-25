@@ -1038,7 +1038,8 @@ Entity* createParticleSapCenter(Entity* parent, Entity* target, int spell, int s
 Entity* createParticleTimer(Entity* parent, int duration, int sprite);
 void createParticleSap(Entity* parent);
 void createParticleExplosionCharge(Entity* parent, int sprite, int particleCount, double scale);
-void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uint32 uid);
+void createParticleFollowerCommand(real_t x, real_t y, real_t z, int sprite, Uint32 uid,
+	const Entity* spatialReference = nullptr);
 Entity* createParticleCastingIndicator(Entity* parent, real_t x, real_t y, real_t z, Uint32 lifetime, Uint32 followUid);
 Entity* createParticleAOEIndicator(Entity* parent, real_t x, real_t y, real_t z, Uint32 lifetime, int size);
 static const int FOLLOWER_SELECTED_PARTICLE = 1229;

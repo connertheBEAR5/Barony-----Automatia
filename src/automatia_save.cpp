@@ -8,7 +8,7 @@
 
 #include "automatia_save.hpp"
 
-#include "party_manager.hpp"
+#include "party_persistence.hpp"
 #include "world_instance.hpp"
 #include "playable_z.hpp"
 
@@ -399,7 +399,7 @@ Result validate(const Json& document)
             return failure("world save party state is missing");
         }
         std::string partyError;
-        if (!AutomatiaParty::PartyManager::validatePersistentJson(
+        if (!AutomatiaParty::PartyPersistence::validatePersistentJson(
                 document["party"], partyError))
         {
             return failure("world save party state is invalid: " + partyError);

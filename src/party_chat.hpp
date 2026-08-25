@@ -8,12 +8,15 @@
 
 #pragma once
 
-#include "party_manager.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
+
+namespace AutomatiaParty
+{
+class PartyManager;
+}
 
 namespace AutomatiaPartyChat
 {

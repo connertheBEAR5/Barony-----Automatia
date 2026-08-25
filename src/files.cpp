@@ -66,6 +66,263 @@ constexpr std::uint16_t kPlayableZExtensionVersion = 2;
 constexpr std::size_t kPlayableZExtensionHeaderBytes = 12;
 constexpr std::size_t kPlayableZMaximumPayloadBytes = 512U * 1024U * 1024U;
 
+// V4.10 keeps map-level metadata separate from the Playable-Z extension.
+// It is placed immediately before PZLV so older V4.9 payload rules remain intact.
+constexpr char kMapMetadataMagic[4] = {'M', 'P', 'M', 'D'};
+constexpr std::uint16_t kMapMetadataVersion = 1;
+constexpr std::size_t kMapMetadataHeaderBytes = 12;
+constexpr std::size_t kMapMetadataMaximumPayloadBytes = 1024;
+
+bool isSafeMapAmbienceResource(const char* resource)
+{
+	if (!resource || resource[0] == '\0')
+	{
+		return false;
+	}
+	const std::string path(resource);
+	if (path.size() >= sizeof(map_t::AmbienceProperties::resource)
+		|| path.front() == '/' || path.front() == '\\'
+		|| path.find(':') != std::string::npos
+		|| path.find('\\') != std::string::npos)
+	{
+		return false;
+	}
+	std::size_t componentStart = 0;
+	while (componentStart <= path.size())
+	{
+		const std::size_t componentEnd = path.find('/', componentStart);
+		const std::string component = path.substr(
+			componentStart,
+			componentEnd == std::string::npos
+			? std::string::npos : componentEnd - componentStart);
+		if (component.empty() || component == "." || component == "..")
+		{
+			return false;
+		}
+		if (componentEnd == std::string::npos)
+		{
+			break;
+		}
+		componentStart = componentEnd + 1;
+	}
+	return std::none_of(path.begin(), path.end(), [](const unsigned char c) {
+		return c < 32 || c == 127;
+	});
+}
+
+void resetMapAmbience(map_t& loadedMap)
+{
+	loadedMap.ambience = {};
+	loadedMap.ambientLight = {};
+}
+
+void appendMapMetadataU16(std::vector<std::uint8_t>& output, const std::uint16_t value)
+{
+	output.push_back(static_cast<std::uint8_t>(value & 0xffU));
+	output.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xffU));
+}
+
+void appendMapMetadataU32(std::vector<std::uint8_t>& output, const std::uint32_t value)
+{
+	for (unsigned shift = 0; shift < 32; shift += 8)
+	{
+		output.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+	}
+}
+
+bool readMapMetadataU16(
+	const std::vector<std::uint8_t>& input, std::size_t& offset, std::uint16_t& value)
+{
+	if (offset > input.size() || input.size() - offset < 2)
+	{
+		return false;
+	}
+	value = static_cast<std::uint16_t>(input[offset])
+		| static_cast<std::uint16_t>(input[offset + 1]) << 8U;
+	offset += 2;
+	return true;
+}
+
+bool readMapMetadataU32(
+	const std::vector<std::uint8_t>& input, std::size_t& offset, std::uint32_t& value)
+{
+	if (offset > input.size() || input.size() - offset < 4)
+	{
+		return false;
+	}
+	value = static_cast<std::uint32_t>(input[offset])
+		| static_cast<std::uint32_t>(input[offset + 1]) << 8U
+		| static_cast<std::uint32_t>(input[offset + 2]) << 16U
+		| static_cast<std::uint32_t>(input[offset + 3]) << 24U;
+	offset += 4;
+	return true;
+}
+
+bool saveMapMetadata(File* fp, const map_t& loadedMap)
+{
+	if (!fp)
+	{
+		return false;
+	}
+	const bool enabled = loadedMap.ambience.enabled
+		&& isSafeMapAmbienceResource(loadedMap.ambience.resource);
+	const std::size_t resourceLength = enabled ? std::strlen(loadedMap.ambience.resource) : 0;
+	std::vector<std::uint8_t> ambience;
+	ambience.reserve(8 + resourceLength);
+	ambience.push_back(enabled ? 1 : 0);
+	ambience.push_back(loadedMap.ambience.loop ? 1 : 0);
+	ambience.push_back(loadedMap.ambience.volume);
+	ambience.push_back(0);
+	appendMapMetadataU16(ambience, loadedMap.ambience.fadeInMilliseconds);
+	appendMapMetadataU16(ambience, loadedMap.ambience.fadeOutMilliseconds);
+	appendMapMetadataU16(ambience, static_cast<std::uint16_t>(resourceLength));
+	ambience.insert(ambience.end(), loadedMap.ambience.resource,
+		loadedMap.ambience.resource + resourceLength);
+
+	std::vector<std::uint8_t> payload;
+	payload.insert(payload.end(), {'A', 'M', 'B', 'I'});
+	appendMapMetadataU32(payload, static_cast<std::uint32_t>(ambience.size()));
+	payload.insert(payload.end(), ambience.begin(), ambience.end());
+
+	const std::uint8_t ambientLight[] =
+	{
+		static_cast<std::uint8_t>(loadedMap.ambientLight.enabled ? 1 : 0),
+		loadedMap.ambientLight.red,
+		loadedMap.ambientLight.green,
+		loadedMap.ambientLight.blue
+	};
+	payload.insert(payload.end(), {'A', 'M', 'B', 'L'});
+	appendMapMetadataU32(payload, sizeof(ambientLight));
+	payload.insert(payload.end(), std::begin(ambientLight), std::end(ambientLight));
+	if (payload.size() > kMapMetadataMaximumPayloadBytes)
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> header;
+	header.insert(header.end(), kMapMetadataMagic, kMapMetadataMagic + 4);
+	appendMapMetadataU16(header, kMapMetadataVersion);
+	appendMapMetadataU16(header, 0);
+	appendMapMetadataU32(header, static_cast<std::uint32_t>(payload.size()));
+	return fp->write(header.data(), sizeof(std::uint8_t), header.size()) == header.size()
+		&& fp->write(payload.data(), sizeof(std::uint8_t), payload.size()) == payload.size();
+}
+
+bool loadMapMetadata(File* fp, map_t& loadedMap, const char* filename)
+{
+	resetMapAmbience(loadedMap);
+	if (!fp)
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> header(kMapMetadataHeaderBytes);
+	if (fp->read(header.data(), sizeof(std::uint8_t), header.size()) != header.size()
+		|| !std::equal(kMapMetadataMagic, kMapMetadataMagic + 4, header.begin()))
+	{
+		printlog("[Map Metadata] Map '%s' has an invalid MPMD envelope.", filename);
+		return false;
+	}
+	std::size_t headerOffset = 4;
+	std::uint16_t version = 0;
+	std::uint16_t reserved = 0;
+	std::uint32_t payloadLength = 0;
+	if (!readMapMetadataU16(header, headerOffset, version)
+		|| !readMapMetadataU16(header, headerOffset, reserved)
+		|| !readMapMetadataU32(header, headerOffset, payloadLength)
+		|| version != kMapMetadataVersion || reserved != 0
+		|| payloadLength > kMapMetadataMaximumPayloadBytes)
+	{
+		return false;
+	}
+	std::vector<std::uint8_t> payload(payloadLength);
+	if (fp->read(payload.data(), sizeof(std::uint8_t), payload.size()) != payload.size())
+	{
+		return false;
+	}
+	std::size_t offset = 0;
+	bool sawAmbience = false;
+	bool sawAmbientLight = false;
+	while (offset < payload.size())
+	{
+		if (payload.size() - offset < 8)
+		{
+			return false;
+		}
+		const char tag[5] = {static_cast<char>(payload[offset]), static_cast<char>(payload[offset + 1]),
+			static_cast<char>(payload[offset + 2]), static_cast<char>(payload[offset + 3]), '\0'};
+		offset += 4;
+		std::uint32_t chunkLength = 0;
+		if (!readMapMetadataU32(payload, offset, chunkLength)
+			|| chunkLength > payload.size() - offset)
+		{
+			return false;
+		}
+		const std::size_t chunkEnd = offset + chunkLength;
+		if (std::memcmp(tag, "AMBI", 4) == 0)
+		{
+			if (sawAmbience || chunkLength < 10)
+			{
+				return false;
+			}
+			sawAmbience = true;
+			const std::uint8_t enabled = payload[offset++];
+			const std::uint8_t loop = payload[offset++];
+			const std::uint8_t volume = payload[offset++];
+			const std::uint8_t chunkReserved = payload[offset++];
+			std::uint16_t fadeIn = 0;
+			std::uint16_t fadeOut = 0;
+			std::uint16_t resourceLength = 0;
+			if ((enabled != 0 && enabled != 1) || (loop != 0 && loop != 1)
+				|| chunkReserved != 0 || !readMapMetadataU16(payload, offset, fadeIn)
+				|| !readMapMetadataU16(payload, offset, fadeOut)
+				|| !readMapMetadataU16(payload, offset, resourceLength)
+				|| resourceLength >= sizeof(loadedMap.ambience.resource)
+				|| resourceLength != chunkEnd - offset)
+			{
+				return false;
+			}
+			std::string resource(reinterpret_cast<const char*>(payload.data() + offset), resourceLength);
+			offset += resourceLength;
+			if (enabled && !isSafeMapAmbienceResource(resource.c_str()))
+			{
+				return false;
+			}
+			loadedMap.ambience.enabled = enabled != 0;
+			loadedMap.ambience.loop = loop != 0;
+			loadedMap.ambience.volume = volume;
+			loadedMap.ambience.fadeInMilliseconds = fadeIn;
+			loadedMap.ambience.fadeOutMilliseconds = fadeOut;
+			std::memcpy(loadedMap.ambience.resource, resource.data(), resourceLength);
+			loadedMap.ambience.resource[resourceLength] = '\0';
+		}
+		else if (std::memcmp(tag, "AMBL", 4) == 0)
+		{
+			if (sawAmbientLight || chunkLength != 4)
+			{
+				return false;
+			}
+			sawAmbientLight = true;
+			const std::uint8_t enabled = payload[offset++];
+			if (enabled != 0 && enabled != 1)
+			{
+				return false;
+			}
+			loadedMap.ambientLight.enabled = enabled != 0;
+			loadedMap.ambientLight.red = payload[offset++];
+			loadedMap.ambientLight.green = payload[offset++];
+			loadedMap.ambientLight.blue = payload[offset++];
+		}
+		else
+		{
+			offset = chunkEnd;
+		}
+		if (offset != chunkEnd)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void appendPlayableZU16(std::vector<std::uint8_t>& output, const std::uint16_t value)
 {
     output.push_back(static_cast<std::uint8_t>(value & 0xffU));
@@ -372,7 +629,13 @@ bool savePlayableZExtension(File* fp, const map_t& loadedMap)
             appendPlayableZI32(layerTransitions, entity->persistentID);
             appendPlayableZI16(layerTransitions, entity->verticalLayerTransitionDelta);
             appendPlayableZI16(layerTransitions, entity->verticalLayerTransitionRotation);
-            appendPlayableZI32(layerTransitions, entity->verticalLayerTransitionModel);
+			// Model 0 historically meant "use the directional stair default".
+			// Persist the resolved model so editor previews never select
+			// system/null.vox for a valid layer stair.
+			appendPlayableZI32(layerTransitions,
+				entity->verticalLayerTransitionModel > 0
+					? entity->verticalLayerTransitionModel
+					: (entity->verticalLayerTransitionDelta > 0 ? 161 : 253));
             appendPlayableZI32(layerTransitions, entity->floorDecorationHeightOffset);
             appendPlayableZI32(layerTransitions, entity->floorDecorationXOffset);
             appendPlayableZI32(layerTransitions, entity->floorDecorationYOffset);
@@ -3410,6 +3673,28 @@ static ConsoleVariable<float> cvar_hell_ambience("/hell_ambience", hellAmbience)
 static ConsoleVariable<Vector4> cvar_map_ambience("/map_ambience", { 0.f, 0.f, 0.f, 0.f });
 #endif
 
+void initializeMapAmbientLightmap(const map_t& loadedMap)
+{
+	if (!loadedMap.ambientLight.enabled)
+	{
+		return;
+	}
+	const vec4_t color =
+	{
+		static_cast<float>(loadedMap.ambientLight.red),
+		static_cast<float>(loadedMap.ambientLight.green),
+		static_cast<float>(loadedMap.ambientLight.blue),
+		0.f
+	};
+	const std::size_t lightmapSize = lightmapSize3D(loadedMap.width, loadedMap.height);
+	const std::size_t smoothedSize = lightmapSmoothedSize3D(loadedMap.width, loadedMap.height);
+	for (int player = 0; player < MAXPLAYERS + 1; ++player)
+	{
+		lightmaps[player].assign(lightmapSize, color);
+		lightmapsSmoothed[player].assign(smoothedSize, color);
+	}
+}
+
 /*-------------------------------------------------------------------------------
 
 	loadMap
@@ -3496,10 +3781,19 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 	fp->read(
 		valid_data,
 		sizeof(char),
-		strlen("BARONY LMPV2.0")
+		strlen("BARONY LMPV4.10")
 	);
 
 	if ( strncmp(
+			valid_data,
+			"BARONY LMPV4.10",
+			strlen("BARONY LMPV4.10")
+		) == 0 )
+	{
+		// V4.10 adds optional map-level metadata before the unchanged PZLV tail.
+		editorVersion = 50;
+	}
+	else if ( strncmp(
 			valid_data,
 			"BARONY LMPV4.9",
 			strlen("BARONY LMPV4.9")
@@ -3658,6 +3952,12 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 			return -1;
 		}
 	}
+	// V4.10 is one byte longer than every prior LMP header. Restore the
+	// historical payload offset after probing an older file.
+	if (editorVersion != 50 && editorVersion != 1)
+	{
+		fp->seek(static_cast<long>(strlen("BARONY LMPV4.9")), File::SeekMode::SET);
+	}
 	/*
 	* Remember the format version only when loading the active world map.
 	*
@@ -3734,6 +4034,7 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 			}
 		}
 	}
+	resetMapAmbience(*destmap);
 	fp->read(destmap->name, sizeof(char), 32); // map name
 	fp->read(destmap->author, sizeof(char), 32); // map author
 	fp->read(&destmap->width, sizeof(Uint32), 1); // map width
@@ -4660,6 +4961,17 @@ fp->read(&numentities, sizeof(Uint32), 1);
 		mapHashData += (sprite * c);
 	}
 
+	if (editorVersion >= 50
+		&& !loadMapMetadata(fp, *destmap, filename))
+	{
+		FileIO::close(fp);
+		list_FreeAll(entlist);
+		if (creatureList)
+		{
+			list_FreeAll(creatureList);
+		}
+		return -1;
+	}
 	if (editorVersion >= 49
 		&& !loadPlayableZExtension(fp, *destmap, entlist, filename))
 	{
@@ -4738,11 +5050,19 @@ fp->read(&numentities, sizeof(Uint32), 1);
 
 #ifndef EDITOR
 		map.setMapHDRSettings();
+		if (const WorldInstanceIdentity* identity = worldState.activeIdentity())
+		{
+			syncMapAmbience(map, identity->key());
+		}
 #endif
 
 		// create new lightmap
 		clearAdditionalPlayableFloorLightmaps();
-        for (int c = 0; c < MAXPLAYERS + 1; ++c) {
+		if (destmap->ambientLight.enabled)
+		{
+			initializeMapAmbientLightmap(*destmap);
+		}
+		for (int c = 0; c < MAXPLAYERS + 1; ++c) {
             auto& lightmap = lightmaps[c];
             auto& lightmapSmoothed = lightmapsSmoothed[c];
 						lightmap.resize(
@@ -4758,7 +5078,13 @@ fp->read(&numentities, sizeof(Uint32), 1);
 					destmap->height
 				)
 			);
-            if ( strncmp(map.name, "Hell", 4) )
+			if ( destmap->ambientLight.enabled )
+			{
+				// The authored base was populated before this loop. Do not replace it
+				// with a biome default or a developer cheat override.
+				continue;
+			}
+			if ( strncmp(map.name, "Hell", 4) )
             {
 							memset(
 				lightmap.data(),
@@ -5068,13 +5394,13 @@ int saveMap(const char* filename2)
 		);
 
 		/*
-		* Saving produces a V4.9 map. The complete V4.8-compatible payload
-		* remains floor Z0, followed by the PZLV extension envelope.
+		 * Saving produces a V4.10 map. The complete V4.8-compatible payload
+		 * remains floor Z0, followed by map metadata and the PZLV envelope.
 		*/
 		fp->write(
-			"BARONY LMPV4.9",
+			"BARONY LMPV4.10",
 			sizeof(char),
-			strlen("BARONY LMPV4.9")
+			strlen("BARONY LMPV4.10")
 		);
 		fp->write(map.name, sizeof(char), 32); // map filename
 		fp->write(map.author, sizeof(char), 32); // map author
@@ -5499,6 +5825,12 @@ int saveMap(const char* filename2)
 
 			// PZLV v2 stores local entity Z; older formats are migrated on load.
 			fp->write(&entity->z, sizeof(real_t), 1);
+		}
+		if (!saveMapMetadata(fp, map))
+		{
+			printlog("[Map Metadata] Failed to serialize ambience metadata for '%s'.", filename);
+			FileIO::close(fp);
+			return 1;
 		}
 		if (!savePlayableZExtension(fp, map))
 		{

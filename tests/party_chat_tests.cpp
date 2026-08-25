@@ -1,4 +1,5 @@
 #include "party_chat.hpp"
+#include "party_manager.hpp"
 #include "world_packet_scope.hpp"
 
 #include <algorithm>

@@ -6,7 +6,7 @@
 
 -------------------------------------------------------------------------------*/
 
-#include "party_manager.hpp"
+#include "party_persistence.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -830,15 +830,17 @@ std::vector<DurablePlayerIdentity> PartyManager::onlineIdentities() const
     return result;
 }
 
-PartyManager::Json PartyManager::toPersistentJson() const
+PartyPersistence::Json PartyPersistence::toPersistentJson(
+    const PartyManager& manager
+)
 {
     Json document{
-        {"next_id", nextPartyIdValue},
+        {"next_id", manager.nextPartyIdValue},
         {"parties", Json::array()}
     };
-    for (const PartyID partyId : partyIds())
+    for (const PartyID partyId : manager.partyIds())
     {
-        const Party& party = parties.at(partyId);
+        const Party& party = manager.parties.at(partyId);
         // A single member is only a transient invitation staging state.
         if (party.members.size() < 2)
         {
@@ -859,7 +861,8 @@ PartyManager::Json PartyManager::toPersistentJson() const
     return document;
 }
 
-bool PartyManager::loadPersistentJson(
+bool PartyPersistence::loadPersistentJson(
+    PartyManager& manager,
     const Json& document,
     std::string& error
 )
@@ -956,16 +959,16 @@ bool PartyManager::loadPersistentJson(
         return false;
     }
     candidate.nextPartyIdValue = nextId;
-    *this = std::move(candidate);
+    manager = std::move(candidate);
     return true;
 }
 
-bool PartyManager::validatePersistentJson(
+bool PartyPersistence::validatePersistentJson(
     const Json& document,
     std::string& error
 )
 {
     PartyManager candidate;
-    return candidate.loadPersistentJson(document, error);
+    return loadPersistentJson(candidate, document, error);
 }
 }

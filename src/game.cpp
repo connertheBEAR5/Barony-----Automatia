@@ -42,6 +42,7 @@
 #include "paths.hpp"
 #include "player.hpp"
 #include "world_state.hpp"
+#include "party_persistence.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #include "sam/framework/sam_sync.hpp"
@@ -61,6 +62,7 @@
 
 #include "UnicodeDecoder.h"
 #include <string>
+#include <array>
 #include <atomic>
 #include <future>
 #include <iterator>
@@ -3058,7 +3060,8 @@ void hydratePreservedAutomatiaWorldDocument()
         && preservedAutomatiaWorldDocument.contains("party"))
     {
         std::string partyError;
-        if (!worldState.partyManager().loadPersistentJson(
+        if (!AutomatiaParty::PartyPersistence::loadPersistentJson(
+                worldState.partyManager(),
                 preservedAutomatiaWorldDocument["party"], partyError))
         {
             printlog(
@@ -6259,6 +6262,56 @@ void syncAutomatiaPlayerSpatialAttachments(
     }
 }
 
+void translateAutomatiaWorldAttachments(
+	Entity& owner,
+	const real_t deltaX,
+	const real_t deltaY)
+{
+	if (deltaX == 0.0 && deltaY == 0.0)
+	{
+		return;
+	}
+	auto translateAttachment = [&](Entity* attachment)
+	{
+		if (!attachment || attachment == &owner || attachment->flags[OVERDRAW])
+		{
+			return;
+		}
+		attachment->x += deltaX;
+		attachment->y += deltaY;
+		attachment->new_x += deltaX;
+		attachment->new_y += deltaY;
+		attachment->lerp_ox += deltaX;
+		attachment->lerp_oy += deltaY;
+		attachment->bNeedsRenderPositionInit = true;
+	};
+
+	for (Entity* bodypart : owner.bodyparts)
+	{
+		translateAttachment(bodypart);
+	}
+	for (node_t* node = map.entities ? map.entities->first : nullptr;
+		node; node = node->next)
+	{
+		Entity* attachment = static_cast<Entity*>(node->element);
+		if (std::find(owner.bodyparts.begin(), owner.bodyparts.end(), attachment)
+			!= owner.bodyparts.end())
+		{
+			// Limbs are already translated by the explicit bodyparts pass above.
+			continue;
+		}
+		const bool sustainedLight = attachment
+			&& attachment->parent == owner.getUID()
+			&& attachment->behavior == &actMagiclightBall
+			&& (attachment->sprite == 174 || attachment->sprite == 1800);
+		if (attachment && attachment->parent == owner.getUID()
+			&& (attachment->flags[NOUPDATE] || sustainedLight))
+		{
+			translateAttachment(attachment);
+		}
+	}
+}
+
 bool playableFloorPlacementTileIsSafe(
     const PlayableFloorId playableFloor,
     const real_t x,
@@ -6431,6 +6484,140 @@ void broadcastAutomatiaPlayerFloorPlacement(const int playerIndex)
         sendPacketSafe(net_sock, -1, net_packet, recipient - 1);
     }
 }
+
+void syncAutomatiaFollowerSpatialAttachments(Entity& follower)
+{
+	const SpatialSpawnContext followerSpatialContext =
+		follower.spatialSpawnContext();
+	auto syncAttachment = [&](Entity* attachment)
+	{
+		if (!attachment || attachment == &follower)
+		{
+			return;
+		}
+		if (attachment->playableFloor != follower.playableFloor)
+		{
+			attachment->setPlayableFloor(follower.playableFloor);
+		}
+		attachment->applySpatialSpawnContext(followerSpatialContext);
+		attachment->bNeedsRenderPositionInit = true;
+	};
+
+	for (Entity* bodypart : follower.bodyparts)
+	{
+		syncAttachment(bodypart);
+	}
+
+	// Monster name tags and other passive visual children are not necessarily
+	// stored in bodyparts. Keep every NOUPDATE child in the same structural
+	// context; active projectiles deliberately remain on their original floor.
+	for (node_t* node = map.entities ? map.entities->first : nullptr;
+		node; node = node->next)
+	{
+		Entity* attachment = static_cast<Entity*>(node->element);
+		if (attachment && attachment->parent == follower.getUID()
+			&& attachment->flags[NOUPDATE])
+		{
+			syncAttachment(attachment);
+		}
+	}
+}
+
+void transitionAutomatiaPlayerFollowersToPlayableFloor(
+	const int playerIndex,
+	const Entity& playerEntity)
+{
+	// Clients receive the authoritative entity updates below. They must not
+	// independently move or duplicate followers while processing PZTR.
+	if (multiplayer == CLIENT || playerIndex < 0 || playerIndex >= MAXPLAYERS
+		|| !stats[playerIndex] || !map.playableFloors.hasFloor(playerEntity.playableFloor))
+	{
+		return;
+	}
+
+	static constexpr real_t followerOffsets[][2] = {
+		{ 12.0, 0.0 }, { -12.0, 0.0 }, { 0.0, 12.0 }, { 0.0, -12.0 },
+		{ 10.0, 10.0 }, { -10.0, 10.0 }, { 10.0, -10.0 }, { -10.0, -10.0 }
+	};
+	std::size_t followerOrdinal = 0;
+	for (node_t* node = stats[playerIndex]->FOLLOWERS.first;
+		node; node = node->next)
+	{
+		if (!node->element)
+		{
+			continue;
+		}
+		Entity* follower = uidToEntity(*static_cast<Uint32*>(node->element));
+		if (!follower || follower->behavior != &actMonster
+			|| follower->monsterAllyIndex != playerIndex)
+		{
+			continue;
+		}
+
+		const real_t previousFollowerX = follower->x;
+		const real_t previousFollowerY = follower->y;
+		const real_t previousOffsetX = std::clamp(
+			follower->x - playerEntity.x, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
+		const real_t previousOffsetY = std::clamp(
+			follower->y - playerEntity.y, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
+		std::array<std::pair<real_t, real_t>, 9> candidates{};
+		candidates[0] = { playerEntity.x + previousOffsetX, playerEntity.y + previousOffsetY };
+		for (std::size_t candidate = 0; candidate < 8; ++candidate)
+		{
+			const std::size_t offsetIndex =
+				(followerOrdinal + candidate) % std::size(followerOffsets);
+			candidates[candidate + 1] = {
+				playerEntity.x + followerOffsets[offsetIndex][0],
+				playerEntity.y + followerOffsets[offsetIndex][1]
+			};
+		}
+
+		real_t destinationX = playerEntity.x;
+		real_t destinationY = playerEntity.y;
+		for (const auto& [candidateX, candidateY] : candidates)
+		{
+			if (playableFloorPlacementFootprintIsSafe(
+					playerEntity.playableFloor, *follower, candidateX, candidateY))
+			{
+				destinationX = candidateX;
+				destinationY = candidateY;
+				break;
+			}
+		}
+
+		if (!follower->transitionToPlayableFloor(
+				playerEntity.playableFloor,
+				destinationX,
+				destinationY,
+				follower->z))
+		{
+			printlog(
+				"[Playable Z] Could not move follower UID %u with player %d to floor %d.",
+				follower->getUID(), playerIndex,
+				static_cast<int>(playerEntity.playableFloor));
+			continue;
+		}
+		follower->monsterTarget = 0;
+		follower->monsterState = MONSTER_STATE_WAIT;
+		syncAutomatiaFollowerSpatialAttachments(*follower);
+		translateAutomatiaWorldAttachments(
+			*follower, destinationX - previousFollowerX,
+			destinationY - previousFollowerY);
+
+		if (multiplayer == SERVER)
+		{
+			for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+			{
+				if (!client_disconnected[recipient]
+					&& serverPlayerCanReceiveActiveMapUpdates(recipient))
+				{
+					sendEntityUDP(follower, recipient, true);
+				}
+			}
+		}
+		++followerOrdinal;
+	}
+}
 }
 
 bool applyAutomatiaPlayableFloorPlacement(
@@ -6458,6 +6645,8 @@ bool applyAutomatiaPlayableFloorPlacement(
     }
 
     Entity& entity = *players[playerIndex]->entity;
+    const real_t previousX = entity.x;
+    const real_t previousY = entity.y;
     const bool floorChanged = entity.playableFloor != playableFloor;
     if (spatialRevision != 0)
     {
@@ -6525,6 +6714,12 @@ bool applyAutomatiaPlayableFloorPlacement(
     entity.new_roll = roll;
 
     syncAutomatiaPlayerSpatialAttachments(playerIndex, entity);
+    if (floorChanged)
+    {
+		translateAutomatiaWorldAttachments(
+			entity, entity.x - previousX, entity.y - previousY);
+        transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity);
+    }
 
     if (floorChanged && localPlayer)
     {
@@ -18657,6 +18852,48 @@ static bool processAutomatiaTransition(
 			continue;
 		}
 		follower->inheritSpatialContextFrom(destinationEntity);
+		// A different .lmp can have different dimensions or walls around its
+		// arrival point. Preserve a nearby formation only while it is usable;
+		// otherwise put the copied follower beside its leader on the leader's
+		// current playable floor, never at its old MapInstance position.
+		real_t followerX = destinationEntity->x + std::clamp(
+			transfer.offsetX, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
+		real_t followerY = destinationEntity->y + std::clamp(
+			transfer.offsetY, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
+		if (!playableFloorPlacementFootprintIsSafe(
+				destinationEntity->playableFloor, *follower, followerX, followerY))
+		{
+			static constexpr real_t arrivalOffsets[][2] = {
+				{ 12.0, 0.0 }, { -12.0, 0.0 }, { 0.0, 12.0 }, { 0.0, -12.0 },
+				{ 10.0, 10.0 }, { -10.0, 10.0 }, { 10.0, -10.0 }, { -10.0, -10.0 }
+			};
+			followerX = destinationEntity->x;
+			followerY = destinationEntity->y;
+			for (const auto& arrivalOffset : arrivalOffsets)
+			{
+				const real_t candidateX = destinationEntity->x + arrivalOffset[0];
+				const real_t candidateY = destinationEntity->y + arrivalOffset[1];
+				if (playableFloorPlacementFootprintIsSafe(
+						destinationEntity->playableFloor, *follower,
+						candidateX, candidateY))
+				{
+					followerX = candidateX;
+					followerY = candidateY;
+					break;
+				}
+			}
+		}
+		follower->x = followerX;
+		follower->y = followerY;
+		follower->new_x = followerX;
+		follower->new_y = followerY;
+		follower->lerp_ox = followerX;
+		follower->lerp_oy = followerY;
+		follower->bNeedsRenderPositionInit = true;
+		if (follower->myTileListNode)
+		{
+			TileEntityList.updateEntity(*follower);
+		}
 		/*
 		 * summonMonster() creates a fresh Stat and leaves MONSTER_INIT at 0.
 		 * The copied follower Stat already contains the authoritative inventory

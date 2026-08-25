@@ -840,8 +840,64 @@ extern char mapFogDensityText[4];
 extern char mapFogRedText[4];
 extern char mapFogGreenText[4];
 extern char mapFogBlueText[4];
+extern char mapAmbientLightEnabledText[4];
+extern char mapAmbientLightRedText[4];
+extern char mapAmbientLightGreenText[4];
+extern char mapAmbientLightBlueText[4];
+extern char mapAmbienceEnabledText[4];
+extern char mapAmbienceResourceText[256];
+extern char mapAmbienceVolumeText[4];
+extern char mapAmbienceLoopText[4];
+extern char mapAmbienceFadeInText[6];
+extern char mapAmbienceFadeOutText[6];
 
 static constexpr Uint8 MAP_FOG_STORAGE_MARKER = 0xA5;
+
+static void loadMapAmbienceEditorFields()
+{
+	strcpy(mapAmbienceEnabledText, map.ambience.enabled ? "[x]" : "[ ]");
+	strcpy(mapAmbienceLoopText, map.ambience.loop ? "[x]" : "[ ]");
+	snprintf(mapAmbienceResourceText, sizeof(mapAmbienceResourceText), "%s",
+		map.ambience.resource);
+	snprintf(mapAmbienceVolumeText, sizeof(mapAmbienceVolumeText), "%u",
+		static_cast<unsigned>(map.ambience.volume));
+	snprintf(mapAmbienceFadeInText, sizeof(mapAmbienceFadeInText), "%u",
+		static_cast<unsigned>(map.ambience.fadeInMilliseconds));
+	snprintf(mapAmbienceFadeOutText, sizeof(mapAmbienceFadeOutText), "%u",
+		static_cast<unsigned>(map.ambience.fadeOutMilliseconds));
+}
+
+static void loadMapAmbientLightEditorFields()
+{
+	strcpy(mapAmbientLightEnabledText, map.ambientLight.enabled ? "[x]" : "[ ]");
+	snprintf(mapAmbientLightRedText, sizeof(mapAmbientLightRedText), "%u",
+		static_cast<unsigned>(map.ambientLight.red));
+	snprintf(mapAmbientLightGreenText, sizeof(mapAmbientLightGreenText), "%u",
+		static_cast<unsigned>(map.ambientLight.green));
+	snprintf(mapAmbientLightBlueText, sizeof(mapAmbientLightBlueText), "%u",
+		static_cast<unsigned>(map.ambientLight.blue));
+}
+
+static void saveMapAmbientLightEditorFields()
+{
+	map.ambientLight.enabled = !strncmp(mapAmbientLightEnabledText, "[x]", 3);
+	map.ambientLight.red = static_cast<Uint8>(std::clamp(atoi(mapAmbientLightRedText), 0, 255));
+	map.ambientLight.green = static_cast<Uint8>(std::clamp(atoi(mapAmbientLightGreenText), 0, 255));
+	map.ambientLight.blue = static_cast<Uint8>(std::clamp(atoi(mapAmbientLightBlueText), 0, 255));
+}
+
+static void saveMapAmbienceEditorFields()
+{
+	map.ambience.enabled = !strncmp(mapAmbienceEnabledText, "[x]", 3);
+	map.ambience.loop = !strncmp(mapAmbienceLoopText, "[x]", 3);
+	map.ambience.volume = static_cast<Uint8>(std::clamp(atoi(mapAmbienceVolumeText), 0, 100));
+	map.ambience.fadeInMilliseconds = static_cast<Uint16>(
+		std::clamp(atoi(mapAmbienceFadeInText), 0, 60000));
+	map.ambience.fadeOutMilliseconds = static_cast<Uint16>(
+		std::clamp(atoi(mapAmbienceFadeOutText), 0, 60000));
+	std::snprintf(map.ambience.resource, sizeof(map.ambience.resource), "%s",
+		mapAmbienceResourceText);
+}
 
 static void updateMapNames()
 {
@@ -1124,6 +1180,8 @@ void buttonNew(button_t* my)
 		strcpy(mapFogGreenText, "180");
 		strcpy(mapFogBlueText, "180");
 	}
+	loadMapAmbientLightEditorFields();
+	loadMapAmbienceEditorFields();
 	if ( (map.flags[MAP_FLAG_GENBYTES3] >> 24) & static_cast<int>(0xFF) )
 	{
 		strcpy(mapflagtext[MAP_FLAG_DISABLEDIGGING], "[x]");
@@ -1215,7 +1273,7 @@ void buttonNew(button_t* my)
 	// The New Map dialog now contains the custom fog panel in addition to the
 	// original map settings. Give it enough room so the fog controls, map size
 	// fields, and Create/Cancel buttons do not overlap.
-	const int newMapHalfWidth = 240;
+	const int newMapHalfWidth = 440;
 	const int newMapHalfHeight = 280;
 	subx1 = xres / 2 - newMapHalfWidth;
 	subx2 = xres / 2 + newMapHalfWidth;
@@ -1357,6 +1415,8 @@ void buttonNewConfirm(button_t* my)
 			map.flags[z] = atoi(mapflagtext[z]);
 		}
 	}
+	saveMapAmbientLightEditorFields();
+	saveMapAmbienceEditorFields();
 	map.width = atoi(widthtext);
 	map.height = atoi(heighttext);
 	map.width = std::min(std::max(MINWIDTH, map.width), MAXWIDTH);
@@ -2046,6 +2106,8 @@ void buttonAttributes(button_t* my)
 		strcpy(mapFogGreenText, "180");
 		strcpy(mapFogBlueText, "180");
 	}
+	loadMapAmbientLightEditorFields();
+	loadMapAmbienceEditorFields();
 	if ( (map.flags[MAP_FLAG_GENBYTES3] >> 24) & static_cast<int>(0xFF) )
 	{
 		strcpy(mapflagtext[MAP_FLAG_DISABLEDIGGING], "[x]");
@@ -2135,8 +2197,8 @@ void buttonAttributes(button_t* my)
 	menuVisible = 0;
 	subwindow = 1;
 	newwindow = 1;
-	subx1 = std::max(16, xres / 2 - 300);
-	subx2 = std::min(xres - 16, xres / 2 + 300);
+	subx1 = std::max(16, xres / 2 - 440);
+	subx2 = std::min(xres - 16, xres / 2 + 440);
 	suby1 = std::max(16, yres / 2 - 280);
 	suby2 = std::min(yres - 16, yres / 2 + 280);
 	strcpy(subtext, "Map properties:");
@@ -2144,7 +2206,7 @@ void buttonAttributes(button_t* my)
 	button = newButton();
 	strcpy(button->label, "  OK  ");
 	button->x = subx2 - 64;
-	button->y = suby2 - 48;
+	button->y = suby2 - 72;
 	button->sizex = 56;
 	button->sizey = 16;
 	button->action = &buttonAttributesConfirm;
@@ -2154,7 +2216,7 @@ void buttonAttributes(button_t* my)
 	button = newButton();
 	strcpy(button->label, "Cancel");
 	button->x = subx2 - 64;
-	button->y = suby2 - 24;
+	button->y = suby2 - 48;
 	button->sizex = 56;
 	button->sizey = 16;
 	button->action = &buttonCloseSubwindow;
@@ -2308,6 +2370,8 @@ void buttonAttributesConfirm(button_t* my)
 			| (static_cast<Uint32>(fogGreen) << 16)
 			| (static_cast<Uint32>(fogBlue) << 8);
 	}
+	saveMapAmbientLightEditorFields();
+	saveMapAmbienceEditorFields();
 
 	if ( !strncmp(mapflagtext[MAP_FLAG_DISABLETRAPS], "[x]", 3) )
 	{
@@ -2356,6 +2420,9 @@ void buttonAttributesConfirm(button_t* my)
 	)
 );
     }
+	// Apply the map-wide RGB base immediately so the editor 3D preview reflects
+	// the confirmed Map Ambient Light settings without requiring a map reload.
+	initializeMapAmbientLightmap(map);
 
 	// transfer data from the new map to the old map and fill extra space with empty data
 	for ( z = 0; z < MAPLAYERS; z++ )

@@ -5743,12 +5743,22 @@ end:
 
 	if ( multiplayer == SERVER )
 	{
-		strcpy((char*)net_packet->data, "SUMM");
+		const PlayableFloorId playableFloor = entity->playableFloor;
+		strcpy((char*)net_packet->data,
+			playableFloor == DEFAULT_PLAYABLE_FLOOR ? "SUMM" : "SUMZ");
 		SDLNet_Write32((Uint32)creature, &net_packet->data[4]);
 		SDLNet_Write32((Uint32)entity->x, &net_packet->data[8]);
 		SDLNet_Write32((Uint32)entity->y, &net_packet->data[12]);
 		SDLNet_Write32(entity->getUID(), &net_packet->data[16]);
-		net_packet->len = 20;
+		if ( playableFloor == DEFAULT_PLAYABLE_FLOOR )
+		{
+			net_packet->len = 20;
+		}
+		else
+		{
+			SDLNet_Write16(static_cast<Uint16>(playableFloor), &net_packet->data[20]);
+			net_packet->len = 22;
+		}
 
 		for ( int c = 1; c < MAXPLAYERS; c++ )
 		{

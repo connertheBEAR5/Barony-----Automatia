@@ -1,6 +1,7 @@
 #include "automatia_identity.hpp"
 #include "automatia_save.hpp"
 #include "party_manager.hpp"
+#include "party_persistence.hpp"
 #include "party_protocol.hpp"
 
 #include <algorithm>
@@ -321,7 +322,7 @@ bool testPersistenceAndMigration()
     const PartyID durableId = manager.partyIdForPlayer(alice);
     const PartyID nextId = manager.nextPartyId();
 
-    const auto saved = manager.toPersistentJson();
+    const auto saved = PartyPersistence::toPersistentJson(manager);
     EXPECT(saved["parties"].size() == 1);
     EXPECT(saved["parties"][0]["id"].get<std::uint64_t>() == durableId);
     EXPECT(saved["next_id"].get<std::uint64_t>() == nextId);
@@ -329,7 +330,7 @@ bool testPersistenceAndMigration()
 
     PartyManager restored;
     std::string error;
-    EXPECT(restored.loadPersistentJson(saved, error));
+    EXPECT(PartyPersistence::loadPersistentJson(restored, saved, error));
     EXPECT(restored.partyIdForPlayer(alice) == durableId);
     EXPECT(restored.partyIdForPlayer(bob) == durableId);
     EXPECT(restored.partyIdForPlayer(carol) == INVALID_PARTY_ID);
@@ -339,17 +340,17 @@ bool testPersistenceAndMigration()
     auto invalid = saved;
     invalid["parties"][0]["members"].push_back(
         invalid["parties"][0]["members"][0]);
-    EXPECT(!PartyManager::validatePersistentJson(invalid, error));
-    EXPECT(!restored.loadPersistentJson(invalid, error));
+    EXPECT(!PartyPersistence::validatePersistentJson(invalid, error));
+    EXPECT(!PartyPersistence::loadPersistentJson(restored, invalid, error));
     EXPECT(restored.partyIdForPlayer(alice) == durableId);
     EXPECT(restored.partyIdForPlayer(bob) == durableId);
     invalid = saved;
     invalid["parties"][0]["leader"] = {
         {"kind", "local"}, {"value", "not-a-member"}};
-    EXPECT(!PartyManager::validatePersistentJson(invalid, error));
+    EXPECT(!PartyPersistence::validatePersistentJson(invalid, error));
     invalid = saved;
     invalid["next_id"] = durableId;
-    EXPECT(!PartyManager::validatePersistentJson(invalid, error));
+    EXPECT(!PartyPersistence::validatePersistentJson(invalid, error));
     invalid = saved;
     auto secondParty = invalid["parties"][0];
     secondParty["id"] = durableId + 1;
@@ -358,12 +359,13 @@ bool testPersistenceAndMigration()
     secondParty["members"][0] = secondParty["leader"];
     invalid["parties"].push_back(secondParty);
     invalid["next_id"] = durableId + 2;
-    EXPECT(!PartyManager::validatePersistentJson(invalid, error));
+    EXPECT(!PartyPersistence::validatePersistentJson(invalid, error));
 
     auto exhausted = saved;
     exhausted["next_id"] = std::numeric_limits<std::uint64_t>::max();
     PartyManager exhaustedManager;
-    EXPECT(exhaustedManager.loadPersistentJson(exhausted, error));
+    EXPECT(PartyPersistence::loadPersistentJson(
+        exhaustedManager, exhausted, error));
     EXPECT(exhaustedManager.createParty(local("Dana")).status
         == OperationStatus::IdSpaceExhausted);
     EXPECT(exhaustedManager.nextPartyId()
@@ -373,7 +375,8 @@ bool testPersistenceAndMigration()
     maximumRevision["parties"][0]["revision"] =
         std::numeric_limits<std::uint64_t>::max();
     PartyManager revisionManager;
-    EXPECT(revisionManager.loadPersistentJson(maximumRevision, error));
+    EXPECT(PartyPersistence::loadPersistentJson(
+        revisionManager, maximumRevision, error));
     EXPECT(revisionManager.promoteLeader(alice, bob).status
         == OperationStatus::IdSpaceExhausted);
     EXPECT(revisionManager.leaveParty(alice).status
@@ -392,8 +395,8 @@ bool testPersistenceAndMigration()
     nearlyMaximumRevision["parties"][0]["revision"] =
         std::numeric_limits<std::uint64_t>::max() - 1;
     PartyManager terminalRevisionManager;
-    EXPECT(terminalRevisionManager.loadPersistentJson(
-        nearlyMaximumRevision, error));
+    EXPECT(PartyPersistence::loadPersistentJson(
+        terminalRevisionManager, nearlyMaximumRevision, error));
     const auto terminalCarolInvite = terminalRevisionManager.invitePlayer(
         alice, carol, 10, 100, 15);
     const auto terminalDaveInvite = terminalRevisionManager.invitePlayer(

@@ -1058,6 +1058,12 @@ void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 			blinkPlayers[i] = false;
 			for ( auto& callout : CalloutMenu[i].callouts )
 			{
+				Entity* localEntity = Player::getPlayerInteractEntity(clientnum);
+				if ( localEntity
+					&& callout.second.playableFloor != localEntity->playableFloor )
+				{
+					continue;
+				}
 				bool selfCallout = false;
 				int targetPlayer = -1;
 				for ( int j = 0; j < MAXPLAYERS; ++j )

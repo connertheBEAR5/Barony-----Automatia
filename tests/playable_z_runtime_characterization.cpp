@@ -2,12 +2,14 @@
 #include "../src/game.hpp"
 #include "../src/stat.hpp"
 #include "../src/entity.hpp"
+#include "../src/engine/audio/sound.hpp"
 #include "../src/collision.hpp"
 #include "../src/files.hpp"
 #include "../src/magic/magic.hpp"
 #include "../src/monster.hpp"
 #include "../src/light.hpp"
 #include "../src/player.hpp"
+#include "../src/paths.hpp"
 
 #include <array>
 #include <chrono>
@@ -344,6 +346,10 @@ bool verifySyntheticMap(
     EXPECT(entity->spatialRevision == 0);
     EXPECT(loaded.playableFloors.floors.size() == 1);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
+    // Every pre-V4.10 fixture has no optional ambience metadata.
+    EXPECT(!loaded.ambience.enabled);
+    EXPECT(loaded.ambience.resource[0] == '\0');
+    EXPECT(!loaded.ambientLight.enabled);
     clearLoadedMap(loaded, entities, creatures);
     return true;
 }
@@ -431,7 +437,7 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     // Z3.3 layer-authored stair metadata coexists with legacy ZTRN data and
     // must survive save/load without requiring any editor-side pairing pass.
     lowerTransition->verticalLayerTransitionDelta = 1;
-    lowerTransition->verticalLayerTransitionModel = 161;
+    lowerTransition->verticalLayerTransitionModel = 0;
     lowerTransition->verticalLayerTransitionRotation = 6;
     lowerTransition->floorDecorationHeightOffset = 12;
     lowerTransition->floorDecorationXOffset = 4;
@@ -440,7 +446,9 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     lowerTransition->skill[8] = static_cast<Sint32>(0x52494154); // "TAIR"
     lowerTransition->skill[9] = static_cast<Sint32>(0x00000053); // "S"
     saved->verticalLayerTransitionDelta = -1;
-    saved->verticalLayerTransitionModel = 253;
+    // Zero is the legacy/default sentinel. Save must resolve it to the
+    // directional model rather than letting the editor preview show null.vox.
+    saved->verticalLayerTransitionModel = 0;
     saved->verticalLayerTransitionRotation = 2;
     saved->floorDecorationHeightOffset = -4;
     saved->floorDecorationXOffset = -3;
@@ -457,13 +465,30 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     savedCeiling->ceilingTileDir = 3;
     savedCeiling->ceilingTileAllowTrap = 1;
     savedCeiling->ceilingTileBreakable = 1;
+    // This remains independent from the existing packed custom-fog fields.
+    map.flags[MAP_FLAG_GENBYTES5] = (static_cast<Uint32>(0xA5) << 24)
+        | (static_cast<Uint32>(24) << 16) | (static_cast<Uint32>(180) << 8);
+    map.flags[MAP_FLAG_GENBYTES6] = (static_cast<Uint32>(32) << 24)
+        | (static_cast<Uint32>(64) << 16) | (static_cast<Uint32>(96) << 8);
+    map.ambience.enabled = true;
+    map.ambience.loop = true;
+    map.ambience.volume = 67;
+    map.ambience.fadeInMilliseconds = 350;
+    map.ambience.fadeOutMilliseconds = 900;
+    std::snprintf(map.ambience.resource, sizeof(map.ambience.resource), "%s",
+        "sound/ambience/fixture_cave_wind.ogg");
+    // This is the map-wide RGB light base used by Hell maps, not fog or audio.
+    map.ambientLight.enabled = true;
+    map.ambientLight.red = 32;
+    map.ambientLight.green = 12;
+    map.ambientLight.blue = 6;
     EXPECT(saveMap("stage4b_roundtrip") == 0);
 
     std::ifstream output(
         temporary.mapPath("stage4b_roundtrip.lmp"), std::ios::binary);
-    std::array<char, 14> header{};
+    std::array<char, 15> header{};
     output.read(header.data(), static_cast<std::streamsize>(header.size()));
-    EXPECT(std::string(header.data(), header.size()) == "BARONY LMPV4.9");
+    EXPECT(std::string(header.data(), header.size()) == "BARONY LMPV4.10");
 
     map_t loaded{};
     list_t entities{};
@@ -543,6 +568,19 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(restoredCeiling->ceilingTileDir == 3);
     EXPECT(restoredCeiling->ceilingTileAllowTrap == 1);
     EXPECT(restoredCeiling->ceilingTileBreakable == 1);
+    EXPECT(loaded.flags[MAP_FLAG_GENBYTES5] == map.flags[MAP_FLAG_GENBYTES5]);
+    EXPECT(loaded.flags[MAP_FLAG_GENBYTES6] == map.flags[MAP_FLAG_GENBYTES6]);
+    EXPECT(loaded.ambience.enabled);
+    EXPECT(loaded.ambience.loop);
+    EXPECT(loaded.ambience.volume == 67);
+    EXPECT(loaded.ambience.fadeInMilliseconds == 350);
+    EXPECT(loaded.ambience.fadeOutMilliseconds == 900);
+    EXPECT(std::string(loaded.ambience.resource)
+        == "sound/ambience/fixture_cave_wind.ogg");
+    EXPECT(loaded.ambientLight.enabled);
+    EXPECT(loaded.ambientLight.red == 32);
+    EXPECT(loaded.ambientLight.green == 12);
+    EXPECT(loaded.ambientLight.blue == 6);
     EXPECT(loaded.playableFloors.floors.size() == 2);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
     const PlayableFloorData* restoredUpper = loaded.playableFloors.find(2);
@@ -599,11 +637,11 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(migratedEntity->worldRenderZ() == -72.5);
     clearLoadedMap(migrated, migratedEntities, migratedCreatures);
 
-    // V4.9 must reject truncated extension data instead of silently flattening.
+    // V4.10 must reject truncated map metadata/PZLV data instead of flattening.
     const std::filesystem::path validPath =
         temporary.mapPath("stage4b_roundtrip.lmp");
     const std::filesystem::path corruptPath =
-        temporary.mapPath("stage4c_truncated_v4_9.lmp");
+        temporary.mapPath("stage4c_truncated_v4_10.lmp");
     std::filesystem::copy_file(
         validPath, corruptPath, std::filesystem::copy_options::overwrite_existing);
     const auto validSize = std::filesystem::file_size(corruptPath);
@@ -615,12 +653,40 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     corrupted.entities = &corruptEntities;
     corrupted.creatures = &corruptCreatures;
     EXPECT(loadMap(
-        "stage4c_truncated_v4_9.lmp",
+        "stage4c_truncated_v4_10.lmp",
         &corrupted,
         &corruptEntities,
         &corruptCreatures,
         nullptr) == -1);
     clearLoadedMap(corrupted, corruptEntities, corruptCreatures);
+    return true;
+}
+
+bool testMapAmbienceLifecycleCharacterization()
+{
+    // A floor transition within one MapInstance must retain the existing loop;
+    // a divergent-map activation gets its own loop and fades the previous one.
+    EXPECT(!mapAmbienceRequiresRestart("caves.lmp#world", "caves.lmp#world"));
+    EXPECT(mapAmbienceRequiresRestart("caves.lmp#world", "ruins.lmp#world"));
+    EXPECT(mapAmbienceRequiresRestart("caves.lmp#world", "caves.lmp#private_2"));
+
+    // This is deliberately a control-flow characterization, not an assertion
+    // that an audio device emitted samples.
+    EXPECT(!mapAmbienceCanUseAudio(true, false));
+    EXPECT(!mapAmbienceCanUseAudio(false, true));
+    EXPECT(mapAmbienceCanUseAudio(false, false));
+    const bool previousHeadless = headless;
+    const bool previousNoSound = no_sound;
+    headless = true;
+    no_sound = false;
+    map_t ambienceMap{};
+    ambienceMap.ambience.enabled = true;
+    std::snprintf(ambienceMap.ambience.resource,
+        sizeof(ambienceMap.ambience.resource), "%s", "sound/ambience/test.ogg");
+    syncMapAmbience(ambienceMap, "caves.lmp#world");
+    stopMapAmbience();
+    headless = previousHeadless;
+    no_sound = previousNoSound;
     return true;
 }
 
@@ -774,6 +840,37 @@ bool testPlayableFloorCollisionIsolation()
     EXPECT(upper->authoredMapLayer == 0);
     EXPECT(list_Size(TileEntityList.getTileList(1, 1, DEFAULT_PLAYABLE_FLOOR)) == 2);
     EXPECT(list_Size(TileEntityList.getTileList(1, 1, 1)) == 0);
+    return true;
+}
+
+bool testWallBusterUsesOwningPlayableFloor()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+
+    const int x = 1;
+    const int y = 1;
+    // Floor 1 is an authored view: its floor/wall/ceiling are map layers
+    // 1/2/3. The base floor's wall (layer 1) must survive a floor-1 buster.
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    EXPECT(map.setTileAt(x, y, FLOORLAYER, 9, 1));
+    EXPECT(map.setTileAt(x, y, OBSTACLELAYER, 88, 1));
+    EXPECT(map.setTileAt(x, y, CEILINGLAYER, 77, 1));
+    EXPECT(map.tileAt(x, y, OBSTACLELAYER, DEFAULT_PLAYABLE_FLOOR) == 9);
+
+    Entity* buster = newEntity(66, 1, map.entities, nullptr);
+    EXPECT(buster != nullptr);
+    buster->x = x * 16.0 + 8.0;
+    buster->y = y * 16.0 + 8.0;
+    buster->z = 7.5;
+    buster->playableFloor = 1;
+    buster->authoredMapLayer = 1;
+    buster->skill[28] = 2;
+    actWallBuster(buster);
+
+    EXPECT(map.tileAt(x, y, OBSTACLELAYER, 1) == 0);
+    EXPECT(map.tileAt(x, y, CEILINGLAYER, 1) == 0);
+    EXPECT(map.tileAt(x, y, OBSTACLELAYER, DEFAULT_PLAYABLE_FLOOR) == 9);
     return true;
 }
 
@@ -1118,6 +1215,19 @@ bool testLocalElevationAndRuntimeSpawns()
     EXPECT(summon->playableFloor == DEFAULT_PLAYABLE_FLOOR);
     EXPECT(summon->spatialRevision == 0);
 
+    // Summons are ordinary runtime spawns: when their caller is being
+    // simulated on an authored floor, they inherit that floor rather than
+    // silently returning to Z0.
+    Entity* upperSummon = nullptr;
+    {
+        ScopedPlayableFloorRuntimeContext scope(SpatialSpawnContext{2, 56, 2});
+        upperSummon = summonMonsterNoSmoke(RAT, 64, 64, true);
+    }
+    EXPECT(upperSummon != nullptr);
+    EXPECT(upperSummon->playableFloor == 2);
+    EXPECT(upperSummon->authoredMapLayer == 2);
+    EXPECT(upperSummon->spatialRevision == 56);
+
     Entity* arrow = newEntity(166, 1, map.entities, nullptr);
     EXPECT(arrow != nullptr);
     arrow->x = 8;
@@ -1205,6 +1315,7 @@ bool testZ34CStructuralLayersAndFalling()
     EXPECT(players[0] == nullptr);
     const int previousClientnum = clientnum;
     const bool previousIntro = intro;
+	Stat* const previousPlayerStats = stats[0];
     {
         Player fallingPlayer(0, false);
         Entity* fallingEntity = newEntity(0, 1, map.entities, nullptr);
@@ -1231,6 +1342,18 @@ bool testZ34CStructuralLayersAndFalling()
 		leftCastingHand->skill[2] = 0;
 		fallingPlayer.hud.magicLeftHand = leftCastingHand;
 
+		// A world-space limb used to be left at the pre-transition X/Y until a
+		// later animation tick, creating a visible duplicate after a fall/stair.
+		Entity* worldLimb = newEntityWithSpatialContext(
+			0, 1, map.entities, nullptr, fallingEntity);
+		EXPECT(worldLimb != nullptr);
+		worldLimb->behavior = &actPlayerLimb;
+		worldLimb->x = fallingEntity->x + 2.0;
+		worldLimb->y = fallingEntity->y;
+		worldLimb->new_x = worldLimb->x;
+		worldLimb->new_y = worldLimb->y;
+		fallingEntity->bodyparts.push_back(worldLimb);
+
 		// Sustained Light/Deep Shade are caster attachments, unlike ordinary
 		// projectiles. Their local model Z moves to the destination structural
 		// slice and their old light field is removed for next-tick recreation.
@@ -1250,6 +1373,38 @@ bool testZ34CStructuralLayersAndFalling()
 		ordinaryProjectile->parent = fallingEntity->getUID();
 		ordinaryProjectile->z = 7.5;
 
+		// Followers are gameplay actors, not visual attachments. They must be
+		// relocated by the authoritative player-floor transaction, and their
+		// passive name-tag child must follow the same structural slice.
+		Stat* followerOwnerStats = new Stat(0);
+		EXPECT(followerOwnerStats != nullptr);
+		stats[0] = followerOwnerStats;
+		Entity* floorFollower = newEntity(0, 1, map.entities, nullptr);
+		EXPECT(floorFollower != nullptr);
+		floorFollower->behavior = &actMonster;
+		floorFollower->monsterAllyIndex = 0;
+		floorFollower->x = 24.0;
+		floorFollower->y = 24.0;
+		floorFollower->z = 7.5;
+		floorFollower->sizex = 4;
+		floorFollower->sizey = 4;
+		floorFollower->playableFloor = 1;
+		floorFollower->authoredMapLayer = 1;
+		Entity* followerNameTag = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, floorFollower);
+		EXPECT(followerNameTag != nullptr);
+		followerNameTag->parent = floorFollower->getUID();
+		followerNameTag->flags[NOUPDATE] = true;
+		followerNameTag->behavior = &actSpriteNametag;
+		Uint32* followerUid = static_cast<Uint32*>(std::malloc(sizeof(Uint32)));
+		EXPECT(followerUid != nullptr);
+		*followerUid = floorFollower->getUID();
+		node_t* followerNode = list_AddNodeLast(&followerOwnerStats->FOLLOWERS);
+		EXPECT(followerNode != nullptr);
+		followerNode->element = followerUid;
+		followerNode->deconstructor = &defaultDeconstructor;
+		followerNode->size = sizeof(Uint32);
+
         int appliedFloorsFallen = 0;
         EXPECT(fallAutomatiaPlayerToLowerPlayableFloor(
             0, appliedFloorsFallen));
@@ -1261,6 +1416,10 @@ bool testZ34CStructuralLayersAndFalling()
 		EXPECT(fallingEntity->x + fallingEntity->sizex < 32.0);
 		EXPECT(leftCastingHand->playableFloor == 0);
 		EXPECT(leftCastingHand->authoredMapLayer == 0);
+		EXPECT(worldLimb->playableFloor == 0);
+		EXPECT(worldLimb->authoredMapLayer == 0);
+		EXPECT(worldLimb->x == fallingEntity->x + 2.0);
+		EXPECT(worldLimb->y == fallingEntity->y);
 		EXPECT(sustainedLight->playableFloor == 0);
 		EXPECT(sustainedLight->authoredMapLayer == 0);
 		EXPECT(sustainedLight->z == -5.5);
@@ -1268,6 +1427,14 @@ bool testZ34CStructuralLayersAndFalling()
 		EXPECT(ordinaryProjectile->playableFloor == 1);
 		EXPECT(ordinaryProjectile->authoredMapLayer == 1);
 		EXPECT(ordinaryProjectile->z == 7.5);
+		EXPECT(floorFollower->playableFloor == 0);
+		EXPECT(floorFollower->authoredMapLayer == 0);
+		EXPECT(followerNameTag->playableFloor == 0);
+		EXPECT(followerNameTag->authoredMapLayer == 0);
+
+		list_FreeAll(&followerOwnerStats->FOLLOWERS);
+		delete followerOwnerStats;
+		stats[0] = previousPlayerStats;
 
 		// When the adjacent lower tile is clear, the same ledge coordinate is a
 		// valid footprint and must remain unchanged.
@@ -1292,6 +1459,7 @@ bool testZ34CStructuralLayersAndFalling()
     // Player teardown expects its global slot to remain valid while it closes
     // UI state; detach the stack fixture only after the destructor has run.
     players[0] = nullptr;
+	stats[0] = previousPlayerStats;
     clientnum = previousClientnum;
     intro = previousIntro;
 
@@ -1502,6 +1670,92 @@ bool testZ2CRuntimeFloorIsolation()
     return true;
 }
 
+bool testUpperFloorMonsterPathing()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+    const bool previousLoading = loading;
+    loading = false;
+
+    // The authored layer below the upper walkable slice is a solid Z0 wall,
+    // while floor 1 itself has an open floor and wall layer. A legacy Z0 path
+    // map reports no route here; floor-aware monster pathing must succeed.
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    for (int x = 0; x < map.width; ++x)
+    {
+        for (int y = 0; y < map.height; ++y)
+        {
+            EXPECT(map.setTileAt(x, y, FLOORLAYER, 1, 1));
+            EXPECT(map.setTileAt(x, y, OBSTACLELAYER, 0, 1));
+        }
+    }
+
+    Entity* monster = newEntity(-1, 1, map.entities, nullptr);
+    EXPECT(monster != nullptr);
+    monster->behavior = &actMonster;
+    monster->playableFloor = 1;
+    monster->authoredMapLayer = 1;
+    monster->x = 24.0;
+    monster->y = 24.0;
+    list_t* path = generatePath(1, 1, 2, 1, monster, nullptr,
+        GENERATE_PATH_TO_HUNT_MONSTER_TARGET);
+    EXPECT(path != nullptr);
+    EXPECT(list_Size(path) > 0);
+    list_FreeAll(path);
+    std::free(path);
+
+    loading = previousLoading;
+    return true;
+}
+
+bool testAdjacentVerticalCircuitNeighbors()
+{
+    multiplayer = SINGLE;
+    EXPECT(resetGlobalMapHarness(4, 4, 1));
+    EXPECT(map.ensurePlayableFloorGeometry(1, false));
+    EXPECT(map.ensurePlayableFloorGeometry(2, false));
+    EXPECT(map.ensurePlayableFloorGeometry(3, false));
+
+    Entity* floorOneWire = newEntity(18, 1, map.entities, nullptr);
+    Entity* floorTwoWire = newEntity(18, 1, map.entities, nullptr);
+    Entity* floorThreeWire = newEntity(18, 1, map.entities, nullptr);
+    EXPECT(floorOneWire && floorTwoWire && floorThreeWire);
+    for (Entity* wire : {floorOneWire, floorTwoWire, floorThreeWire})
+    {
+        wire->x = 24.0;
+        wire->y = 24.0;
+        wire->behavior = &actCircuit;
+        wire->skill[28] = 1; // CIRCUIT_OFF
+    }
+    floorOneWire->playableFloor = floorOneWire->authoredMapLayer = 1;
+    floorTwoWire->playableFloor = floorTwoWire->authoredMapLayer = 2;
+    floorThreeWire->playableFloor = floorThreeWire->authoredMapLayer = 3;
+    EXPECT(TileEntityList.addEntity(*floorOneWire) != nullptr);
+    EXPECT(TileEntityList.addEntity(*floorTwoWire) != nullptr);
+    EXPECT(TileEntityList.addEntity(*floorThreeWire) != nullptr);
+
+    list_t* directNeighbors = floorOneWire->getPowerableNeighbors();
+    EXPECT(directNeighbors != nullptr);
+    bool foundFloorTwo = false;
+    bool foundFloorThree = false;
+    for (node_t* node = directNeighbors->first; node; node = node->next)
+    {
+        foundFloorTwo |= node->element == floorTwoWire;
+        foundFloorThree |= node->element == floorThreeWire;
+    }
+    list_FreeAll(directNeighbors);
+    std::free(directNeighbors);
+    EXPECT(foundFloorTwo);
+    EXPECT(!foundFloorThree);
+
+    // A direct hop stops at floor 2, while a wire on floor 2 may relay it.
+    floorOneWire->circuitPowerOn();
+    EXPECT(floorOneWire->skill[28] == 2); // CIRCUIT_ON
+    EXPECT(floorTwoWire->skill[28] == 2);
+    EXPECT(floorThreeWire->skill[28] == 2);
+    return true;
+}
+
 bool testPersistentMinimapAndPlacement()
 {
     multiplayer = SINGLE;
@@ -1623,13 +1877,17 @@ int runPlayableZRuntimeCharacterization()
     const bool passed =
         testLmpCompatibilityAndRoundTrip(temporary)
         && testOneFloorCollisionAndSpatialIndex()
+		&& testWallBusterUsesOwningPlayableFloor()
         && testPlayableFloorCollisionIsolation()
         && testZ3TransitionPrimitive()
         && testPlayableFloorGeometryIsolation()
         && testLocalElevationAndRuntimeSpawns()
         && testZ34CStructuralLayersAndFalling()
-        && testZ2CRuntimeFloorIsolation()
-        && testPersistentMinimapAndPlacement();
+		&& testZ2CRuntimeFloorIsolation()
+		&& testUpperFloorMonsterPathing()
+		&& testAdjacentVerticalCircuitNeighbors()
+        && testPersistentMinimapAndPlacement()
+        && testMapAmbienceLifecycleCharacterization();
     clearGlobalMapHarness();
     multiplayer = previousMultiplayer;
     loading = previousLoading;

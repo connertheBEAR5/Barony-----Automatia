@@ -117,6 +117,16 @@ char mapFogDensityText[4] = "255";
 char mapFogRedText[4] = "180";
 char mapFogGreenText[4] = "180";
 char mapFogBlueText[4] = "180";
+char mapAmbientLightEnabledText[4] = "[ ]";
+char mapAmbientLightRedText[4] = "32";
+char mapAmbientLightGreenText[4] = "32";
+char mapAmbientLightBlueText[4] = "32";
+char mapAmbienceEnabledText[4] = "[ ]";
+char mapAmbienceResourceText[256] = "";
+char mapAmbienceVolumeText[4] = "100";
+char mapAmbienceLoopText[4] = "[x]";
+char mapAmbienceFadeInText[6] = "0";
+char mapAmbienceFadeOutText[6] = "0";
 // function prototypes
 Uint32 timerCallback(Uint32 interval, void* param);
 bool handleEvents(void);
@@ -210,6 +220,11 @@ static char editorTilePaletteSearch[128] = "";
 static char editorMonsterItemSearch[128] = "";
 static char editorOpenMapSearch[128] = "";
 static char editorDirectorySearch[128] = "";
+static char editorAmbienceResourceSearch[128] = "";
+static std::vector<std::string> editorAmbienceResources;
+static int editorAmbienceResourceFirstVisible = 0;
+static bool editorAmbienceResourcesEnumerated = false;
+static bool editorAmbiencePickerOpen = false;
 static std::string editorMonsterItemSearchLastKey;
 static std::string editorPaletteLastFilter;
 static std::vector<int> editorPaletteMatches;
@@ -225,6 +240,57 @@ static std::string editorPaletteLowercase(const std::string& text)
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
     }
     return result;
+}
+
+static bool editorIsAmbienceResource(const std::string& path)
+{
+	const std::string lowered = editorPaletteLowercase(path);
+	return lowered.size() > 4
+		&& (lowered.compare(lowered.size() - 4, 4, ".ogg") == 0
+			|| lowered.compare(lowered.size() - 4, 4, ".wav") == 0
+			|| lowered.compare(lowered.size() - 4, 4, ".mp3") == 0);
+}
+
+static void editorCollectAmbienceResources(const std::string& directory)
+{
+	char** entries = PHYSFS_enumerateFiles(directory.c_str());
+	if (!entries)
+	{
+		return;
+	}
+	for (char** entry = entries; *entry; ++entry)
+	{
+		const std::string resource = directory + "/" + *entry;
+		PHYSFS_Stat stat;
+		if (!PHYSFS_stat(resource.c_str(), &stat))
+		{
+			continue;
+		}
+		if (stat.filetype == PHYSFS_FILETYPE_DIRECTORY)
+		{
+			editorCollectAmbienceResources(resource);
+		}
+		else if (stat.filetype == PHYSFS_FILETYPE_REGULAR
+			&& editorIsAmbienceResource(resource))
+		{
+			editorAmbienceResources.push_back(resource);
+		}
+	}
+	PHYSFS_freeList(entries);
+}
+
+static void editorLoadAmbienceResources()
+{
+	if (editorAmbienceResourcesEnumerated)
+	{
+		return;
+	}
+	editorAmbienceResourcesEnumerated = true;
+	if (PHYSFS_isInit())
+	{
+		editorCollectAmbienceResources("sound");
+	}
+	std::sort(editorAmbienceResources.begin(), editorAmbienceResources.end());
 }
 
 static bool editorPaletteTextMatches(const char* displayName, int index, const char* filter)
@@ -15290,52 +15356,26 @@ int main(int argc, char** argv)
 				camera.winw = xres - 128;
 				camera.winh = yres - 32;
 				/*
-				 * The editor 3D preview should stay readable on every
-				 * vertical layer. Add a temporary camera-following light
-				 * to every active map layer for this rendered frame.
+				 * Keep the editor preview light local to the camera's current
+				 * structural slice. Spawning one light on every map layer makes
+				 * the contributions overlap in a derived Playable-Z light volume
+				 * and badly overexposes the preview. The ordinary editor light
+				 * radius is sufficient; real geometry and structural attenuation
+				 * decide how much reaches adjacent layers.
 				 *
-				 * These are runtime-only editor lights. They are removed
-				 * immediately after drawing and are never stored in the
+				 * This is a runtime-only editor light. It is removed immediately
+				 * after drawing and is never stored in the
 				 * map entity list or written to the .lmp file.
 				 */
 				const int editor3DCameraLightLayer =
 					entityZToLightmapLayer(camera.z);
-				const int editor3DActiveLightLayers =
-					std::max(
-						1,
-						std::min(
-							MAPLAYERS,
-							static_cast<int>(
-								map.numLayers
-							)
-						)
+				light_t* editor3DCameraLight =
+					addLight(
+						static_cast<Sint32>(camera.x),
+						static_cast<Sint32>(camera.y),
+						editor3DCameraLightLayer,
+						"editor"
 					);
-
-				std::vector<light_t*> editor3DCameraLights;
-				editor3DCameraLights.reserve(
-					editor3DActiveLightLayers
-				);
-
-				for ( int lightLayer = 0;
-					lightLayer < editor3DActiveLightLayers;
-					++lightLayer )
-				{
-					light_t* cameraLayerLight =
-						addLight(
-							static_cast<Sint32>(camera.x),
-							static_cast<Sint32>(camera.y),
-							lightLayer,
-							"editor",
-							10
-						);
-
-					if ( cameraLayerLight )
-					{
-						editor3DCameraLights.push_back(
-							cameraLayerLight
-						);
-					}
-				}
 
 				using Editor3DPreviewState =
 					std::tuple<
@@ -15428,7 +15468,12 @@ int main(int argc, char** argv)
 					}
 					else if ( isVerticalLayerStair )
 					{
-						editor3DModelIndex = entity->verticalLayerTransitionModel;
+						// Older ZLDR records and an in-progress editor placement can
+						// legitimately carry model 0. Model 0 is system/null.vox, not a
+						// stair, so mirror the runtime default before drawing the preview.
+						editor3DModelIndex = entity->verticalLayerTransitionModel > 0
+							? entity->verticalLayerTransitionModel
+							: (entity->verticalLayerTransitionDelta > 0 ? 161 : 253);
 					}
 
 					const bool hasEditorPreviewModel =
@@ -15521,7 +15566,7 @@ int main(int argc, char** argv)
 					"ang = %3.3f\n"
 					"fps = %3.1f\n"
 					"decor models = %d  sprites = %d\n"
-					"camera light layer = %d  lit layers = %d\n"
+					"camera light layer = %d\n"
 					"Up/Down move  Left/Right turn\n"
 					"Q/E or PgUp/PgDn height  Home reset",
 					camera.x,
@@ -15531,22 +15576,15 @@ int main(int argc, char** argv)
 					fps,
 					editor3DModelCount,
 					editor3DSpriteCount,
-					editor3DCameraLightLayer,
-					static_cast<int>(
-						editor3DCameraLights.size()
-					)
+					editor3DCameraLightLayer
 				);
 
-				for ( light_t* cameraLayerLight :
-					editor3DCameraLights )
+				if ( editor3DCameraLight
+					&& editor3DCameraLight->node )
 				{
-					if ( cameraLayerLight
-						&& cameraLayerLight->node )
-					{
-						list_RemoveNode(
-							cameraLayerLight->node
-						);
-					}
+					list_RemoveNode(
+						editor3DCameraLight->node
+					);
 				}
 
 				for ( auto& previewState :
@@ -16627,33 +16665,153 @@ int main(int argc, char** argv)
 						printText(font8x8_bmp, fogFieldX, fogY, fogValues[fogIndex]);
 					}
 
+					const int ambientLightPanelX = fogPanelX + 220;
+					const int ambientLightPanelY = fogPanelY;
+					const int ambientLightFieldX = ambientLightPanelX + 112;
 					printTextFormattedColor(
 						font8x8_bmp,
-						fogPanelX + 180,
-						fogPanelY + 18,
-						makeColorRGB(180, 180, 180),
-						"Distance: 16-4080 world units"
+						ambientLightPanelX,
+						ambientLightPanelY,
+						makeColorRGB(255, 210, 120),
+						"Map Ambient Light"
 					);
-					printTextFormattedColor(
-						font8x8_bmp,
-						fogPanelX + 180,
-						fogPanelY + 36,
-						makeColorRGB(180, 180, 180),
-						"Density/R/G/B: 0-255"
-					);
-					printTextFormattedColor(
-						font8x8_bmp,
-						fogPanelX + 180,
-						fogPanelY + 54,
+					printText(font8x8_bmp, ambientLightPanelX, ambientLightPanelY + 18, "Enabled:");
+					printText(font8x8_bmp, ambientLightFieldX, ambientLightPanelY + 18,
+						mapAmbientLightEnabledText);
+					const char* ambientLightLabels[3] = {"Red:", "Green:", "Blue:"};
+					char* ambientLightValues[3] = {
+						mapAmbientLightRedText, mapAmbientLightGreenText, mapAmbientLightBlueText};
+					for ( int lightIndex = 0; lightIndex < 3; ++lightIndex )
+					{
+						const int lightY = ambientLightPanelY + 36 + lightIndex * 18;
+						printText(font8x8_bmp, ambientLightPanelX, lightY, ambientLightLabels[lightIndex]);
+						drawDepressed(ambientLightFieldX - 4, lightY - 4,
+							ambientLightFieldX + 60, lightY + 12);
+						printText(font8x8_bmp, ambientLightFieldX, lightY, ambientLightValues[lightIndex]);
+					}
+					printTextFormattedColor(font8x8_bmp, ambientLightPanelX, ambientLightPanelY + 96,
 						makeColorRGB(
-							std::clamp(atoi(mapFogRedText), 0, 255),
-							std::clamp(atoi(mapFogGreenText), 0, 255),
-							std::clamp(atoi(mapFogBlueText), 0, 255)
-						),
-						"Fog color preview"
-					);
+							std::clamp(atoi(mapAmbientLightRedText), 0, 255),
+							std::clamp(atoi(mapAmbientLightGreenText), 0, 255),
+							std::clamp(atoi(mapAmbientLightBlueText), 0, 255)),
+						"Light color preview");
 
-					start_y = suby2 - 44;
+					const int ambiencePanelX = fogPanelX + 440;
+					const int ambiencePanelY = fogPanelY;
+					const int ambienceFieldX = ambiencePanelX + 132;
+					printTextFormattedColor(
+						font8x8_bmp,
+						ambiencePanelX,
+						ambiencePanelY,
+						makeColorRGB(120, 220, 255),
+						"Map Ambient Audio"
+					);
+					printText(font8x8_bmp, ambiencePanelX, ambiencePanelY + 18, "Enabled:");
+					printText(font8x8_bmp, ambienceFieldX, ambiencePanelY + 18,
+						mapAmbienceEnabledText);
+					const char* ambienceLabels[5] = {
+						"Sound:", "Volume:", "Loop:", "Fade In (ms):", "Fade Out (ms):"};
+					char* ambienceValues[5] = {
+						mapAmbienceResourceText, mapAmbienceVolumeText, mapAmbienceLoopText,
+						mapAmbienceFadeInText, mapAmbienceFadeOutText};
+					for ( int ambienceIndex = 0; ambienceIndex < 5; ++ambienceIndex )
+					{
+						const int ambienceY = ambiencePanelY + 36 + ambienceIndex * 18;
+						printText(font8x8_bmp, ambiencePanelX, ambienceY, ambienceLabels[ambienceIndex]);
+						const int ambienceWidth = ambienceIndex == 0 ? 220 : 60;
+						drawDepressed(ambienceFieldX - 4, ambienceY - 4,
+							ambienceFieldX + ambienceWidth, ambienceY + 12);
+						if ( ambienceIndex == 0 && mapAmbienceResourceText[0] == '\0' )
+						{
+							printTextFormattedColor(font8x8_bmp, ambienceFieldX, ambienceY,
+								makeColorRGB(180, 180, 180), "Select sound...");
+						}
+						else
+						{
+							printText(font8x8_bmp, ambienceFieldX, ambienceY, ambienceValues[ambienceIndex]);
+						}
+					}
+					if ( editorAmbiencePickerOpen )
+					{
+						const int pickerX = ambiencePanelX;
+						const int pickerY = ambiencePanelY + 52;
+						const int pickerWidth = 340;
+						const int pickerBottom = std::max(pickerY + 24, suby2 - 60);
+						SDL_Rect pickerRect = {pickerX, pickerY, pickerWidth, pickerBottom - pickerY};
+						drawRect(&pickerRect, makeColorRGB(32, 32, 44), 255);
+						drawDepressed(pickerX + 4, pickerY + 4, pickerX + pickerWidth - 4, pickerY + 20);
+						printText(font8x8_bmp, pickerX + 8, pickerY + 8, editorAmbienceResourceSearch);
+						if ( inputstr == editorAmbienceResourceSearch
+							&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							printText(font8x8_bmp, pickerX + 8
+								+ strlen(editorAmbienceResourceSearch) * 8, pickerY + 8, "|");
+						}
+						const std::string filter = editorPaletteLowercase(editorAmbienceResourceSearch);
+						std::vector<const std::string*> matches;
+						for ( const std::string& resource : editorAmbienceResources )
+						{
+							if ( filter.empty() || editorPaletteLowercase(resource).find(filter) != std::string::npos )
+							{
+								matches.push_back(&resource);
+							}
+						}
+						const int visibleRows = std::max(0, (pickerBottom - (pickerY + 28)) / 12);
+						editorAmbienceResourceFirstVisible = std::max(0,
+							std::min(editorAmbienceResourceFirstVisible,
+								std::max(0, static_cast<int>(matches.size()) - visibleRows)));
+						if ( matches.empty() )
+						{
+							printTextFormattedColor(font8x8_bmp, pickerX + 8, pickerY + 32,
+								makeColorRGB(255, 210, 120), "No VFS audio resources match this search.");
+						}
+						for ( int row = 0; row < visibleRows
+							&& editorAmbienceResourceFirstVisible + row < static_cast<int>(matches.size()); ++row )
+						{
+							printText(font8x8_bmp, pickerX + 8, pickerY + 28 + row * 12,
+								matches[editorAmbienceResourceFirstVisible + row]->c_str());
+						}
+					}
+					const char* mapPropertiesHelp = nullptr;
+					if ( mousex >= fogFieldX - 4 && mousex < fogFieldX + 60
+						&& mousey >= fogPanelY + 32 && mousey < fogPanelY + 126 )
+					{
+						const int fogRow = (mousey - (fogPanelY + 32)) / 18;
+						if ( fogRow == 0 ) { mapPropertiesHelp = "Fog distance is 16-4080 world units; lower values hide more distant geometry."; }
+						else if ( fogRow == 1 ) { mapPropertiesHelp = "Fog density controls opacity: 0 is transparent and 255 is fully opaque at the fog limit."; }
+						else if ( fogRow >= 2 && fogRow <= 4 ) { mapPropertiesHelp = "Fog RGB uses 0-255 per channel and is independent from map ambient light."; }
+					}
+					if ( mousex >= ambientLightFieldX - 4 && mousex < ambientLightFieldX + 60 )
+					{
+						if ( mousey >= ambientLightPanelY + 14 && mousey < ambientLightPanelY + 32 )
+						{
+							mapPropertiesHelp = "Enable a map-wide RGB light base, like Hell's authored ambient lighting.";
+						}
+						else if ( mousey >= ambientLightPanelY + 32 && mousey < ambientLightPanelY + 90 )
+						{
+							mapPropertiesHelp = "Ambient-light RGB is 0-255 per channel. Hell's neutral base is approximately 32, 32, 32.";
+						}
+					}
+					if ( mousex >= ambienceFieldX - 4 && mousex < ambienceFieldX + 220 )
+					{
+						const int audioRow = (mousey - (ambiencePanelY + 32)) / 18;
+						if ( mousey >= ambiencePanelY + 14 && mousey < ambiencePanelY + 32 )
+						{
+							mapPropertiesHelp = "Enable environmental audio for this map. It is separate from music and visual ambient light.";
+						}
+						else if ( audioRow == 0 ) { mapPropertiesHelp = "Choose a sound from the mounted VFS. The search menu only lists supported audio resources."; }
+						else if ( audioRow == 1 ) { mapPropertiesHelp = "Volume is 0-100 and affects only this map's environmental audio loop."; }
+						else if ( audioRow == 2 ) { mapPropertiesHelp = "Loop repeats the selected environmental sound until this MapInstance is left."; }
+						else if ( audioRow == 3 ) { mapPropertiesHelp = "Fade In is milliseconds from silence after this MapInstance becomes active."; }
+						else if ( audioRow == 4 ) { mapPropertiesHelp = "Fade Out is milliseconds used when changing to another MapInstance."; }
+					}
+					if ( mapPropertiesHelp )
+					{
+						printTextFormattedColor(font8x8_bmp, subx1 + 8, suby2 - 20,
+							makeColorRGB(255, 230, 96), "%s", mapPropertiesHelp);
+					}
+
+					start_y = suby2 - 72;
 					pad_y1 = 0;
 					printText(font8x8_bmp, subx1 + 8, start_y + pad_y1, "Map Width:");
 					drawDepressed(subx1 + 104, start_y + pad_y1 - 4, subx1 + 168, start_y + pad_y1 + rowheight - 4);
@@ -16977,13 +17135,138 @@ int main(int argc, char** argv)
 							}
 						}
 
-						if ( omousex >= subx1 + 104 && omousey >= suby2 - 48 && omousex < subx1 + 168 && omousey < suby2 - 32 )
+						const int ambientLightClickX = subx1 + 340;
+						const int ambientLightClickY = suby1 + 356;
+						if ( omousex >= ambientLightClickX
+							&& omousex < ambientLightClickX + 32
+							&& omousey >= ambientLightClickY + 14
+							&& omousey < ambientLightClickY + 32 )
+						{
+							strcpy(mapAmbientLightEnabledText,
+								!strncmp(mapAmbientLightEnabledText, "[x]", 3) ? "[ ]" : "[x]");
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+						}
+						char* ambientLightClickValues[3] =
+						{
+							mapAmbientLightRedText,
+							mapAmbientLightGreenText,
+							mapAmbientLightBlueText
+						};
+						for ( int lightIndex = 0; lightIndex < 3; ++lightIndex )
+						{
+							const int lightY = ambientLightClickY + 36 + lightIndex * 18;
+							if ( omousex >= ambientLightClickX - 4
+								&& omousex < ambientLightClickX + 60
+								&& omousey >= lightY - 4 && omousey < lightY + 12 )
+							{
+								inputstr = ambientLightClickValues[lightIndex];
+								editproperty = 20 + lightIndex;
+								cursorflash = ticks;
+							}
+						}
+
+						const int ambienceClickX = subx1 + 580;
+						const int ambienceClickY = suby1 + 356;
+						if ( omousex >= ambienceClickX
+							&& omousex < ambienceClickX + 32
+							&& omousey >= ambienceClickY + 14
+							&& omousey < ambienceClickY + 32 )
+						{
+							strcpy(mapAmbienceEnabledText,
+								!strncmp(mapAmbienceEnabledText, "[x]", 3) ? "[ ]" : "[x]");
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+						}
+						const int ambienceResourceY = ambienceClickY + 36;
+						if ( omousex >= ambienceClickX - 4 && omousex < ambienceClickX + 220
+							&& omousey >= ambienceResourceY - 4 && omousey < ambienceResourceY + 12 )
+						{
+							editorLoadAmbienceResources();
+							editorAmbiencePickerOpen = !editorAmbiencePickerOpen;
+							editorAmbienceResourceFirstVisible = 0;
+							inputstr = editorAmbienceResourceSearch;
+							inputlen = 127;
+							editproperty = -1;
+							cursorflash = ticks;
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+						}
+						const int ambienceVolumeY = ambienceClickY + 54;
+						if ( !editorAmbiencePickerOpen
+							&& omousex >= ambienceClickX - 4 && omousex < ambienceClickX + 60
+							&& omousey >= ambienceVolumeY - 4 && omousey < ambienceVolumeY + 12 )
+						{
+							inputstr = mapAmbienceVolumeText;
+							editproperty = 23;
+							cursorflash = ticks;
+						}
+						if ( !editorAmbiencePickerOpen
+							&& omousex >= ambienceClickX && omousex < ambienceClickX + 32
+							&& omousey >= ambienceClickY + 68 && omousey < ambienceClickY + 86 )
+						{
+							strcpy(mapAmbienceLoopText,
+								!strncmp(mapAmbienceLoopText, "[x]", 3) ? "[ ]" : "[x]");
+							mousestatus[SDL_BUTTON_LEFT] = 0;
+						}
+						for ( int fadeIndex = 0; fadeIndex < 2; ++fadeIndex )
+						{
+							const int fadeY = ambienceClickY + 90 + fadeIndex * 18;
+							if ( !editorAmbiencePickerOpen
+								&& omousex >= ambienceClickX - 4 && omousex < ambienceClickX + 60
+								&& omousey >= fadeY - 4 && omousey < fadeY + 12 )
+							{
+								inputstr = fadeIndex == 0 ? mapAmbienceFadeInText : mapAmbienceFadeOutText;
+								editproperty = 24 + fadeIndex;
+								cursorflash = ticks;
+							}
+						}
+						if ( editorAmbiencePickerOpen )
+						{
+							const int pickerX = subx1 + 448;
+							const int pickerY = suby1 + 408;
+							const int pickerWidth = 340;
+							const int pickerBottom = std::max(pickerY + 24, suby2 - 60);
+							const int listTop = pickerY + 28;
+							const int visibleRows = std::max(0, (pickerBottom - listTop) / 12);
+							const std::string filter = editorPaletteLowercase(editorAmbienceResourceSearch);
+							std::vector<const std::string*> matches;
+							for ( const std::string& resource : editorAmbienceResources )
+							{
+								if ( filter.empty() || editorPaletteLowercase(resource).find(filter) != std::string::npos )
+								{
+									matches.push_back(&resource);
+								}
+							}
+							if ( omousex >= pickerX + 4 && omousex < pickerX + pickerWidth - 4
+								&& omousey >= pickerY + 4 && omousey < pickerY + 20 )
+							{
+								inputstr = editorAmbienceResourceSearch;
+								inputlen = 127;
+								editproperty = -1;
+								cursorflash = ticks;
+							}
+							else if ( omousex >= pickerX + 4 && omousex < pickerX + pickerWidth - 4
+								&& omousey >= listTop && omousey < pickerBottom )
+							{
+								const int clickedRow = (omousey - listTop) / 12;
+								const int selected = editorAmbienceResourceFirstVisible + clickedRow;
+								if ( clickedRow < visibleRows && selected >= 0
+									&& selected < static_cast<int>(matches.size()) )
+								{
+									snprintf(mapAmbienceResourceText, sizeof(mapAmbienceResourceText), "%s",
+										matches[selected]->c_str());
+									editorAmbiencePickerOpen = false;
+									inputstr = mapAmbienceResourceText;
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+								}
+							}
+						}
+
+						if ( omousex >= subx1 + 104 && omousey >= suby2 - 76 && omousex < subx1 + 168 && omousey < suby2 - 60 )
 						{
 							inputstr = widthtext;
 							editproperty = 13;
 							cursorflash = ticks;
 						}
-						if ( omousex >= subx1 + 104 && omousey >= suby2 - 24 && omousex < subx1 + 168 && omousey < suby2 - 8 )
+						if ( omousex >= subx1 + 104 && omousey >= suby2 - 52 && omousex < subx1 + 168 && omousey < suby2 - 36 )
 						{
 							inputstr = heighttext;
 							editproperty = 14;
@@ -17064,7 +17347,7 @@ int main(int argc, char** argv)
 						inputlen = 3;
 						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 						{
-							printText(font8x8_bmp, subx1 + 108 + strlen(widthtext) * 8, suby2 - 44, "\26");
+							printText(font8x8_bmp, subx1 + 108 + strlen(widthtext) * 8, suby2 - 72, "\26");
 						}
 					}
 					if ( editproperty == 14 )   // edit map height
@@ -17078,7 +17361,7 @@ int main(int argc, char** argv)
 						inputlen = 3;
 						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 						{
-							printText(font8x8_bmp, subx1 + 108 + strlen(heighttext) * 8, suby2 - 20, "\26");
+							printText(font8x8_bmp, subx1 + 108 + strlen(heighttext) * 8, suby2 - 48, "\26");
 						}
 					}
 					pad_y1 += 24;
@@ -17229,6 +17512,47 @@ int main(int argc, char** argv)
 								fogCursorY,
 								"\26"
 							);
+						}
+					}
+					if ( editproperty >= 20 && editproperty <= 22 )
+					{
+						char* ambientLightEditValues[3] = {
+							mapAmbientLightRedText,
+							mapAmbientLightGreenText,
+							mapAmbientLightBlueText};
+						const int lightIndex = editproperty - 20;
+						if ( !SDL_IsTextInputActive() )
+						{
+							SDL_StartTextInput();
+							inputstr = ambientLightEditValues[lightIndex];
+						}
+						inputlen = 3;
+						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							printText(font8x8_bmp, subx1 + 340
+								+ strlen(ambientLightEditValues[lightIndex]) * 8,
+								suby1 + 392 + lightIndex * 18, "\26");
+						}
+					}
+					if ( editproperty >= 23 && editproperty <= 25 )
+					{
+						char* ambienceEditValues[3] = {
+							mapAmbienceVolumeText,
+							mapAmbienceFadeInText,
+							mapAmbienceFadeOutText};
+						const int ambienceIndex = editproperty - 23;
+						if ( !SDL_IsTextInputActive() )
+						{
+							SDL_StartTextInput();
+							inputstr = ambienceEditValues[ambienceIndex];
+						}
+						inputlen = ambienceIndex == 0 ? 3 : 5;
+						if ( (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+						{
+							const int ambienceCursorY = suby1 + 410 + ambienceIndex * 36;
+							printText(font8x8_bmp, subx1 + 580
+								+ strlen(ambienceEditValues[ambienceIndex]) * 8,
+								ambienceCursorY, "\26");
 						}
 					}
 				}
@@ -18151,7 +18475,7 @@ int main(int argc, char** argv)
 					{
 						int numProperties = sizeof(chestPropertyNames) / sizeof(chestPropertyNames[0]); //find number of entries in property list
 						const int lenProperties = sizeof(chestPropertyNames[0]) / sizeof(char); //find length of entry in property list
-						int spacing = 36; // 36 px between each item in the list.
+						int spacing = 40; // Keep labels, fields, and feedback on distinct rows.
 						int pad_y1 = suby1 + 28; // 28 px spacing from subwindow start.
 						int pad_x1 = subx1 + 8; // 8px spacing from subwindow start.
 						int pad_x2 = 64;
@@ -19323,18 +19647,6 @@ int main(int argc, char** argv)
 
 							pad_x1 = subx1 + 8;
 						}
-
-						// print out directions
-						pad_x1 += 54;
-						spacing = 18;
-						pad_y1 = suby1 + 28 + 8 * spacing;
-						printText(font8x8_bmp, pad_x1 + 32, pad_y1, "NORTH(3)");
-						pad_y1 = suby1 + 28 + 9 * spacing;
-						printText(font8x8_bmp, pad_x1, pad_y1, "WEST(2)");
-						printText(font8x8_bmp, pad_x1 + 96 - 16, pad_y1, "EAST(0)");
-						pad_y1 = suby1 + 28 + 10 * spacing;
-						printText(font8x8_bmp, pad_x1 + 32, pad_y1, "SOUTH(1)");
-						spacing = 36;
 
 						// Cycle properties with TAB.
 						if ( keystatus[SDLK_TAB] )
