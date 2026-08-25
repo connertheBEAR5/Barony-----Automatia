@@ -7,6 +7,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "sam_workshop.hpp"
+#include <algorithm>
 #include "sam_logger.hpp"
 #include "sam_errors.hpp"
 #include "nlohmann/json.hpp"
@@ -257,6 +258,24 @@ static bool parseManifest(const std::string& jsonText, const std::string& modPat
 	out.baronyMaxVersion = getString("barony_max_version");
 	out.incompatibleWithBaronyVersion = getString("incompatible_with_barony_version");
 	out.description = getString("description");
+	// "rooms": { "<levelset>": ["rooms/foo.lmp", ...] } -- prefab rooms added to an
+	// existing levelset's pool. Parsed here; ordering/validation happens in SAMRooms.
+	{
+		auto it = j.find("rooms");
+		if ( it != j.end() && it->is_object() )
+		{
+			for ( auto r = it->begin(); r != it->end(); ++r )
+			{
+				if ( !r.value().is_array() ) { continue; }
+				std::vector<std::string> paths;
+				for ( const auto& el : r.value() )
+				{
+					if ( el.is_string() ) { paths.push_back(el.get<std::string>()); }
+				}
+				if ( !paths.empty() ) { out.rooms.emplace_back(r.key(), paths); }
+			}
+		}
+	}
 	out.dependencies = getStringArray("dependencies", false); // namespaces, not paths
 	out.classes = getStringArray("classes", true);
 	out.items = getStringArray("items", true);
@@ -288,6 +307,29 @@ static bool parseManifest(const std::string& jsonText, const std::string& modPat
 					continue;
 				}
 				out.models.push_back({ id, file });
+			}
+		}
+	}
+
+	// v1.10.3 -- pictures the mod draws itself. Same shape as "models": an array of
+	// { "id": "ns:name", "file": "art/x.png" }.
+	{
+		auto it = j.find("images");
+		if ( it != j.end() && it->is_array() )
+		{
+			for ( const auto& el : *it )
+			{
+				if ( !el.is_object() ) { continue; }
+				std::string id, file;
+				if ( auto idIt = el.find("id"); idIt != el.end() && idIt->is_string() ) { id = idIt->get<std::string>(); }
+				if ( auto fIt = el.find("file"); fIt != el.end() && fIt->is_string() ) { file = fIt->get<std::string>(); }
+				if ( id.empty() || file.empty() ) { continue; }
+				if ( SAMErrors::relPathEscapes(file) )
+				{
+					SAM_WARN(MOD, std::string("Manifest 'images' file '") + file + "' escapes the mod folder - ignored.");
+					continue;
+				}
+				out.images.push_back({ id, file });
 			}
 		}
 	}
@@ -341,6 +383,23 @@ static std::vector<SAMModManifest> sortByDependencies(const std::vector<SAMModMa
 	{
 		remaining.push_back(&m);
 	}
+
+	// DETERMINISTIC TIE-BREAK. Dependencies still come first -- that is what the loop below
+	// does -- but among mods that do not depend on each other the order was whatever order
+	// they happened to be mounted in, i.e. the arrangement of the player's mod list.
+	//
+	// That mattered far more than it looks. Custom content ids (items, classes, races,
+	// spells, effects) are handed out in load order and then written RAW into savegames and
+	// RAW onto the wire, with nothing anywhere mapping them back to a name. So reordering
+	// your mod list silently turned every saved custom item into a different mod's item, and
+	// two players with the SAME mods in a different order got different ids for the same
+	// content -- which the multiplayer fingerprint could not detect, because it compares a
+	// sorted list of names.
+	//
+	// Sorting by namespace makes the result depend only on WHICH mods are loaded, never on
+	// how they are arranged. Same set, same ids, every machine, every launch.
+	std::sort(remaining.begin(), remaining.end(),
+		[](const SAMModManifest* a, const SAMModManifest* b) { return a->ns < b->ns; });
 
 	while ( !remaining.empty() )
 	{

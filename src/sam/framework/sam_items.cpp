@@ -49,6 +49,7 @@ static const char* MOD = "ITEMS";
 
 static std::map<int, SAMItemDef> s_registry;
 static int s_nextItemId = SAM_ITEM_ID_BASE;
+static SAMItems::RuntimeIdResolver s_runtimeIdResolver;
 
 // Resolved kit_ui paths, cached because the crafting panel asks for every role on EVERY
 // frame: without this each open panel cost ~17 real file opens per frame per player, just
@@ -71,6 +72,46 @@ struct SAMItemSaved
 	std::map<std::string, Sint32> attributes;
 };
 static std::map<int, SAMItemSaved> s_itemPatches;
+
+#ifndef EDITOR
+static Uint64 samTraitMask(const std::vector<std::string>& traits, const std::string& stableId,
+	bool warnUnknown)
+{
+	struct SamTraitName { const char* name; Uint64 bit; };
+	static const SamTraitName kTraitNames[] = {
+		{ "ranged",           SAMItemTrait::RANGED },
+		{ "quiver",           SAMItemTrait::QUIVER },
+		{ "foci",             SAMItemTrait::FOCI },
+		{ "instrument",       SAMItemTrait::INSTRUMENT },
+		{ "thrown_ball",      SAMItemTrait::THROWN_BALL },
+		{ "shield_slot",      SAMItemTrait::SHIELD_SLOT },
+		{ "potion_bad",       SAMItemTrait::POTION_BAD },
+		{ "automaton_food",   SAMItemTrait::AUTOMATON_FOOD },
+		{ "tinker_throwable", SAMItemTrait::TINKER_THROWABLE },
+		{ "usable",           SAMItemTrait::USABLE },
+		{ "beatitude_ac",     SAMItemTrait::BEATITUDE_AC },
+	};
+	Uint64 mask = 0;
+	for ( const std::string& trait : traits )
+	{
+		bool matched = false;
+		for ( const auto& known : kTraitNames )
+		{
+			if ( trait == known.name )
+			{
+				mask |= known.bit;
+				matched = true;
+				break;
+			}
+		}
+		if ( warnUnknown && !matched )
+		{
+			SAM_WARN(MOD, "Item [" + stableId + "] declares unknown trait '" + trait + "' — ignored.");
+		}
+	}
+	return mask;
+}
+#endif
 
 /*-------------------------------------------------------------------------------
 	Local helpers
@@ -108,6 +149,56 @@ static bool fileExists(const std::string& p)
 {
 	std::ifstream f(p.c_str(), std::ios::binary);
 	return f.good();
+}
+
+// Resolve a mod-supplied image path to something the image loader can open.
+//
+// The DOCUMENTED form is relative to the mod folder ("items/images/foo.png"). But `model`
+// and `model_fp` resolve a completely different way -- they go to loadVoxel as raw PhysFS
+// logical paths and are never joined onto anything -- and PhysFS has the game root mounted
+// too, so "mods/<folder>/foo.vox" happens to work for a hand-installed mod. A modder who
+// copies that prefix style onto `icon` gets <mod>/mods/<folder>/foo.png here: the prefix
+// doubles, nothing is found, and the icon silently stays vanilla with no diagnostic at all.
+//
+// So try the documented form, tolerate the PhysFS form, and warn when the second one is what
+// worked -- because that spelling also breaks the MODELS on a Workshop install, where the
+// content directory is not <Barony>/mods/<folder>.
+static std::string samResolveModImage(const std::string& modPath, const std::string& rel,
+	const char* field, const std::string& ownerId)
+{
+	if ( rel.empty() ) { return std::string(); }
+	auto collapse = [](const std::string& in) {
+		std::string out; out.reserve(in.size());
+		for ( char c : in )
+		{
+			if ( c == '/' && !out.empty() && out.back() == '/' ) { continue; }
+			out.push_back(c);
+		}
+		return out;
+	};
+
+	const std::string want = collapse(toForwardSlashes(joinPath(modPath, rel)));
+	if ( fileExists(want) ) { return want; }
+
+#ifndef EDITOR
+	const std::string logical = collapse(toForwardSlashes(rel));
+	if ( const char* realDir = PHYSFS_getRealDir(logical.c_str()) )
+	{
+		const std::string alt = collapse(toForwardSlashes(joinPath(realDir, logical)));
+		if ( fileExists(alt) )
+		{
+			SAM_WARN("ITEMS", "[" + ownerId + "] " + field + " '" + rel + "' was found from the "
+				"game folder, not your mod folder. These paths are relative to your mod, so drop "
+				"the leading \"mods/<your folder>/\". It works today only because you installed "
+				"the mod by hand -- on a Steam Workshop install this path will not exist.");
+			return alt;
+		}
+	}
+#endif
+	SAM_WARN("ITEMS", "[" + ownerId + "] " + field + " '" + rel + "' was not found (looked for '"
+		+ want + "'). The path is relative to your mod folder: for a file at "
+		"<your mod>/items/images/foo.png write \"items/images/foo.png\". Using the default icon.");
+	return std::string();
 }
 
 // Valid enum-name lists (for validation + "did you mean?" suggestions). Kept in
@@ -478,7 +569,7 @@ static bool registerItemAt(int id, SAMItemDef def)
 	}
 	if ( !def.icon.empty() )
 	{
-		const std::string abs = toForwardSlashes(joinPath(def.modPath, def.icon));
+		const std::string abs = samResolveModImage(def.modPath, def.icon, "icon", def.id);
 		if ( fileExists(abs) && slot.images.first )
 		{
 			string_t* s = static_cast<string_t*>(slot.images.first->element);
@@ -530,33 +621,7 @@ static bool registerItemAt(int id, SAMItemDef def)
 	// names warn rather than failing the item, so a mod written for a newer framework still
 	// loads on an older exe -- it just does not get that behaviour.
 	{
-		struct SamTraitName { const char* name; Uint64 bit; };
-		static const SamTraitName kTraitNames[] = {
-			{ "ranged",           SAMItemTrait::RANGED },
-			{ "quiver",           SAMItemTrait::QUIVER },
-			{ "foci",             SAMItemTrait::FOCI },
-			{ "instrument",       SAMItemTrait::INSTRUMENT },
-			{ "thrown_ball",      SAMItemTrait::THROWN_BALL },
-			{ "shield_slot",      SAMItemTrait::SHIELD_SLOT },
-			{ "potion_bad",       SAMItemTrait::POTION_BAD },
-			{ "automaton_food",   SAMItemTrait::AUTOMATON_FOOD },
-			{ "tinker_throwable", SAMItemTrait::TINKER_THROWABLE },
-			{ "usable",           SAMItemTrait::USABLE },
-			{ "beatitude_ac",     SAMItemTrait::BEATITUDE_AC },
-		};
-		slot.samTraits = 0;
-		for ( const std::string& t : def.traits )
-		{
-			bool matched = false;
-			for ( const auto& kn : kTraitNames )
-			{
-				if ( t == kn.name ) { slot.samTraits |= kn.bit; matched = true; break; }
-			}
-			if ( !matched )
-			{
-				SAM_WARN(MOD, "Item [" + def.id + "] declares unknown trait '" + t + "' — ignored.");
-			}
-		}
+		slot.samTraits = samTraitMask(def.traits, def.id, true);
 		if ( slot.samTraits != 0 )
 		{
 			SAM_DEBUG(MOD, "  traits: " + std::to_string(def.traits.size()) + " declared");
@@ -574,21 +639,43 @@ static bool registerItemAt(int id, SAMItemDef def)
 	return true;
 }
 
-// Allocate the next mod item id in load order and write the def there. The ceiling is
-// the built-in band, not NUM_ITEM_SLOTS: mods must never be handed a slot the framework
-// has reserved for itself, or a mod item and a built-in would collide on the same id.
+// Consume Automatia's stable-id mapping when integrated. The standalone fallback scans
+// the same full range while skipping the one fixed framework-owned workbench slot.
 static bool registerItem(SAMItemDef def)
 {
-	const int id = s_nextItemId;
-	if ( id >= SAM_BUILTIN_ITEM_ID_BASE )
+	if ( s_runtimeIdResolver )
 	{
-		SAM_ERROR(MOD, "Item registry full (next id " + std::to_string(id) + " >= "
-			+ std::to_string(SAM_BUILTIN_ITEM_ID_BASE) + ", the start of the framework's reserved band) — skipping '"
-			+ def.id + "'.");
+		const int resolved = s_runtimeIdResolver(def.id);
+		if ( resolved < SAM_ITEM_ID_BASE || resolved >= NUM_ITEM_SLOTS )
+		{
+			SAM_ERROR(MOD, "Stable item [" + def.id
+				+ "] has no valid Automatia runtime mapping — skipping definition.");
+			return false;
+		}
+		return registerItemAt(resolved, std::move(def));
+	}
+
+	// Standalone/upstream fallback. Integrated Automatia always supplies the resolver.
+	while ( s_nextItemId == SAM_ITEM_HUNTERS_WORKBENCH ) { ++s_nextItemId; }
+	const int id = s_nextItemId;
+	if ( id >= NUM_ITEM_SLOTS )
+	{
+		SAM_ERROR(MOD, "Item registry full at " + std::to_string(NUM_ITEM_SLOTS)
+			+ " slots — skipping '" + def.id + "'.");
 		return false;
 	}
 	s_nextItemId = id + 1;
 	return registerItemAt(id, std::move(def));
+}
+
+void SAMItems::setRuntimeIdResolver(RuntimeIdResolver resolver)
+{
+	s_runtimeIdResolver = std::move(resolver);
+}
+
+void SAMItems::clearRuntimeIdResolver()
+{
+	s_runtimeIdResolver = RuntimeIdResolver{};
 }
 
 bool SAMItems::registerBuiltinAt(int id, SAMItemDef def)
@@ -839,6 +926,7 @@ void SAMItems::clear()
 			items[id].setIdentifiedName("");
 			items[id].setUnidentifiedName("");
 			items[id].attributes.clear();
+			items[id].samTraits = 0;
 		}
 	}
 	s_registry.clear();
@@ -867,6 +955,7 @@ void SAMItems::reapplyAfterDataReload()
 		slot.item_slot = slotFromName(def.slot);
 		slot.attributes.clear();
 		for ( const auto& a : def.attributes ) { slot.attributes[a.first] = a.second; }
+		slot.samTraits = samTraitMask(def.traits, def.id, false);
 		injectCustomTooltip(id, def);
 	}
 	if ( !s_registry.empty() )
@@ -1009,18 +1098,9 @@ std::string SAMItems::getIconPath(int itemId)
 	}
 	// Same absolute path we resolved at registration, but collapse any accidental
 	// "//" into "/" so Image::get (PhysFS + raw fallback) resolves it cleanly.
-	const std::string raw = toForwardSlashes(joinPath(it->second.modPath, it->second.icon));
-	std::string out;
-	out.reserve(raw.size());
-	for ( char c : raw )
-	{
-		if ( c == '/' && !out.empty() && out.back() == '/' ) { continue; }
-		out.push_back(c);
-	}
-	if ( !fileExists(out) )
-	{
-		out.clear(); // fall back to the placeholder rather than a broken path
-	}
+	// Same resolver as registration so the two can never disagree about where an icon lives.
+	// Any warning was already emitted once at load time; this runs per draw, so it stays quiet.
+	std::string out = samResolveModImage(it->second.modPath, it->second.icon, "icon", it->second.id);
 	s_iconPathCache[itemId] = out;
 	return out;
 }

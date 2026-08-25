@@ -123,6 +123,7 @@ namespace
         definition.item_slot = NO_EQUIP;
         definition.attributes.clear();
         definition.tooltip = "tooltip_default";
+        definition.samTraits = 0;
     }
 }
 

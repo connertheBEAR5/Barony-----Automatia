@@ -28,6 +28,7 @@
 #include "player_slot_map.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_items.hpp"
 #endif
 
 #include <assert.h>
@@ -907,6 +908,7 @@ ItemType itemLevelCurve(const Category cat, const int minLevel, const int maxLev
 	}
 
 	Uint32 numoftype = 0;
+	std::vector<int> samCandidates;
 	for ( c = 0; c < numitems; ++c )
 	{
 		chances[c] = false;
@@ -1000,6 +1002,10 @@ ItemType itemLevelCurve(const Category cat, const int minLevel, const int maxLev
 			}
 		}
 	}
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMItems::lootCandidates(static_cast<int>(cat), minLevel, maxLevel, samCandidates);
+	numoftype += static_cast<Uint32>(samCandidates.size());
+#endif
 	if ( numoftype == 0 )
 	{
 		printlog("warning: category passed to itemLevelCurve has no items!\n");
@@ -1015,6 +1021,7 @@ ItemType itemLevelCurve(const Category cat, const int minLevel, const int maxLev
 			numleft++;
 		}
 	}
+	numleft += static_cast<Uint32>(samCandidates.size());
 	if ( numleft == 0 )
 	{
 		return GEM_ROCK;
@@ -1048,6 +1055,10 @@ ItemType itemLevelCurve(const Category cat, const int minLevel, const int maxLev
 				}
 			}
 		}
+	}
+	if ( pick < samCandidates.size() )
+	{
+		return static_cast<ItemType>(samCandidates[pick]);
 	}
 
 	return GEM_ROCK;
@@ -5430,6 +5441,11 @@ Sint32 Item::weaponGetAttack(const Stat* const wielder) const
 
 bool Item::doesItemProvideBeatitudeAC(ItemType type)
 {
+	if ( type >= 0 && type < NUM_ITEM_SLOTS
+		&& (items[type].samTraits & SAMItemTrait::BEATITUDE_AC) )
+	{
+		return true;
+	}
 	if ( itemTypeIsQuiver(type) || items[type].category == SPELLBOOK
 		|| itemTypeIsFoci(type)
 		|| itemTypeIsInstrument(type)
@@ -6789,6 +6805,11 @@ bool isPotionBad(const Item& potion)
 	{
 		return false;
 	}
+	if ( potion.type >= 0 && potion.type < NUM_ITEM_SLOTS
+		&& (items[potion.type].samTraits & SAMItemTrait::POTION_BAD) )
+	{
+		return true;
+	}
 
 	if (potion.identified && 
 		(potion.type == POTION_SICKNESS 
@@ -7068,6 +7089,11 @@ bool isRangedWeapon(const Item& item)
 
 bool isRangedWeapon(const ItemType type)
 {
+	if ( type >= 0 && type < NUM_ITEM_SLOTS
+		&& (items[type].samTraits & SAMItemTrait::RANGED) )
+	{
+		return true;
+	}
 	switch ( type )
 	{
 	case SLING:
@@ -7717,11 +7743,19 @@ bool itemSpriteIsQuiverBaseThirdPersonModel(const int sprite)
 
 bool itemTypeIsQuiver(const ItemType type)
 {
-	return (type >= QUIVER_SILVER && type <= QUIVER_HUNTING) || (type >= QUIVER_BONE && type <= QUIVER_BLACKIRON);
+	return (type >= QUIVER_SILVER && type <= QUIVER_HUNTING)
+		|| (type >= QUIVER_BONE && type <= QUIVER_BLACKIRON)
+		|| (type >= 0 && type < NUM_ITEM_SLOTS
+			&& (items[type].samTraits & SAMItemTrait::QUIVER));
 }
 
 bool itemTypeIsFoci(const ItemType type)
 {
+	if ( type >= 0 && type < NUM_ITEM_SLOTS
+		&& (items[type].samTraits & SAMItemTrait::FOCI) )
+	{
+		return true;
+	}
 	switch ( type )
 	{
 	case TOOL_FOCI_FIRE:
@@ -7749,12 +7783,16 @@ bool itemTypeIsFoci(const ItemType type)
 
 bool itemTypeIsInstrument(const ItemType type)
 {
-	return (type >= INSTRUMENT_FLUTE && type <= INSTRUMENT_HORN);
+	return (type >= INSTRUMENT_FLUTE && type <= INSTRUMENT_HORN)
+		|| (type >= 0 && type < NUM_ITEM_SLOTS
+			&& (items[type].samTraits & SAMItemTrait::INSTRUMENT));
 }
 
 bool itemTypeIsThrownBall(const ItemType type)
 {
-	return type == DUST_BALL || type == GREASE_BALL || type == SLOP_BALL;
+	return type == DUST_BALL || type == GREASE_BALL || type == SLOP_BALL
+		|| (type >= 0 && type < NUM_ITEM_SLOTS
+			&& (items[type].samTraits & SAMItemTrait::THROWN_BALL));
 }
 
 real_t rangedAttackGetSpeedModifier(const Stat* const myStats)

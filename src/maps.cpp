@@ -31,6 +31,9 @@
 #include <cstdint>
 #ifndef EDITOR
 #include "world_state.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/framework/sam_rooms.hpp"
+#endif
 #endif
 // ==================== SECRET DOORWAY GLOBALS ====================
 bool secretDoorwayHasSpawned = false;   // Only one per entire run
@@ -1607,6 +1610,25 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 
 		loadSubRoomData(fullMapPath, &mapList);
 	}
+#if defined(SAM_FRAMEWORK_ENABLED) && !defined(EDITOR)
+	// S.A.M rooms append to the existing Automatia/vanilla room pool. The entrance
+	// remains vanilla index zero; Automatia's grouped treasure, shop, special, and
+	// cuboid editor systems remain independent. SAMRooms already returns a canonical
+	// namespace/path ordering, so this extends (rather than replaces) the deterministic
+	// RNG index space on every peer with the same catalog.
+	for ( const std::string& injectedRoom : SAMRooms::roomsFor(levelset) )
+	{
+		if ( loadSubRoomData(injectedRoom, &mapList) )
+		{
+			++numlevels;
+		}
+		else
+		{
+			printlog("[S.A.M] Rejected unreadable injected room '%s' for levelset '%s'.\n",
+				injectedRoom.c_str(), levelset);
+		}
+	}
+#endif
 	// ==================== SECRET DOORWAY BIOME GROUPS (NO GENERIC) ====================
 GroupSubRooms_t minesSecretDoorways;
 GroupSubRooms_t swampSecretDoorways;

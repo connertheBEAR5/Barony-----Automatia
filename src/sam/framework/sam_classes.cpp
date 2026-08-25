@@ -29,6 +29,7 @@
 #include <fstream>
 #include <sstream>
 #include <set>
+#include <cstdint>
 
 #ifndef EDITOR
 #include "main.hpp"          // MAXPLAYERS, CLIENT, multiplayer
@@ -40,8 +41,11 @@
 #include "mod_tools.hpp"     // ItemTooltips (itemNameStringToItemID, spellItems)
 #include "magic/magic.hpp"   // addSpell
 #include "sam_spells.hpp"    // SAMSpells::getSpellByName (custom starting spells)
+#include "monster.hpp"       // Monster enum (samRaceKey maps the drawn body to a race key)
 #include <cctype>
 #include <cstdlib>           // free
+#include <system_error>
+#include <filesystem>
 #endif
 
 using nlohmann::json;
@@ -63,7 +67,11 @@ static std::map<int, std::set<int>> s_classPassives;
 // grants them. Barony's own ClassHotbarConfig_t::assignHotbarSlots() runs a few frames
 // LATER and zeroes every hotbar slot, so the pins have to be re-applied after it — see
 // reapplyHotbarPins(), called at the end of assignHotbarSlots.
-static std::map<int, std::vector<std::pair<int, Uint32>>> s_hotbarPins;
+// uint32_t rather than SDL's Uint32: this declaration is at file scope, but Uint32 only
+// arrives with main.hpp, which is included under #ifndef EDITOR below. The editor build
+// therefore failed to compile this file at all. The two types are the same width and
+// the same type on every platform we build for, so nothing else changes.
+static std::map<int, std::vector<std::pair<int, uint32_t>>> s_hotbarPins;
 
 static bool readWholeFile(const std::string& path, std::string& out)
 {
@@ -109,6 +117,18 @@ static bool fileExists(const std::string& path)
 	return f.is_open();
 }
 
+// The keys appearance.races accepts. Must stay in step with samRaceKey below, which is
+// what the draw-time lookup is matched against; "default" is the catch-all entry.
+static bool isKnownAppearanceRace(const std::string& key)
+{
+	static const std::set<std::string> kNames = {
+		"default", "HUMAN", "SKELETON", "VAMPIRE", "SUCCUBUS", "GOATMAN", "AUTOMATON",
+		"INCUBUS", "GOBLIN", "INSECTOID", "RAT", "TROLL", "SPIDER", "IMP", "GNOME",
+		"GREMLIN", "DRYAD", "MYCONID", "SALAMANDER",
+	};
+	return kNames.count(key) > 0;
+}
+
 /*-------------------------------------------------------------------------------
 	SAMClasses::loadFromManifest
 -------------------------------------------------------------------------------*/
@@ -121,6 +141,46 @@ static void validateClassSemantics(const SAMClassDef& def, const std::string& fi
 
 void SAMClasses::loadFromManifest(const SAMModManifest& manifest)
 {
+	// The number-one reason a modder's class never appears: mod.json has no "classes"
+	// array, or an empty one, or it simply does not list the file. Nothing in the framework
+	// ever looked at what was actually on disk, so a folder of perfectly good class JSON was
+	// invisible and completely silent -- the load summary just said "0 classes" and a new
+	// modder has no reason to read that as an error.
+	//
+	// So when a mod declares no classes, look in its classes/ folder and say what we found.
+	// Omitting the array is legitimate (plenty of mods ship no classes at all), which is why
+	// this only speaks up when there are real files being ignored.
+#ifndef EDITOR
+	if ( manifest.classes.empty() )
+	{
+		std::error_code ec;
+		std::vector<std::string> found;
+		const std::string dir = joinPath(manifest.modPath, "classes");
+		for ( const auto& entry : std::filesystem::directory_iterator(dir, ec) )
+		{
+			if ( ec ) { break; }
+			std::error_code ec2;
+			if ( entry.is_regular_file(ec2) && entry.path().extension() == ".json" )
+			{
+				found.push_back("classes/" + entry.path().filename().string());
+			}
+		}
+		if ( !found.empty() )
+		{
+			std::string list;
+			for ( const std::string& f : found )
+			{
+				if ( !list.empty() ) { list += ", "; }
+				list += "\"" + f + "\"";
+			}
+			SAM_WARN(MOD, "Mod [" + manifest.ns + "] declares no classes in mod.json, but "
+				+ std::to_string(found.size()) + " class file(s) exist on disk and are being IGNORED.");
+			SAM_WARN(MOD, "  fix:      add them to mod.json ->  \"classes\": [" + list + "]");
+			SAM_WARN(MOD, "  -> until then these classes will NOT appear in character select.");
+		}
+	}
+#endif
+
 	for ( const std::string& relPath : manifest.classes )
 	{
 		const std::string path = joinPath(manifest.modPath, relPath);
@@ -216,6 +276,30 @@ void SAMClasses::loadFromManifest(const SAMModManifest& manifest)
 			}
 		}
 
+		// Optional second icon for the selected/hovered state. Same rules as portrait:
+		// traversal-guarded, existence-checked at load, and non-fatal when absent.
+		def.portraitSelected = getStr(j, "portrait_selected");
+		if ( !def.portraitSelected.empty() && SAMErrors::relPathEscapes(def.portraitSelected) )
+		{
+			SAM_WARN(MOD, "Class [" + def.id + "] portrait_selected path '" + def.portraitSelected
+				+ "' escapes the mod folder — ignoring it.");
+			def.portraitSelected.clear();
+		}
+		if ( !def.portraitSelected.empty() )
+		{
+			const std::string absSel = toForwardSlashes(joinPath(manifest.modPath, def.portraitSelected));
+			if ( fileExists(absSel) )
+			{
+				def.portraitSelectedPath = absSel;
+				SAM_INFO(MOD, "Class [" + def.id + "] portrait_selected -> " + absSel);
+			}
+			else
+			{
+				SAM_WARN(MOD, "Class [" + def.id + "] portrait_selected not found (the normal "
+					"portrait will be used in every state): " + absSel);
+			}
+		}
+
 		if ( j.contains("stats") && j["stats"].is_object() )
 		{
 			const json& s = j["stats"];
@@ -253,6 +337,22 @@ void SAMClasses::loadFromManifest(const SAMModManifest& manifest)
 			{
 				for ( auto it = a["races"].begin(); it != a["races"].end(); ++it )
 				{
+					// The lookup at draw time is an exact match against samRaceKey's output,
+					// which is upper case. A key that is merely close -- "human" for "HUMAN"
+					// -- stored fine, matched nothing, and quietly fell back to "default", so
+					// the class dressed every race instead of the one it named. Reject it here
+					// where the file and the field can be pointed at.
+					if ( !isKnownAppearanceRace(it.key()) )
+					{
+						SAMErrors::reportSemantic(MOD, fileLabel,
+							"/appearance/races/" + it.key(), "", "not a race name",
+							"\"default\", or one of HUMAN SKELETON VAMPIRE SUCCUBUS GOATMAN"
+							" AUTOMATON INCUBUS GOBLIN INSECTOID RAT TROLL SPIDER IMP GNOME"
+							" GREMLIN DRYAD MYCONID SALAMANDER (upper case)",
+							"check the spelling and the case",
+							"that entry ignored; the rest of the class loaded.", true);
+						continue;
+					}
 					if ( !it.value().is_object() ) { continue; }
 					const json& entry = it.value();
 					const std::string head = getStr(entry, "head");
@@ -388,9 +488,43 @@ void SAMClasses::loadFromManifest(const SAMModManifest& manifest)
 			}
 			if ( r.contains("difficulty") && r["difficulty"].is_object() )
 			{
+				// Two star lines on the character-select card. The engine's own label (lang entry
+				// 5428) is a two-line label reading "Survival:" then "Complexity:", but these
+				// shipped as "attack" and "survival" -- names matching NEITHER line, so modders
+				// reliably set the wrong one.
+				//
+				// The correct names are survival/complexity. The old pair still parses so nothing
+				// already published breaks. Note "survival" is unfortunately in BOTH spellings and
+				// means a different line in each, so which scheme is in use has to be decided before
+				// reading it -- the presence of a partner key is what settles it:
+				//   has "complexity"        -> new scheme: survival = line 0, complexity = line 1
+				//   else has "attack"       -> old scheme: attack   = line 0, survival   = line 1
+				//   else (lone "survival")  -> new scheme, and line 1 stays 0 so neither line draws
+				const json& d = r["difficulty"];
 				auto clamp15 = [](int v){ return (v < 1) ? 0 : (v > 5 ? 5 : v); };
-				def.difficultyAttack   = clamp15(getInt(r["difficulty"], "attack", 0));
-				def.difficultySurvival = clamp15(getInt(r["difficulty"], "survival", 0));
+				int line0 = 0, line1 = 0;
+				if ( d.contains("complexity") )
+				{
+					line0 = clamp15(getInt(d, "survival", 0));
+					line1 = clamp15(getInt(d, "complexity", 0));
+					if ( d.contains("attack") )
+					{
+						SAM_WARN(MOD, "Class [" + def.id + "] ratings.difficulty mixes the old name "
+							"'attack' with the new 'complexity'. Using survival/complexity and ignoring "
+							"'attack'. Remove it.");
+					}
+				}
+				else if ( d.contains("attack") )
+				{
+					line0 = clamp15(getInt(d, "attack", 0));
+					line1 = clamp15(getInt(d, "survival", 0));
+				}
+				else
+				{
+					line0 = clamp15(getInt(d, "survival", 0));
+				}
+				def.difficultyAttack   = line0;   // legacy field name; drives the Survival line
+				def.difficultySurvival = line1;   // ... and the Complexity line
 			}
 		}
 
@@ -416,8 +550,26 @@ void SAMClasses::loadFromManifest(const SAMModManifest& manifest)
 	}
 }
 
+namespace
+{
+	// Every head index this framework registered, so the engine's hardcoded
+	// isPlayerHeadSprite switch can be widened to accept them.
+	//
+	// Declared up here rather than beside resolveAppearance because SAMClasses::clear() has
+	// to empty it too -- leaving it further down made clear() a forward reference.
+	std::set<int> s_customHeadSprites;
+}
+
 void SAMClasses::clear()
 {
+	// resolveAppearance() is the only other place this set is emptied, and the unload path
+	// never calls it -- Mods::unloadMods -> SAMLoader::unload -> here. Without this, every
+	// model index the last-loaded class registered stays in the set for the life of the
+	// process, so Entity::isPlayerHeadSprite() keeps answering yes for vanilla content after
+	// the player has turned mods off.
+#ifndef EDITOR
+	s_customHeadSprites.clear();
+#endif
 	s_registry.clear();
 	s_nextClassId = SAM_CLASS_ID_BASE;
 	// v0.7.0 Feature 5: emptying the overlays fully reverts sam_patch_class + class
@@ -712,6 +864,21 @@ static void validateClassSemantics(const SAMClassDef& def, const std::string& fi
 	};
 	checkRolls(def.strongRolls, "strong_rolls");
 	checkRolls(def.weakRolls, "weak_rolls");
+	// weights uses the same six names, but as KEYS. It was the one growth field with no
+	// validation: a typo like "Int" or "INTEL" is dropped by the engine's name lookup and the
+	// attribute silently falls back to neutral, so a class quietly grows nothing like its JSON
+	// reads. Same check, same "did you mean" hint as the roll lists.
+	for ( const auto& kv : def.statGrowthWeights )
+	{
+		if ( !listHas(kRollNames, kv.first) )
+		{
+			const std::string sug = SAMErrors::suggest(kv.first, kRollNames);
+			SAMErrors::reportSemantic(MOD, fileLabel, "/stat_growth/weights", kv.first,
+				"not a known stat", "one of STR, DEX, CON, INT, PER, CHR",
+				sug.empty() ? "" : ("did you mean \"" + sug + "\"?"),
+				"that attribute keeps neutral growth.", /*warn=*/true);
+		}
+	}
 }
 
 void SAMClasses::applyStats(int classnum, Stat* stat)
@@ -799,36 +966,46 @@ void SAMClasses::applyStatOverrides(int classnum, Stat* stat)
 
 namespace
 {
-	// Every head index this framework registered, so the engine's hardcoded
-	// isPlayerHeadSprite switch can be widened to accept them.
-	std::set<int> s_customHeadSprites;
-
 	// Barony's RACE_* -> the Monster enum name a modder writes in "races". Kept local so
 	// this file doesn't depend on the engine's race tables; an unknown key simply never
 	// matches and falls through to "default", which is the safe outcome.
+	// The character-select "race" a class appearance entry is keyed by, from the MONSTER
+	// the player is drawn as.
+	//
+	// Takes a Monster, not a PlayerRaces id, because a Monster is what the call site has:
+	// actPlayer resolves playerRace through getMonsterFromPlayerRace long before the head
+	// is set. It used to switch on 0-17 as though those were PlayerRaces constants, which
+	// silently mapped a human (Monster HUMAN == 1) to "SKELETON" and a goatman (29) to
+	// nothing at all -- so a per-race head landed on the wrong race or vanished.
+	//
+	// Reading the MONSTER also makes S.A.M custom races work with no extra arm: they reach
+	// here already resolved to the body they wear, so a head authored for GOATMAN applies
+	// to a goatman-bodied custom race. That is the correct key as well as the convenient
+	// one -- the limb offset table is indexed by monster type, so the head lands on the
+	// focal point it was drawn for.
 	const char* samRaceKey(int playerRace)
 	{
 		switch ( playerRace )
 		{
-			case 0:  return "HUMAN";
-			case 1:  return "SKELETON";
-			case 2:  return "VAMPIRE";
-			case 3:  return "SUCCUBUS";
-			case 4:  return "GOATMAN";
-			case 5:  return "AUTOMATON";
-			case 6:  return "INCUBUS";
-			case 7:  return "GOBLIN";
-			case 8:  return "INSECTOID";
-			case 9:  return "RAT";
-			case 10: return "TROLL";
-			case 11: return "SPIDER";
-			case 12: return "IMP";
-			case 13: return "GNOME";
-			case 14: return "GREMLIN";
-			case 15: return "DRYAD";
-			case 16: return "MYCONID";
-			case 17: return "SALAMANDER";
-			default: return "";
+			case HUMAN:        return "HUMAN";
+			case SKELETON:     return "SKELETON";
+			case VAMPIRE:      return "VAMPIRE";
+			case SUCCUBUS:     return "SUCCUBUS";
+			case GOATMAN:      return "GOATMAN";
+			case AUTOMATON:    return "AUTOMATON";
+			case INCUBUS:      return "INCUBUS";
+			case GOBLIN:       return "GOBLIN";
+			case INSECTOID:    return "INSECTOID";
+			case RAT:          return "RAT";
+			case TROLL:        return "TROLL";
+			case SPIDER:       return "SPIDER";
+			case CREATURE_IMP: return "IMP";
+			case GNOME:        return "GNOME";
+			case GREMLIN:      return "GREMLIN";
+			case DRYAD:        return "DRYAD";
+			case MYCONID:      return "MYCONID";
+			case SALAMANDER:   return "SALAMANDER";
+			default:           return "";
 		}
 	}
 }
@@ -845,23 +1022,48 @@ void SAMClasses::resolveAppearance()
 			// A custom .vox registered by SAMModels wins; otherwise fall back to a plain
 			// numeric index so a modder can name a vanilla head directly.
 			int idx = SAMModels::modelIndexForId(hv.second);
+			bool headExplained = false;   // a precise message was already emitted below
 			if ( idx < 0 )
 			{
 				char* end = nullptr;
 				const long n = std::strtol(hv.second.c_str(), &end, 10);
-				if ( end && *end == '\0' && n >= 0 ) { idx = (int)n; }
+				// Same bounds as body_model below. class.schema.json advertises the raw
+				// numeric form for heads as well, and an out-of-range or zero index here has
+				// the identical failure mode: opengl.cpp silently draws nothing, so the head
+				// vanishes with no log line and /sam_models shows nothing, because no model
+				// was ever registered.
+				if ( end && *end == '\0' && n > 0 && n < (long)nummodels )
+				{
+					idx = (int)n;
+				}
+				else if ( end && *end == '\0' )
+				{
+					SAM_ERROR(MOD, "Class [" + def.id + "] head for " + hv.first + " is model index "
+						+ std::to_string(n) + ", which is "
+						+ ( n == 0 ? std::string("models/system/null.vox, the engine's EMPTY model")
+						            : std::string("past the end of the table (this game has ")
+						              + std::to_string((long long)nummodels) + " models, 1.."
+						              + std::to_string((long long)nummodels - 1) + ")" )
+						+ ". The head would draw as nothing, so it is ignored."
+						" Remember models.txt line N is index N-1.");
+					headExplained = true;
+				}
 			}
-			if ( idx < 0 )
+			if ( idx < 0 && !headExplained )
 			{
 				SAM_WARN(MOD, "Class [" + def.id + "] appearance head '" + hv.second
 					+ "' for race '" + hv.first + "' is not a registered model — ignoring it "
 					+ "(that race keeps its normal head).");
-				continue;
 			}
+			if ( idx < 0 ) { continue; }
 			def.appearanceHeadIdx[hv.first] = idx;
-			// Only OUR models need the isPlayerHeadSprite widening; a vanilla index is
-			// already in the engine's switch.
-			if ( SAMModels::modelIndexForId(hv.second) >= 0 ) { s_customHeadSprites.insert(idx); }
+			// Widen isPlayerHeadSprite for whatever this resolved to, ours or vanilla.
+			// It used to widen only for our own .vox on the theory that "a vanilla index is
+			// already in the engine's switch" -- but that switch lists the vanilla PLAYER
+			// heads, and the interesting vanilla indices to point a class at are monster
+			// limbs (Gharbad's head, say), which are not in it. Leaving those unwidened
+			// broke the client's player-entity binding in multiplayer.
+			s_customHeadSprites.insert(idx);
 			SAM_DEBUG(MOD, "  [" + def.id + "] head for " + hv.first + " -> model " + std::to_string(idx));
 		}
 
@@ -872,22 +1074,72 @@ void SAMClasses::resolveAppearance()
 		if ( !def.bodyModel.empty() )
 		{
 			int bidx = SAMModels::modelIndexForId(def.bodyModel);
+			const bool wasRegistered = ( bidx >= 0 );
+			// Set when we have already said something specific about why this failed, so the
+			// generic "here are the three accepted forms" note below stays quiet. Saying both
+			// makes the precise message look like boilerplate.
+			bool alreadyExplained = false;
 			if ( bidx < 0 )
 			{
 				char* end = nullptr;
 				const long n = std::strtol(def.bodyModel.c_str(), &end, 10);
-				if ( end && *end == '\0' && n >= 0 ) { bidx = (int)n; }
+				if ( end && *end == '\0' && n >= 0 )
+				{
+					// A raw vanilla model index. Two things bite people here.
+					//
+					// (1) It was completely unbounded, so a number past the end of the table was
+					// accepted and the player rendered as NOTHING -- invisible, no log line, and no
+					// way to guess why.
+					//
+					// (2) models.txt is 1-based when you read it and 0-based when you index it
+					// (init.cpp:742 prints "listed at line %d" as c + 1). Someone greps the file,
+					// sees line 1026, writes 1026, and silently gets the model on line 1027. We
+					// cannot detect that one, so the message says it out loud.
+					// Index 0 is models/system/null.vox, the engine's EMPTY model. It passes
+					// every bound and then draws nothing -- the exact outcome this check was
+					// added to prevent, except now with a success line in the log claiming it
+					// resolved, which is worse to diagnose than silence.
+					if ( n == 0 )
+					{
+						SAM_ERROR(MOD, "Class [" + def.id + "] body_model '0' is model index 0, which is"
+							" models/system/null.vox -- the engine's EMPTY model. The class would render as"
+							" nothing at all, so this is ignored. Model indices start at 1 for real content.");
+						alreadyExplained = true;
+					}
+					else if ( n >= (long)nummodels )
+					{
+						SAM_ERROR(MOD, "Class [" + def.id + "] body_model '" + def.bodyModel
+							+ "' is model index " + std::to_string(n) + ", but this game only has "
+							+ std::to_string((long long)nummodels) + " models, and index 0 is the empty"
+							" model, so the usable range is 1.."
+							+ std::to_string((long long)nummodels - 1) + ". Ignoring it, or the class"
+							" would render as nothing at all. Remember models.txt line N is index N-1.");
+						alreadyExplained = true;
+					}
+					else
+					{
+						bidx = (int)n;
+					}
+				}
 			}
 			if ( bidx >= 0 )
 			{
 				def.bodyModelIdx = bidx;
 				s_customHeadSprites.insert(bidx);
-				SAM_DEBUG(MOD, "  [" + def.id + "] body model -> " + std::to_string(bidx));
+				// INFO, not DEBUG. When a class body does not appear this is the line that says
+				// whether it resolved at all, and DEBUG needs an environment variable that no
+				// player and almost no modder has ever set -- so nobody has ever read it.
+				const std::string from = wasRegistered ? SAMModels::pathForId(def.bodyModel) : std::string();
+				SAM_INFO(MOD, "  [" + def.id + "] body_model '" + def.bodyModel + "' -> model index "
+					+ std::to_string(bidx) + (from.empty() ? "" : "  (" + from + ")"));
 			}
-			else
+			else if ( !alreadyExplained )
 			{
 				SAM_WARN(MOD, "Class [" + def.id + "] body_model '" + def.bodyModel
-					+ "' is not a registered model — ignoring (class keeps its normal body).");
+					+ "' did not resolve - the class keeps its normal body. body_model takes a path"
+					" to a .vox your mod ships (e.g. models/mymod/jet.vox), an id you declared in"
+					" mod.json \"models\", or a raw vanilla model index. A bare name is none of"
+					" those. Run /sam_models to see what is registered.");
 			}
 		}
 	}

@@ -53,6 +53,16 @@ public:
         const SAMModManifest& manifest
     );
 
+    // Reserve framework-owned content in the same stable/runtime catalog used by
+    // mods. This prevents a fixed framework slot from colliding with the 20,000-slot
+    // Automatia range while keeping the stable id authoritative in persistence.
+    static bool registerFrameworkBuiltin(
+        const std::string& stableId,
+        int runtimeId,
+        const std::string& displayName,
+        const std::string& category
+    );
+
     static int count();
 
     static const SAMFoundationItemDef* getItem(

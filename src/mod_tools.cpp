@@ -28,6 +28,13 @@ See LICENSE for details.
 #include "ui/LoadingScreen.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_foundation.hpp"
+#ifndef EDITOR
+#include "sam/framework/sam_classes.hpp"
+#include "sam/framework/sam_items.hpp"
+#include "sam/framework/sam_monsters.hpp"
+#include "sam/framework/sam_races.hpp"
+#include "sam/framework/sam_sounds.hpp"
+#endif
 #endif
 #include <thread>
 #include <future>
@@ -12143,6 +12150,17 @@ void Mods::loadMods()
 		doLoadingScreen();
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	// Base data/model/sound tables now exist and all asynchronous reads have joined.
+	// Append S.A.M resources on the main thread, then resolve every stable model
+	// reference against the single shared numeric table.
+	SAMItems::registerModModels();
+	SAMClasses::resolveAppearance();
+	SAMRaces::resolveLimbModels();
+	SAMMonsters::reportBodyResolution();
+	SAMSounds::appendSounds();
+#endif
 
 	if ( physfsSearchBooksToUpdate() )
 	{

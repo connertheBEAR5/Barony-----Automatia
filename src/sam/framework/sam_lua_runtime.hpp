@@ -71,6 +71,64 @@ namespace SAMLua
 	// was successfully delivered to.
 	int dispatchEvent(const Event& ev);
 
+	// ---- reading back what a handler CHANGED --------------------------------------------
+	//
+	// The event table is an in/out parameter. A handler that assigns to one of the event's
+	// own numeric or string fields is proposing a new value, and the engine site decides
+	// whether to honour it:
+	//
+	//     SAMLua::Event ev; ev.setName("player.on_damage_taken").i("damage", dmg);
+	//     SAMLua::dispatchEvent(ev);
+	//     if ( SAMLua::lastDispatchCancelled() ) { dmg = 0; }
+	//     else { dmg = SAMLua::lastEventInt("damage", dmg); }
+	//
+	// Only fields the engine PUT on the event are read back, so a script cannot invent a
+	// field and have it mean something. The fallback is returned when the handler left the
+	// field alone, made it a non-number, or when no script is loaded -- so a site that adopts
+	// this reads exactly as it did before whenever nothing is listening.
+	//
+	// Both runtimes write into the same store and the JS pass runs after the Lua one, so a
+	// value changed in either language is visible here.
+	// ---- script-registered entity behaviours ---------------------------------------------
+	//
+	// Barony runs every entity through a function pointer once per frame. registerBehavior
+	// puts a SCRIPT function behind one of those pointers, so a mod can define what a thing
+	// does rather than choosing from what the framework exposes.
+	//
+	// Returns a registry index, or -1. The index -- not the name -- is what an entity carries,
+	// so the per-frame path is an array lookup rather than a string compare.
+	int  registerBehavior(const std::string& fullName, const std::string& ns, int luaFnRef);
+	int  registerBehaviorJs(const std::string& fullName, const std::string& ns, void* jsFn);
+	int  behaviorIndexFor(const std::string& fullName);
+	// Invoked by the trampoline every frame for one entity. Runs ONLY the owning script.
+	void runBehavior(int index, unsigned long long uid);
+	// Dropped when mods reload, so a behaviour cannot outlive the script that defined it.
+	void clearBehaviors();
+	// Detach a behaviour's function by name without touching the row's identity. Used by the
+	// JS runtime when a behaviour errors, so the pointer is cleared before the value is freed.
+	void clearBehaviorFn(const std::string& fullName);
+	// Turn an entity. Shared by both runtimes. `radians` is the same convention
+	// sam_get_facing returns and sam_spawn_projectile takes. Returns false for an unknown
+	// uid, a player (their facing is theirs), or a non-finite angle.
+	bool setEntityFacing(unsigned long long uid, double radians);
+	// Turn `uid` to face `targetUid`. Returns false if either is unknown.
+	bool lookAt(unsigned long long uid, unsigned long long targetUid);
+	// Read an entity's facing, or a negative number if the uid is unknown.
+	double entityFacing(unsigned long long uid);
+
+	// Shared by both runtimes' sam_spawn_entity. Returns the new uid, or 0.
+	unsigned long long spawnScriptedEntity(double tileX, double tileY,
+		const std::string& behaviourName, const std::string& modelId, const std::string& ns);
+
+	// Used by the JS runtime to feed the same store, so a value changed in either language
+	// is visible to the engine site through the readers below. Not for engine sites.
+	void recordEventWriteBackNumber(const char* field, double v);
+	void recordEventWriteBackString(const char* field, const std::string& v);
+
+	long long   lastEventInt(const char* field, long long fallback);
+	double      lastEventNumber(const char* field, double fallback);
+	std::string lastEventString(const char* field, const std::string& fallback);
+
 	// Did any handler of the LAST dispatchEvent return false, i.e. ask the game not to do
 	// what it was about to do? Call this immediately after dispatchEvent at a site that
 	// offers the mod a decision. Always false when no script cancels, which is every script
@@ -141,6 +199,21 @@ namespace SAMLua
 	// Fire on_action_pressed/on_action_released for a player. Called by pollActions on
 	// the host, and by the 'SAMA' packet handler for a remote client's edges.
 	void dispatchAction(int player, int actionIndex, bool pressed);
+
+	// ---- mod-defined networking ("SAMP") ------------------------------------------
+	// One generic envelope so a mod can send its own data between host and clients.
+	// Bounded to a single datagram: NET_PACKET_SIZE is 512, and the 4-byte id, the sender
+	// index and the tag length take 6 of it. Oversize is REFUSED, never truncated.
+	static const size_t SAM_PACKET_MAX_TAG = 32;
+	static const size_t SAM_PACKET_MAX_PAYLOAD = 400;
+
+	// Send a mod packet. On the host, target is a player index or -1 for all clients;
+	// on a client the target is ignored and it always goes to the host.
+	bool sendModPacket(int target, const std::string& tag, const std::string& payload);
+
+	// Deliver a received mod packet to every script as an "on_packet" event.
+	// Called from the net.cpp handlers on both sides. Dispatches to JS too.
+	void dispatchModPacket(int fromPlayer, const std::string& tag, const std::string& payload);
 	// Wire format for 'SAMA' — index into the action table. Returns "" if out of range.
 	const char* actionNameForIndex(int index);
 	// Backs sam_is_action_held / sam_get_action_binding.
@@ -276,6 +349,34 @@ namespace SAMLua
 	void triggerHitstop(int durationMs);
 	bool hitstopActive();
 	void resetImpact();
+
+	// v1.11.0 -- a mod panel was clicked. Called from the ONE C callback every S.A.M button
+	// shares (sam_ui.cpp), because Button::setCallback takes a bare function pointer with no
+	// user data. Dispatches ui.on_click to Lua and JS alike, so a panel behaves the same in
+	// either runtime.
+	// `value` is the payload the event carries in .value: the clicked row's id for
+	// ui.on_select, the committed text for ui.on_submit, empty for ui.on_click.
+	// Shared by sam_travel_to_level in BOTH runtimes. The preconditions here are subtle
+	// enough that duplicating them per runtime is how they drift apart -- which is this
+	// project's most repeated bug. One implementation, two thin bindings.
+	bool travelToLevel(int target, bool secret, const char* tag);
+
+	void dispatchUiEvent(const std::string& eventName, const std::string& ns,
+		const std::string& panel, const std::string& widget, const std::string& value);
+
+	// v1.11.0 -- custom projectiles. The only thing a script could previously launch was a
+	// fixed vanilla spell, which ruled out ranged attack patterns, telegraphed boss volleys,
+	// weapons that fire anything but an arrow, and traps.
+	//   owner: player index that fired it, or -1 for an unowned shot
+	//   angle: radians, same convention as sam_get_facing
+	//   speed: world pixels per tick (a vanilla arrow is around 8)
+	// Returns the projectile's uid, or 0 on failure. Host only.
+	unsigned long long spawnProjectile(int owner, double tileX, double tileY, double angle,
+		double speed, int damage, int lifetimeTicks, const std::string& modelId);
+
+	// Fired by the projectile behavior on contact, to Lua and JS alike.
+	void dispatchProjectileHit(unsigned long long projectile, unsigned long long target,
+		int x, int y, int damage);
 
 	// Tear down the VM and release all script references.
 	void shutdown();

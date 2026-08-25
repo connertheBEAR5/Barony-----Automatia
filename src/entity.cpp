@@ -16,6 +16,7 @@ See LICENSE for details.
 #include "items.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_items.hpp"
 #endif
 #include "monster.hpp"
 #include "engine/audio/sound.hpp"
@@ -21121,6 +21122,13 @@ int getWeaponSkill(const Item* weapon)
 	{
 		return PRO_UNARMED;
 	}
+#ifdef SAM_FRAMEWORK_ENABLED
+	if ( const int samSkill = SAMItems::weaponSkillFor(weapon->type);
+		samSkill >= 0 )
+	{
+		return samSkill;
+	}
+#endif
 
 	if ( weapon->type == QUARTERSTAFF || weapon->type == IRON_SPEAR 
 		|| weapon->type == STEEL_HALBERD || weapon->type == ARTIFACT_SPEAR 

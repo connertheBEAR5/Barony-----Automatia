@@ -45,6 +45,9 @@
 #include "party_persistence.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_loader.hpp"
+#include "sam/framework/sam_lua_runtime.hpp"
+#include "sam/framework/sam_js_runtime.hpp"
 #include "sam/framework/sam_sync.hpp"
 #endif
 #include "mod_tools.hpp"
@@ -12672,7 +12675,11 @@ static bool capturePersistentMonsterItem(
 {
     if ( !item
         || item->type < 0
-        || item->type >= NUMITEMS
+        || (item->type >= NUMITEMS
+#ifdef SAM_FRAMEWORK_ENABLED
+            && !SAMItemRegistryFoundation::isRegisteredRuntimeItemId(item->type)
+#endif
+        )
         || item->count <= 0 )
     {
         return false;
@@ -13315,7 +13322,11 @@ static bool capturePersistentWorldItemState(
         || entity->behavior != &actItem
         || entity->itemContainer != 0
         || entity->skill[10] < 0
-        || entity->skill[10] >= NUMITEMS
+        || (entity->skill[10] >= NUMITEMS
+#ifdef SAM_FRAMEWORK_ENABLED
+            && !SAMItemRegistryFoundation::isRegisteredRuntimeItemId(entity->skill[10])
+#endif
+        )
         || entity->skill[13] <= 0 )
     {
         return false;
@@ -20151,6 +20162,23 @@ void gameLogic(void)
 	Uint32 i = 0, j;
 	bool entitydeletedself;
 
+#ifdef SAM_FRAMEWORK_ENABLED
+	// Script simulation is host-authoritative and renderer-independent. Networked
+	// input/action forwarding remains disabled until its additive packet family is
+	// negotiated through Automatia's registry handshake; local and headless hosts
+	// still receive deterministic ticks and timers here.
+	if ( SAMLoader::isLoaded()
+		&& multiplayer != CLIENT
+		&& !gamePaused
+		&& !loading )
+	{
+		SAMLua::dispatchTick(static_cast<long long>(ticks));
+		SAMJs::dispatchTick(static_cast<long long>(ticks));
+		SAMLua::tickTimers();
+		SAMJs::tickTimers();
+	}
+#endif
+
 #ifdef NINTENDO
 	(void)nxUpdateCrashMessage();
 #endif
@@ -21084,7 +21112,15 @@ void gameLogic(void)
 						else if ( entity->behavior == &actItem )
 						{
 							totalFloorItems++;
-							tmpItem.type = (entity->skill[10] >= 0 && entity->skill[10] < NUMITEMS) ? (ItemType)entity->skill[10] : ItemType::GEM_ROCK;
+							const bool validFloorItemType = entity->skill[10] >= 0
+								&& (entity->skill[10] < NUMITEMS
+#ifdef SAM_FRAMEWORK_ENABLED
+									|| SAMItemRegistryFoundation::isRegisteredRuntimeItemId(entity->skill[10])
+#endif
+								);
+							tmpItem.type = validFloorItemType
+								? static_cast<ItemType>(entity->skill[10])
+								: ItemType::GEM_ROCK;
 							tmpItem.status = (int)entity->skill[11] < Status::BROKEN ?
 								Status::BROKEN : ((int)entity->skill[11] > EXCELLENT ? EXCELLENT : (Status)entity->skill[11]);
 							tmpItem.beatitude = std::min(std::max((Sint16)-100, (Sint16)entity->skill[12]), (Sint16)100);

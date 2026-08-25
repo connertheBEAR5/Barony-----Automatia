@@ -27,16 +27,15 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <functional>
+
+#include "../sam_item_limits.hpp"
 
 struct SAMModManifest;  // from sam_workshop.hpp (full type only needed in the .cpp)
 
-// Custom item ids occupy [5000, NUM_ITEM_SLOTS). Chosen well above NUMITEMS.
-static const int SAM_ITEM_ID_BASE = 5000;
-
-// Framework-owned items live ABOVE every mod id, at fixed numbers that never move.
-// See the NUM_ITEM_SLOTS comment in items.hpp for why load-order ids would corrupt saves.
-static const int SAM_BUILTIN_ITEM_ID_BASE = 6000;
-static const int SAM_ITEM_HUNTERS_WORKBENCH = 6000;
+// Custom and framework-owned item slots come from the shared Automatia/S.A.M contract
+// in sam_item_limits.hpp. Keeping this header free of items.hpp avoids pulling the full
+// engine item model into every framework registry consumer.
 
 // One parsed item JSON (mirrors item.schema.json).
 struct SAMItemDef
@@ -117,6 +116,14 @@ struct SAMItemPatch
 class SAMItems
 {
 public:
+	using RuntimeIdResolver = std::function<int(const std::string&)>;
+
+	// Automatia assigns session ids from its stable-identity catalog before the rich
+	// 2.1 definitions are installed. Supplying this resolver makes this registry a
+	// consumer of that mapping instead of a second competing allocator.
+	static void setRuntimeIdResolver(RuntimeIdResolver resolver);
+	static void clearRuntimeIdResolver();
+
 	// Read + register every item JSON declared in a mod manifest, into items[]
 	// starting at SAM_ITEM_ID_BASE. Additive across manifests within one load
 	// cycle; call clear() first each cycle.

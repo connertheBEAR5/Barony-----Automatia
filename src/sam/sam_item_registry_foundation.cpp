@@ -7,6 +7,7 @@
 -------------------------------------------------------------------------------*/
 
 #include "sam_item_registry_foundation.hpp"
+#include "sam_runtime_id_allocator.hpp"
 
 #include "framework/sam_logger.hpp"
 #include "framework/sam_workshop.hpp"
@@ -92,6 +93,29 @@ namespace
         return stableId.substr(0, separator)
             == expectedNamespace;
     }
+
+    bool runtimeIdInUse(
+        const std::vector<SAMFoundationItemDef>& registry,
+        const int runtimeId
+    )
+    {
+        for ( const SAMFoundationItemDef& item : registry )
+        {
+            if ( item.runtimeId == runtimeId )
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int nextAvailableRuntimeId(
+        const std::vector<SAMFoundationItemDef>& registry
+    )
+    {
+        return firstAvailableSAMRuntimeItemId(
+            [&](const int id) { return runtimeIdInUse(registry, id); });
+    }
 }
 
 std::vector<SAMFoundationItemDef>
@@ -115,11 +139,8 @@ void SAMItemRegistryFoundation::loadFromManifest(
 
     for ( const std::string& relativePath : manifest.items )
     {
-        if (
-            SAMItemRegistryFoundation::RuntimeIdBase
-                + static_cast<int>(registry.size())
-            >= SAMItemRegistryFoundation::RuntimeIdLimit
-        )
+        const int runtimeId = nextAvailableRuntimeId(registry);
+        if ( runtimeId < 0 )
         {
             SAM_ERROR(
                 "ITEMS",
@@ -244,9 +265,7 @@ void SAMItemRegistryFoundation::loadFromManifest(
         definition.stackable =
             declaration.value("stackable", false);
         definition.sourcePath = fullPath;
-        definition.runtimeId =
-            SAMItemRegistryFoundation::RuntimeIdBase
-            + static_cast<int>(registry.size());
+        definition.runtimeId = runtimeId;
 
         registry.push_back(definition);
         knownIds.insert(stableId);
@@ -264,6 +283,45 @@ void SAMItemRegistryFoundation::loadFromManifest(
             + ")"
         );
     }
+}
+
+bool SAMItemRegistryFoundation::registerFrameworkBuiltin(
+    const std::string& stableId,
+    const int runtimeId,
+    const std::string& displayName,
+    const std::string& category
+)
+{
+    if ( stableId.empty()
+        || runtimeId < RuntimeIdBase
+        || runtimeId >= RuntimeIdLimit
+        || runtimeIdInUse(registry, runtimeId)
+        || runtimeIdForStableId(stableId) >= 0 )
+    {
+        SAM_ERROR(
+            "ITEMS",
+            "Invalid or colliding framework item reservation ["
+            + stableId + "] at runtime id " + std::to_string(runtimeId)
+        );
+        return false;
+    }
+
+    SAMFoundationItemDef definition;
+    definition.stableId = stableId;
+    definition.modNamespace = "sam";
+    definition.nameIdentified = displayName;
+    definition.nameUnidentified = displayName;
+    definition.category = category;
+    definition.slot = "NO_EQUIP";
+    definition.runtimeId = runtimeId;
+    registry.push_back(std::move(definition));
+
+    SAM_INFO(
+        "ITEMS",
+        "Reserved framework item [" + stableId + "] as runtime id "
+        + std::to_string(runtimeId)
+    );
+    return true;
 }
 
 int SAMItemRegistryFoundation::count()

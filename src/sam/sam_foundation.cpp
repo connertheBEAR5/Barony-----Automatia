@@ -2,7 +2,7 @@
 
     Automatia S.A.M Integration
     File: sam_foundation.cpp
-    Stage: SAM-1J
+    Stage: S.A.M. 2.1 integration
 
 -------------------------------------------------------------------------------*/
 
@@ -13,6 +13,8 @@
 #include "sam_item_catalog_exporter.hpp"
 #include "sam_item_definition_bridge.hpp"
 #include "framework/sam_logger.hpp"
+#include "framework/sam_items.hpp"
+#include "framework/sam_loader.hpp"
 #include "framework/sam_workshop.hpp"
 #include "../items.hpp"
 
@@ -90,6 +92,19 @@ void SAMFoundation::onModLoad(
     SAMClassRegistryFoundation::clear();
     SAMItemRegistryFoundation::clear();
 
+    // The built-in workbench participates in the same stable-id catalog as mod
+    // items. Reserve its upstream fixed slot before allocating mod content so no
+    // load order can produce a numeric collision.
+    if ( !manifests.empty() )
+    {
+        SAMItemRegistryFoundation::registerFrameworkBuiltin(
+            "sam:hunters_workbench",
+            SAM_ITEM_HUNTERS_WORKBENCH,
+            "hunter's workbench",
+            "TOOL"
+        );
+    }
+
     if ( !SAMItemRegistryFoundation::validateRuntimeLayout(
         NUMITEMS
     ) )
@@ -164,6 +179,15 @@ void SAMFoundation::onModLoad(
     SAMItemDefinitionBridge::runControlledConstructionTests();
     SAMItemCatalogExporter::write(outputDirectory);
 
+#ifndef EDITOR
+    SAMItems::setRuntimeIdResolver([](const std::string& stableId) {
+        return SAMItemRegistryFoundation::runtimeIdForStableId(stableId);
+    });
+    // The foundation opened the load section before validating manifests and
+    // building the stable-id catalog. Keep the 2.1 runtime in that same section.
+    SAMLoader::load(mountedPaths, baronyVersion, false);
+#endif
+
     SAM_INFO(
         "CORE",
         "Item declarations registered: "
@@ -192,7 +216,7 @@ void SAMFoundation::onModLoad(
     );
     SAM_INFO(
         "CORE",
-        "Live custom item spawning and inventory integration remain disabled in SAM-1E"
+        "S.A.M 2.1 runtime registries and sandbox lifecycle active"
     );
 
     SAMLoadStats stats;
@@ -231,6 +255,14 @@ void SAMFoundation::onModUnload()
         "Automatia S.A.M manifest loader unloading"
     );
 
+#ifndef EDITOR
+    if ( SAMLoader::isLoaded() )
+    {
+        SAMLoader::unload();
+    }
+    SAMItems::clearRuntimeIdResolver();
+#endif
+
     SAMContentCatalog::clear();
     SAMItemDefinitionBridge::clearInstalledDefinitions();
     SAMItemRegistryFoundation::clear();
@@ -238,7 +270,6 @@ void SAMFoundation::onModUnload()
     SAMWorkshop::clear();
     manifestCount = 0;
 
-    SAMLogger::logSessionSummary();
     SAMLogger::shutdown();
     samInitialized = false;
 }

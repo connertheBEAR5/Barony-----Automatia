@@ -16,7 +16,13 @@
 #include "sam_races.hpp"
 #include "sam_sounds.hpp"
 #include "sam_recipes.hpp"
-#include "sam_workbench.hpp"   // the framework's built-in Hunter's Workbench
+#include "sam_workbench.hpp"
+#include "sam_rooms.hpp"     // prefab rooms injected into vanilla levelsets
+#ifndef EDITOR
+#include "sam_hud.hpp"   // script HUD, cleared on unload
+#include "sam_images.hpp" // mod-supplied pictures (overlay + HUD art)
+#include "sam_ui.hpp"     // interactive mod panels, closed on (un)load
+#endif   // the framework's built-in Hunter's Workbench
 #include "sam_monster_patches.hpp" // v0.7.0 F5 monster stat overrides — both builds
 #ifndef EDITOR
 #include "sam_sync.hpp"    // multiplayer sync — game build only (not in EDITOR_SOURCES)
@@ -43,9 +49,12 @@
 bool SAMLoader::loaded = false;
 
 void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mountedPaths,
-	const std::string& baronyVersion)
+	const std::string& baronyVersion, bool beginLogSection)
 {
-	SAMLogger::beginModLoad(); // opens the MOD LOAD section + starts the load-time clock
+	if ( beginLogSection )
+	{
+		SAMLogger::beginModLoad(); // opens the MOD LOAD section + starts the load-time clock
+	}
 	SAM_INFO("CORE", "S.A.M initializing..." + (baronyVersion.empty() ? std::string() : (" (Barony " + baronyVersion + ")")));
 	SAM_INFO("CORE", "Scanning " + std::to_string(mountedPaths.size()) + " mounted mod path(s) for mod.json...");
 
@@ -55,11 +64,17 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 	// every Play, so appending would double-register).
 	SAMClasses::clear();
 	SAMItems::clear();
+#ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
 	SAMEffects::clear(); // drop custom status effects -> vanilla
 	SAMRaces::clear(); // drop custom playable races -> vanilla
 	SAMSounds::clear(); // drop staged custom sounds (engine table reset on next append)
 	SAMRecipes::clear(); // drop tinkering recipes -> vanilla craftable grid
 	SAMWorkbench::clear(); // and the built-in bench, so it re-installs this cycle
+	SAMRooms::clear(); // drop injected rooms -> vanilla room pools
+	SAMHud::clearAll(); // a mod's HUD must never outlive the mod that drew it
+	SAMImages::clear(); // drop the image registry + every live overlay
+	SAMUi::closeAll();  // a panel must never outlive the mod that opened it
+#endif
 	SAMMonsterPatch::clear(); // v0.7.0 F5: drop any prior monster stat overrides
 #ifndef EDITOR
 	SAMSpells::clear(); // custom-spell registry — rebuild fresh each load
@@ -99,6 +114,7 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 	// private prepend-mounted overlay. Barony reads these lazily at map
 	// generation (long after this hook), so the mount alone suffices.
 	SAMMonsters::applyAll(mods);
+	SAMRooms::applyAll(mods);   // prefab rooms added to existing levelsets (sorted for MP determinism)
 #endif
 
 	// S.A.M: re-install the framework's own built-in content BEFORE the per-mod loop, so a
@@ -106,12 +122,27 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 	// and have it already exist. Unconditional: the clear() above wiped the registration
 	// that initGameDatafiles made at startup, and the bench must come back whether or not
 	// this load cycle has any mods in it.
-	SAMWorkbench::install();
+#ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
+	if ( !mods.empty() )
+	{
+		SAMWorkbench::install();
+	}
+#endif
 
 	int totalClasses = 0;
 	int totalItems = 0;
 	int totalMonsters = 0;
 	int totalPlugins = 0;
+	// Log the order content ids are handed out in. This is now derived only from WHICH mods
+	// are loaded (dependencies first, then namespace order), never from how the player
+	// arranged their list -- so the same set produces the same ids on every machine and after
+	// any reshuffle. Printing it makes that checkable instead of a claim.
+	{
+		std::string order;
+		for ( const auto& m : mods ) { if ( !order.empty() ) { order += " -> "; } order += m.ns; }
+		if ( !order.empty() ) { SAM_INFO("WORKSHOP", "Content id order: " + order); }
+	}
+
 	for ( const auto& m : mods )
 	{
 		totalClasses += static_cast<int>(m.classes.size());
@@ -136,14 +167,17 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 		// Register the mod's classes and items into the runtime registries.
 		SAMClasses::loadFromManifest(m);
 		SAMItems::loadFromManifest(m);
+#ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
 		SAMEffects::loadFromManifest(m); // custom status effects into slots 135..159
 		SAMRaces::loadFromManifest(m); // custom playable races into ids 200..255
 		SAMSounds::loadFromManifest(m); // stage custom sounds (appended after vanilla reload)
 		SAMRecipes::loadFromManifest(m); // tinkering recipes (item ids resolved lazily at kit-open)
+#endif
 
 #ifndef EDITOR
 		// Custom spells (Session 1: metadata registry only — no in-engine spell yet).
 		SAMSpells::loadFromManifest(m);
+		SAMImages::loadFromManifest(m); // pictures the mod ships (validated here, not at draw time)
 
 		// S.A.M scripting: auto-load behavior scripts. A script (.ts/.js/.lua) defines
 		// on_event(event) and/or on_tick(event); once loaded it receives EVERY dispatched
@@ -284,14 +318,32 @@ void SAMLoader::unload()
 	SAMWorkshop::clear();
 	SAMClasses::clear();       // also reverts sam_patch_class + class passives (F5)
 	SAMItems::clear();         // also reverts sam_patch_item overrides (F5)
+#ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
 	SAMEffects::clear();       // drop custom status effects
 	SAMRaces::clear();         // drop custom playable races
 	SAMSounds::clear();        // drop staged custom sounds
 	SAMRecipes::clear();       // drop tinkering recipes
 	SAMWorkbench::clear();     // drop the built-in bench registration
+#endif
 	SAMMonsterPatch::clear();  // reverts sam_patch_monster overrides (F5)
-#ifndef EDITOR
+	// Rooms are NOT optional to clear. The registry holds ABSOLUTE paths, so unmounting the
+	// mod's PhysFS folder does not stop generateDungeon from loading the .lmp files: with a
+	// stale registry `SAMRooms::any()` stays true, the room pool stays inflated, and
+	// `map_rng.rand() % numlevels` draws from a different range -- the same seed generates a
+	// DIFFERENT dungeon after the player pressed Unload Mods. In multiplayer that desyncs a
+	// host who unloaded against a client who never had the mod, silently. It also re-fails
+	// verifyMapHash, which sets disableSteamAchievements back on four lines after
+	// Mods::unloadMods just cleared it.
+#ifndef EDITOR   // GAME_SOURCES-only subsystems
+	SAMRooms::clear();         // drop injected rooms -> vanilla room pools
 	SAMSpells::clear();   // drop the custom-spell registry
+	SAMImages::clear();   // drop mod pictures + any overlay still on screen
+	SAMUi::closeAll();    // close every mod panel
+	// Same promise sam_hud.hpp makes: a HUD must never outlive the mod that drew it. Nothing
+	// else takes it down on this path -- Mods::unloadMods shows a loading screen WITH a
+	// background, which skips the Frame::guiDestroy branch -- so without this the mod's
+	// widgets keep drawing over a main menu that now claims to be vanilla.
+	SAMHud::clearAll();   // drop the script HUD container and every widget under it
 	// NOTE: do NOT call SAMModels::clear() here. The id->index map IS the append-time
 	// duplicate guard: appendModels skips an id already in it. Dropping the map on unload
 	// makes the next load re-append every .vox the engine still holds, growing the model

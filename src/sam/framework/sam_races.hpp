@@ -57,6 +57,29 @@ struct SAMRaceDef
 	// Optional "starting_spells": innate spells this race knows from creation (vanilla
 	// "SPELL_X" names or custom "namespace:spell"). Granted by SAMRaces::applySpells.
 	std::vector<std::string> startingSpells;
+
+	// Optional "allies" / "enemies": monster types (Monster enum values) this race is at
+	// peace with, or always hostile to, REGARDLESS of what its host body says.
+	//
+	// A race already inherits its host body's relations for free -- a goatman-bodied race
+	// is ignored by goatmen because the engine sees stats->type == GOATMAN. These two
+	// lists are the part that could not be expressed before: a difference from the host.
+	// Both are empty by default, and an empty list is not "no allies", it is "no opinion"
+	// -- the host body's own relations stand untouched.
+	std::vector<int> allies;
+	std::vector<int> enemies;
+
+	// Optional "limb_models": this race's OWN body, one model per limb, instead of the
+	// host body's. host_body still decides the skeleton -- the limb offsets, the
+	// animation, which slots exist -- and these decide what is drawn in each slot.
+	//
+	// limbModels holds the reference exactly as the JSON wrote it; limbModelIdx and
+	// headModelIdx hold it resolved to an engine model index, which cannot happen at
+	// parse time because the model table does not exist yet. -1 means "not set", which
+	// is different from 0: index 0 is models/system/null.vox and draws nothing.
+	std::map<std::string, std::string> limbModels;
+	std::map<int, int> limbModelIdx;   // LIMB_HUMANOID_* -> engine model index
+	int headModelIdx = -1;
 };
 
 class SAMRaces
@@ -110,4 +133,47 @@ public:
 	// initClassStats, before the unconditional HP/MP clamp. No-op for a non-SAM
 	// race id or an unregistered id.
 	static void applyStats(int raceId, Stat* myStats);
+
+	// What this race has DECLARED about a monster type, as a tri-state:
+	//
+	//    1  ally     -- will not attack it, and it will not attack back
+	//    0  enemy    -- hostile on sight, whatever the host body thinks
+	//   -1  silent   -- no declaration; the host body's own relations stand
+	//
+	// -1 is the answer for every vanilla race, every unregistered id, and every race
+	// that declared nothing, which is what keeps the engine sites a true no-op. Callers
+	// must treat -1 as "leave the verdict alone", never as a boolean.
+	static int declaredAllegiance(int raceId, int monsterType);
+
+	// --- custom limb models ---------------------------------------------------------
+	// Turn every declared limb_models reference into an engine model index. Must run
+	// AFTER the model table is built and after a mod's own .vox files are appended to
+	// it, which is why it is a separate pass and not part of loadFromManifest.
+	static void resolveLimbModels();
+
+	// The model this race draws for one limb (a LIMB_HUMANOID_* constant), or -1 to
+	// leave the host body's own model alone. -1 for every vanilla race.
+	static int limbModelFor(int raceId, int limbType);
+
+	// The model this race draws as its head, or -1. Kept apart from limbModelFor
+	// because the engine sets the head on the player entity itself rather than through
+	// the limb path, and never gates it behind an equipment check.
+	static int headModelFor(int raceId);
+
+	// True iff this model index is some registered race's head. The engine's
+	// isPlayerHeadSprite is a hardcoded list of vanilla PLAYER heads; a race head is
+	// not in it (Gharbad's head is a monster limb, not a player head), and answering
+	// false there breaks the client's player-entity binding in multiplayer.
+	static bool isRaceHeadSprite(int sprite);
+
+	// Does this player SEE that monster type as hostile?
+	//
+	// For the client-side sites that read the allegiance table directly because
+	// checkEnemy is host-only there: the callout markers and the aim-assist cone. Pass
+	// what the table said as `vanilla` and it is handed straight back for every vanilla
+	// race, every unregistered id, and every relation nobody declared -- so those sites
+	// keep their exact behaviour and only a declared relation changes the answer.
+	//
+	// Shopkeepers are excluded on purpose: their disposition belongs to the wanted level.
+	static bool clientEnemyView(int player, int monsterType, bool vanilla);
 };

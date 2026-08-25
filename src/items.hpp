@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "sam/sam_item_limits.hpp"
+
 #include "main.hpp"
 #include "prng.hpp"
 #include "game.hpp"
@@ -555,19 +557,9 @@ const int NUMITEMS = ITEM_ENUM_MAX;
 // NUMITEMS remains the vanilla item count and must continue to be used by
 // vanilla enumeration, random loot generation, achievements, and balance
 // logic. NUM_ITEM_SLOTS is only for validated direct item-definition storage.
-constexpr int SAM_ITEM_ID_BASE = 5000;
-constexpr int NUM_ITEM_SLOTS = 25000;
-constexpr int SAM_ITEM_ID_LIMIT = NUM_ITEM_SLOTS;
-constexpr int SAM_ITEM_CAPACITY =
-    SAM_ITEM_ID_LIMIT - SAM_ITEM_ID_BASE;
-
 static_assert(
     NUMITEMS <= SAM_ITEM_ID_BASE,
     "Vanilla item IDs overlap the reserved S.A.M item range"
-);
-static_assert(
-    SAM_ITEM_CAPACITY == 20000,
-    "Automatia must provide exactly 20,000 S.A.M item slots"
 );
 
 typedef enum Category
@@ -799,6 +791,10 @@ public:
 	ItemEquippableSlot item_slot = ItemEquippableSlot::NO_EQUIP;
 	std::map<std::string, Sint32> attributes;
 	std::string tooltip = "tooltip_default";
+	// S.A.M behaviour declarations. Kept as an inert zero mask for vanilla items.
+	// Engine predicates may opt into individual traits without depending on the
+	// framework registry or its heavy implementation headers.
+	std::uint64_t samTraits = 0;
 
 	const char* getIdentifiedName() const { return item_name_identified.c_str(); }
 	const char* getUnidentifiedName() const { return item_name_unidentified.c_str(); }

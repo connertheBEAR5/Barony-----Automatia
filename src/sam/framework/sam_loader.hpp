@@ -27,7 +27,7 @@ public:
 	// mod found and a summary. Fully rebuilds state on every call (Barony calls
 	// this every time the player starts a modded game).
 	static void load(const std::vector<std::pair<std::string, std::string>>& mountedPaths,
-		const std::string& baronyVersion = "");
+		const std::string& baronyVersion = "", bool beginLogSection = true);
 
 	// Tear down all S.A.M state back to vanilla (called from Mods::unloadMods()).
 	static void unload();

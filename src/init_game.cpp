@@ -41,6 +41,10 @@
 #include "ui/GameUI.hpp"
 #include "ui/Text.hpp"
 #include "ui/MainMenu.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/framework/sam_effects.hpp"
+#include "sam/framework/sam_items.hpp"
+#endif
 
 #include <thread>
 #include <future>
@@ -118,6 +122,12 @@ void initGameDatafiles(bool moddedReload)
 	CompendiumEntries.readModelLimbsFromFile("codex");
 	MainMenu::MainMenuBanners_t::readFromFile();
 	Player::Inventory_t::Appraisal_t::readFromFile();
+#ifdef SAM_FRAMEWORK_ENABLED
+	// The vanilla readers above rebuild their maps from scratch. Re-apply only the
+	// registered extension rows afterward; with no S.A.M content both calls are no-ops.
+	SAMItems::reapplyAfterDataReload();
+	SAMEffects::reapplyDisplayEntries();
+#endif
 }
 
 void initGameDatafilesAsync(bool moddedReload)

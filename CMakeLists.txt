@@ -21,6 +21,23 @@ if(BUILD_TESTING)
     add_test(NAME automatia_foundation COMMAND automatia_foundation_tests)
 
     add_executable(
+        sam_21_integration_contract_tests
+        tests/sam_21_integration_contract_tests.cpp
+    )
+    target_include_directories(
+        sam_21_integration_contract_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_definitions(
+        sam_21_integration_contract_tests
+        PRIVATE
+        BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    )
+    target_compile_features(sam_21_integration_contract_tests PRIVATE cxx_std_17)
+    add_test(NAME sam_21_integration_contract COMMAND sam_21_integration_contract_tests)
+
+    add_executable(
         party_backend_tests
         tests/party_backend_tests.cpp
         src/automatia_save.cpp
@@ -714,10 +731,72 @@ if (GAME_ENABLED)
 			WORKING_DIRECTORY "${PROJECT_BINARY_DIR}"
 	)
   endif()
-  if (SAM_FRAMEWORK_ENABLED)
+	if (SAM_FRAMEWORK_ENABLED)
+	set(SAM_RUNTIME_21_SOURCES
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_backup.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_bodies.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_catalog.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_classes.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_effects.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_event.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_hud.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_images.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_items.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_js_runtime.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_loader.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_lua_runtime.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_models.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_monster_patches.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_monsters.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_patcher.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_races.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_recipes.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_rooms.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_sounds.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_spells.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_ui.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_workbench.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_world.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_world_state.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/quickjs/quickjs-amalgam.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lapi.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lauxlib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lbaselib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lcode.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lcorolib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lctype.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ldblib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ldebug.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ldo.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ldump.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lfunc.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lgc.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/linit.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/liolib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/llex.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lmathlib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lmem.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/loadlib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lobject.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lopcodes.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/loslib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lparser.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lstate.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lstring.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lstrlib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ltable.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ltablib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/ltm.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lundump.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lutf8lib.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lvm.c"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lzio.c"
+	)
 	target_sources(
 		barony
 		PRIVATE
+			${SAM_RUNTIME_21_SOURCES}
+			"${PROJECT_SOURCE_DIR}/src/sam/sam_automatia_adapter.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_foundation.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_class_registry_foundation.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_item_registry_foundation.cpp"
@@ -732,8 +811,11 @@ if (GAME_ENABLED)
 	target_include_directories(
 		barony
 		PRIVATE
+			"${PROJECT_SOURCE_DIR}/src"
 			"${PROJECT_SOURCE_DIR}/src/sam"
 			"${PROJECT_SOURCE_DIR}/src/sam/framework"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54"
+			"${PROJECT_SOURCE_DIR}/src/sam/framework/quickjs"
 	)
 	target_compile_definitions(
 		barony
@@ -742,7 +824,7 @@ if (GAME_ENABLED)
 	)
 	message(
 		STATUS
-		"Building Automatia with S.A.M 1.10.0 foundation support"
+		"Building Automatia with S.A.M 2.1.0 runtime and stable-identity adapters"
 	)
   endif()
 

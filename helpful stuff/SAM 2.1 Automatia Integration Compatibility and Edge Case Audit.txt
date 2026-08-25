@@ -1,0 +1,1342 @@
+S.A.M. FRAMEWORK 2.1 / AUTOMATIA INTEGRATION
+COMPATIBILITY AND EDGE-CASE AUDIT
+
+Working repository: /home/conner/Barony-----Automatia
+Supplied archive: /home/conner/Downloads/SAM-Framework-2.1.0.zip
+Inspected source root: SAM-Framework-2.1.0
+Exact source version marker: SAM_FRAMEWORK_VERSION "2.1.0"
+Audit state: FINAL IMPLEMENTATION AUDIT -- supported integration complete; protocol boundary documented
+Date: 2026-08-24
+
+Status vocabulary
+-----------------
+RESOLVED              Implementation is present and source-reviewed.
+MITIGATED             Risk is reduced but a residual limitation remains.
+TESTED                An automated or explicitly described live test passed.
+MANUAL TEST REQUIRED  The build/test harness cannot honestly prove the behavior.
+DEFERRED              Intentionally outside this integration or stopped at a safety boundary.
+KNOWN LIMITATION      Supported behavior has a documented restriction.
+
+
+1. EXECUTIVE SUMMARY
+====================
+
+The current Automatia tree and the supplied S.A.M. 2.1 source do not represent two
+drop-in alternatives. They solve different parts of the same problem and overlap at
+several dangerous seams.
+
+Automatia currently contains an intentionally lightweight S.A.M. 1.10 foundation. It
+scans mod manifests, builds deterministic class/item catalogs, allocates custom runtime
+item slots in [5000, 25000), exports sam_item_catalog.json, installs basic live item
+definitions, and threads stable item identifiers through editor templates, persistence,
+scores, shops, item actions, and many gameplay packet paths. Its authority rule is:
+
+    stable_id = persistent/cross-session identity
+    runtime item id = current-session lookup only
+
+The supplied S.A.M. 2.1 source is a substantially larger runtime framework. It adds or
+extends complete class/item registries, Lua 5.4, QuickJS JavaScript/TypeScript, a unified
+event wrapper, custom effects/races/sounds/recipes/spells/models/monster overlays,
+script HUD and panels, image overlays, world and catalog query APIs, per-save script
+state, prefab room injection, mod-defined packets, and registry fingerprint exchange.
+
+A blind replacement is unsafe. Upstream S.A.M. allocates numeric item IDs from load
+order and treats those numbers as its engine identity. Automatia already uses the same
+numeric range but separately preserves stable IDs across saves, editor content, and
+network paths. Running both registries independently would duplicate parsing and risk
+different mappings. Replacing Automatia's registry would remove missing-mod record
+preservation and the catalog fingerprint currently included in the multiplayer
+handshake. Ignoring 2.1 would discard useful mod APIs.
+
+The integration direction is therefore a shared lower-level contract:
+
+    deterministic manifest/content order
+                  |
+                  +-- Automatia stable identity and persistence authority
+                  |
+                  +-- S.A.M. 2.1 enriched runtime definitions and mod APIs
+
+S.A.M. spatial APIs require special treatment. The supplied implementation accesses the
+single global map and mostly uses legacy map.tiles / default-floor queries. Automatia's
+active map global is only a compatibility view of one MapInstance, and Playable-Z keeps
+playableFloor, authoredMapLayer and local Entity::z separate. A 2.1 call may operate on
+the active instance, but it must never silently affect another MapInstance or default to
+floor Z0 when invoked for an upper-floor entity.
+
+The archive contains framework source, schemas, docs and examples, but it does not ship
+a patch set for the engine interception sites. The source comments describe many hook
+points. Engine integration must consequently be source-driven and cannot be assumed
+complete merely because framework files compile.
+
+
+2. S.A.M. 2.1 ARCHITECTURE
+=========================
+
+Version and bundled dependencies
+--------------------------------
+
+* sam_logger.hpp identifies the exact framework as 2.1.0.
+* Lua 5.4 is vendored as C source under framework/lua54.
+* quickjs-ng is vendored as quickjs-amalgam.c plus quickjs.h.
+* nlohmann/json single-header 3.11.3 is vendored under framework/nlohmann.
+* TypeScript support uses framework/typescript/typescript.js at runtime and a content
+  hash cache under the game's output directory.
+* Framework source is MIT licensed; the archive does not include Barony source.
+
+Lifecycle
+---------
+
+SAMLoader::load() scans already-mounted paths through SAMWorkshop::scan(), clears every
+registry/runtime, initializes the script VMs, applies patch/monster overlays, registers
+manifest content, loads companion scripts, resolves late references, and publishes a
+load summary. SAMLoader::unload() clears scripts, registries, UI, overlays, patches and
+temporary resources. S.A.M. expects Barony's Mods::loadMods()/unloadMods() to be the
+owner of this lifecycle.
+
+Public API and hooks
+--------------------
+
+SAMLua and SAMJs expose parallel host APIs. SamEvent is the 2.1 bridge intended to build
+one primitive-only event and dispatch it to both runtimes. Script callbacks receive no
+engine pointers. State-changing calls are normally rejected on multiplayer clients.
+The event surface supports cancellation and numeric/string write-back at hook sites.
+
+Registries
+----------
+
+SAMWorkshop owns dependency-sorted manifests. SAMClasses, SAMItems, SAMEffects,
+SAMRaces, SAMSounds, SAMRecipes, SAMSpells, SAMModels, SAMMonsters, SAMImages and
+SAMRooms own content-specific registries. Most are process-global and rebuilt per mod
+load. This global lifetime is compatible only if each loaded Automatia MapInstance uses
+the same mod set and registry mapping.
+
+Resource and overlay systems
+----------------------------
+
+SAMPatcher and SAMMonsters create private overlay content for PhysFS. SAMModels grows
+the global model table at a controlled load seam. SAMHud and SAMUi retain logical widget
+descriptions so they can reconstruct engine Frames destroyed at a floor transition.
+SAMImages resolves manifest IDs to local paths and uses host-to-client messages for
+remote overlays.
+
+Thread assumptions
+------------------
+
+Registry construction, UI access, global map access, script dispatch and engine table
+mutation assume the main game thread. Script VM state is global and not synchronized.
+The Lua watchdog uses an instruction counter; QuickJS uses a wall-clock interrupt.
+Neither makes the host API thread-safe.
+
+Headless assumptions
+--------------------
+
+Core scanning, validation, logging, registries and scripting can in principle run
+without a renderer. HUD, UI and image modules touch renderer/UI resources and must be
+excluded or no-op in a headless process. Sound calls must honor no_sound. Upstream uses
+EDITOR compile guards but has no equivalent comprehensive headless guard.
+
+
+3. EXISTING AUTOMATIA ARCHITECTURE
+==================================
+
+Automatia S.A.M. 1.10 foundation
+--------------------------------
+
+SAMFoundation is invoked from mod_tools.cpp after Barony mounts mods and is unloaded
+before the mounts disappear. It initializes SAMLogger, scans manifests, builds the
+foundation class/item registries, rebuilds SAMContentCatalog, installs basic ItemGeneric
+definitions through SAMItemDefinitionBridge, runs controlled construction checks, and
+exports sam_item_catalog.json.
+
+The game target intentionally compiles only the foundation adapters plus logger,
+errors, workshop and sync. The larger 1.10 framework source is present but not linked.
+This is an important architecture fact: source presence did not mean gameplay scripting
+was active before this upgrade.
+
+Item identity
+-------------
+
+items[] has NUM_ITEM_SLOTS storage through 25000 while NUMITEMS remains the vanilla
+enumerated count. Automatia reserves [5000, 25000) for S.A.M. definitions and does not
+widen vanilla random-generation loops into empty slots. SAMItemRegistryFoundation maps
+stable IDs to session runtime IDs. Existing engine patches resolve stable IDs before
+accepting transmitted numeric IDs and reject unknown custom slots rather than clamping
+them to NUMITEMS - 1.
+
+The editor reads ~/.barony/sam_item_catalog.json into a catalog keyed by both stable ID
+and runtime ID. Monster inventory/equipment templates carry stable ID metadata so an
+editor-only launch and a later game launch can remap without treating runtime numbers as
+persistent identity.
+
+Playable-Z
+----------
+
+Entity::z is local animation/model elevation. Entity::playableFloor controls discrete
+simulation scope. Entity::authoredMapLayer is the structural layer used to calculate
+world render/light Z. SpatialSpawnContext carries playableFloor, spatialRevision and
+authoredMapLayer. newEntity() inherits the thread-local active runtime context, while
+newEntityWithSpatialContext() explicitly copies a source/context. map_t::tileAt and
+setTileAt take playableFloor and understand layer-stack-derived floors.
+
+Divergent paths
+---------------
+
+WorldState owns multiple MapInstances. Activating an instance swaps the compatibility
+global map/simulation state. A MapInstance key is mapFile#instanceId and is independent
+from playableFloor and authoredMapLayer. Network packet scope filters map-local traffic;
+late join and persistence carry instance revisions and identities.
+
+Persistence, parties, dialogue and editor
+------------------------------------------
+
+Automatia has separate world/character persistence, durable party identities and party
+state, divergent-map late join, JSON dialogue/quests, and substantial Zed extensions.
+These systems are authoritative existing behavior and cannot be replaced by S.A.M.'s
+global per-mod JSON store or its narrower per-character additional_data helper.
+
+
+4. S.A.M. 1.10 -> S.A.M. 2.1 MIGRATION
+======================================
+
+MITIGATED / SOURCE-VERIFIED / MANUAL FIXTURE REQUIRED. Migration inputs are 1.10 manifest/catalog behavior, saved stable IDs,
+editor templates and packets. The archive contains no explicit 1.10-to-2.1 catalog
+migrator. S.A.M. manifests remain namespace/version based and the 2.1 workshop scanner
+is structurally compatible with the current foundation. New manifest fields include
+images and rooms; older manifests omit them safely.
+
+Required migration rules:
+
+* Existing stable IDs keep authority even if 2.1 assigns a different session slot.
+* Existing sam_item_catalog.json files are input hints for editor/missing-mod content,
+  never authority over a live validated registry.
+* Missing mods do not cause a saved custom record to be replaced by a vanilla item.
+* A restored mod resolves an opaque record by stable ID and leaves its other serialized
+  fields intact.
+* A 1.10 mod that omits all 2.1 fields loads with the old basic behavior.
+* New scripts and registries must not initialize twice during a mount/reload cycle.
+
+
+5. SYSTEM-BY-SYSTEM COMPATIBILITY MATRIX
+========================================
+
+Subsystem                         Classification        Current disposition
+---------                         --------------        -------------------
+Manifest discovery/dependencies  MINOR OVERLAP         RESOLVED: shared SAMWorkshop canonical order.
+Logger/error reporting            NO CONFLICT           RESOLVED: 2.1 marker and one load section.
+Class registry                    MAJOR OVERLAP         MITIGATED: both registries retained; full gameplay hooks deferred.
+Item registry                     DIRECT CONFLICT       RESOLVED/TESTED: one stable-id allocator is authority.
+Catalog fingerprint               DIRECT CONFLICT       RESOLVED/TESTED: Automatia content hash retained.
+Lua/JavaScript/TypeScript         MINOR OVERLAP         MITIGATED: lifecycle/tick/timers active; manual content tests required.
+Event bridge                      MINOR OVERLAP         MITIGATED: runtime present; only connected engine events may fire.
+Custom effects                    MINOR OVERLAP         MITIGATED: registry/display rows active; persistence/wire hooks deferred.
+Custom races                      MAJOR OVERLAP         MITIGATED: registry/models active; gameplay/save hooks deferred.
+Custom monsters                   MAJOR OVERLAP         MITIGATED: overlays/models active; rich follower identity is deferred.
+Models/body overrides             MAJOR OVERLAP         MITIGATED: model table/headless split active; body draw hooks manual/deferred.
+Sounds                            MINOR OVERLAP         MITIGATED: append/runtime guards active; audible test required.
+HUD/images/panels                 MAJOR OVERLAP         MITIGATED: runtime/lifetime active; rendered and multiplayer tests required.
+Catalog/world query APIs          MAJOR OVERLAP         MITIGATED: active-floor filters; active-instance-only contract.
+World mutation APIs               DIRECT CONFLICT       DEFERRED in multiplayer; safe single-player floor adapter active.
+Per-mod global state              MINOR OVERLAP         RESOLVED as a distinct global settings facility.
+Per-character SAM state           MAJOR OVERLAP         DEFERRED: upstream process-global store is unsafe for 15 identities.
+Prefab room injection             MAJOR OVERLAP         RESOLVED/TESTED at provider seam; live MP manual test required.
+Map data patches                  MAJOR OVERLAP         MITIGATED: upstream overlay lifecycle retained; map extensions untouched.
+Mod fingerprint packets           MAJOR OVERLAP         MITIGATED: fingerprint composition retained; live handshake deferred.
+Mod-defined packets               MAJOR OVERLAP         DEFERRED: requires scoped/versioned protocol design.
+Steam Workshop discovery          NO CONFLICT           RESOLVED: consumes Barony-mounted paths only.
+--nosteam                         MINOR OVERLAP         RESOLVED by absence of direct Steam dependency; manual launch required.
+Headless                          MAJOR OVERLAP         MITIGATED/BUILD TESTED: GPU model work skipped; live run required.
+Editor                            MAJOR OVERLAP         MITIGATED: existing stable catalog/palettes preserved; rich entity UI deferred.
+Dialogue/quests                   MAJOR OVERLAP         MITIGATED: existing stable item paths preserved; new events deferred.
+Text Source scripting             MAJOR OVERLAP         RESOLVED boundary: separate VMs; Tester and Z4 not started.
+
+For every MAJOR/DIRECT row the integration test must cover: no mods, one valid mod,
+duplicate declaration, missing mod on reload, restored mod, different load order, host,
+client, headless, upper floor, and divergent MapInstance where the feature is spatial.
+
+
+6. ITEM REGISTRY / RUNTIME IDS / STABLE IDS
+===========================================
+
+DIRECT CONFLICT -- RESOLVED for live registration; persistence gaps are listed below.
+
+Vanilla IDs remain [0, NUMITEMS). Custom storage is arbitrary nonnegative ItemType data
+within the current engine storage contract, not a reason to clamp to NUMITEMS - 1.
+Automatia currently reserves runtime slots [5000, 25000). The 2.1 SAMItems registry also
+starts at 5000 and reserves framework item 6000, so two independent allocators could
+write the same slot for different stable IDs.
+
+Integration invariants:
+
+1. stable_id is serialized whenever available.
+2. runtime ID is resolved from the live stable registry at use/load/receive time.
+3. raw nonnegative unknown runtime IDs may be retained as opaque data but never indexed
+   into items[] without a validated bound and live definition.
+4. duplicate stable IDs are rejected deterministically with source diagnostics.
+5. duplicate requested numeric IDs cannot displace an already registered stable ID.
+6. registry exhaustion fails the new declaration, not existing content.
+7. signed packet fields and ItemType casts are validated before conversion.
+8. missing content remains an unknown custom record, not an unrelated vanilla item.
+
+Affected consumers audited in current source include gameplay inventory actions,
+equipment transitions, shops, scores, magic weapons, entity equipment, console item
+commands, monster editor templates and many net.cpp receive paths. Additional consumers
+that require explicit 2.1 verification are loot candidates, workbench recipes, chest
+contents, custom-monster inventory, class/race starting gear, spell payload items,
+dialogue/quest checks and Text Source references.
+
+Edge cases:
+
+* Runtime ID 5000 in an old save maps to A; next session it maps to B. Stable A must win.
+* A catalog says runtime 70000. Preserve the opaque number but do not index items[].
+* Two mods declare the same stable ID. First canonical dependency/namespace order wins;
+  second fails visibly. Never let UI order decide.
+* A mod is renamed but retains namespace/stable IDs. Content remains compatible; source
+  display metadata may change.
+* A namespace/stable ID is renamed. Treat as missing old content unless an explicit alias
+  migration is declared; do not guess from display name.
+
+
+7. sam_item_catalog.json COMPATIBILITY
+======================================
+
+MAJOR OVERLAP -- RESOLVED for current schema/export and fingerprint authority.
+
+The Automatia exporter currently writes schema_version, fingerprint,
+vanilla_item_count, total_item_slots, runtime_base, runtime_limit,
+runtime_limit_exclusive, runtime_last_id, runtime_capacity,
+registered_item_count and items. Each live item includes runtime_id, stable_id,
+mod_namespace, names, description, category, slot, weight, value, level and stackable.
+
+Required behavior:
+
+* Parse schema fields defensively and ignore unknown future fields.
+* Preserve older files for editor display even if a current mod is absent.
+* Never accept catalog runtime IDs as live authority without matching the active stable
+  registry/fingerprint.
+* Headless and editor-only launches must select the same deterministic mod/content order.
+* Invalid registrations do not appear as valid live catalog entries.
+* Publication stays atomic through a temporary file.
+* Multiplayer compares content fingerprint as well as namespace@version list.
+
+
+8. PLAYABLE-Z
+=============
+
+DIRECT CONFLICT for spatial APIs -- MITIGATED; safe adapters implemented, unsupported scopes refused.
+
+Upstream 2.1 SAMWorld::tile/setTile directly index map.tiles and therefore read/write the
+legacy compatibility floor. SAMWorld::findEntities walks the active global entity list
+without filtering playableFloor. Script spawn APIs call legacy spawn helpers and depend
+on ambient runtime context. These are unsafe without adapters.
+
+Every S.A.M.-created spatial object must receive all of:
+
+    active MapInstance (by operating only in the activated map)
+    playableFloor
+    authoredMapLayer
+    local Entity::z
+    spatialRevision
+
+Entity creation should use newEntityWithSpatialContext or a scoped
+SpatialSpawnContext. A player-targeted operation should derive context from that player's
+entity only after confirming the player belongs to the active MapInstance. It must not
+activate a different instance re-entrantly from inside an entity behavior.
+
+Specific audits:
+
+* Items/monsters/projectiles/particles: inherit caller/owner context before creation.
+* Child entities: use source inheritance; do not translate bodyparts twice.
+* Lights: pass playableFloor and structural authored layer to floor-aware addLight.
+* Tiles/pathing: use map.tileAt/setTileAt and floor-specific path maps.
+* Effects: non-spatial data may attach to an entity; packets still need entity scope.
+* Legacy one-floor maps: default context remains floor 0/layer 0/revision 0.
+* Same X/Y on floors 0 and 5: queries and collisions return only the requested floor.
+
+
+9. DIVERGENT PATHS / MAPINSTANCE
+================================
+
+DIRECT CONFLICT for global world calls -- MITIGATED by an active-instance-only contract.
+
+S.A.M. process-global registries are acceptable only if every MapInstance in one process
+uses the same mounted mod set. Spatial state is not process-global. Scripts may inspect or
+mutate only the currently activated instance unless an explicit validated instance API is
+added later. MapInstance is never inferred from playableFloor.
+
+Room generation must use the same canonical injected room list and seed for every peer
+and every generation of a given content set. Unload/reload must not leave pointers to
+overlay files. Late join must receive the same registry fingerprint before accepting
+custom state.
+
+
+10. PERSISTENCE
+===============
+
+MAJOR OVERLAP -- MITIGATED for items/world records; S.A.M script world-state bridge is DEFERRED.
+
+S.A.M. 2.1 SAMWorldState stores namespaced strings in SaveGameInfo.additional_data and
+caps key/value/total sizes. Automatia has broader character and world persistence,
+including multiple MapInstances and true-Z context. SAMWorldState may be a compatibility
+front end, but Automatia's save transaction remains authority.
+
+Unknown custom item/entity/monster/mechanism records must retain their stable content ID,
+source metadata and opaque extension state. Corrupt extension records fail locally and do
+not invalidate unrelated vanilla/world records. A headless restart must rebuild the same
+registry before resolving state.
+
+
+11. HEADLESS SERVER
+===================
+
+MAJOR OVERLAP -- MITIGATED and BUILD TESTED; live dedicated-server acceptance remains MANUAL.
+
+Core registries, scripts and gameplay hooks must not require gui, renderer, Image, SDL
+window, local player, audio device, editor or Steam client. HUD/UI/image calls on headless
+must return a documented false/no-op. no_sound must prevent sound API work. Manifest
+discovery uses already-mounted paths and therefore does not require Steam.
+
+
+12. 15-PLAYER MULTIPLAYER
+=========================
+
+MAJOR OVERLAP -- MITIGATED and compile-characterized for MAXPLAYERS=15; live session is MANUAL.
+
+Most supplied loops use MAXPLAYERS, which will expand correctly. Several comments and API
+descriptions still say 0..3, indicating four-player assumptions require line-by-line
+review. Player fields must be wide enough for slots 0..14; bitmasks need at least 16 bits.
+All custom packets must validate player index, length, sender authority and active map
+scope. Late join/disconnect/reconnect must not retain a script pointer or stale slot.
+
+
+13. STEAM / --nosteam
+=====================
+
+MINOR OVERLAP -- RESOLVED in architecture; Steam and --nosteam launches are MANUAL TEST REQUIRED.
+
+SAMWorkshop does not scan Steam directories; it consumes Barony's mountedFilepaths.
+Therefore local, Workshop, Steam and --nosteam paths can share the loader. No core module
+may call Steam APIs directly. Multiplayer send helpers must continue to use Barony's
+transport-neutral reliable packet path.
+
+
+14. ZED EDITOR
+==============
+
+MAJOR OVERLAP -- MITIGATED; existing editor capability is preserved, rich new entity UI is DEFERRED.
+
+Keep Automatia's catalog-backed item selection, stable-ID monster inventory/equipment
+templates, searches, 32-layer editing, cuboid copy/paste, persistent IDs, stairs, custom
+exits and custom properties. S.A.M. 2.1 content should appear through these systems rather
+than introducing a competing editor palette.
+
+Missing mods: show retained stable/source metadata and an explicit unavailable label.
+Undo/redo and copy/paste must round-trip unknown extension metadata. Editor launch must
+not initialize renderer-only script HUD or network systems.
+
+
+15. ROOM GROUPS / ROOM GENERATION
+=================================
+
+MAJOR OVERLAP -- RESOLVED at the generation-provider seam; live deterministic MP remains MANUAL.
+
+S.A.M. 2.1 SAMRooms reads manifest entries shaped as levelset -> list of prefab .lmp
+paths. It canonicalizes ordering by namespace/relative path because generateDungeon uses
+the room list as an RNG index space and clients regenerate from a shared seed.
+
+Automatia has two distinct room-related capabilities that must remain:
+
+* Zed cuboid/multi-layer room selection and whole-room clipboard operations.
+* Existing generateDungeon room/subroom pools and special/treasure/shop placement logic.
+
+Best-of-both-worlds design:
+
+    canonical generation room provider
+             |
+             +-- vanilla/Automatia levelset room sequence and subroom rules
+             |
+             +-- sorted S.A.M. injected prefab descriptors
+
+The provider must append S.A.M. rooms without changing the no-mod list or RNG consumption.
+Automatia editor selection metadata is not replaced by SAMRooms. A future shared room
+descriptor may expose cuboid bounds/editor metadata, but 2.1's file-path injection does
+not contain enough information to become the editor's room representation.
+
+Required tests: no-mod seed equivalence; one injected room; multiple mods in opposite UI
+orders; dependency ordering; missing room file; duplicate path; 32-layer room; room with
+stairs/Playable-Z metadata; divergent generated instances; host/client regeneration;
+late join; removed mod on reload; old map with no extension metadata.
+
+
+16. MONSTERS / NPCS / FOLLOWERS
+===============================
+
+MAJOR OVERLAP -- MITIGATED; overlays/items/models integrate, follower/custom-body coverage is incomplete.
+
+Custom monster definitions/patches must preserve Automatia persistent IDs, MapInstance,
+Playable-Z context, inventories with stable item IDs, faction/recruitment state, dialogue
+identity, follower ownership and 15-player indices. Mini Mimic remains future work; this
+integration must not hardcode an assumption that blocks it.
+
+Custom body models create child/spatial risks. Recruitment of a custom monster must not
+replace its custom definition with a vanilla enum on save. Missing mod reload retains an
+opaque follower record or fails visibly; it never substitutes a different monster.
+
+
+17. DIALOGUE / QUESTS
+=====================
+
+MAJOR OVERLAP -- MITIGATED by preserving Automatia authority; new event adapters are DEFERRED.
+
+Automatia JSON dialogue/quest state remains authoritative. Item requirements and rewards
+must resolve stable IDs at evaluation time. S.A.M events may observe dialogue/quest
+changes through adapters, but must not duplicate quest journals or per-player flags.
+Per-player state is essential in 15-player and divergent-map sessions.
+
+
+18. TEXT SOURCE / SCRIPTING
+===========================
+
+MAJOR OVERLAP -- RESOLVED as a subsystem boundary; engine-event breadth is a KNOWN LIMITATION.
+
+S.A.M. Lua/JS/TS VMs are separate from Text Source. Define ordering if both observe one
+event; do not silently execute Text Source through S.A.M or vice versa. Host APIs accept
+copied primitives and validated stable IDs. The Text Source Script Tester and Z4 are
+explicitly outside this task and will not be started.
+
+
+19. CUSTOM MAP PROPERTIES
+=========================
+
+MAJOR OVERLAP -- RESOLVED by non-interference; no new map property format was introduced.
+
+Preserve Automatia fog, audio/ambience lifecycle, Playable-Z trailers and unknown future
+metadata. S.A.M metadata should use a length-delimited/versioned extension rather than
+overloading fixed-width legacy bytes. Unknown extensions must survive editor save when
+possible. Per-MapInstance ambience is not a process-global S.A.M sound setting.
+
+
+20. RENDERING / LIGHTING
+========================
+
+MAJOR OVERLAP -- MITIGATED; headless model path is guarded, rendered bodies/lights need manual tests.
+
+Custom models and images are useful 2.1 APIs. Spatial models/lights must use structural
+world Z = local Entity::z + mapLayerWorldZ(authoredMapLayer) and select the entity's
+playableFloor light buffers. Headless must not load GPU resources. UI image caching must
+be cleared safely on mod unload/floor UI reconstruction.
+
+
+21. AUDIO HOOKS
+===============
+
+MINOR OVERLAP -- MITIGATED; lifecycle is connected, audible and positional scope tests remain MANUAL.
+
+Custom sounds and sam_play_sound must honor no_sound and headless. Positional sounds need
+MapInstance and playableFloor routing; a global non-positional notification may be sent to
+all intended players only after explicit scope choice. Do not claim audible output from
+compile/unit tests.
+
+
+22. .LMP / MAP COMPATIBILITY
+============================
+
+MAJOR OVERLAP -- MITIGATED/CHARACTERIZATION TESTED; injected-room combinations require manual maps.
+
+Old maps with no S.A.M/Playable-Z data stay floor 0/layer 0. Injected rooms must be parsed
+by the current LMP reader and retain unknown extensions. A missing injected room is
+excluded before numlevels/RNG selection. Old map generation must be byte/seed equivalent
+with no injected rooms.
+
+
+23. NETWORKING PROTOCOL
+=======================
+
+MAJOR OVERLAP -- DEFERRED at the mandated protocol-redesign stop boundary.
+
+S.A.M. defines SAMF (fingerprint), SAMP (mod envelope), SAMA (action edge), SAMS (speed),
+SAMI (image), SAMT (tile), and other feature messages in the runtimes. Automatia already
+extends item packets with stable IDs and scopes simulation packets to MapInstance.
+
+No casual redesign is permitted. Each additive packet needs a length/version check,
+sender direction check, slot bound, payload cap, map-scope decision, and late-join gate.
+If correct registry synchronization requires redesigning existing packets rather than an
+additive handshake, implementation stops before that redesign.
+
+
+24. REGISTRY HANDSHAKE / MOD MISMATCH
+=====================================
+
+DIRECT CONFLICT -- MITIGATED in fingerprint data; live pre-game enforcement is DEFERRED.
+
+Upstream SAMSync compares namespace@version only. Automatia's current SAMSync deliberately
+adds __sam_content_catalog__@<fingerprint>. Preserve that addition. Namespace/version
+equality is insufficient when files differ or a registration failed. A mismatch warns and
+must prevent unsafe custom-ID interpretation; whether to hard-block gameplay is a product
+decision and is not silently changed here.
+
+
+25. MOD LOAD ORDER
+==================
+
+MAJOR OVERLAP -- RESOLVED for deterministic registries/rooms; live dependency permutations are MANUAL.
+
+Use dependency-safe canonical order with namespace ordering for independent mods. UI click
+order and PhysFS enumeration order cannot assign runtime identity or room RNG indices.
+Duplicate namespaces, dependency cycles and missing required dependencies fail
+deterministically. Optional dependencies may affect hooks only through documented order.
+
+
+26. RESOURCE LIFETIME
+=====================
+
+MAJOR OVERLAP -- MITIGATED; unload order is implemented and source-reviewed.
+
+Unload order must stop callbacks/timers before freeing registries/models/images/overlay
+files. Entity behavior tags must be cleared or retained as inert placeholders before VM
+functions are released. UI retained descriptions cannot refer to unloaded image paths.
+Save serialization cannot hold raw registry pointers.
+
+
+27. ERROR HANDLING
+==================
+
+MINOR OVERLAP -- MITIGATED; validation/logging present, malformed-content fuzzing is DEFERRED.
+
+Malformed JSON, invalid stable IDs, missing files, duplicate declarations, capacity
+exhaustion and script errors are isolated per record/script. Logs include mod namespace,
+source path and field. A recoverable mod error does not crash the host or invalidate
+unrelated content. Do not catch and hide engine invariant failures.
+
+
+28. PERFORMANCE
+===============
+
+MINOR OVERLAP -- MITIGATED; load-time registries/caches retained, profiling is MANUAL.
+
+Registries build at mod load, not per frame. SamEvent is intended to avoid building two
+events when no scripts listen. Entity/world scans require radius and result caps plus
+playableFloor filtering. Room lists are pre-sorted. UI is retained. Script memory and
+instruction/time budgets stay enabled. Avoid re-generating path maps per tile edit; batch
+or defer once per affected floor.
+
+
+29. COMPILE-TIME / HEADER DEPENDENCY IMPACT
+===========================================
+
+MAJOR OVERLAP -- RESOLVED for public-header fanout; clean-build RAM measurement is DEFERRED.
+
+nlohmann/json.hpp is 24,765 lines and must remain implementation-local. Public Automatia
+headers already need review where they include it. S.A.M headers mostly use std types and
+forward declarations, but sam_event.hpp directly includes both complete runtime headers.
+Prefer a lightweight event declaration/pimpl or implementation-local runtime includes
+before exposing SamEvent widely. Build the runtime in a dedicated target/object group so
+QuickJS/Lua/json parsing does not fan out across ordinary Barony translation units.
+
+
+30. THREADING / ASYNC
+=====================
+
+MAJOR OVERLAP -- MITIGATED: engine resource append occurs after async joins on the main thread.
+
+All engine-facing S.A.M calls are main-thread only. Do not dispatch scripts from async map
+generation or assignActions workers while process-global map/registries are being swapped.
+Room registry reads can be immutable during generation, but applying/reloading rooms is a
+barrier operation. No callback may outlive mod unload.
+
+
+31. SECURITY / TRUST BOUNDARIES
+===============================
+
+MAJOR OVERLAP -- MITIGATED by host authority/sandboxes; packet and fuzz work is DEFERRED.
+
+Mod JSON/scripts and all client packets are untrusted. Preserve Lua/QuickJS sandbox caps,
+no filesystem/network/OS libraries, primitive-only events and per-script disable-on-error.
+Validate paths against traversal and keep writes under controlled output directories.
+Clients cannot submit authoritative item IDs, tile edits, stats, entity spawns or registry
+definitions. SAMP tags/payloads are bounded and sender identity is server-derived.
+
+
+32. LEGACY AUTOMATIA CONTENT
+============================
+
+DIRECT CONFLICT if replaced -- RESOLVED by additive integration and characterization coverage.
+
+Preserve old maps, saves, editor templates, sam_item_catalog.json, dialogue/quest JSON,
+Room/cuboid clipboard data, Playable-Z trailers, party data and divergent worlds. Missing
+new S.A.M fields mean defaults; they do not trigger migration rewrites.
+
+
+33. AUTOMATED TEST MATRIX
+=========================
+
+Planned automated coverage:
+
+* framework version and single lifecycle initialization/unload
+* 1.10 manifest accepted by 2.1 scanner
+* stable registration and deterministic runtime remap
+* large/nonnegative runtime values rejected for indexing but preserved as opaque data
+* duplicate stable ID and duplicate namespace
+* catalog schema/fingerprint and atomic publication
+* missing/restored mod resolution
+* custom monster template/equipment/container/drop round-trip where harnessable
+* upper-floor and same-X/Y/different-floor query/spawn helpers
+* divergent instance scope rejection
+* headless registry/script initialization without UI/audio resources
+* registry mismatch details
+* room canonical order and no-mod no-op behavior
+* vanilla save and legacy map characterization
+
+
+34. MANUAL ACCEPTANCE MATRIX
+============================
+
+MANUAL TEST REQUIRED for rendered Zed palettes, custom HUD/panels/images, audible custom
+sound, Steam and --nosteam mounted-mod flows, 15-player live sessions, host migration
+behavior not represented by tests, multi-MapInstance live room generation, custom model
+limbs/lighting, save restoration after physically removing/reinstalling a mod, and real
+Workshop dependency ordering.
+
+
+35. KNOWN LIMITATIONS
+=====================
+
+* Archive source does not include a ready engine patch series for its many hook sites.
+* A single process-global mod registry means per-MapInstance mod sets are not supported.
+* Cross-MapInstance script mutation is unsafe without a future explicit queued API.
+* Mathematical exhaustive combination testing is impossible; the matrix uses systematic
+  partitions and high-risk combinations.
+
+
+36. DEFERRED CONCERNS
+=====================
+
+* Text Source Script Tester -- explicitly prohibited by task.
+* Z4 -- explicitly prohibited by task.
+* A protocol redesign, if additive validated packets are insufficient -- stop/report
+  boundary per task.
+* Per-instance mod sets and hot unloading content used by live entities.
+* Mini Mimic implementation; only compatibility space is reserved.
+
+
+37. FINAL INTEGRATION DECISIONS
+===============================
+
+FINAL. Decisions established and implemented where marked RESOLVED/MITIGATED:
+
+1. Automatia stable-ID registry remains persistence/network identity authority.
+2. S.A.M. 2.1 manifest fields and APIs are adapted onto shared canonical load order.
+3. Automatia's content fingerprint extension to SAMSync is retained.
+4. S.A.M. room injection appends to a shared generation provider; it does not replace
+   Zed cuboid room editing or existing subroom logic.
+5. Spatial APIs operate only on the active MapInstance and explicit/inherited
+   SpatialSpawnContext; MapInstance, playableFloor and authoredMapLayer remain separate.
+6. Heavy JSON/runtime headers remain implementation-local or within a dedicated runtime
+   build boundary.
+
+
+COMBINATORIAL EDGE-CASE REGISTER
+================================
+
+C01 S.A.M item + persistent chest + floor 5 + divergent instance + headless restart +
+    missing mod + restored mod: retain stable ID and opaque item fields; resolve only
+    after registry rebuild; chest/entity context stays instance/floor-specific.
+
+C02 S.A.M monster + recruitment + upper floor + remote player + reconnect + save/reload:
+    persistent monster ID, follower owner identity and spatial context all survive; player
+    slot is re-resolved, not persisted as sole authority.
+
+C03 injected S.A.M room + Automatia cuboid room data + procedural generation + two
+    MapInstances + late join: canonical room order/seed produce the same LMP selection;
+    each generated instance has independent runtime entities/state.
+
+C04 S.A.M item + quest objective + remapped runtime ID + old character save: quest stores
+    stable ID and resolves against the live catalog; unrelated runtime occupant does not
+    satisfy the objective.
+
+C05 S.A.M projectile + upper authored layer + child particle + structural light + remote
+    client: projectile/particle inherit floor, authored layer and revision; packets reach
+    only clients in the same instance/floor rendering scope.
+
+C06 S.A.M tile edit + floor 4 + another entity at same X/Y floor 0 + client: setTileAt
+    changes only floor 4, regenerates its pathing, and sends a floor/instance-scoped update.
+
+C07 two mods + same stable ID + opposite UI load order + headless host/client: canonical
+    dependency/namespace order chooses the same winner and fingerprints expose failure.
+
+C08 S.A.M effect + follower monster + missing mod + reload: unknown effect slot is not
+    reinterpreted as a different newly registered effect; stable effect identity or opaque
+    extension data is required before persistence is declared resolved.
+
+C09 S.A.M UI panel + floor transition + mod unload during loading: retained UI reconstructs
+    only while its owning namespace remains loaded; image handles do not outlive registry.
+
+C10 TypeScript timer + divergent instance switch + headless server: timer dispatch occurs on
+    main thread under an explicit active instance; UI calls no-op; world calls cannot target
+    a stale previous active map.
+
+C11 custom room + missing dependency + same seed: missing/invalid room is removed before
+    numlevels is computed on all peers, or registry mismatch stops unsafe generation.
+
+C12 custom item + shop + 15th player + runtime ID > 32767: item type uses validated 32-bit
+    transport/stable payload; no Sint16 truncation; player index accepts 14.
+
+C13 custom NPC + dialogue item check + private MapInstance + party invite: dialogue and
+    party state remain per-player/durable; S.A.M content identity is orthogonal to party and
+    map identity.
+
+C14 custom model body + polymorph + upper layer + lighting: class/race rules decide override;
+    rendering uses local z plus authored layer world offset exactly once.
+
+C15 old one-floor LMP + no mods + --nosteam + no_sound headless: registry remains empty,
+    room RNG and map bytes remain legacy, no renderer/audio/Steam path is touched.
+
+END OF BASELINE AND DESIGN REGISTER
+
+
+FINAL IMPLEMENTATION STATUS AND EVIDENCE ADDENDUM
+=================================================
+
+This addendum is authoritative where a baseline paragraph above describes an item as a
+requirement or planned test. It records what this integration actually changed, what was
+automated, what still needs a real game/editor/network session, and what stopped at the
+explicit packet-redesign boundary. A framework source file being present and linked is
+not counted as an engine hook unless an actual engine call site was connected.
+
+
+A. AUTHORITATIVE INPUT AND VERSION VERIFICATION
+-----------------------------------------------
+
+Status: RESOLVED / SOURCE-VERIFIED.
+
+The supplied ZIP was extracted to a new temporary directory and never overlaid on the
+repository. It contained 654 files (approximately 5.2 MB). No bundled installer,
+Workshop upload, shell script or application was executed during inspection. The source
+version authority is framework/sam_logger.hpp:
+
+    #define SAM_FRAMEWORK_VERSION "2.1.0"
+
+The same 2.1.0 marker occurs in the supplied Workshop framework_version.json and GUI
+Dashboard source. The supplied version-check script confirmed both but returned failure
+because release_v2.1.0/RELEASE_NOTES_v2.1.0.md is outside/missing from the supplied
+archive. That is an upstream packaging/test prerequisite, not an Automatia source drift.
+
+The imported framework tree is byte-identical to supplied 2.1 in every file except the
+deliberate Automatia integration seams: items, Lua/JS spawn bridge, loader log ownership,
+headless models, sync fingerprint extension, and floor-aware world access. The already
+extended Automatia sam_sync.cpp was retained instead of replacing it with upstream's
+namespace/version-only implementation.
+
+
+B. BUILD AND LIFECYCLE ARCHITECTURE
+-----------------------------------
+
+Status: RESOLVED / BUILD TESTED.
+
+CMake now gives the game target the complete S.A.M. 2.1 C++ runtime, vendored Lua 5.4 C
+runtime and QuickJS amalgamation. Runtime include directories are PRIVATE. Zed keeps the
+lightweight Automatia foundation and does not link UI/network/script implementation that
+it does not need. The lifecycle remains owned by Mods::loadMods/unloadMods:
+
+    mounted paths
+       -> Automatia foundation scans and establishes stable identity
+       -> shared content catalog/fingerprint is rebuilt and exported
+       -> S.A.M. 2.1 rich registries consume the established item mapping
+       -> vanilla asynchronous data reloads join
+       -> S.A.M. models/classes/races/monsters/sounds resolve on main thread
+
+Unload stops VMs/timers and clears UI, image, room, effect, race, sound, recipe, workbench,
+patch and monster overlay state before the mounted content disappears. The foundation and
+rich loader share one logger load section, avoiding duplicate lifecycle headers. With no
+valid S.A.M. manifests the framework workbench is not injected, so vanilla-only content
+and RNG/item tables remain unchanged.
+
+Lua and QuickJS receive host-authoritative ticks/timers in gameLogic on single-player or
+the server, never the remote client, and not while paused/loading. This is a real lifecycle
+connection. It is not evidence that every upstream event documented in sam_event is wired
+to every corresponding Barony engine transition; unconnected event breadth is a KNOWN
+LIMITATION.
+
+
+C. S.A.M. 1.10 TO 2.1 MIGRATION
+--------------------------------
+
+Status: MITIGATED / SOURCE-VERIFIED / MANUAL MOD TEST REQUIRED.
+
+Automatia's previous 1.10-era manifest scan, stable registry, catalog exporter, class
+selection integration and stable item persistence were preserved. S.A.M. 2.1 manifests
+are a compatible superset: omitted 2.1 arrays and fields default to empty, so a basic
+1.10 manifest is accepted without rewriting it. The migration does not rewrite old maps,
+saves, templates or sam_item_catalog.json.
+
+The stable-id allocator runs before the rich 2.1 item loader. Therefore a 1.10 item keeps
+the Automatia session mapping chosen for its stable ID, while any richer 2.1 definition
+stamps traits, tooltips, model metadata and attributes into that same slot. The fixed
+2.1 Hunter's Workbench is reserved as stable ID sam:hunters_workbench at runtime 6000
+before mod allocation. Mod allocation scans the complete [5000,25000) range and skips
+occupied 6000; it does not sacrifice the old 20,000-slot capacity contract.
+
+No alias mechanism was invented for renamed namespaces/stable IDs. A renamed ID remains
+missing until a mod supplies an explicit future migration; guessing by display name could
+silently convert an old object into unrelated content.
+
+
+D. ITEM IDENTITY, CATALOG, AND CONSUMERS
+----------------------------------------
+
+Status: RESOLVED for registry/session mapping; MITIGATED for every possible consumer.
+
+One lightweight header now owns these constants without importing JSON or runtime code:
+
+    vanilla IDs            [0, NUMITEMS)
+    custom runtime slots   [5000, 25000)
+    capacity               20,000
+    fixed 2.1 workbench    6000
+
+The Automatia foundation remains the only integrated allocator. SAMItems accepts a
+stable-id resolver callback and refuses a rich definition with no valid mapping. Its
+standalone fallback also uses the full range and skips 6000. Registry exhaustion returns
+failure; it does not clamp, wrap or displace an existing definition. Duplicate stable IDs
+remain deterministically rejected by the foundation. Custom trait declarations are
+folded into a uint64 mask stored in ItemGeneric; unload/data reload clears/reapplies the
+mask so a removed mod cannot leak behavior into a later runtime occupant.
+
+Connected item behavior includes:
+
+* rich definitions and tooltip restoration after vanilla data readers clear tables;
+* custom model append/late resolution;
+* random loot candidate participation by category and level;
+* weapon proficiency override;
+* ranged, quiver, foci, instrument, thrown-ball, potion-bad and beatitude-AC traits;
+* persistent world items and persistent monster inventory/equipment acceptance;
+* floor-summary inspection without replacing a registered custom item by GEM_ROCK;
+* existing Automatia stable-ID packet/save/editor/shop/score/magic paths remain intact.
+
+Unknown nonnegative item IDs may be retained by existing opaque persistence fields, but
+are never safe for items[] indexing without [0,NUM_ITEM_SLOTS) plus live-registration
+validation. The integration introduces no NUMITEMS-1 clamp for custom content. Existing
+vanilla clamps in unrelated legacy monster code are not treated as S.A.M registration
+paths and were not broadly rewritten in this task.
+
+sam_item_catalog.json keeps Automatia's versioned schema, range metadata, fingerprint,
+stable/runtime mapping and atomic publication. The workbench participates in the same
+catalog when S.A.M mods are active. Catalog runtime numbers are informational for the
+specific fingerprint/session; stable_id remains authority. Editor and missing-mod views
+may display an old catalog, but gameplay never accepts that file as a substitute live
+registry.
+
+Residual item cases requiring content fixtures/manual sessions: shop-specific exclusion
+attributes on custom loot, all crafting recipe combinations, real chest UI, custom class
+starting equipment, restored-mod visual reconstruction, and a live item with runtime ID
+above 32767 crossing every relevant packet family.
+
+
+E. PLAYABLE-Z AND DIVERGENT MAPS
+--------------------------------
+
+Status: MITIGATED / CHARACTERIZATION TESTED.
+
+The narrow Automatia scripting adapter creates a ground item through newEntity while a
+SpatialSpawnContext is active. This inherits playableFloor, authoredMapLayer and
+spatialRevision. It assigns Entity::z = 0 as local model elevation and never derives a
+layer from z. Tile validation uses map.tileAt(..., activeRuntimePlayableFloor()).
+
+SAMWorld tile reads use map.tileAt on the active playable floor. Entity lookup/find
+filters by activeRuntimePlayableFloor, preventing same-X/Y entities on other floors from
+matching. Terrain writes use map.setTileAt for single-player. Path connectivity refuses
+nonzero floors because the current global path-map API cannot name a playable floor;
+returning false is safer than answering with floor-zero geometry.
+
+S.A.M calls operate only on the currently activated MapInstance. There is deliberately
+no API that takes an arbitrary instance key and re-enters WorldState from inside a script
+callback. Thus MapInstance and playableFloor remain orthogonal, but scripts cannot mutate
+a dormant divergent instance. That restriction is a KNOWN LIMITATION, not a collapse of
+the two axes.
+
+The Stage 4D/Z3.4C characterization executable passed after integration. It genuinely
+characterized legacy local-z safety, ELYR authored-layer round trip, structural render/
+light context, multipart spawn floors, falling/landing, persistent ownership, minimap
+floor isolation, and stacked stairs. It did not execute a graphical S.A.M projectile,
+particle, light or custom-monster body; those remain MANUAL TEST REQUIRED. Upstream 2.1
+spawn APIs other than the adapted ground-item seam must be reviewed as each engine hook
+is connected; merely inheriting ambient context is not accepted as proof.
+
+
+F. ROOM GROUPS AND PROCEDURAL GENERATION
+----------------------------------------
+
+Status: RESOLVED architecture / SOURCE-CONTRACT TESTED / LIVE MP MANUAL.
+
+Automatia's Zed cuboid/multi-layer selection, whole-room clipboard, Room Groups, vanilla
+subrooms, shop/treasure/special placement and existing generation algorithms remain.
+SAMRooms is an additive provider only:
+
+    existing canonical mapList (entrance remains index 0)
+              + sorted valid S.A.M prefab paths for this levelset
+
+An injected room is passed through the current loadSubRoomData parser, so it receives the
+same LMP/Playable-Z validation as any other room. Unreadable paths are rejected before
+numlevels increases. With no registered rooms the loop is a no-op and consumes no RNG.
+SAMRooms clears on unload, preventing stale absolute paths and preventing no-mod seed/RNG
+range drift after a mod is removed.
+
+This is the best-of-both-worlds reconciliation: a shared generation input seam, not a
+replacement editor model and not two competing dungeon generators. A future richer
+shared room descriptor may expose cuboid/editor metadata, but S.A.M. 2.1 supplies only
+levelset/path injection and cannot truthfully represent Automatia Room Group geometry.
+
+Live host/client regeneration with actual injected 32-layer rooms is not automated.
+Because safe registry negotiation is not live-wired, S.A.M rooms must not be used in a
+multiplayer lobby until host and clients have been manually confirmed to use identical
+content. Hard gating belongs to the deferred protocol work below.
+
+
+G. PERSISTENCE
+--------------
+
+Status: MITIGATED; core custom item records preserved; S.A.M extension-state bridge DEFERRED.
+
+Existing Automatia character/world persistence remains authority for containers, dropped
+items, monster inventories/equipment, companions, MapInstances and Playable-Z context.
+Capture paths that previously accepted only < NUMITEMS now also accept a live registered
+custom ID and retain the existing stable ID. Loading resolves stable ID against the live
+registry and does not substitute an unrelated vanilla item when resolution fails.
+
+S.A.M. 2.1 SAMWorldState is compiled and available to Lua/JS, with per-key/value/total
+caps, but its collect/beginLoad/absorb callbacks were not wired into SaveGameInfo. The
+upstream implementation owns one process-global data map while Automatia can host fifteen
+durable player identities and multiple divergent map instances. Blindly appending that
+same map to each character save would make per-character ownership false and could leak
+one player's mod state to another. Correct integration requires an identity- and possibly
+MapInstance-keyed adapter plus explicit host/client authority. This is DEFERRED rather
+than shipping corrupt semantics.
+
+Custom effect, spell, race and arbitrary scripted entity identity do not yet have a
+stable opaque persistence envelope. Missing/restored mod survival is therefore RESOLVED
+for the Automatia stable-item paths, but a KNOWN LIMITATION for these richer 2.1 types.
+Likewise no promise is made that a custom follower body/effect reconstructs while its mod
+is absent. The underlying vanilla/Automatia follower save remains unchanged.
+
+
+H. MULTIPLAYER PROTOCOL STOP REPORT
+-----------------------------------
+
+Status: DEFERRED by explicit task boundary; existing Automatia packets were not redesigned.
+
+The supplied 2.1 runtime defines SAMF, SAMP, SAMA, SAMS, SAMI and SAMT messages. The
+archive contains send/receive helpers and comments describing engine handler seams, but
+the current Automatia net dispatcher has no live handler calls for this family. More
+importantly, spatial messages do not carry MapInstance, playableFloor, authoredMapLayer
+or spatialRevision. Namespace@version comparison alone is insufficient; Automatia's
+content fingerprint extension is retained in SAMSync but not yet invoked as a mandatory
+pre-game handshake.
+
+This is a significant protocol design, not a safe incidental packet patch. The required
+future protocol must include at least:
+
+1. a negotiated protocol/version/capability frame before accepting S.A.M content;
+2. full content-catalog fingerprint and deterministic registration result, not only mod
+   namespace/version;
+3. a hard safe failure or content-disable decision before procedural generation;
+4. sender direction and server-authority validation per message;
+5. MAXPLAYERS-sized player validation for slots 0..14;
+6. explicit MapInstance identity plus playableFloor and spatialRevision for every spatial
+   mutation/effect, and authoredMapLayer wherever structural placement needs it;
+7. bounded payload/tag/image/state sizes and integer-width validation;
+8. late-join snapshot/order rules, disconnect/reconnect ownership, duplicate/replay rules;
+9. behavior for vanilla peers and peers with framework but different capability sets;
+10. fuzz tests plus host/client/dedicated-server divergent-map acceptance.
+
+Until that design exists, multiplayer sam_set_tile refuses all writes. Script ticks stay
+host-authoritative, and no new incoming S.A.M packet handler was added. Other upstream
+packet-emitting script APIs are linked but have no Automatia receive integration; mods
+must treat them as unavailable in Automatia multiplayer. This limitation is explicit so
+unknown packets cannot be mistaken for tested synchronization.
+
+The MAXPLAYERS == 4 static assertion in upstream move-speed state was removed. Storage is
+now std::array<double, MAXPLAYERS> initialized to 1.0, and the full game compiles with the
+Automatia 15-player configuration. This proves the corrected allocation/compile contract,
+not a live fifteen-client run.
+
+
+I. HEADLESS, STEAM, UI, RENDERING, AND AUDIO
+--------------------------------------------
+
+Status: MITIGATED / BUILD TESTED / MANUAL ACCEPTANCE REQUIRED.
+
+Manifest discovery consumes Mods::mountedFilepaths and has no direct Steam client call,
+so local, Workshop and --nosteam discovery share the engine's existing mount authority.
+Core VM/registry simulation is outside renderer/window/audio code. Model registration
+appends the same numeric model table on graphical and headless peers, but skips polygon
+generation and VBO creation when headless. This keeps authoritative model indices stable
+without touching a GPU.
+
+Upstream sandbox/UI/image/audio source guards were retained and resource append occurs on
+the main thread after vanilla async loads join. UI, HUD and images clear during unload.
+SAMSounds appends only at the engine resource seam. No audible sound, rendered S.A.M HUD,
+panel, image, voxel body, lighting result, Steam Workshop session, --nosteam session or
+actual dedicated-server boot was observed by these code/build tests. Those outcomes are
+MANUAL TEST REQUIRED and are not claimed.
+
+
+J. ZED EDITOR, MAP PROPERTIES, DIALOGUE, QUESTS, AND TEXT SOURCE
+---------------------------------------------------------------
+
+Status: PRESERVED / PARTIALLY EXTENDED.
+
+Zed still builds with the lightweight stable catalog interfaces and its existing S.A.M
+item description/selection path. Stable IDs in monster inventory/equipment templates,
+unknown catalog display, search, 32 authored layers, cuboid selection, clipboard,
+persistent IDs, stairs, exits/tunnels and custom sprite/map properties are untouched.
+The full game-only Lua/QuickJS/UI/network runtime is not pulled into editor public headers.
+
+There is no new competing S.A.M editor palette. Rich 2.1 custom item definitions flow
+through the catalog/runtime shared ID contract. Custom entity/race/effect visual editors,
+rendered model previews with missing mods, and undo/redo of new arbitrary extension blobs
+remain DEFERRED/MANUAL.
+
+Automatia dialogue, per-player quest state and journal remain authoritative. Existing
+stable-item storage/evaluation paths were preserved. No duplicate S.A.M quest system was
+invented, and no new dialogue/quest event bridge is claimed. Text Source remains a
+separate scripting system with separate lifecycle and state. The prohibited Text Source
+Script Tester and Z4 were not started.
+
+No .LMP format or custom map-property byte layout was changed. Fog, current/future
+ambience work, PZLV/ELYR and unknown extension concerns therefore remain owned by their
+existing versioned paths. S.A.M room files use the normal loader rather than adding an
+unversioned metadata channel.
+
+
+K. MONSTERS, NPCS, FOLLOWERS, EFFECTS, CLASSES, AND RACES
+---------------------------------------------------------
+
+Status: MITIGATED; registries/overlays are active, full engine semantics are incomplete.
+
+The 2.1 registries, patchers, generated overlays, model references and scripting query
+APIs are compiled into the runtime. Monster body resolution is reported after model
+append. Existing Automatia custom-monster JSON, NPC/dialogue, recruitment, faction,
+persistent follower, Playable-Z and stable inventory mechanisms were not removed.
+
+However, source review found no complete Automatia engine call-site coverage for every
+SAMClasses stat/passive, SAMEffects combat/tick/persistence, SAMRaces character-save,
+SAMBodies render-limb, custom-spell wire, or follower reconstruction hook described by
+upstream. These files being linked does not make those behaviors complete. They remain
+KNOWN LIMITATIONS and need feature-specific adapters/tests before a mod may depend on
+them in persistent multiplayer. Mini Mimic itself remains future work; no enum/range
+decision was introduced that deliberately blocks it.
+
+
+L. COMPILE-TIME, MEMORY, THREADING, AND PERFORMANCE
+---------------------------------------------------
+
+Status: RESOLVED architecture / BUILD TESTED / profiling deferred.
+
+items.hpp gained only a tiny constants/bitmask header and one uint64 field. It does not
+include nlohmann/json.hpp or any sam/framework header. JSON remains in implementation
+files and framework-private headers; Lua/QuickJS include paths are PRIVATE to the game
+target. Ordinary engine translation units include only the narrow registry/runtime class
+headers required at their actual seams. The 24,765-line nlohmann header was not added to
+widely shared Automatia headers.
+
+The mandated build completed with -j6, demonstrating that the recent header/RAM cleanup
+was not reversed under that concurrency. No memory measurement was requested beyond the
+instruction that such a measurement use -j1, so no unsubstantiated peak-RAM number is
+reported. A clean rebuild/preprocessed-TU fanout measurement remains DEFERRED because it
+would be expensive and is not necessary to establish the include architecture.
+
+All resource/model resolution added by this integration runs after existing async jobs
+join and on the main thread. Script dispatch is in gameLogic. Room registries are rebuilt
+during mod lifecycle, not concurrently mutated during generation. No S.A.M callback is
+dispatched from initGameDatafilesAsync or map-generation workers. Registries/caches build
+at load; item behavior checks use one uint64 mask rather than per-frame JSON lookup.
+
+
+M. SECURITY AND ERROR HANDLING
+------------------------------
+
+Status: MITIGATED / SOURCE-REVIEWED.
+
+Upstream Lua/QuickJS sandboxes, instruction/memory limits, primitive event copies, script
+disable-on-error behavior, manifest path validation, bounded world-state values, bounded
+world/entity queries and registration diagnostics were retained. The Automatia spawn
+adapter validates item-table range, quantity, tile bounds, active floor geometry and
+entity-list availability. Multiplayer terrain mutation is refused instead of trusting an
+unscoped caller. Clients do not receive the host-authoritative gameLogic script tick.
+
+Malformed JSON, duplicate stable IDs, invalid mappings, unreadable rooms, unknown traits
+and registry exhaustion log and reject the affected record. No broad exception swallowing
+or vanilla replacement fallback was added. Full adversarial JSON/script/packet fuzzing,
+symlink/path-platform testing and hostile-client testing are DEFERRED. Because S.A.M
+packet handlers are not integrated, no claim is made that their upstream parser is an
+Automatia trust boundary yet.
+
+
+N. AUTOMATED VALIDATION RECORD
+------------------------------
+
+Status: TESTED where explicitly listed.
+
+1. `cmake --build build-super-posix -j6`: PASSED, including Zed and the complete game.
+   The only observed final-link framework warning is vendored Lua loslib's tmpnam warning;
+   the sandbox does not open the OS library, but the C object is linked. Existing game.cpp
+   chdir/status-path and compiler-option warnings also remain.
+
+2. `ctest --test-dir build-super-posix --output-on-failure`: PASSED, 7/7:
+   automatia_foundation, sam_21_integration_contract, party_backend,
+   social_party_ui_model, party_chat, playable_z_characterization and
+   playable_z_runtime_characterization.
+
+3. `sam_21_integration_contract` genuinely checks the shared range/capacity/workbench
+   constants, first-free allocation around occupied IDs, complete registry exhaustion,
+   ScopedPlayableFloorRuntimeContext inheritance, exact 2.1 marker, stable resolver/
+   lifecycle/room/tick/persistence seams, MAXPLAYERS storage fix, floor-aware SAMWorld
+   source seams, and absence of heavy framework/JSON headers from items.hpp. Source-seam
+   assertions are characterization guards, not a substitute for runtime mod fixtures.
+
+4. `./build-super-posix/barony --automatia-stage4d-z3-transition-characterization`:
+   PASSED with the explicit final Stage 4D/Z3.4C success record described above.
+
+5. `git diff --check`: PASSED during review and must remain part of final handoff.
+
+6. Supplied `python3 tools/check_versions.py`: EXECUTED AFTER SOURCE INSPECTION; framework,
+   GUI and installer checks passed, but overall exit 1 because the external release notes
+   file was not supplied.
+
+7. Supplied GUI code-generation test was inspected but NOT RUN: the environment has no
+   node and no Lua interpreter, and the archive does not contain the executable that the
+   test prefers. Installing network dependencies or executing an uninspected installer
+   was not appropriate. This is reported as NOT RUN, not a pass.
+
+Requested cases not honestly executed as end-to-end fixtures: a real 1.10 mod migration,
+duplicate/missing/restored mods, old catalog parsing, live monster/equipment/container/
+drop persistence, headless process boot, registry mismatch lobby, injected-room network
+generation, vanilla-only save load, legacy map plus active S.A.M mod, and graphical
+upper-floor custom content. Lower-level contracts relevant to several of these passed,
+but the end-to-end cases remain MANUAL TEST REQUIRED.
+
+
+O. MANUAL ACCEPTANCE PLAN
+-------------------------
+
+Status: MANUAL TEST REQUIRED.
+
+Run with controlled fixture mods and capture logs/save/catalog hashes for each:
+
+* vanilla, Steam, --nosteam and no_sound startup; mod load/unload/reload twice;
+* dedicated headless host, graphical host and remote client with identical content;
+* 15 connected player slots including slot 14, disconnect/reconnect and late join;
+* current/missing/restored mod catalog with a custom ID below and above 32767;
+* inventory, equipment, shop, chest, dropped item, follower and world restart round trip;
+* legacy 1.10 manifest/catalog/save and a renamed-display-name but stable namespace/ID;
+* duplicate namespace/stable ID and a deliberately exhausted synthetic registry;
+* same X/Y custom items/monsters on floors 0 and 5 in two MapInstances;
+* stair/fall transitions with custom item, monster, projectile, particle and child model;
+* old one-floor LMP, injected 32-layer PZ room, Automatia Room Group/cuboid clipboard,
+  missing room dependency, two independent injected-room mods and seed comparison;
+* rendered item/class/race models, body limbs, structural light, HUD/panel/image cleanup;
+* custom audio under normal, no_sound and headless modes;
+* dialogue/quest stable item check before/after runtime remap;
+* malformed/traversal JSON, oversized script state and deliberate script budget failure.
+
+Do not enable multiplayer world mutations, mod-defined packets, image/speed/action
+replication or injected-room public lobbies until the protocol work in H is complete.
+
+
+P. FINAL LIMITATIONS AND DEFERRED WORK
+--------------------------------------
+
+Status: KNOWN LIMITATION / DEFERRED.
+
+* Live negotiated S.A.M packet/registry handshake and all spatial packet context.
+* Identity-correct S.A.M script world-state persistence for 15 durable players and
+  divergent MapInstances.
+* Complete engine event interception coverage.
+* Full custom effect/race/class/spell/body/follower persistence and wire semantics.
+* Arbitrary dormant-MapInstance script queries/mutations.
+* Nonzero-floor path-connectivity query until path maps accept a floor.
+* Rich Zed custom entity/effect/race panels and visual missing-mod previews.
+* End-to-end fixtures and manual matrices enumerated above.
+* Upstream release note packaging and GUI codegen test prerequisites.
+* Text Source Script Tester and Z4, explicitly prohibited.
+
+
+Q. FINAL BEST-OF-BOTH-WORLDS DECISIONS
+---------------------------------------
+
+Status: FINAL.
+
+1. Automatia remains stable identity, persistence, MapInstance, Playable-Z, editor and
+   multiplayer authority. No existing system was replaced wholesale.
+2. S.A.M. 2.1 supplies enriched registries, scripting runtimes, content/resource hooks,
+   effects/races/models/sounds/rooms/UI APIs and mod extension surfaces.
+3. One item mapping feeds both systems; no competing runtime allocator exists in the
+   integrated lifecycle.
+4. A small engine trait contract exposes useful item behavior without framework-header
+   fanout.
+5. Room injection shares the lowest safe generation seam while Automatia Room Groups and
+   editor geometry remain intact.
+6. Spatial script access inherits or filters current context and refuses unsupported
+   ambiguous operations; local Entity::z never becomes a layer.
+7. Headless peers keep deterministic numeric resources without renderer work.
+8. Existing packets were not casually changed. The missing scope/handshake problem is
+   isolated as an explicit protocol project.
+9. Features whose framework code is linked but whose engine interception/persistence is
+   incomplete are documented as incomplete; presence is not reported as behavior.
+10. Legacy content and no-mod behavior stay additive/no-op by construction.
+
+
+R. COMBINATORIAL REGISTER FINAL DISPOSITION
+--------------------------------------------
+
+C01 custom item/chest/floor5/divergent/headless/missing/restored: MITIGATED for stable
+    item record and spatial container context; real removal/restart/restoration MANUAL.
+C02 custom recruited monster/upper floor/remote/reconnect/reload: DEFERRED for complete
+    rich monster identity; existing Automatia follower behavior preserved.
+C03 S.A.M room/Room Group/procedural/two instances/late join: RESOLVED provider design;
+    live handshake/late-join deterministic acceptance DEFERRED.
+C04 item/quest/remap/old save: MITIGATED by retained stable-item authority; real quest
+    fixture MANUAL.
+C05 projectile/upper layer/child particle/light/remote: MANUAL/DEFERRED; item spawn is
+    adapted but this broader spatial family is not claimed.
+C06 tile edit/floor4/same XY/client: RESOLVED by safe refusal in multiplayer; single-player
+    floor4 setTileAt is supported, nonzero-floor connectivity remains unavailable.
+C07 duplicate stable ID/load order/headless host-client: RESOLVED registration rejection
+    and fingerprint composition; live host-client hard gate DEFERRED.
+C08 effect/follower/missing/reload: DEFERRED; no stable opaque effect persistence envelope.
+C09 UI/floor transition/unload: MITIGATED by unload clear; graphical transition MANUAL.
+C10 TypeScript timer/instance switch/headless: MITIGATED by main-thread active-instance
+    dispatch; dormant instance targeting is unavailable; live headless MANUAL.
+C11 custom room/missing dependency/same seed: MITIGATED by pre-numlevels load rejection;
+    live peer mismatch hard gate DEFERRED.
+C12 item/shop/player15/runtime>32767: registry and player storage BUILD TESTED; every shop/
+    packet path at that ID remains MANUAL and unsafe S.A.M packets are unavailable.
+C13 NPC/dialogue/private instance/party: Automatia systems preserved; new cross-system
+    S.A.M event behavior DEFERRED.
+C14 custom body/polymorph/upper layer/light: model table/headless split MITIGATED; rendered
+    body/structural-light acceptance MANUAL.
+C15 legacy LMP/no mods/--nosteam/no_sound headless: no-mod construction RESOLVED in source;
+    combined live launch MANUAL.
+
+Additional high-risk combinations:
+
+C16 item runtime 6000 + workbench + mod declaring first ID + reload: RESOLVED by reserving
+    sam:hunters_workbench before first-free allocation and clearing traits/registry.
+C17 two reloads + changed model list + headless: MITIGATED by persistent model index guard
+    and no headless VBO work; memory/resource live soak MANUAL.
+C18 room unload + identical seed + stale absolute path: RESOLVED by SAMRooms::clear before
+    unmount; deterministic file-fixture comparison MANUAL.
+C19 script tile edit + floor0 + multiplayer: RESOLVED by refusal even on floor0 because
+    lack of MapInstance/handshake makes the packet ambiguous on every floor.
+C20 custom item definition + vanilla tooltip reload + mod unload + another mod reuses slot:
+    RESOLVED by reapply and complete trait/definition cleanup.
+C21 different files with same namespace/version + room generation: fingerprint detects the
+    catalog difference in data; live mandatory gate DEFERRED, so public MP remains unsafe.
+C22 script world save + two durable players + divergent instances: DEFERRED rather than
+    writing process-global data into both characters and falsely claiming isolation.
+C23 15th player + temporary speed + disconnect: storage width RESOLVED; network event and
+    reconnect cleanup not integrated, therefore behavior unavailable rather than tested.
+C24 custom model item + headless authority + graphical client: numeric append design is
+    MITIGATED; content handshake and rendered equivalence MANUAL/DEFERRED.
+C25 no mods + lifecycle reload + workbench: RESOLVED; the workbench is not installed when
+    the validated manifest set is empty, preserving vanilla item/RNG state.
+
+END OF FINAL S.A.M. 2.1 / AUTOMATIA AUDIT
