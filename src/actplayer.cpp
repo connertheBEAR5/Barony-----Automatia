@@ -70,7 +70,7 @@ static void projectCommandTargetOnPlayerFloor(
 {
 	real_t startX = cameras[player].x * 16.0;
 	real_t startY = cameras[player].y * 16.0;
-	real_t startZ = cameras[player].z + (4.5 - cameras[player].z) / 2.0 + startZOffset;
+	real_t startZ = getCameraAimLocalZ(player) + startZOffset;
 	real_t pitch = cameras[player].vang;
 	if ( pitch < 0 || pitch > PI )
 	{

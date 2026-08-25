@@ -3872,7 +3872,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 					// more accurate line of sight, look up
 					real_t startx = cameras[player.playernum].x * 16.0;
 					real_t starty = cameras[player.playernum].y * 16.0;
-					real_t startz = cameras[player.playernum].z + (4.5 - cameras[player.playernum].z) / 2.0 + -2.5;
+					real_t startz = getCameraAimLocalZ(player.playernum) - 2.5;
 					real_t pitch = cameras[player.playernum].vang;
 					if ( pitch < PI ) // looking down
 					{
@@ -3941,7 +3941,7 @@ real_t Player::WorldUI_t::tooltipInRange(Entity& tooltip)
 					// more accurate line of sight
 					real_t startx = cameras[player.playernum].x * 16.0;
 					real_t starty = cameras[player.playernum].y * 16.0;
-					real_t startz = cameras[player.playernum].z + (4.5 - cameras[player.playernum].z) / 2.0 + -2.5;
+					real_t startz = getCameraAimLocalZ(player.playernum) - 2.5;
 					real_t pitch = cameras[player.playernum].vang;
 					if ( pitch < 0 || pitch > PI )
 					{

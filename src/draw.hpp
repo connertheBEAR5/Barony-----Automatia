@@ -513,6 +513,9 @@ extern view_t cameras[MAXPLAYERS];
 extern view_t menucam;
 PlayableFloorId getCameraPlayableFloor(const view_t* camera);
 real_t getCameraHudLocalZ(int player);
+// Convert a rendered camera height back into the active player's local floor
+// space before a gameplay ray intersects the ground plane.
+real_t getCameraAimLocalZ(int player);
 
 // function prototypes for opengl.c:
 #define REALCOLORS 0

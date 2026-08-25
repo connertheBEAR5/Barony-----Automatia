@@ -1235,6 +1235,9 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	const std::string sprites = readFile(sourcePath("src/actsprite.cpp"));
 	const std::string playerActions = readFile(sourcePath("src/actplayer.cpp"));
 	const std::string magicParticles = readFile(sourcePath("src/magic/actmagic.cpp"));
+	const std::string drawSource = readFile(sourcePath("src/draw.cpp"));
+	const std::string playerAim = readFile(sourcePath("src/player.cpp"));
+	const std::string handMagic = readFile(sourcePath("src/magic/act_HandMagic.cpp"));
 	EXPECT(!game.empty());
 	EXPECT(!gameUi.empty());
 	EXPECT(!interfaceSource.empty());
@@ -1244,6 +1247,9 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	EXPECT(!sprites.empty());
 	EXPECT(!playerActions.empty());
 	EXPECT(!magicParticles.empty());
+	EXPECT(!drawSource.empty());
+	EXPECT(!playerAim.empty());
+	EXPECT(!handMagic.empty());
 
 	// Same-MapInstance playable-floor movement is authoritative on the server,
 	// puts followers on the leader's floor, and scopes passive visual children.
@@ -1315,6 +1321,16 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	EXPECT(contains(playerActions, "projectCommandTargetOnPlayerFloor(PLAYER_NUM, *players[PLAYER_NUM]->entity, true"));
 	EXPECT(contains(playerActions, "FOLLOWER_TARGET_PARTICLE, 0, my"));
 	EXPECT(contains(magicParticles, "spatialReference ? spatialReference : uidToEntity(uid)"));
+	// Camera Z includes an authored-floor world offset. Camera-driven actions
+	// must remove it before intersecting their local ground plane; otherwise an
+	// upper-floor cursor resolves the distant floor-zero target.
+	const std::string cameraAim = section(
+		drawSource, "real_t getCameraAimLocalZ(int player)", "/*-------------------------------------------------------------------------------");
+	EXPECT(contains(cameraAim, "cameras[player].z - structuralCameraOffset"));
+	EXPECT(contains(cameraAim, "mapLayerWorldZ(playerEntity->structuralMapLayer())"));
+	EXPECT(contains(playerActions, "real_t startZ = getCameraAimLocalZ(player) + startZOffset"));
+	EXPECT(contains(playerAim, "getCameraAimLocalZ(player.playernum) - 2.5"));
+	EXPECT(contains(handMagic, "startz = getCameraAimLocalZ(player) + *cvar_rangefinderStartZ"));
 	return true;
 }
 

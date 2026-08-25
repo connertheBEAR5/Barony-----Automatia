@@ -266,6 +266,28 @@ real_t getCameraHudLocalZ(int player)
 	return 0.0;
 }
 
+real_t getCameraAimLocalZ(int player)
+{
+#ifndef EDITOR
+	if ( player >= 0
+		&& player < MAXPLAYERS
+		&& players[player]
+		&& players[player]->entity )
+	{
+		const Entity* playerEntity = players[player]->entity;
+		const real_t structuralCameraOffset =
+			map.playableFloorUsesAuthoredLayerStack(playerEntity->playableFloor)
+				? 2.0 * mapLayerWorldZ(playerEntity->structuralMapLayer())
+				: 0.0;
+		const real_t localCameraZ = cameras[player].z - structuralCameraOffset;
+		// Legacy ground selection expresses the camera in local entity-Z units,
+		// with the eye height interpolated toward the floor plane at z=4.5.
+		return localCameraZ + (4.5 - localCameraZ) / 2.0;
+	}
+#endif
+	return cameras[player].z + (4.5 - cameras[player].z) / 2.0;
+}
+
 static Shader gearShader;
 static Shader lineShader;
 static Mesh lineMesh = {

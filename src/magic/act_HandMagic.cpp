@@ -431,7 +431,7 @@ void spellcasting_animation_manager_t::setRangeFinderLocation()
 	{
 		startx = cameras[player].x * 16.0;
 		starty = cameras[player].y * 16.0;
-		startz = cameras[player].z + (4.5 - cameras[player].z) / 2.0 + *cvar_rangefinderStartZ;
+		startz = getCameraAimLocalZ(player) + *cvar_rangefinderStartZ;
 		pitch = cameras[player].vang;
 		yaw = cameras[player].ang;
 	}
