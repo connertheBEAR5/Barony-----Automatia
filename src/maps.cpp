@@ -8176,6 +8176,7 @@ void assignActions(
 			case 207:
 			case 246:
 			case 247:
+			case EDITOR_SPRITE_MINIMIMIC:
 			{
 				entity->sizex = 4;
 				entity->sizey = 4;

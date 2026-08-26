@@ -76,6 +76,13 @@ enum Monster : int
 	MONSTER_UNUSED_8,
 	MAX_MONSTER
 };
+
+/*
+ * Zed marker for the existing runtime MINIMIMIC actor. This is an authored
+ * map sprite only; assignActions() resolves it to MINIMIMIC and the normal
+ * initMiniMimic()/actMonster implementation owns all runtime behavior.
+ */
+static constexpr Sint32 EDITOR_SPRITE_MINIMIMIC = 248;
 const int NUMMONSTERS = MAX_MONSTER;
 extern int kills[NUMMONSTERS];
 

@@ -19095,6 +19095,10 @@ bool Entity::checkEnemy(Entity* your)
 		{
 			return true;
 		}
+		else if ( yourStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_NEUTRAL )
+		{
+			return false;
+		}
 	}
 	else if ( your->behavior == &actPlayer && behavior == &actMonster && myStats->monsterForceAllegiance != Stat::MONSTER_FORCE_ALLEGIANCE_NONE )
 	{
@@ -19105,6 +19109,10 @@ bool Entity::checkEnemy(Entity* your)
 		else if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_ENEMY )
 		{
 			return true;
+		}
+		else if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_NEUTRAL )
+		{
+			return false;
 		}
 	}
 
@@ -19691,6 +19699,10 @@ bool Entity::checkFriend(Entity* your)
 		{
 			return false;
 		}
+		else if ( yourStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_NEUTRAL )
+		{
+			return false;
+		}
 	}
 	else if ( your->behavior == &actPlayer && behavior == &actMonster && myStats->monsterForceAllegiance != Stat::MONSTER_FORCE_ALLEGIANCE_NONE )
 	{
@@ -19699,6 +19711,10 @@ bool Entity::checkFriend(Entity* your)
 			return true;
 		}
 		else if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_ENEMY )
+		{
+			return false;
+		}
+		else if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_NEUTRAL )
 		{
 			return false;
 		}

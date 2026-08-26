@@ -1534,6 +1534,7 @@ void setDefaultMonsterStats(Stat* stats, int sprite)
 			stats->GOLD = 0;
 			stats->HUNGER = 900;
 			break;
+		case EDITOR_SPRITE_MINIMIMIC:
 		case (1000 + MINIMIMIC):
 			stats->type = MINIMIMIC;
 			stats->stat_appearance = local_rng.rand();
@@ -1553,6 +1554,14 @@ void setDefaultMonsterStats(Stat* stats, int sprite)
 			stats->LVL = 10;
 			stats->GOLD = 0;
 			stats->RANDOM_GOLD = 0;
+			if ( sprite == EDITOR_SPRITE_MINIMIMIC )
+			{
+				// The authored palette entry is explicitly hostile by default.
+				// Runtime summons using 1000 + MINIMIMIC retain their existing
+				// natural-faction setup.
+				stats->monsterForceAllegiance =
+					Stat::MONSTER_FORCE_PLAYER_ENEMY;
+			}
 			break;
 		case 247:
 		case (1000 + MONSTER_ADORCISED_WEAPON):

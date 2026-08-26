@@ -640,6 +640,7 @@ Monster editorSpriteTypeToMonster(Sint32 sprite)
 	case 207: monsterType = GREMLIN; break;
 	case 246: monsterType = REVENANT_SKULL; break;
 	case 247: monsterType = MONSTER_ADORCISED_WEAPON; break;
+	case EDITOR_SPRITE_MINIMIMIC: monsterType = MINIMIMIC; break;
 	default:
 		break;
 	}
@@ -699,6 +700,7 @@ int checkSpriteType(Sint32 sprite)
 	case 207:
 	case 246:
 	case 247:
+	case EDITOR_SPRITE_MINIMIMIC:
 		//monsters
 		return 1;
 		break;
@@ -2105,7 +2107,8 @@ std::vector<const char*> spriteEditorNameStrings =
 	"NOT USED",
 	"NOT USED",
 	"REVENANT_SKULL",
-	"ADORCISED_WEAPON"
+	"ADORCISED_WEAPON",
+	"MINI MIMIC"
 };
 
 char monsterEditorNameStrings[NUMMONSTERS][32] =

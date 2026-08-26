@@ -69,6 +69,8 @@ button_t* butAttributes;
 button_t* butClearMap;
 button_t* butDialogue;
 button_t* butDialogueEditor;
+button_t* butScripts;
+button_t* butTextSourceScriptTester;
 button_t* butHelp;
 button_t* butAbout;
 button_t* butEditorControls;
@@ -2514,9 +2516,23 @@ void buttonClearMapConfirm(button_t* my)
 
 void buttonDialogue(button_t* my)
 {
-	if ( menuVisible != 6 )
+	if ( menuVisible != 5 )
 	{
-		menuVisible = 6;
+		menuVisible = 5;
+	}
+	else
+	{
+		menuVisible = 0;
+	}
+}
+
+// Scripts menu
+
+void buttonScripts(button_t* my)
+{
+	if ( menuVisible != 7 )
+	{
+		menuVisible = 7;
 	}
 	else
 	{
@@ -2534,9 +2550,9 @@ void buttonDialogueEditor(button_t* my)
 
 void buttonHelp(button_t* my)
 {
-	if ( menuVisible != 5 )
+	if ( menuVisible != 6 )
 	{
-		menuVisible = 5;
+		menuVisible = 6;
 	}
 	else
 	{
@@ -4536,6 +4552,34 @@ void buttonSpritePropertiesConfirm(button_t* my)
 							sizeof(tmpSpriteStats->customDialogueID) - 1
 						] = '\0';
 
+						if ( tmpSpriteStats->type == MINIMIMIC )
+						{
+							const int disposition = std::max(0, std::min(2,
+								atoi(spriteProperties[MONSTER_PROPERTY_DISPOSITION])));
+							switch ( disposition )
+							{
+								case 1:
+									tmpSpriteStats->monsterForceAllegiance =
+										Stat::MONSTER_FORCE_PLAYER_NEUTRAL;
+									break;
+								case 2:
+									tmpSpriteStats->monsterForceAllegiance =
+										Stat::MONSTER_FORCE_PLAYER_ALLY;
+									break;
+								case 0:
+								default:
+									tmpSpriteStats->monsterForceAllegiance =
+										Stat::MONSTER_FORCE_PLAYER_ENEMY;
+									break;
+							}
+							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_MONSTER_RECRUITABLE] =
+								atoi(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]) != 0;
+							if ( atoi(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]) == 0 )
+							{
+								tmpSpriteStats->customDialogueID[0] = '\0';
+							}
+						}
+
 						/*
 						 * Persist the authored squad, elite, and defeat-tag fields.
 						 * These MISC_FLAGS entries are serialized with the monster Stat.
@@ -6477,6 +6521,41 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 		spriteProperties[26][
 			sizeof(spriteProperties[26]) - 1
 		] = '\0';
+
+		int disposition = 0;
+		switch ( tmpSpriteStats->monsterForceAllegiance )
+		{
+			case Stat::MONSTER_FORCE_PLAYER_NEUTRAL:
+				disposition = 1;
+				break;
+			case Stat::MONSTER_FORCE_PLAYER_ALLY:
+			case Stat::MONSTER_FORCE_PLAYER_RECRUITABLE:
+				disposition = 2;
+				break;
+			case Stat::MONSTER_FORCE_PLAYER_ENEMY:
+			case Stat::MONSTER_FORCE_ALLEGIANCE_NONE:
+			default:
+				disposition = 0;
+				break;
+		}
+		snprintf(
+			spriteProperties[MONSTER_PROPERTY_DISPOSITION],
+			sizeof(spriteProperties[MONSTER_PROPERTY_DISPOSITION]),
+			"%d",
+			disposition
+		);
+		snprintf(
+			spriteProperties[MONSTER_PROPERTY_RECRUITABLE],
+			sizeof(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]),
+			"%d",
+			tmpSpriteStats->monsterIsRecruitable() ? 1 : 0
+		);
+		snprintf(
+			spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED],
+			sizeof(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]),
+			"%d",
+			tmpSpriteStats->customDialogueID[0] != '\0' ? 1 : 0
+		);
 
 		/* Restore authored squad fields when reopening monster properties. */
 		snprintf(

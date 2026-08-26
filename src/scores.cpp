@@ -7338,7 +7338,19 @@ int SaveGameInfo::populateFromSession(const int playernum)
 						stats.MISC_FLAGS[i] = follower->MISC_FLAGS[i];
 					}
 					for ( auto& attribute : follower->attributes ) {
-						stats.attributes.push_back(attribute);
+						if ( attribute.first != "automatia_custom_dialogue" )
+						{
+							stats.attributes.push_back(attribute);
+						}
+					}
+					if ( follower->customDialogueID[0] != '\0' )
+					{
+						// Reuse the existing generic follower attribute record instead
+						// of changing the binary SaveGameInfo::stat_t layout.
+						stats.attributes.emplace_back(
+							"automatia_custom_dialogue",
+							follower->customDialogueID
+						);
 					}
 
 					// equipment slots
@@ -9198,10 +9210,21 @@ list_t* loadGameFollowers(const SaveGameInfo& info) {
 			// read follower attributes
 			for (auto& attr : follower.attributes) {
 				char key[32];
-				char value[32];
+				char value[64];
 				stringCopy(key, attr.first.c_str(), sizeof(key), attr.first.size());
 				stringCopy(value, attr.second.c_str(), sizeof(value), attr.second.size());
 				stats->attributes.emplace(std::make_pair(key, value));
+			}
+			const std::string authoredDialogue =
+				stats->getAttribute("automatia_custom_dialogue");
+			if ( !authoredDialogue.empty() )
+			{
+				stringCopy(
+					stats->customDialogueID,
+					authoredDialogue.c_str(),
+					sizeof(Stat::customDialogueID),
+					authoredDialogue.size()
+				);
 			}
 
 			// read follower inventory
@@ -9469,9 +9492,9 @@ int restoreAutomatiaCharacterFollowers(
                 monsterStats->monsterForceAllegiance =
                     Stat::MONSTER_FORCE_ALLEGIANCE_NONE;
             }
-            // A restored recruit must remain a follower rather than returning
-            // to its authored quest-NPC interaction path.
-            monsterStats->customDialogueID[0] = '\0';
+            // Keep authored dialogue configuration on restored followers.
+            // handleCustomMonsterDialogue() ignores active allies, so this
+            // remains compatible with follower HUD/inventory interaction.
             monster->flags[USERFLAG2] = true;
             monster->monsterAllyIndex = player;
             monster->monsterAllyClass = monsterStats->allyClass;

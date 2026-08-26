@@ -1,0 +1,1529 @@
+TEXT SOURCE @SCRIPT GUIDE VS RUNTIME AUDIT
+Automatia second-pass code review, correction, verification, and library audit
+Date: 2026-08-26
+
+Authoritative implementation inspected:
+  src/actgeneral.cpp
+  src/text_source_script.cpp
+  src/text_source_script_catalog.cpp
+  src/text_source_script_registry.cpp
+  src/text_source_script_tester.cpp
+  src/mod_tools.cpp / ScriptTextParser call sites
+  current supporting Entity, item, WorldState, player, networking, and editor code
+  src/sam/sam_foundation.cpp
+  src/sam/framework/sam_loader.cpp
+  src/sam/framework/sam_workshop.hpp/.cpp
+  src/sam/framework/sam_lua_runtime.cpp
+  src/sam/framework/sam_js_runtime.cpp
+  all current src/sam/*.cpp and src/sam/*.hpp registration surfaces
+
+Secondary historical/intended-behavior reference:
+  "Official Scripting Guide for the Barony Editor"
+  by WALL OF JUSTICE
+  https://steamcommunity.com/sharedfiles/filedetails/?id=2021523109
+
+Authority rule:
+  The current C++ source is authoritative. The Steam guide was used to find
+  candidate spellings and historical intent. No guide-only spelling was added
+  to the insertable library merely because the guide mentions it.
+
+STATUS LEGEND
+
+  BEHAVIOR VERIFIED
+    A deterministic state transition was executed in an isolated test using
+    shared runtime decoding/state logic.
+
+  DISPATCH VERIFIED
+    The real shared parser accepts the valid form, rejects its catalogued
+    invalid form, resolves it to the catalog entry, and the consistency test
+    finds the declared active C++ handler seam. Live world mutation remains a
+    manual test unless separately stated.
+
+  PARSER VERIFIED
+    Parser contract only. There are currently no catalog entries left at this
+    level; every insertable entry has at least active-dispatch evidence.
+
+  MANUAL BEHAVIOR REQUIRED
+    Parser and dispatch are code-backed, but the gameplay effect has not been
+    represented as a deterministic live-world fixture in this pass.
+
+  BLOCKED IN EDITOR TEST MODE
+    The tag mutates a live map, player, entity, level, inventory, mechanism, or
+    network-relevant state. The Zed tester reports it without executing it.
+
+  UNSUPPORTED / HISTORICAL
+    Not accepted as a current canonical runtime tag and not insertable.
+
+  AVAILABLE
+    The owning native implementation or extension callback is present. This is
+    independent of verification depth; registration alone never upgrades a tag
+    to Dispatch or Behavior Verified.
+
+  UNAVAILABLE - MISSING MOD
+    Retained extension metadata is visible for diagnosis, but parser validation
+    rejects execution and the live callback pointer has been cleared.
+
+  NEEDS VERIFICATION
+    A callback may be registered and routable, but its declared grammar/dispatch
+    or behavior has not yet earned the corresponding verification level.
+
+
+1. EXECUTIVE SUMMARY
+
+The current implementation contains 37 unique normalized tag definitions:
+
+  * 35 literal definitions.
+  * 2 generated/pattern families.
+  * 79 concrete accepted spellings when all 12 stat and 32 proficiency family
+    variants are expanded.
+  * 0 aliases established by current code.
+
+Unified-registry totals in the current S.A.M. 2.1.0 tree after framework/mod
+registration surfaces were audited:
+
+  * Native Barony/Automatia definitions: 37.
+  * S.A.M. Framework Text Source definitions: 0.
+  * Currently registered S.A.M.-mod Text Source definitions: 0.
+  * Unified available definitions at normal startup: 37.
+  * S.A.M. Lua/JavaScript/TypeScript host APIs: intentionally not counted as
+    Text Source commands because no current source route registers or dispatches
+    them through the Text Source parser.
+
+Verification totals for the 37 insertable definitions:
+
+  * Behavior Verified: 1 (@setvar=).
+  * Dispatch Verified: 36.
+  * Parser Verified only: 0.
+  * Manual behavior verification required: 36.
+  * Unsupported guide-only canonical tags: 1 (@findanytarget=).
+  * Additional guide-described but explicitly unavailable/currently unsupported
+    target or behavior variants: 6.
+
+The six original complete recipes are all Dispatch Verified and still marked
+Manual Behavior Required. They parse as complete scripts and every component
+resolves back to a code-backed catalog definition.
+
+The tester now has one editable working copy, one shared language front-end, and
+one unified native/extension registry. Gameplay, Zed validation, library
+examples, and characterization tests all use parseTextSourceScript() and the
+same scriptTagDefinitions() unified view. Native world mutation remains in
+TextSourceScript::handleTextSourceScript(). Registered extensions route from
+that same sequential runtime token stream through their registered callback.
+Zed does not invoke either world mutation path: it executes only @setvar=
+against disposable TestSession state and blocks every live-world mutation.
+
+The review also corrected focused @script spatial defects. Coordinate/entity
+scans are limited to the Text Source playableFloor, connected-player operations
+exclude players in another WorldState MapInstance, new pressure plates and wires
+inherit source spatial context, explosions establish the appropriate source or
+attached-entity floor context, and @copyNPC templates are selected on the source
+floor. authoredMapLayer and local Entity::z were not conflated with floor.
+
+Malformed and unknown tokens are now marked invalid by the shared parser and
+filtered before the legacy stoi-based gameplay dispatcher. Valid tokens in the
+same script retain their original order and duplicates and continue executing.
+This removes a tester/runtime safety mismatch without making one malformed token
+silently suppress every otherwise valid command.
+
+
+2. END-TO-END CURRENT ARCHITECTURE
+
+2.1 Authored Text Source storage
+
+  * Sprite 132 is the Text Source entity.
+  * TextSourceScript::getScriptFromEntity() assembles bytes from skill[4] through
+    skill[59], excluding skill[28] because that slot is circuit_status.
+  * Four bytes are decoded per nonzero skill word. Empty skill words are skipped,
+    so the persisted physical fields are concatenated; authors must provide the
+    spacing that should exist between adjacent tags.
+  * Inline Text Source storage is bounded by the legacy skill array and 256-byte
+    local buffer. Resource scripts are not constrained to that physical field
+    capacity, though the Zed editable tester deliberately caps its working copy
+    at 16 KiB.
+
+2.2 Resource indirection
+
+  * If the assembled source begins with '$', getScriptFromEntity() calls the
+    shared resolveTextSourceResource().
+  * The resolver follows the gameplay word convention: space, LF, CR, and NUL
+    terminate the key; '$' bytes before the terminator are omitted.
+  * ScriptTextParser.allEntries supplies formattedText from /data/scripts.
+  * The gameplay resolver historically accepts any found object type. Zed warns
+    when an entry is not OBJ_SCRIPT but preserves that behavior.
+  * A missing key leaves gameplay with the original '$...' inline string. Zed
+    reports the miss and clears its working copy.
+
+2.3 Map-generation recognition and attachment setup
+
+  * TextSourceScript::parseScriptInMapGeneration() retrieves the source.
+  * A valid @script marker changes textSourceIsScript from message mode to the
+    script lifecycle and initially selects circuit power triggering.
+  * @triggerif= configures automatic trigger state.
+  * @attachto= and optional @attachrange= build a UID child list once during map
+    post-processing.
+  * Runtime filtering now excludes candidates on another playableFloor.
+  * @reattachto= is different: it clears and rebuilds the UID set at execution
+    time, in sequence with surrounding commands.
+
+2.4 Runtime trigger lifecycle
+
+  * Entity::actTextSource() returns immediately on multiplayer CLIENT. Gameplay
+    mutation is therefore server/single-player authoritative.
+  * Default scripts respond to circuit power.
+  * Automatic conditions are always, attached entities removed, attached
+    entities existing, all attached invisible, all attached visible, and bell
+    interaction/breakage.
+  * Trigger satisfaction marks an attached script fired.
+  * textSourceDelay counts down while powered. The original delay is retained in
+    the upper 16 bits of textSourceVariables4W.
+  * The low run-state byte prevents repeat execution while continuously powered.
+    A resettable power source can clear it after power is removed unless the
+    configured one-shot byte prevents that reset.
+
+2.5 Shared parsing and validation
+
+  * parseTextSourceScript() scans the source for '@'.
+  * A token ends on ASCII space, another '@', or NUL. LF, CR, and tab are not
+    token separators in the legacy gameplay grammar.
+  * Trailing CR/LF is accepted for no-argument/integer forms where the legacy
+    decoder can consume it. A tab inside a token is rejected.
+  * @attached. is normalized into Token::attached plus the underlying canonical
+    command.
+  * Literal definitions and registered aliases are resolved from the unified
+    scriptTagDefinitions() view. That view contains the immutable native
+    catalog followed by deeply owned extension registrations.
+  * Stats and proficiencies are resolved by generated-family parsing.
+  * Proficiency indices must use the exact runtime-generated decimal spelling;
+    leading-zero forms such as @pro01= are rejected because the dispatcher only
+    generates @pro1=.
+  * Each Token records canonicalTag, catalogIndex, safety, source position, and
+    validity.
+  * Extension aliases preserve the spelling used in Token::command while
+    canonicalTag identifies the owning command definition.
+  * Retained missing-mod definitions resolve for diagnostics but produce an
+    unavailable error and valid=false; they never reach a stale callback.
+  * Registered private argument schemas may supply a validator callback. Shared
+    built-in argument kinds continue using the same native parser contracts.
+  * Unknown or malformed tokens produce Error diagnostics and valid=false.
+  * Prefix misuse produces a Warning when required attachment is missing or when
+    @attached. has no target-specific meaning. Prefixing the four map-generation
+    directives is an Error because their setup path never strips that prefix.
+
+2.6 Live dispatch
+
+  * TextSourceScript::handleTextSourceScript() calls the shared parser first.
+  * It rebuilds the legacy dispatch input from valid tokens only.
+  * Valid tokens retain source order and duplicates.
+  * The existing sequential if/else handler and generated stat/proficiency loops
+    perform world mutation. The catalog is metadata, not a second mutator.
+  * A non-native valid token instead routes, in the same sequence, through the
+    callback stored by registerScriptTagExtension(). The callback sees the real
+    parsed Token and the live source Entity via an opaque lightweight context.
+  * Map-generation-only extensions dispatch in parseScriptInMapGeneration()
+    only after a valid @script marker is confirmed. They are then removed from
+    the later runtime stream, preventing duplicate callback execution.
+  * Extension callbacks cannot mutate the registry while validation/dispatch is
+    active. Exceptions are caught at the registry boundary and become errors.
+  * textSourceProcessScriptTag() remains the legacy packed-value decoder. The
+    @setvar= name/integer decoder is shared with the tester.
+
+2.7 Zed tester path
+
+  * The tester uses ScriptTextParser and the same resource resolver as gameplay.
+  * Validate / Parse uses parseTextSourceScript().
+  * The editable script buffer is the sole tester working copy; validation and
+    Run Test synchronize from that buffer.
+  * Run Test invokes TestSession. Directives are reported, @setvar= changes only
+    disposable TestSession variables, and all gameplay mutations are blocked.
+  * Run Test also requires a valid @script marker. Without one, it reports that
+    gameplay would keep the sprite in message mode and performs no disposable
+    state transition.
+  * The selected Text Source contributes source X/Y, playableFloor,
+    authoredMapLayer, local z, and spatialRevision independently.
+  * Zed has no running MapInstance; this is displayed explicitly instead of
+    inventing one.
+  * The Library page consumes the same registry generation as gameplay. A load,
+    unload, restore, or removal invalidates selection/category caches and the UI
+    rebuilds from the current unified view.
+
+
+3. GRAMMAR CHARACTERIZATION
+
+3.1 Case and delimiters
+
+  * Tags and enumerated values are case-sensitive.
+  * Tags require no whitespace between name, operator, and value.
+  * ASCII space separates tags. Multiple spaces are harmless.
+  * A second '@' also begins the next token, even with no intervening space.
+  * There is no quote, escape, or script-comment syntax.
+  * Non-'@' text is ignored by the command scanner.
+
+3.2 Operators
+
+  * Most valued literals include '=' in their canonical spelling.
+  * The generated stat and proficiency families accept '=' and '+'.
+  * No other '+' alias/family was found.
+
+3.3 Integers and ranges
+
+  * Signed decimal integers are accepted by the shared parser.
+  * A one-dimensional range is A-B. Negative endpoints are represented without
+    whitespace, for example -2--1. The legacy decoder was corrected to avoid
+    mistaking the leading sign for a range separator.
+  * A map range is X,Y or X1-X2,Y1-Y2. Many map-range commands also accept all.
+  * Map coordinates are offset by mapGenerationRoomX/Y, clamped to current map
+    bounds, and packed into four 8-bit fields by the legacy decoder.
+  * Map coordinates above 255 cannot be represented by that packed contract.
+  * Effect assignment uses effect-or-range;duration-or-range.
+  * Explode uses context-dependent forms: attached sprite integer, or X,Y with
+    optional ;sprite when nonattached.
+
+3.4 Sequence and duplicates
+
+  * Tokens execute in source order.
+  * Duplicate tokens are retained.
+  * Repeated @setvar= for the same key leaves the final value.
+  * @reattachto= changes which entities later attached commands see.
+  * When ordering must span simulation ticks, multiple Text Sources and Message
+    Delay remain the runtime mechanism; the language has no wait statement.
+
+3.5 Malformed/unknown behavior after this pass
+
+  * Parser: Error diagnostic and Token::valid=false.
+  * Tester Validate: fails; Run Test stops before state changes.
+  * Gameplay: skips only invalid tokens and dispatches remaining valid tokens.
+  * Unknown guide-only tags are not silently treated as verified library items.
+
+
+4. MACHINE-READABLE CATALOG DESIGN
+
+The lightweight public metadata types live in text_source_script.hpp. Native
+data lives in text_source_script_catalog.cpp so every engine/editor translation
+unit does not parse a giant initializer. text_source_script_registry.cpp owns
+extension strings deeply and materializes one unified view. Every
+ScriptTagDefinition records:
+
+  canonical spelling; display syntax; insertion template; category; aliases;
+  pattern-family status; value kind/count/separators/domain; attachment mode;
+  targets; scope; map-range/all support; persistent-state flag; authority;
+  editor safety; default behavior; description; minimal valid example; invalid
+  example; caveats; source location; verification depth; manual requirement;
+  verification method; precise dispatch evidence; origin kind/display name;
+  stable source identifier; source version when supplied; availability/detail;
+  dispatch phase; optional private-schema validator; and extension callback.
+
+The parser directly consumes the unified registry. The editor library
+introspects it. The test suite walks every definition. There is no independent
+tester tag list and no second S.A.M catalog. Because the native world mutator is
+still an if/else dispatcher, a bidirectional source consistency test compares
+active native runtime spellings against normalized native catalog spellings and
+checks every dispatchEvidence fragment. Commented-out @addtomonster= is stripped
+before this comparison. Registered extensions are instead checked through the
+actual register/parse/validate/dispatch/unload/restore path.
+
+Registry collision policy:
+
+  * Exact canonical collisions, alias collisions, and prefix ambiguities are
+    rejected. The parser is prefix-based, so allowing prefix ambiguity would
+    make load order an undocumented precedence rule.
+  * Native literal commands and all 44 concrete generated-family prefixes win;
+    an extension cannot replace them.
+  * Two extensions cannot claim the same/overlapping spelling, even from the
+    same owner while both are live.
+  * Extension presentation/index order is stableSourceId then canonical command,
+    independent of call order. Collision acceptance is explicit first-success:
+    the already registered owner remains and the later registration receives a
+    failure. A future S.A.M adapter must invoke registration in S.A.M's existing
+    dependency/namespace deterministic order on every peer.
+  * A retained unavailable definition can be restored only by the same stable
+    source ID and canonical spelling. A different owner cannot take it over.
+  * Aliases are exact prefixes supplied as metadata and route to the same
+    canonical callback. They are not cosmetic library-only aliases.
+
+
+5. COMPLETE CURRENT TAG INVENTORY
+
+5.1 Structure, triggers, and attachment
+
+@script
+  Contract: no value; @attached.script is unsupported because map-generation
+            recognition does not strip the execution-only prefix.
+  Behavior: selects the script lifecycle rather than Text Source message mode.
+  Default: recommended first, although legacy recognition searches the text.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@triggerif=
+  Values: always, attached#dies, attached#exists, attached#invisible,
+          attached#visible, attached#interacted.
+  Behavior: selects automatic triggering instead of circuit power.
+  Caveat: attached#interacted currently acts only for attached bells. Prefixing
+          the directive itself as @attached.triggerif= is unsupported.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@attachto=
+  Values: players, monsters, items, gold, bell, breakable, collider, or an exact
+          current monstertypename.
+  Behavior: one-time UID selection during map generation; source tile unless an
+            @attachrange= is supplied.
+  Unsupported values: summontrap and teleporter. @attached.attachto= is also
+                      unsupported; setup directives are not execution targets.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@attachrange=
+  Values: map range or all.
+  Behavior: supplies selection coordinates to @attachto=/@reattachto=.
+  Caveat: packed 8-bit coordinates after offset/clamp; @attached.attachrange=
+          is unsupported.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@reattachto=
+  Values/targets: same resolver domain as @attachto=.
+  Behavior: clears and rebuilds attachments at its execution position.
+  Safety: BLOCKED IN EDITOR TEST MODE.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.2 Player state and level state
+
+@clrplayer
+  Targets: attached players or current-scope connected players.
+  Behavior: clears equipment, inventory, and stats without choosing a class.
+  Risk: destructive; remote update path needs multiplayer acceptance testing.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@class=
+  Value: integer class index in current build range.
+  Targets: attached players or current-scope connected players.
+  Behavior: clears/reinitializes class and class inventory. Unavailable DLC class
+            selections fall back to Barbarian in the handler.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@clrstats
+  Targets: attached players/monsters or current-scope connected players.
+  Behavior: resets HP, MP, attributes, level, gold, and EXP; retains inventory.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@hunger=
+  Value: integer; current handler clamps only the upper bound to 2000.
+  Targets: players only. Attached non-player entities are skipped.
+  Guide discrepancy: guide labels monsters as targets.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@nextlevel=
+  Value: integer skip count.
+  Behavior: sets global loadnextlevel and skipLevelsOnLoad.
+  Divergent Paths caveat: no player or MapInstance destination is encoded.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.3 Mechanisms and map-coordinate actions
+
+@power=
+  Value: map range or all.
+  Behavior: powers permanent plates and creates missing invisible permanent plate
+            entities with the source spatial context.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@unpower=
+  Value: map range or all.
+  Behavior: turns off existing permanent plates and makes affected plates
+            noninteractive; does not delete them.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@wire=
+  Value: map range or all.
+  Behavior: creates missing circuit entities with source spatial context and
+            refreshes neighboring circuits.
+  Guide status: current-code-only / undocumented by guide.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@unwire=
+  Value: map range or all.
+  Behavior: depowers and removes circuit entities in the selected source floor.
+  Guide status: current-code-only / undocumented by guide.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.4 Monster, faction, target, and effect actions
+
+@freezemonsters=
+  Value: map range or all; attachable.
+  Behavior: sets EFF_STUNNED true with duration -1.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@unfreezemonsters=
+  Value: map range or all; attachable.
+  Behavior: clears EFF_STUNNED without tracking which system applied it.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@seteffect=
+  Form: @attached.seteffect=effect-range;duration-range.
+  Targets: attached players or monsters only.
+  Caveat: duration randomization uses [start,end) behavior for a true range, not
+          an inclusive upper endpoint; complex effect mechanics vary.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@clreffect=
+  Form: @attached.clreffect=effect-or-inclusive-range.
+  Targets: attached players or monsters only.
+  Caveat: values are packed into 8-bit fields and the loop bounds against
+          NUMEFFECTS.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@findtarget=
+  Form: @attached.findtarget=map-range-or-all.
+  Targets: attached monsters; candidate enemy players or monsters on that
+           monster's playableFloor, within the range and 256 world units.
+  Caveat: the line-of-sight trace is commented out. @findanytarget= does not
+          exist; current checkEnemy() already allows enemy NPC candidates.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@killall=
+  Value: map range or all; attachable.
+  Behavior: sets all selected monster HP to zero, followers included.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@killenemies=
+  Value: map range or all; attachable.
+  Nonattached behavior: kills non-follower monsters in source-floor range.
+  Attached behavior: current condition selects monsters with a player leader,
+                     the opposite of guide intent. This is recorded as a legacy
+                     defect rather than silently changed in this pass.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@nodropitems=
+  Value: map range or all; attachable.
+  Behavior: sets monsterNoDropItems. Nonattached scans non-followers; attached
+            scans attached monsters.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@copyNPC=
+  Value: low 8-bit NPC template flag integer.
+  Template: same-floor monster named scriptNPC with matching STAT_FLAG_NPC byte.
+  Targets: attached players/monsters, or current-scope connected players.
+  Unsupported variant: $summon template / summon-trap behavior.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@setenemy=
+  Value: map range or all; attachable.
+  Behavior: sets non-follower monsterForceAllegiance to player enemy and sends
+            the existing entity stat flag update.
+  Unsupported variant: summon-trap post-spawn application.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@setally=
+  Value: map range or all; attachable.
+  Behavior: sets non-follower monsterForceAllegiance to player ally.
+  Caveat: unlike @setenemy=, the branch lacks an explicit
+          serverUpdateEntityStatFlag call.
+  Unsupported variant: summon-trap post-spawn application.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.5 Entity manipulation
+
+@damage=
+  Form: @attached.damage=integer.
+  Targets: attached monster, chest, door, furniture, or damageable collider.
+  Behavior: subtracts the relevant HP field. Destruction processing may occur on
+            a later entity tick.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@explode=
+  Forms: @attached.explode=sprite or @explode=X,Y[;sprite].
+  Behavior: default explosion for sprite 0, otherwise selected sprite helper.
+  Spatial correction: attached calls establish each target context; coordinate
+                      calls establish the source context.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.6 Variables
+
+@setvar=
+  Form: @setvar=nonempty-name,integer.
+  Behavior: replaces/inserts the runtime scriptVariables value and notifies the
+            gameplay achievement observer.
+  Tester: uses the same decoder against disposable state; repeated-key behavior
+          is executed and asserted.
+  Guide status: current-code-only / undocumented by guide.
+  Verification: BEHAVIOR VERIFIED; no manual check required for the documented
+                disposable assignment itself. Achievement integration remains a
+                broader gameplay concern.
+
+5.7 Item transfer and breakable actions
+
+@addtomonsters=
+  Form: @attached.addtomonsters=map-range-or-all.
+  Required setup: attached world items; destination monsters in range.
+  Behavior: copies each stack to each destination monster, then removes a source
+            world entity only if at least one conversion/transfer succeeded.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@equipitems=
+  Form: @attached.equipitems=map-range-or-all.
+  Required setup: attached monsters; world items are found in the supplied range.
+  Behavior: copies compatible items into equipment slots, overwriting existing
+            equipment, then removes only world items equipped by at least one
+            valid target. Wrong target types, unavailable S.A.M definitions, and
+            items without a compatible slot remain in the world.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@pickupitems=
+  Form: @attached.pickupitems=map-range-or-all.
+  Required setup: attached players or monsters; world items in range.
+  Behavior: copies each item into each attached inventory and removes a world
+            entity only after at least one pickup succeeds.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@addtochest=
+  Form: @attached.addtochest=map-range-or-all.
+  Required setup: attached world items; chest destination.
+  Behavior: the last matching chest receives converted attached items. An item
+            that cannot be converted (including unavailable custom runtime data)
+            remains a world entity.
+  Guide metadata discrepancy: one guide label says Monsters, while its prose and
+                              current code require items.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@addtobreakable=
+  Form: @attached.addtobreakable=map-range-or-all.
+  Required setup: item or gold attachment type; breakable destination.
+  Behavior: hides linked entities; only one item UID is retained, while multiple
+            gold entities can be marked and the last UID is stored.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@breakablespawn=
+  Form: @attached.breakablespawn=current-monster-name.
+  Required setup: attached breakable and empty colliderHideMonster slot.
+  Behavior: stores the normal destroy-time monster selection.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+@breakablejumpspawn=
+  Form: @attached.breakablejumpspawn=current-monster-name.
+  Required setup: attached breakable and empty colliderHideMonster slot.
+  Behavior: stores 1000 plus monster type for the proximity jump-spawn path.
+  Verification: DISPATCH VERIFIED; MANUAL BEHAVIOR REQUIRED.
+
+5.8 Generated families
+
+@st<STAT>{=|+}
+  Concrete names: STR, DEX, CON, INT, PER, CHR; '=' sets and '+' adds.
+  Concrete count: 12.
+  Targets: attached players/monsters or current-scope connected players.
+  Known current defect: spelling @stINT maps to CON and @stCON maps to INT due to
+                        the switch that constructs handler names.
+  Verification: all 12 spellings parser-tested and generated-loop dispatch
+                cross-checked; MANUAL BEHAVIOR REQUIRED.
+
+@pro<INDEX>{=|+}
+  Concrete indices: 0 through 15; concrete count 32.
+  Targets: attached players/monsters or current-scope connected players.
+  Known current semantics: both '=' and '+' call setProficiency(). '+' does not
+                           add, despite the guide's description.
+  Verification: all 32 spellings parser-tested and generated-loop dispatch
+                cross-checked; MANUAL BEHAVIOR REQUIRED.
+
+
+6. GUIDE VS CODE RECONCILIATION
+
+GROUP A. VERIFIED IN CURRENT CODE AND DOCUMENTED IN GUIDE
+
+The following 34 normalized definitions appear in active current code and are
+also discussed by the guide, either in its reference sections or tutorials:
+
+  @script
+  @triggerif=
+  @attachto=
+  @attachrange=
+  @reattachto=
+  @clrplayer
+  @class=
+  @clrstats
+  @hunger=
+  @nextlevel=
+  @power=
+  @unpower=
+  @freezemonsters=
+  @unfreezemonsters=
+  @seteffect=
+  @clreffect=
+  @findtarget=
+  @killall=
+  @killenemies=
+  @damage=
+  @explode=
+  @nodropitems=
+  @copyNPC=
+  @setenemy=
+  @setally=
+  @addtomonsters=
+  @equipitems=
+  @pickupitems=
+  @addtochest=
+  @addtobreakable=
+  @breakablespawn=
+  @breakablejumpspawn=
+  @st<STAT>{=|+}
+  @pro<INDEX>{=|+}
+
+All 34 belong in the code-backed library. "Documented" does not mean the guide's
+entire behavior description is current. Important differences are:
+
+  * @triggerif=attached#interacted is now implemented for bells even though the
+    guide labels it not yet available.
+  * @hunger= currently skips attached monsters.
+  * @stCON and @stINT are mapped oppositely in current dispatch.
+  * @proN+ currently sets rather than adds.
+  * attached @killenemies= selects followers due to the current conditional,
+    while nonattached behavior excludes followers.
+  * @seteffect duration ranges use an exclusive upper bound in random selection.
+  * @findtarget= checks any entity checkEnemy() accepts; the guide's proposed
+    findtarget/findanytarget distinction is not present as two handlers.
+  * @addtochest= code requires item attachments, matching guide prose but not one
+    of its target labels.
+  * @script is found anywhere by legacy setup, although placing it first remains
+    the supported authoring recommendation.
+  * The guide contains four-player-era examples. Current loops use MAXPLAYERS;
+    the build target is 15 players.
+
+GROUP B. VERIFIED IN CURRENT CODE BUT MISSING OR OUTDATED IN GUIDE
+
+@wire=
+  Current source creates missing circuit entities in a map range and refreshes
+  circuit neighbors. It is absent from the guide. It is insertable as Dispatch
+  Verified, with live mechanism testing still required.
+
+@unwire=
+  Current source depowers/removes circuit entities in a map range. It is absent
+  from the guide. It is insertable as Dispatch Verified and destructive/blocked
+  in editor test mode.
+
+@setvar=
+  Current source writes scriptVariables and notifies the achievement observer.
+  It is absent from the guide. Its assignment/replacement semantics are Behavior
+  Verified in disposable TestSession state and use the shared runtime decoder.
+
+Current behavior that makes a guide entry outdated, but not a new canonical tag:
+
+  * attached#interacted is current for bells.
+  * 15-player loops replace the guide tutorial's four-start-position assumption.
+  * Playable-Z and MapInstance scoping now apply to @script target selection.
+
+GROUP C. PRESENT IN GUIDE BUT NOT SUPPORTED BY CURRENT CODE
+
+Canonical guide-only tag:
+
+@findanytarget=
+  Guide intent: a monster-target search variant that includes non-player NPCs.
+  Current source: no active literal, generated spelling, setup handler, or alias.
+  The current @findtarget= uses checkEnemy() over player and monster candidates.
+  Library decision: UNSUPPORTED/HISTORICAL only; never insertable.
+
+Guide-marked not-yet-available/currently unsupported variants (six):
+
+  1. @attachto=summontrap
+  2. @attachto=teleporter
+  3. @copyNPC= using $summon templates for breakable/summon-trap spawning
+  4. @setenemy= applied as a summon-trap spawn modifier
+  5. @setally= applied as a summon-trap spawn modifier
+  6. @findtarget= applied as a summon-trap spawn modifier
+
+These are not aliases and are not inserted. The guide itself marks them as not
+available, but this pass explicitly checked whether later source had added them.
+It has not.
+
+Historical source-only nonfeature:
+
+@addtomonster=
+  A singular-item-to-one-monster branch exists only as commented-out code.
+  It is excluded from the active runtime/catalog bidirectional test, catalog,
+  search results, and insertion UI.
+
+GROUP D. AMBIGUOUS OR MANUAL INVESTIGATION REQUIRED
+
+The following matters cannot honestly be promoted to behavior-verified by the
+non-graphical characterization executable:
+
+  * Exact class reset/inventory behavior for each DLC/content configuration.
+  * Live player and monster stat/effect mutations.
+  * Remote-client SCRU/effect/hunger synchronization.
+  * @setally= replication, because it lacks @setenemy='s explicit stat flag call.
+  * Persistent-map consequences of mechanisms and entity HP/state changes.
+  * Actual visual/audio outcome of explosions and spawned breakable monsters.
+  * Trigger timing across ticks, run-once settings, and power removal in live play.
+  * Bell interaction trigger under multiplayer timing.
+  * @findtarget pathing and target retention with current AI/line-of-sight behavior.
+  * Inclusive/exclusive effect-duration expectations at runtime RNG boundaries.
+  * Attached @killenemies= compatibility decision (fixing it could alter old maps).
+  * @stCON/@stINT compatibility decision.
+  * @proN+ compatibility decision.
+  * Custom S.A.M item transfer/equip/pickup/chest/breakable flows.
+  * Missing-mod custom item entities restored after their mod returns.
+  * Upper-floor explosion visuals, particles, lights, and child entity context.
+  * WorldState unload/reload and late-join restoration of attachment UID lists.
+  * Divergent-player @nextlevel= policy.
+  * Headless execution of every indirect helper invoked by each mutation.
+
+GROUP E. ORIGIN CLASSIFICATION FOR THE UNIFIED LIBRARY
+
+  Native guide-documented command:
+    The 34 GROUP A normalized definitions.
+
+  Native runtime-only command:
+    @wire=, @unwire=, and @setvar= (GROUP B).
+
+  Automatia-added canonical command:
+    Zero are attributed solely to Automatia. The current tree proves the three
+    GROUP B commands are native to this Automatia build, but the inspected
+    source alone does not reliably prove their first upstream/downstream
+    provenance. Fabricating that attribution would be worse than the conservative
+    Origin "Native Barony/Automatia" used by all 37 native definitions.
+
+  S.A.M.-added command:
+    Zero in current S.A.M. Framework 2.1.0.
+
+  S.A.M.-mod-added command:
+    Zero can be registered by the current S.A.M. 2.1.0 manifest/Lua/JS/plugin
+    lifecycle. The unified registry supports such a future adapter without a
+    second catalog, but does not invent a current registration surface.
+
+  Historical/unsupported command:
+    @findanytarget=, the six unavailable guide variants above, and commented-out
+    @addtomonster=.
+
+
+7. TESTER SECOND-PASS REVIEW
+
+7.1 State before this review
+
+The already-implemented tester was preserved. It already:
+
+  * opened from a new Zed Scripts menu;
+  * loaded $resource entries through ScriptTextParser;
+  * used a shared parseTextSourceScript front-end;
+  * displayed a read-only context snapshot and diagnostics;
+  * blocked live-world operations; and
+  * executed @setvar= only in disposable state.
+
+7.2 Problems found
+
+  * The parser carried a private hardcoded command surface, separate from the
+    future library it needed to power.
+  * Argument types were too broad. Examples include treating @damage= like a map
+    range, accepting unbounded proficiency indices, and insufficiently checking
+    effect/explosion shapes.
+  * @setvar= decoding was duplicated between gameplay and tester.
+  * Gameplay logged shared parser errors but still sent malformed tokens to the
+    legacy stoi dispatcher.
+  * The tester showed only a loaded preview, not an editable working script.
+  * There was no searchable catalog, filtering, details, insertion, or recipes.
+  * No registry-wide drift test covered all active tags or pattern expansions.
+  * Several @script scans leaked across playable floors/MapInstances.
+  * @copyNPC's nonattached connected-player loop stopped at the first disconnected
+    slot, a four-player-era shape incompatible with sparse 15-player sessions.
+  * The generated-family parser accepted leading-zero proficiency spellings that
+    the runtime-generated dispatch names could never match.
+  * Run Test allowed disposable @setvar= execution without @script even though a
+    newly authored Text Source would remain in message mode.
+  * A failed $resource lookup cleared the editable working copy, and an overlong
+    generic Zed clipboard paste was not guaranteed to leave a trailing NUL.
+
+7.3 Corrections made
+
+  * Added the shared metadata catalog and strict per-kind value contracts.
+  * Added canonical/catalog identity to parsed tokens.
+  * Added Token::valid and filtered malformed/unknown tokens before live legacy
+    dispatch while preserving valid token order and duplicates.
+  * Shared @setvar= decoding between runtime and TestSession.
+  * Added editable 16 KiB working copy and explicit append/backspace-at-end UI.
+  * Added Tags/Recipes library modes, search, categories, verification filters,
+    selection details, source/method/caveat display, and insert actions.
+  * Added focused Playable-Z/MapInstance filters and spatial spawn contexts.
+  * Prevented item-transfer commands from deleting world records when no target,
+    slot, pickup, or S.A.M-backed conversion succeeds.
+  * Required exact generated proficiency spellings and gated sandbox execution on
+    a valid @script marker.
+  * Preserved the current working copy after resource lookup failure, marked a
+    truncated resource as edited, and made clipboard paste termination explicit.
+  * Rewrote the test as a data-driven full catalog characterization suite.
+
+7.4 Honest runtime sharing boundary
+
+The tester does not instantiate a fake monster/map/player interpreter and does
+not call live TextSourceScript::handleTextSourceScript() inside the editor. Such
+a call would mutate the authored/current world and would not be a disposable
+test. The shared portions are tokenization, recognition, value validation,
+canonical resolution, resource resolution, metadata, and @setvar= decoding.
+Every other command is proven to an active dispatcher seam and marked Dispatch
+Verified, then blocked with a reason. This is intentionally not described as a
+behavior execution test.
+
+
+8. VERIFIED LIBRARY UI
+
+Location:
+  Zed -> Scripts -> Text Source Script Tester... -> Library tab
+
+Search fields:
+  Tag search covers canonical name, syntax, aliases, category, target types,
+  scope, description, caveats, origin kind/display name, stable source ID,
+  source version, availability name, and availability detail. Recipe search
+  covers name, category, script, description, and caveats. Matching is
+  case-insensitive.
+
+Examples verified by automated search assertions:
+  player, monster, effect, power, attach, stat, inventory, mechanism.
+
+Category filter:
+  Derived from actual tag/recipe metadata, sorted, and preceded by All.
+
+Verification filter:
+  All code-backed, Manual Level 4, Behavior, Dispatch, Parser, Needs manual.
+
+Origin filter:
+  All, Native, Barony, Automatia, S.A.M., Installed Mods. Native includes the
+  conservative Barony/Automatia origin plus any future reliably attributable
+  Barony or Automatia entry. The current exact Barony and Automatia filters are
+  empty because exclusive provenance was not source-verifiable; the UI explains
+  this rather than fabricating attribution. S.A.M. Framework and S.A.M. Mod
+  remain separate kinds.
+
+Availability filter:
+  All, Available, Unavailable, Needs Review. Availability is never inferred
+  from origin or verification depth. Available includes routable
+  NeedsVerification entries; Needs Review also selects them so an author can
+  focus specifically on incomplete evidence.
+
+Detail view for tags:
+  name, origin display/kind, stable source, source version, availability/detail,
+  syntax, category, aliases, targets, scope, attachment mode, value count,
+  separators/domain, description, default, verified example, caveats,
+  verification/manual status, method, test safety, dispatch phase,
+  authority/persistence, source.
+
+Dynamic refresh:
+  The window watches scriptTagRegistryGeneration(). A registry mutation clears
+  stale index selection and rebuilds category/match state. Filtering S.A.M. in
+  the present tree produces zero results plus an explicit explanation that
+  S.A.M. Lua/JS APIs are a separate language surface.
+
+Detail view for recipes:
+  name, category, full script, description, caveats, verification/manual status,
+  and verification method.
+
+Insert Tag:
+  Appends insertionTemplate to the working copy. Required values use explicit
+  editable placeholders such as <X,Y> or <value>. No dangerous random coordinate
+  or class/effect value is silently chosen.
+
+Insert Example:
+  Appends the catalog's short parser-tested minimal example.
+
+Insert Recipe:
+  Appends the complete combined parser-tested script.
+
+Caret rule:
+  Zed's generic input loop has caret editing only for its specialized window 20.
+  Window 41 therefore uses explicit append-at-end semantics. The UI says this;
+  it does not pretend to insert at a nonexistent caret.
+
+Capacity rule:
+  appendScriptSnippet() checks the complete insertion before mutation. A snippet
+  that would exceed 16 KiB is rejected and the working copy remains unchanged.
+
+
+9. VERIFIED COMPLETE RECIPES
+
+Immediate tile power
+  @script @triggerif=always @power=1,1
+  Status: DISPATCH VERIFIED; coordinate must be edited; live behavior manual.
+
+Attach to players
+  @script @attachto=players @attachrange=all @triggerif=always
+  @attached.hunger=250
+  Status: DISPATCH VERIFIED; player mutation/manual multiplayer test required.
+
+Freeze monsters in a room
+  @script @attachto=monsters @attachrange=1-3,1-3 @triggerif=always
+  @attached.freezemonsters=all
+  Status: DISPATCH VERIFIED; replace coordinates; live effect manual.
+
+Item removal opens a tile
+  @script @attachto=items @attachrange=2,2 @triggerif=attached#dies
+  @power=3,3
+  Status: DISPATCH VERIFIED; live trigger delay/run-once behavior manual.
+
+Set player strength
+  @script @attachto=players @attachrange=all @triggerif=always
+  @attached.stSTR=5
+  Status: DISPATCH VERIFIED; STR spelling avoids known CON/INT swap.
+
+Apply invisibility
+  @script @attachto=monsters @attachrange=4,4 @triggerif=always
+  @attached.seteffect=5;10
+  Status: DISPATCH VERIFIED; live effect/network behavior manual.
+
+These are original compact recipes derived from current code, not copied guide
+tutorial scripts.
+
+
+10. PLAYABLE-Z REVIEW
+
+Spatial axes remain independent:
+
+  MapInstance
+  playableFloor
+  authoredMapLayer
+  local Entity::z
+  spatialRevision
+
+No new code infers authored layer or playableFloor from Entity::z.
+
+Current S.A.M applicability:
+
+  There are zero S.A.M.-added Text Source commands to find, create, move, or
+  modify a spatial object. Accordingly, no Lua/JS spawn API was mislabeled as a
+  Text Source command and no fake spatial behavior test is claimed.
+
+Future registered callback contract:
+
+  Runtime and map-generation callbacks receive the actual source Entity through
+  sourceContext plus Token::attached. Their metadata must accurately declare
+  targets, scope, attachment, authority, persistence, and dispatch phase. That
+  is sufficient for an adapter to call current spatialSpawnContext(),
+  newEntityWithSpatialContext(), textSource floor/MapInstance helpers, and stable
+  identity resolvers without pulling Entity/S.A.M headers into the public
+  registry header. The generic registry does not invent authoredMapLayer from z,
+  select global entities, or provide a permissive spatial fallback.
+
+  A future spatial command is NOT Behavior Verified merely because its callback
+  registers. It still requires same-X/Y different-floor, different MapInstance,
+  upper-floor child/particle/light, spatialRevision, persistence, multiplayer,
+  and headless characterization appropriate to the operation.
+
+Entity selection corrections:
+
+  * Map-generation @attachto= filters candidate.playableFloor == source floor.
+  * @reattachto= uses the same floor filter.
+  * Nonattached monster/entity/item/chest/breakable/mechanism scans use the source
+    floor.
+  * @findtarget= requires each candidate to share the attached monster's floor.
+  * @copyNPC= template monsters share the Text Source floor.
+
+Player selection corrections:
+
+  * clrplayer, class, clrstats, hunger, copyNPC, stats, and proficiencies use
+    textSourcePlayerSharesSpatialScope().
+  * The helper checks connection/state, WorldState MapInstance membership when
+    the current map has an identity, and source/player playableFloor equality.
+  * A legacy/unbound map retains historical single-map behavior.
+
+Spawn/effect corrections:
+
+  * New @power= plates and @wire= circuits use newEntityWithSpatialContext(...,
+    &src).
+  * Attached explosions establish each target's spatialSpawnContext.
+  * Nonattached coordinate explosions establish the Text Source context.
+
+Authored structure:
+
+  * @script map ranges are gameplay X/Y selections on a playable floor. They do
+    not select an authoredMapLayer and do not edit structural tiles directly.
+  * authoredMapLayer is captured/displayed by the tester but remains separate.
+
+Attachment movement rule:
+
+  * An attachment is a UID identity, not a permanent tile/floor query. If an
+    attached entity legitimately changes floor after attachment, later attached
+    operations continue following that entity. This preserves UID semantics.
+
+Remaining Playable-Z manual concerns:
+
+  * upper-floor particle/light/child visuals for explosions;
+  * mechanism propagation on stacked same-X/Y floors;
+  * persistence/reload of attachment UIDs after floor transitions;
+  * breakable delayed summons inheriting the breakable's current context;
+  * legacy one-floor maps under the same helpers.
+
+
+11. MAPINSTANCE / DIVERGENT PATHS REVIEW
+
+  * Entity scans occur in the currently active map's entity/creature lists, then
+    apply playableFloor filtering.
+  * Player pointers are global across divergent maps, so the new WorldState check
+    explicitly excludes a player whose membership is another MapInstance.
+  * No packet or WorldState format was changed.
+  * @nextlevel= remains a global legacy transition command with no per-player or
+    per-instance destination. It is documented, blocked in the tester, and left
+    for a deliberate Divergent Paths design decision.
+  * Attachment children are UID-based. Late join and unload/reload restoration of
+    those lists requires live/world-persistence testing.
+
+
+12. MULTIPLAYER AND HEADLESS REVIEW
+
+Server authority:
+  Entity::actTextSource() exits on CLIENT. Script gameplay mutations originate
+  on server/single-player simulation. Runtime extension callbacks are routed
+  inside handleTextSourceScript() after that same gate; no client-side parallel
+  dispatcher was added.
+
+Player count:
+  Current target loops use MAXPLAYERS. The @copyNPC= loop was corrected from a
+  condition that stopped on the first disconnected slot to a full sparse-slot
+  loop with per-slot validation. No hardcoded four-player script loop remains in
+  the changed handler paths.
+
+Networking:
+  Existing SCRU, hunger, effects, item pickup, entity update, and mechanism paths
+  were preserved. No packet layout or registry handshake was changed.
+  The current S.A.M contribution is zero commands, so there is no command set to
+  synchronize. Any future extension registration must be derived deterministically
+  from the already validated mod set or added to the existing S.A.M mismatch
+  policy before clients may rely on it; this task did not casually change packets.
+
+Known networking concerns:
+  @setally= lacks the explicit entity stat-flag update used by @setenemy=;
+  item/equipment fan-out to multiple remote players needs live testing;
+  trigger/attachment state for late join needs live testing; custom registry
+  mismatch remains governed by existing S.A.M/network behavior.
+
+Headless:
+  Gameplay catalog/parser files depend only on standard C++ data structures.
+  The runtime is in the existing server simulation and does not require the Zed
+  library, a window, or local Steam client. Some action helpers may generate
+  effects/sounds through existing headless-aware engine paths; this pass did not
+  claim an isolated headless fixture for every one of 36 mutations.
+  The registry itself uses only standard-library data and function pointers. It
+  imports no renderer, window, audio, editor, Steam, S.A.M VM, or local-player
+  dependency, so a future server callback can register without creating a UI
+  dependency. The callback's own headless suitability remains its owner's test.
+
+
+13. S.A.M. INTERACTION
+
+The current tree marker is S.A.M Framework 2.1.0.
+
+Actual registration/lifecycle audit:
+
+  * All current src/sam C/C++ headers and implementations were searched for
+    TextSourceLanguage, Text Source, @script, command/keyword registration,
+    callback command registries, aliases, and namespace command surfaces.
+  * SAMModManifest contains dependencies, classes, items, patches, monsters,
+    spells, effects, races, sounds, recipes, plugins, models, images, and rooms.
+    It has no Text Source command/keyword/alias/argument metadata.
+  * SAMLoader rebuilds content registries on load and creates fresh Lua and
+    QuickJS/TypeScript VMs. It loads class/item sibling scripts and mod-level
+    main.ts/main.js/main.lua files defining on_event and/or on_tick.
+  * sam_register_hook() in Lua and JavaScript registers a namespaced custom
+    EVENT name in g_customHooks. It does not register a Text Source parser
+    spelling or handler. Those vectors currently allow repeated event names;
+    that behavior is unrelated to Text Source command collision policy.
+  * Plugin paths may be declared, but SAMLoader explicitly states native plugin
+    loading is not implemented. A manifest callback name therefore cannot be
+    treated as an executable Text Source command.
+  * S.A.M runtime VMs are excluded from the editor build. SAMFoundation still
+    scans shared manifest content for editor-visible data, but there is no
+    editor or game Text Source registration call to consume.
+  * SAMLoader::unload clears its content registries and scripting VMs. Because
+    there are zero current S.A.M Text Source registrations, no current unload
+    hook into the unified registry is required or fabricated.
+
+Current command result:
+
+  S.A.M. Framework commands = 0.
+  S.A.M.-mod commands = 0.
+  Aliases/families/conditions/actions/selectors registered through S.A.M = 0.
+
+This zero is a positive source finding, not an assumption. The automated test
+recursively checks current src/sam C/C++ files for @script literals or calls to
+registerScriptTagExtension(). A future source addition therefore makes the
+consistency test fail until its actual lifecycle is adapted and catalogued.
+
+Unified future registration seam:
+
+  * registerScriptTagExtension() deeply copies metadata supplied by a S.A.M
+    adapter; temporary manifest strings cannot dangle.
+  * Required origin metadata is S.A.M Framework or S.A.M Mod plus display name
+    and stable source ID. Source version is retained when actually supplied.
+  * Exact commands and exact aliases feed the same parser/library/runtime view.
+    A RegisteredExtension argument kind permits a private validator without
+    adding S.A.M schema types to the public header.
+  * Available entries require a live dispatch callback. Registration alone does
+    not change VerificationLevel; an uncharacterized entry should be marked
+    NeedsVerification rather than falsely promoted.
+  * dispatchPhase separates map-generation setup from runtime action. A
+    map-generation callback runs only after a valid @script marker and is not
+    dispatched again at runtime.
+  * markScriptTagSourceUnavailable() retains copied metadata, marks it missing,
+    and clears validator/dispatch function pointers before a mod can unload.
+    Re-registration by the same stable source restores the entry. Full removal
+    is also available when retained metadata is not desired.
+  * The registry is a main-thread lifecycle facility. It is deliberately not
+    synchronized, and mutation is refused while an extension validator or
+    dispatch callback is active.
+
+This is a clean adapter target, not a claim that S.A.M. 2.1.0 already calls it.
+When a later S.A.M version adds a real registration API/manifest field, its load
+and unload sites must feed this seam in both gameplay and editor registration
+lifecycles; the new source-surface test will force that work.
+
+Text Source language findings:
+
+  * There is no stable-ID @script literal.
+  * There is no direct numeric item-ID @script argument in this tag set.
+  * Item commands operate on already-existing attached/world item entities.
+  * newItemFromEntity() accepts arbitrary valid runtime item IDs rather than
+    clamping to NUMITEMS, and for a custom runtime ID requires the S.A.M registry
+    to resolve a nonempty stable ID.
+  * An unavailable or numeric-only custom item is refused; it is not substituted
+    with an unrelated vanilla item. The reviewed @script transfer paths now keep
+    the source world entity when that refusal means no transfer succeeded.
+  * The transfer commands then use the normal Item/inventory/chest/equipment
+    paths, so loaded S.A.M definitions can flow through those paths.
+
+Limitations:
+
+  * A script cannot name stable_id directly.
+  * A missing-mod preserved record cannot be materialized by these world-item
+    transfer commands until current runtime registration exists.
+  * Custom equipment-slot metadata and multiplayer registry agreement need live
+    tests.
+  * No stable-ID command syntax, custom entity spawn tag, custom monster tag, or
+    custom selector was invented from similarly named Lua/JS host APIs.
+  * Retained unavailable command metadata is in-memory lifecycle state, not a
+    new persistent editor cache. The current S.A.M manifest has no authoritative
+    command schema from which to reconstruct such a cache after process restart.
+  * No S.A.M header or JSON header was introduced into the lightweight Text
+    Source public interface.
+
+
+14. TEST ARCHITECTURE
+
+Executable:
+  text_source_script_tests
+
+CTest name:
+  text_source_script
+
+Data-driven coverage:
+
+  * asserts exact catalog totals and unique canonical names;
+  * validates required metadata fields for every definition;
+  * parses every minimal example through the shared parser;
+  * resolves every valid token back to the exact catalog entry;
+  * verifies safety metadata propagation;
+  * parses every invalid example and requires an invalid token/error;
+  * tests Optional, Required, and NotMeaningful @attached. contracts;
+  * tests Unsupported map-generation @attached. prefix contracts;
+  * expands and tests all 12 stat spellings;
+  * expands and tests all 32 proficiency spellings;
+  * rejects invalid stat/proficiency family members, including leading-zero
+    proficiency spellings that have no generated runtime handler name;
+  * characterizes LF, tab, delimiters, signed ranges, semicolons, duplicates,
+    sequence order, unknown commands, and mixed valid/invalid tokens;
+  * parses all six complete recipes and checks every component's verification;
+  * tests search across required user terms;
+  * tests insertion spacing, capacity, and failure atomicity;
+  * tests gameplay $resource key conventions;
+  * behavior-tests shared @setvar= replacement and TestSession reset;
+  * proves a missing @script marker leaves the sandbox in message mode without
+    applying disposable state;
+  * checks disposable sandbox blocking and independent spatial context fields;
+  * extracts active handler spellings after stripping line comments and compares
+    runtime tags bidirectionally with catalog tags;
+  * checks every dispatchEvidence source seam;
+  * rejects @findanytarget= and the invented @item_stable_id form;
+  * checks parser/resource/tester/editor integration seams;
+  * checks server-authority, MAXPLAYERS, WorldState, playableFloor, source-context
+    spawn/effect, delay, run-state, physical text joining, and S.A.M version seams.
+  * checks that item-transfer removal is success-guarded and that the existing
+    runtime item converter validates runtime/stable identity before conversion.
+  * asserts the initial invariant 37 native + 0 S.A.M Framework + 0 S.A.M Mod =
+    37 unified definitions;
+  * recursively scans current src/sam C/C++ sources and requires zero @script
+    literals and zero unified-registry registration calls;
+  * verifies that sam_register_hook is the separate namespaced event-hook path,
+    manifests have no scriptCommands field, behavior VMs load on_event/on_tick,
+    and native plugin loading remains unimplemented;
+  * registers a temporary synthetic S.A.M-mod fixture through the real unified
+    registry, then verifies canonical parsing, alias normalization, malformed
+    integer rejection, runtime callback dispatch, phase refusal, deep owner and
+    version metadata, origin search, and refusal of callback-time registry
+    mutation;
+  * registers a private argument-schema fixture and verifies its validator
+    accepts an even integer and rejects an odd integer with its real diagnostic;
+  * rejects missing dispatch/validator callbacks, exact native collision, native
+    alias collision, generated-family collision, duplicate live registration,
+    and stable-owner takeover;
+  * marks the fixture mod unavailable, verifies retained metadata plus cleared
+    callbacks and parser refusal, restores only from the same stable owner, then
+    removes every fixture before native bidirectional consistency checks;
+  * source-checks both runtime and map-generation extension dispatch seams, the
+    valid @script marker gate, registry generation UI refresh, origin filtering,
+    availability filtering, and explicit zero-current-S.A.M explanation.
+
+What these tests do not fake:
+
+  * no graphical editor clicks;
+  * no renderer/audio output;
+  * no full multiplayer transport;
+  * no real S.A.M mod command, because current S.A.M. 2.1.0 exposes none;
+  * no claim that the synthetic registry fixture is shipped content;
+  * no live map fixture for each destructive mutation;
+  * no claim that a source-string seam equals behavior execution.
+
+
+15. SECURITY, TRUST, AND ERROR HANDLING
+
+  * Catalog entries do not expose filesystem, shell, process, save, Steam, or raw
+    network operations.
+  * @nextlevel= is the broadest global state transition and is blocked in Zed.
+  * Every gameplay mutation is blocked in Zed, including ostensibly reversible
+    map changes.
+  * Resource keys are looked up in ScriptTextParser's loaded entries; the tester
+    does not execute scripts from arbitrary file paths.
+  * Integer parsing is full-consumption and range-checked against int.
+  * Invalid tokens are filtered before legacy stoi dispatch.
+  * Failed resource lookup preserves the current editable working copy.
+  * Zed clipboard pastes are explicitly NUL-terminated at the configured input
+    bound; insertion helpers remain atomic on capacity failure.
+  * Catalog-defined semantic domains such as live monster names and class bounds
+    may still be resolved by the active runtime handler because the standalone
+    parser intentionally has no dependency on engine registries.
+  * Untrusted clients do not authoritatively execute Entity::actTextSource().
+  * The registration API is an internal C++ adapter seam; current Lua/JS scripts
+    cannot call it. It does not turn sam_register_hook names or manifest strings
+    into native function pointers.
+  * Extension metadata is deep-copied, required fields are validated, private
+    schemas require a validator, and executable definitions require a callback.
+  * Callback/validator exceptions are contained and reported. Registry mutation
+    from inside either callback is refused, preventing index/pointer invalidation
+    while a parsed token stream is executing.
+  * A future adapter callback has the same trust/authority as that adapter's
+    engine bridge; this registry does not grant Lua/JS new filesystem, shell,
+    network, or raw memory capabilities.
+
+
+16. COMPILE-TIME / HEADER IMPACT
+
+  * text_source_script.hpp uses only standard lightweight headers and plain data
+    contracts.
+  * The large metadata initializer is implementation-local in
+    text_source_script_catalog.cpp.
+  * Deep-copy ownership, collision scans, availability lifecycle, and callback
+    exception boundaries are implementation-local in
+    text_source_script_registry.cpp.
+  * No nlohmann/json.hpp, S.A.M implementation header, renderer header, or
+    WorldState header is included by the shared public header.
+  * The public extension ABI uses standard strings, enums, plain contracts, and
+    function pointers with an opaque sourceContext. It does not include Entity,
+    SAMLoader, Lua, QuickJS, or manifest headers.
+  * world_state.hpp is included only in actgeneral.cpp for the focused divergent
+    player check.
+  * Editor/game-specific heavy headers remain in text_source_script_tester.cpp or
+    existing gameplay .cpp files.
+  * This architecture does not recreate the prior JSON header fanout problem.
+
+
+17. MANUAL ACCEPTANCE MATRIX
+
+Editor UI
+  [ ] Open Scripts -> Text Source Script Tester.
+  [ ] Load a valid $resource; confirm editable working copy and byte count.
+  [ ] Enter a missing $resource after editing; confirm the working copy survives.
+  [ ] Paste text at/above the 16 KiB bound; confirm safe truncation and editing.
+  [ ] Type/backspace at the end, Validate, and observe current buffer.
+  [ ] Search player/monster/effect/power/attach/stat.
+  [ ] Cycle category, all six verification filters, all six origin filters, and
+      all four availability filters.
+  [ ] Select Origin S.A.M.; confirm zero results and the separate-VM explanation.
+  [ ] Inspect details and scroll long caveats/source fields.
+  [ ] Insert a placeholder tag, edit placeholder, validate.
+  [ ] Insert each minimal example and all six recipes.
+  [ ] Confirm capacity failure preserves existing text.
+
+Lifecycle
+  [ ] Circuit-powered repeatable source.
+  [ ] Run-once source.
+  [ ] Delayed always trigger.
+  [ ] Each attached condition, including bell interaction.
+  [ ] Reattach followed by attached mutation in the same script.
+
+Playable-Z
+  [ ] Same X/Y entities on two playable floors for each scan family.
+  [ ] Upper-floor @power/@wire entity creation.
+  [ ] Upper-floor attached and coordinate explosions, including particles/light.
+  [ ] @copyNPC templates with matching flags on different floors.
+  [ ] Attached entity moves to another floor and retains intended UID behavior.
+
+Divergent Paths
+  [ ] Two players in different MapInstances; global player tag affects only the
+      source instance/floor.
+  [ ] Two loaded MapInstances with identical coordinates and floor numbers.
+  [ ] Unload/reload and late join with attachment state.
+  [ ] Decide/verify @nextlevel= divergent policy before relying on it.
+
+Multiplayer/headless
+  [ ] 15-player sparse connected slots, including gaps before later players.
+  [ ] Remote clrplayer/class/clrstats/hunger/stats/proficiencies.
+  [ ] Remote effects and item pickup/equipment/chest transfer.
+  [ ] setenemy/setally replication comparison.
+  [ ] Disconnect/reconnect and late join after a trigger fires.
+  [ ] --nosteam host/client behavior.
+  [ ] Headless execution for each destructive/effect helper family.
+
+S.A.M
+  [ ] Loaded custom item through addtomonsters/equipitems/pickupitems/addtochest.
+  [ ] Large runtime custom item ID.
+  [ ] Missing mod refusal without vanilla substitution.
+  [ ] Mod restored and item operation retried after stable mapping returns.
+  [ ] Registry mismatch client denied/handled by existing synchronization policy.
+  [ ] If a future S.A.M command adapter is added: loaded command appears without
+      Zed hardcoding, alias routes to its canonical handler, unload displays it
+      unavailable without executing, same-owner reload restores it, and native
+      collision is rejected.
+
+Legacy discrepancies requiring a product decision
+  [ ] @stCON/@stINT mapping.
+  [ ] @proN+ set-versus-add behavior.
+  [ ] attached @killenemies= follower selection.
+  [ ] @seteffect duration range upper bound.
+
+
+18. EXACT REMAINING TAGS REQUIRING MANUAL BEHAVIOR VERIFICATION
+
+All insertable definitions except @setvar= remain manual at the world-behavior
+level:
+
+  @script
+  @triggerif=
+  @attachto=
+  @attachrange=
+  @reattachto=
+  @clrplayer
+  @class=
+  @clrstats
+  @hunger=
+  @nextlevel=
+  @power=
+  @unpower=
+  @wire=
+  @unwire=
+  @freezemonsters=
+  @unfreezemonsters=
+  @seteffect=
+  @clreffect=
+  @findtarget=
+  @killall=
+  @killenemies=
+  @damage=
+  @explode=
+  @nodropitems=
+  @copyNPC=
+  @setenemy=
+  @setally=
+  @addtomonsters=
+  @equipitems=
+  @pickupitems=
+  @addtochest=
+  @addtobreakable=
+  @breakablespawn=
+  @breakablejumpspawn=
+  @st<STAT>{=|+}
+  @pro<INDEX>{=|+}
+
+This list means "manual world behavior still required," not "unverified or
+unsupported." Each is parser- and dispatch-verified and is insertable with that
+exact status displayed.
+
+
+19. KNOWN LIMITATIONS AND DEFERRED CONCERNS
+
+  * Registry registration/collision validation is linear in existing definitions
+    and parsing is linear in definitions/aliases per token. Registration is a
+    mod-load operation, the unified vector is generation-cached, and the current
+    live size is 37, so no runtime regression was observed. A future ecosystem
+    with hundreds/thousands of commands should profile an indexed lookup that
+    preserves exact prefix-collision semantics.
+  * Native world handlers remain legacy if/else mutation code. Extensions have
+    a callable registry seam, but moving all native handlers behind it would be a
+    larger compatibility-sensitive scripting redesign and remains out of scope.
+  * Runtime semantic registries (monster names, classes, effect meanings) are not
+    linked into the lightweight editor parser. Their word/integer shape and active
+    dispatch are verified; live availability remains runtime-dependent.
+  * Map range packing is 8-bit per endpoint.
+  * Inline Text Source physical storage is much smaller than the tester's 16 KiB
+    resource-oriented buffer.
+  * Generic Zed input supports end editing, not arbitrary caret insertion, in
+    this window.
+  * No unsupported/historical tab is exposed as insertable content; such entries
+    remain in this audit only, by design.
+  * The native catalog has zero proven aliases. Extension aliases must be live
+    registered spellings and are parser/dispatch tested; cosmetic aliases remain
+    forbidden.
+  * Current S.A.M. 2.1.0 has no command registration lifecycle, so dynamic
+    S.A.M entries cannot be demonstrated with real shipped content. The test
+    fixture proves the shared seam only and is removed immediately.
+  * Retained missing-mod metadata lasts for the current process/load lifecycle.
+    There is no fabricated disk cache because current manifests expose no
+    authoritative command schema.
+  * Extension command families with arbitrary matchers are not exposed by the
+    current S.A.M and are not invented. Exact registered commands, exact aliases,
+    and private argument validators are supported.
+  * registerScriptTagExtension() is a source-level C++ adapter contract, not a
+    stable cross-compiler DLL ABI. If S.A.M later implements native plugin
+    loading, a versioned C ABI/owned bridge must sit in front of it rather than
+    exporting std::string and function-pointer contracts directly to arbitrary
+    binaries.
+  * Manual GUI confirmation is still required; successful editor compilation is
+    not visual acceptance.
+  * The authorized Text Source Script Tester work is present. Z4 was not started.
+
+
+20. FINAL VALIDATION RECORD
+
+Targeted characterization during implementation:
+  PASS - text_source_script_tests target built.
+  PASS - ./build-super-posix/text_source_script_tests.
+  PASS - editor target built.
+  PASS - barony target built.
+
+Required final validation after the fresh review:
+  PASS - cmake --build build-super-posix -j6
+         All configured targets completed, including editor, barony, and the
+         Text Source characterization target.
+  PASS - ctest --test-dir build-super-posix --output-on-failure
+         8/8 tests passed, 0 failed. This includes text_source_script plus the
+         existing Automatia, S.A.M. 2.1, party, and Playable-Z suites.
+  PASS - ./build-super-posix/barony --automatia-stage4d-z3-transition-characterization
+         Exit 0. Reported the Stage 4D/Z3.4C stacked-sprite/fall runtime passed.
+  PASS - ./build-super-posix/text_source_script_tests
+         Exit 0 after the full build.
+  PASS - git diff --check
+         Exit 0 with no whitespace errors.
+
+Validation boundary:
+  These results do not replace the manual editor, live multiplayer/headless,
+  upper-floor visual/effect, divergent-instance, or S.A.M custom-item scenarios
+  listed above. No graphical/manual acceptance was claimed.
+
+
+21. FINAL INTEGRATION DECISIONS
+
+  1. Current C++ remains language authority; guide remains secondary.
+  2. One unified native/extension registry powers parsing, library metadata,
+     examples, tests, and extension dispatch; no unrelated S.A.M catalog exists.
+  3. Native legacy world handlers are retained; registered extension callbacks
+     join their real token stream without creating a fake second language.
+  4. Invalid tokens are filtered; valid neighbors still execute in order.
+  5. Only disposable @setvar= executes in editor test mode.
+  6. Verification depth is explicit and manual needs are never hidden.
+  7. Guide-only @findanytarget= and unavailable variants are not insertable.
+  8. Existing guide/current semantic conflicts are documented, not silently
+     changed where old map compatibility needs a deliberate decision.
+  9. @script-specific Playable-Z/MapInstance leaks are fixed narrowly.
+ 10. No network packets, Playable-Z model, Divergent Paths model, Text Source
+     language, or S.A.M identity syntax was redesigned.
+ 11. Current S.A.M. 2.1.0 contributes exactly zero Text Source commands. Its
+     Lua/JS/TS APIs and namespaced event hooks remain separate and are not
+     misrepresented in the Library.
+ 12. Native/extension exact, alias, prefix, and generated-family collisions are
+     rejected. Stable owner identity is required to restore retained metadata.
+ 13. Origin and availability are independent of verification depth; registration
+     never implies Behavior or Manual Game Test verification.

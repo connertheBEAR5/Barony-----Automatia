@@ -3294,7 +3294,14 @@ void drawEntities2D(long camx, long camy)
 				}
 				
 				// if item sprite and the item index is not 0 (NULL), or 1 (RANDOM)
-				if ( entity->sprite == 8 && entity->skill[10] > 1 )
+				if ( entity->sprite == EDITOR_SPRITE_MINIMIMIC )
+				{
+					// Zed keeps the authored marker ID but previews it with the
+					// familiar chest artwork. Runtime uses the existing 1794/1795
+					// Mini Mimic voxel body through initMiniMimic().
+					drawImageScaled(sprites[21], nullptr, &pos);
+				}
+				else if ( entity->sprite == 8 && entity->skill[10] > 1 )
 				{
 					// draw the item sprite in the editor layout
 					Item* tmpItem = newItem(static_cast<ItemType>(entity->skill[10] - 2), static_cast<Status>(0), 0, 0, 0, 0, nullptr);

@@ -272,6 +272,9 @@ static const int STAT_FLAG_MONSTER_DISABLE_HC_SCALING = 26;
 static const int STAT_FLAG_HP_BONUS = 27;
 static const int STAT_FLAG_MP_BONUS = 28;
 static const int STAT_FLAG_ASSISTANCE_PLAYER_PTS = 29;
+// Authored monsters may be recruitable independently of their disposition.
+// MISC_FLAGS are already part of the generic monster map/save record.
+static const int STAT_FLAG_MONSTER_RECRUITABLE = 30;
 
 typedef enum
 {
@@ -499,8 +502,16 @@ char customDialogueID[64] = "";
 		MONSTER_FORCE_ALLEGIANCE_NONE = 0,
 		MONSTER_FORCE_PLAYER_ALLY,
 		MONSTER_FORCE_PLAYER_ENEMY,
-		MONSTER_FORCE_PLAYER_RECRUITABLE
+		MONSTER_FORCE_PLAYER_RECRUITABLE,
+		MONSTER_FORCE_PLAYER_NEUTRAL
 	};
+	bool monsterIsRecruitable() const
+	{
+		// Preserve compatibility with existing maps and S.A.M. definitions that
+		// use the legacy combined friendly/recruitable force-allegiance value.
+		return monsterForceAllegiance == MONSTER_FORCE_PLAYER_RECRUITABLE
+			|| MISC_FLAGS[STAT_FLAG_MONSTER_RECRUITABLE] != 0;
+	}
 	int getPassiveShieldBonus(bool checkShield, bool excludeSkill) const;
 	int getActiveShieldBonus(bool checkShield, bool excludeSkill, Item* shieldItem = nullptr, bool checkNonShieldBonus = false) const;
 	static int getParryingACBonus(Stat* myStats, Item* myWeapon, bool checkWeapon, bool excludeSkill, int weaponSkill);

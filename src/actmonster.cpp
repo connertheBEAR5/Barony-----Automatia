@@ -6148,7 +6148,7 @@ bool makeFollower(int monsterclicked, bool ringconflict, char namesays[64],
 					canAlly = true; // non-boss imps
 				}
 			}
-			if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_RECRUITABLE
+			if ( myStats->monsterIsRecruitable()
 				|| (myStats->getEffectActive(EFF_PENANCE) >= 1 
 					&& myStats->getEffectActive(EFF_PENANCE) < 1 + MAXPLAYERS) )
 			{
@@ -6356,11 +6356,11 @@ bool makeFollower(int monsterclicked, bool ringconflict, char namesays[64],
 							canAlly = true; // non-boss imps
 						}
 					}
-					if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_RECRUITABLE )
+					if ( myStats->monsterIsRecruitable() )
 					{
 						canAlly = true;
 					}
-					if ( myStats->monsterForceAllegiance == Stat::MONSTER_FORCE_PLAYER_RECRUITABLE
+					if ( myStats->monsterIsRecruitable()
 						|| (myStats->getEffectActive(EFF_PENANCE) >= 1
 							&& myStats->getEffectActive(EFF_PENANCE) < 1 + MAXPLAYERS) )
 					{
@@ -18210,11 +18210,11 @@ bool handleCustomMonsterDialogueChoice(
 		);
 
 		/*
-		 * The NPC is now a follower, so remove its authored dialogue from the
-		 * live Stat instance. The persistent recruited flag above provides the
-		 * durable guard when the NPC is reconstructed later.
+		 * Keep the authored dialogue resource on the Stat. The generic follower
+		 * guard in handleCustomMonsterDialogue() prevents it from reclaiming GUI
+		 * focus while recruited, while retaining the authored configuration for
+		 * copy/save/restore and dialogue-plus-recruitable NPCs.
 		 */
-		npc->getStats()->customDialogueID[0] = '\0';
 
 		messagePlayer(
 			player,

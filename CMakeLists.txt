@@ -37,6 +37,41 @@ if(BUILD_TESTING)
     target_compile_features(sam_21_integration_contract_tests PRIVATE cxx_std_17)
     add_test(NAME sam_21_integration_contract COMMAND sam_21_integration_contract_tests)
 
+	add_executable(
+		text_source_script_tests
+		tests/text_source_script_tests.cpp
+		src/text_source_script.cpp
+		src/text_source_script_catalog.cpp
+		src/text_source_script_registry.cpp
+	)
+	target_include_directories(
+		text_source_script_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		text_source_script_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(text_source_script_tests PRIVATE cxx_std_17)
+	add_test(NAME text_source_script COMMAND text_source_script_tests)
+
+	add_executable(
+		minimimic_authored_characterization_tests
+		tests/minimimic_authored_characterization_tests.cpp
+	)
+	target_compile_definitions(
+		minimimic_authored_characterization_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(
+		minimimic_authored_characterization_tests PRIVATE cxx_std_17)
+	add_test(
+		NAME minimimic_authored_characterization
+		COMMAND minimimic_authored_characterization_tests)
+
     add_executable(
         party_backend_tests
         tests/party_backend_tests.cpp

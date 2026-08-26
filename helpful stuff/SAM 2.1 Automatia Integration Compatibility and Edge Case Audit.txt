@@ -247,7 +247,7 @@ Steam Workshop discovery          NO CONFLICT           RESOLVED: consumes Baron
 Headless                          MAJOR OVERLAP         MITIGATED/BUILD TESTED: GPU model work skipped; live run required.
 Editor                            MAJOR OVERLAP         MITIGATED: existing stable catalog/palettes preserved; rich entity UI deferred.
 Dialogue/quests                   MAJOR OVERLAP         MITIGATED: existing stable item paths preserved; new events deferred.
-Text Source scripting             MAJOR OVERLAP         RESOLVED boundary: separate VMs; Tester and Z4 not started.
+Text Source scripting             MAJOR OVERLAP         RESOLVED boundary: separate VMs; later-authorized unified Tester/Library present; Z4 not started.
 
 For every MAJOR/DIRECT row the integration test must cover: no mods, one valid mod,
 duplicate declaration, missing mod on reload, restored mod, different load order, host,
@@ -500,8 +500,10 @@ MAJOR OVERLAP -- RESOLVED as a subsystem boundary; engine-event breadth is a KNO
 
 S.A.M. Lua/JS/TS VMs are separate from Text Source. Define ordering if both observe one
 event; do not silently execute Text Source through S.A.M or vice versa. Host APIs accept
-copied primitives and validated stable IDs. The Text Source Script Tester and Z4 are
-explicitly outside this task and will not be started.
+copied primitives and validated stable IDs. At the time of this S.A.M integration task,
+the Text Source Script Tester and Z4 were explicitly outside scope. A later authorized
+task added the unified Tester/Library after auditing S.A.M. 2.1.0 and finding zero S.A.M
+Text Source command registrations; Z4 remains unstarted.
 
 
 19. CUSTOM MAP PROPERTIES
@@ -710,8 +712,9 @@ Workshop dependency ordering.
 36. DEFERRED CONCERNS
 =====================
 
-* Text Source Script Tester -- explicitly prohibited by task.
-* Z4 -- explicitly prohibited by task.
+* Text Source Script Tester -- subsequently authorized and implemented through a shared
+  native/extension registry; current S.A.M. 2.1.0 contributes zero Text Source commands.
+* Z4 -- still not started.
 * A protocol redesign, if additive validated packets are insufficient -- stop/report
   boundary per task.
 * Per-instance mod sets and hot unloading content used by live entities.
@@ -1097,8 +1100,9 @@ remain DEFERRED/MANUAL.
 Automatia dialogue, per-player quest state and journal remain authoritative. Existing
 stable-item storage/evaluation paths were preserved. No duplicate S.A.M quest system was
 invented, and no new dialogue/quest event bridge is claimed. Text Source remains a
-separate scripting system with separate lifecycle and state. The prohibited Text Source
-Script Tester and Z4 were not started.
+separate scripting system with separate lifecycle and state. A later authorized task
+added the Text Source Tester/Library without bridging it into the S.A.M behavior VMs;
+Z4 was not started.
 
 No .LMP format or custom map-property byte layout was changed. Fog, current/future
 ambience work, PZLV/ELYR and unknown extension concerns therefore remain owned by their
@@ -1256,7 +1260,7 @@ Status: KNOWN LIMITATION / DEFERRED.
 * Rich Zed custom entity/effect/race panels and visual missing-mod previews.
 * End-to-end fixtures and manual matrices enumerated above.
 * Upstream release note packaging and GUI codegen test prerequisites.
-* Text Source Script Tester and Z4, explicitly prohibited.
+* Text Source Script Tester is now present under later authorization; Z4 remains deferred.
 
 
 Q. FINAL BEST-OF-BOTH-WORLDS DECISIONS

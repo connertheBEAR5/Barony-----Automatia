@@ -24,6 +24,8 @@
 #include "scores.hpp"
 #include "mod_tools.hpp"
 #include "paths.hpp"
+#include "text_source_script.hpp"
+#include "world_state.hpp"
 
 /*-------------------------------------------------------------------------------
 
@@ -2686,6 +2688,32 @@ void actTextSource(Entity* my)
 
 TextSourceScript textSourceScript;
 
+namespace
+{
+	bool textSourceEntitySharesFloor(const Entity& source, const Entity& candidate)
+	{
+		return source.playableFloor == candidate.playableFloor;
+	}
+
+	bool textSourcePlayerSharesSpatialScope(const Entity& source, int player)
+	{
+		if ( player < 0 || player >= MAXPLAYERS
+			|| !stats[player] || client_disconnected[player]
+			|| !players[player] || !players[player]->entity )
+		{
+			return false;
+		}
+		// A legacy/unbound map has no identity and keeps its historical single-map
+		// behavior.  Once WorldState owns the map, divergent players are excluded.
+		if ( worldState.identityFor(map)
+			&& !worldState.playerSharesInstance(player, map) )
+		{
+			return false;
+		}
+		return textSourceEntitySharesFloor(source, *players[player]->entity);
+	}
+}
+
 int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string findTag, Entity& src)
 {
 	size_t foundScriptTag = input.find(findTag);
@@ -2731,16 +2759,14 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 		{
 			if ( findTag.compare("@setvar=") == 0 )
 			{
-				std::string variableName = tagValue.substr(0, foundMapReference);
-				int value = std::stoi(tagValue.substr(foundMapReference + 1, tagValue.length() - foundMapReference));
-				if ( scriptVariables.find(variableName) != scriptVariables.end() )
+				std::string variableName;
+				int value = 0;
+				if ( !TextSourceLanguage::parseSetVariableArgument(
+					tagValue, variableName, value) )
 				{
-					scriptVariables[variableName] = value;
+					return k_ScriptError;
 				}
-				else
-				{
-					scriptVariables.insert(std::make_pair(variableName, value));
-				}
+				scriptVariables[variableName] = value;
 				return 0;
 			}
 
@@ -2751,7 +2777,7 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 			int x2 = 0;
 			int y1 = 0;
 			int y2 = 0;
-			size_t foundMapRange = x_str.find("-");
+			size_t foundMapRange = x_str.find('-', 1);
 			if ( foundMapRange != std::string::npos )
 			{
 				// found map range reference.
@@ -2763,7 +2789,7 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 				x1 = std::stoi(x_str);
 				x2 = x1;
 			}
-			foundMapRange = y_str.find("-");
+			foundMapRange = y_str.find('-', 1);
 			if ( foundMapRange != std::string::npos )
 			{
 				// found map range reference.
@@ -2810,7 +2836,7 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 				std::pair<int, int> param2 = std::make_pair(0, 0);
 				std::string first_str = tagValue.substr(0, foundSeperator);
 				std::string second_str = tagValue.substr(foundSeperator + 1, tagValue.length() - foundSeperator);
-				size_t foundRange = first_str.find("-");
+				size_t foundRange = first_str.find('-', 1);
 				if ( foundRange != std::string::npos )
 				{
 					// found range reference.
@@ -2822,7 +2848,7 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 					param1.first = std::stoi(first_str);
 					param1.second = param1.first;
 				}
-				foundRange = second_str.find("-");
+				foundRange = second_str.find('-', 1);
 				if ( foundRange != std::string::npos )
 				{
 					// found range reference.
@@ -2842,7 +2868,7 @@ int TextSourceScript::textSourceProcessScriptTag(std::string& input, std::string
 			}
 			else
 			{
-				size_t foundRange = tagValue.find("-");
+				size_t foundRange = tagValue.find('-', 1);
 				if ( foundRange != std::string::npos )
 				{
 					std::pair<int, int> param1 = std::make_pair(0, 0);
@@ -2960,33 +2986,46 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 {
 	bool statOnlyUpdateNeeded = false;
 
-	std::vector<std::string> tokens;
-	std::string searchString = input;
-	size_t findToken = searchString.find("@");
-	while ( findToken != std::string::npos )
+	const auto parsed = TextSourceLanguage::parseTextSourceScript(input);
+	for ( const auto& diagnostic : parsed.diagnostics )
 	{
-		std::string token = "@";
-		++findToken;
-		while ( findToken < searchString.length()
-			&& searchString.at(findToken) != ' '
-			&& searchString.at(findToken) != '@'
-			&& searchString.at(findToken) != '\0'
-			)
+		printlog("[SCRIPT]: %s line %d column %d: %s",
+			TextSourceLanguage::severityName(diagnostic.severity),
+			diagnostic.line, diagnostic.column, diagnostic.message.c_str());
+	}
+	if ( !parsed.success() )
+	{
+		printlog("[SCRIPT]: Validation reported errors; invalid tokens will be skipped.");
+	}
+
+	std::vector<std::string> tokens;
+	std::vector<std::size_t> parsedTokenIndexes;
+	tokens.reserve(parsed.tokens.size());
+	parsedTokenIndexes.reserve(parsed.tokens.size());
+	input.clear();
+	for ( std::size_t parsedIndex = 0; parsedIndex < parsed.tokens.size(); ++parsedIndex )
+	{
+		const auto& token = parsed.tokens[parsedIndex];
+		if ( token.valid )
 		{
-			token = token + searchString.at(findToken);
-			++findToken;
+			tokens.push_back(token.raw);
+			parsedTokenIndexes.push_back(parsedIndex);
+			if ( !input.empty() )
+			{
+				input.push_back(' ');
+			}
+			input.append(token.raw);
 		}
-		searchString.erase(searchString.find(token), token.length());
-		tokens.push_back(token);
-		findToken = searchString.find("@");
 	}
 
 	printlog("[SCRIPT]: Starting Execution...");
 	std::string executionLog = "[SCRIPT]: Processed tokens:";
 	std::vector<Entity*> attachedEntities = textSourceScript.getScriptAttachedEntities(src);
 
+	std::size_t runtimeTokenIndex = 0;
 	for ( auto it = tokens.begin(); it != tokens.end(); ++it )
 	{
+		const auto& parsedToken = parsed.tokens[parsedTokenIndexes[runtimeTokenIndex++]];
 		executionLog.append(" ").append(*it);
 
 		bool processOnAttachedEntity = false;
@@ -3001,6 +3040,20 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 			{
 				input.erase(foundAttachedTag + 1, strlen("attached."));
 			}
+		}
+
+		const auto* definition = TextSourceLanguage::definitionForToken(parsedToken);
+		if ( definition && !TextSourceLanguage::isNativeScriptOrigin(definition->origin.kind) )
+		{
+			std::string dispatchError;
+			if ( !TextSourceLanguage::dispatchScriptTagExtension(parsedToken, &src,
+				TextSourceLanguage::ScriptDispatchPhase::RuntimeExecution, dispatchError) )
+			{
+				printlog("[SCRIPT]: Extension dispatch failed for %s (%s): %s",
+					parsedToken.command.c_str(), definition->origin.displayName,
+					dispatchError.c_str());
+			}
+			continue;
 		}
 
 		if ( (*it).find("@reattachto=") != std::string::npos )
@@ -3040,7 +3093,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 			for ( node_t* node = map.entities->first; node; node = node->next )
 			{
 				Entity* entity = (Entity*)node->element;
-				if ( entity )
+				if ( entity && textSourceEntitySharesFloor(src, *entity) )
 				{
 					if ( (entity->behavior == &actMonster && attachTo == TO_MONSTERS)
 						|| (entity->behavior == &actPlayer && attachTo == TO_PLAYERS)
@@ -3094,7 +3147,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					for ( int c = 0; c < MAXPLAYERS; ++c )
 					{
-						if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+						if ( textSourcePlayerSharesSpatialScope(src, c) )
 						{
 							applyToEntities.push_back(players[c]->entity);
 						}
@@ -3152,7 +3205,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					for ( int c = 0; c < MAXPLAYERS; ++c )
 					{
-						if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+						if ( textSourcePlayerSharesSpatialScope(src, c) )
 						{
 							applyToEntities.push_back(players[c]->entity);
 						}
@@ -3212,7 +3265,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					for ( int c = 0; c < MAXPLAYERS; ++c )
 					{
-						if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+						if ( textSourcePlayerSharesSpatialScope(src, c) )
 						{
 							applyToEntities.push_back(players[c]->entity);
 						}
@@ -3267,7 +3320,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					for ( int c = 0; c < MAXPLAYERS; ++c )
 					{
-						if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+						if ( textSourcePlayerSharesSpatialScope(src, c) )
 						{
 							applyToEntities.push_back(players[c]->entity);
 						}
@@ -3318,7 +3371,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* pressurePlate = (Entity*)node->element;
-					if ( pressurePlate && pressurePlate->behavior == &actTrapPermanent )
+					if ( pressurePlate && pressurePlate->behavior == &actTrapPermanent
+						&& textSourceEntitySharesFloor(src, *pressurePlate) )
 					{
 						int findx = static_cast<int>(pressurePlate->x) >> 4;
 						int findy = static_cast<int>(pressurePlate->y) >> 4;
@@ -3338,7 +3392,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					{
 						if ( plateSpots.find(x + map.width * y) == plateSpots.end() )
 						{
-							Entity* pressurePlate = newEntity(-1, 1, map.entities, nullptr);
+							Entity* pressurePlate = newEntityWithSpatialContext(
+								-1, 1, map.entities, nullptr, &src);
 							pressurePlate->sizex = 2;
 							pressurePlate->sizey = 2;
 							pressurePlate->x = x * 16 + 8;
@@ -3368,7 +3423,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* pressurePlate = (Entity*)node->element;
-					if ( pressurePlate && pressurePlate->behavior == &actTrapPermanent )
+					if ( pressurePlate && pressurePlate->behavior == &actTrapPermanent
+						&& textSourceEntitySharesFloor(src, *pressurePlate) )
 					{
 						int findx = static_cast<int>(pressurePlate->x) >> 4;
 						int findy = static_cast<int>(pressurePlate->y) >> 4;
@@ -3398,7 +3454,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* wire = (Entity*)node->element;
-					if ( wire && wire->behavior == &actCircuit )
+					if ( wire && wire->behavior == &actCircuit
+						&& textSourceEntitySharesFloor(src, *wire) )
 					{
 						int findx = static_cast<int>(wire->x) >> 4;
 						int findy = static_cast<int>(wire->y) >> 4;
@@ -3414,7 +3471,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					{
 						if ( wireSpots.find(x + map.width * y) == wireSpots.end() )
 						{
-							Entity* wire = newEntity(-1, 1, map.entities, nullptr);
+							Entity* wire = newEntityWithSpatialContext(
+								-1, 1, map.entities, nullptr, &src);
 							wire->sizex = 3;
 							wire->sizey = 3;
 							wire->x = x * 16 + 8;
@@ -3446,7 +3504,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					nextnode = node->next;
 					Entity* wire = (Entity*)node->element;
-					if ( wire && wire->behavior == &actCircuit )
+					if ( wire && wire->behavior == &actCircuit
+						&& textSourceEntitySharesFloor(src, *wire) )
 					{
 						int findx = static_cast<int>(wire->x) >> 4;
 						int findy = static_cast<int>(wire->y) >> 4;
@@ -3490,7 +3549,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -3533,7 +3593,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -3635,7 +3696,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 						for ( node_t* node = map.creatures->first; node; node = node->next )
 						{
 							Entity* target = (Entity*)node->element;
-							if ( (target->behavior == &actMonster || target->behavior == &actPlayer) && target != entity
+							if ( target && textSourceEntitySharesFloor(*entity, *target)
+								&& (target->behavior == &actMonster || target->behavior == &actPlayer) && target != entity
 								&& entity->checkEnemy(target) )
 							{
 								int findx = static_cast<int>(target->x) >> 4;
@@ -3701,7 +3763,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -3744,7 +3807,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster && !entity->monsterAllyGetPlayerLeader() )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity)
+							&& !entity->monsterAllyGetPlayerLeader() )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -3803,6 +3868,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				{
 					for ( auto entity : attachedEntities )
 					{
+						ScopedPlayableFloorRuntimeContext spatialScope(
+							entity->spatialSpawnContext());
 						if ( explosionSprite > 0 )
 						{
 							spawnExplosionFromSprite(explosionSprite, entity->x, entity->y, -4 + local_rng.rand() % 8);
@@ -3815,6 +3882,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				}
 				else
 				{
+					ScopedPlayableFloorRuntimeContext spatialScope(
+						src.spatialSpawnContext());
 					if ( explosionSprite > 0 )
 					{
 						spawnExplosionFromSprite(explosionSprite, x1 * 16.0 + 8.0, y1 * 16.0 + 8.0, -4 + local_rng.rand() % 8);
@@ -3859,7 +3928,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster && !entity->monsterAllyGetPlayerLeader() )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity)
+							&& !entity->monsterAllyGetPlayerLeader() )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -3901,7 +3972,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 				for ( node_t* node = map.entities->first; node; node = node->next )
 				{
 					Entity* scriptEntity = (Entity*)node->element;
-					if ( scriptEntity && scriptEntity->behavior == &actMonster )
+					if ( scriptEntity && scriptEntity->behavior == &actMonster
+						&& textSourceEntitySharesFloor(src, *scriptEntity) )
 					{
 						Stat* scriptStats = scriptEntity->getStats();
 						if ( scriptStats && !strcmp(scriptStats->name, "scriptNPC") && (scriptStats->MISC_FLAGS[STAT_FLAG_NPC] & 0xFF) == result )
@@ -3924,11 +3996,14 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 							}
 							else
 							{
-								for ( int c = 0; c < MAXPLAYERS && !client_disconnected[c] && players[c] && players[c]->entity; ++c )
+								for ( int c = 0; c < MAXPLAYERS; ++c )
 								{
-									stats[c]->copyNPCStatsAndInventoryFrom(*scriptStats);
+									if ( textSourcePlayerSharesSpatialScope(src, c) )
+									{
+										stats[c]->copyNPCStatsAndInventoryFrom(*scriptStats);
+										statOnlyUpdateNeeded = true;
+									}
 								}
-								statOnlyUpdateNeeded = true;
 							}
 						}
 					}
@@ -3969,7 +4044,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster && !entity->monsterAllyGetPlayerLeader() )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity)
+							&& !entity->monsterAllyGetPlayerLeader() )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -4019,7 +4096,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster && !entity->monsterAllyGetPlayerLeader() )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity)
+							&& !entity->monsterAllyGetPlayerLeader() )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -4121,7 +4200,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.creatures->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actMonster )
+						if ( entity && entity->behavior == &actMonster
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -4133,16 +4213,21 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					}
 					for ( auto entity : applyToEntities )
 					{
+						bool transferred = false;
 						for ( auto monster : monsters )
 						{
 							Item* item = newItemFromEntity(entity);
 							if ( item )
 							{
 								monster->addItemToMonsterInventory(item);
+								transferred = true;
 							}
 						}
-						list_RemoveNode(entity->mynode);
-						entity = nullptr;
+						if ( transferred )
+						{
+							list_RemoveNode(entity->mynode);
+							entity = nullptr;
+						}
 					}
 				}
 				else
@@ -4172,12 +4257,13 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					}
 
 					std::vector<Entity*> items;
-					if ( attachedEntities.size() > 0 )
+					if ( !applyToEntities.empty() )
 					{
 						for ( node_t* node = map.entities->first; node; node = node->next )
 						{
 							Entity* entity = (Entity*)node->element;
-							if ( entity && entity->behavior == &actItem )
+							if ( entity && entity->behavior == &actItem
+								&& textSourceEntitySharesFloor(src, *entity) )
 							{
 								int findx = static_cast<int>(entity->x) >> 4;
 								int findy = static_cast<int>(entity->y) >> 4;
@@ -4188,6 +4274,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 							}
 						}
 					}
+					std::set<Entity*> equippedItems;
 					for ( auto entity : applyToEntities )
 					{
 						for ( auto i : items )
@@ -4253,6 +4340,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 										(*itemSlot) = newItem(WOODEN_SHIELD, EXCELLENT, 0, 1, 0, false, NULL);
 										copyItem(*itemSlot, item); // set equipped item to this new one.
 									}
+									equippedItems.insert(i);
 								}
 								free(item);
 							}
@@ -4260,8 +4348,11 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					}
 					for ( auto i : items )
 					{
-						list_RemoveNode(i->mynode);
-						i = nullptr;
+						if ( equippedItems.count(i) )
+						{
+							list_RemoveNode(i->mynode);
+							i = nullptr;
+						}
 					}
 				}
 				else
@@ -4294,12 +4385,13 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					}
 
 					std::vector<Entity*> items;
-					if ( attachedEntities.size() > 0 )
+					if ( !applyToEntities.empty() )
 					{
 						for ( node_t* node = map.entities->first; node; node = node->next )
 						{
 							Entity* entity = (Entity*)node->element;
-							if ( entity && entity->behavior == &actItem )
+							if ( entity && entity->behavior == &actItem
+								&& textSourceEntitySharesFloor(src, *entity) )
 							{
 								int findx = static_cast<int>(entity->x) >> 4;
 								int findy = static_cast<int>(entity->y) >> 4;
@@ -4310,6 +4402,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 							}
 						}
 					}
+					std::set<Entity*> pickedUpItems;
 					for ( auto entity : applyToEntities )
 					{
 						for ( auto i : items )
@@ -4320,12 +4413,14 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 								if ( entity->behavior == &actMonster )
 								{
 									entity->addItemToMonsterInventory(item);
+									pickedUpItems.insert(i);
 								}
 								else if ( entity->behavior == &actPlayer )
 								{
 									Item* pickedUp = itemPickup(entity->skill[2], item);
 									if ( pickedUp )
 									{
+										pickedUpItems.insert(i);
 										if ( players[entity->skill[2]]->isLocalPlayer() )
 										{
 											// item is the new inventory stack for server, free the picked up items
@@ -4336,13 +4431,20 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 											free(pickedUp); // item is the picked up items (pickedUp == item)
 										}
 									}
+									else
+									{
+										free(item);
+									}
 								}
 							}
 						}
 					}
 					for ( auto i : items )
 					{
-						list_RemoveNode(i->mynode);
+						if ( pickedUpItems.count(i) )
+						{
+							list_RemoveNode(i->mynode);
+						}
 					}
 				}
 				else
@@ -4374,7 +4476,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.entities->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->behavior == &actChest )
+						if ( entity && entity->behavior == &actChest
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -4392,9 +4495,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 							if ( item )
 							{
 								chest->addItemToChest(item, true, nullptr);
+								list_RemoveNode(entity->mynode);
+								entity = nullptr;
 							}
-							list_RemoveNode(entity->mynode);
-							entity = nullptr;
 						}
 					}
 				}
@@ -4439,7 +4542,8 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 					for ( node_t* node = map.entities->first; node; node = node->next )
 					{
 						Entity* entity = (Entity*)node->element;
-						if ( entity && entity->isColliderBreakableContainer() )
+						if ( entity && entity->isColliderBreakableContainer()
+							&& textSourceEntitySharesFloor(src, *entity) )
 						{
 							int findx = static_cast<int>(entity->x) >> 4;
 							int findy = static_cast<int>(entity->y) >> 4;
@@ -4590,7 +4694,10 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 									|| (entity->behavior == &actPlayer && stats[entity->skill[2]] && !client_disconnected[entity->skill[2]]) )
 								{
 									applyToEntities.push_back(entity);
-									statOnlyUpdateNeeded = (entity->behavior == &actPlayer);
+									if ( entity->behavior == &actPlayer )
+									{
+										statOnlyUpdateNeeded = true;
+									}
 								}
 							}
 						}
@@ -4598,7 +4705,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 						{
 							for ( int c = 0; c < MAXPLAYERS; ++c )
 							{
-								if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+								if ( textSourcePlayerSharesSpatialScope(src, c) )
 								{
 									applyToEntities.push_back(players[c]->entity);
 									statOnlyUpdateNeeded = true;
@@ -4679,7 +4786,10 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 									|| (entity->behavior == &actPlayer && stats[entity->skill[2]] && !client_disconnected[entity->skill[2]]) )
 								{
 									applyToEntities.push_back(entity);
-									statOnlyUpdateNeeded = (entity->behavior == &actPlayer);
+									if ( entity->behavior == &actPlayer )
+									{
+										statOnlyUpdateNeeded = true;
+									}
 								}
 							}
 						}
@@ -4687,7 +4797,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 						{
 							for ( int c = 0; c < MAXPLAYERS; ++c )
 							{
-								if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+								if ( textSourcePlayerSharesSpatialScope(src, c) )
 								{
 									applyToEntities.push_back(players[c]->entity);
 									statOnlyUpdateNeeded = true;
@@ -4746,7 +4856,10 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 									|| (entity->behavior == &actPlayer && stats[entity->skill[2]] && !client_disconnected[entity->skill[2]]) )
 								{
 									applyToEntities.push_back(entity);
-									statOnlyUpdateNeeded = (entity->behavior == &actPlayer);
+									if ( entity->behavior == &actPlayer )
+									{
+										statOnlyUpdateNeeded = true;
+									}
 								}
 							}
 						}
@@ -4754,7 +4867,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 						{
 							for ( int c = 0; c < MAXPLAYERS; ++c )
 							{
-								if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+								if ( textSourcePlayerSharesSpatialScope(src, c) )
 								{
 									applyToEntities.push_back(players[c]->entity);
 									statOnlyUpdateNeeded = true;
@@ -4791,7 +4904,10 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 									|| (entity->behavior == &actPlayer && stats[entity->skill[2]] && !client_disconnected[entity->skill[2]]) )
 								{
 									applyToEntities.push_back(entity);
-									statOnlyUpdateNeeded = (entity->behavior == &actPlayer);
+									if ( entity->behavior == &actPlayer )
+									{
+										statOnlyUpdateNeeded = true;
+									}
 								}
 							}
 						}
@@ -4799,7 +4915,7 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 						{
 							for ( int c = 0; c < MAXPLAYERS; ++c )
 							{
-								if ( stats[c] && !client_disconnected[c] && players[c] && players[c]->entity )
+								if ( textSourcePlayerSharesSpatialScope(src, c) )
 								{
 									applyToEntities.push_back(players[c]->entity);
 									statOnlyUpdateNeeded = true;
@@ -4825,7 +4941,9 @@ void TextSourceScript::handleTextSourceScript(Entity& src, std::string input)
 	{
 		for ( int c = 1; c < MAXPLAYERS; ++c )
 		{
-			if ( !players[c]->isLocalPlayer() )
+			if ( stats[c] && !client_disconnected[c]
+				&& players[c] && players[c]->entity
+				&& !players[c]->isLocalPlayer() )
 			{
 				updateClientInformation(c, false, false, TextSourceScript::CLIENT_UPDATE_ALL);
 			}
@@ -5202,18 +5320,20 @@ std::string TextSourceScript::getScriptFromEntity(Entity& src)
 
 	if ( buf[0] == '$' )
 	{
-		// try to replace script with data file entry
-		std::string key = "";
-		for ( int i = 0; i <= totalChars; ++i )
+		const auto resolved = TextSourceLanguage::resolveTextSourceResource(buf,
+			[](const std::string& key, std::string& script)
 		{
-			char c = buf[i];
-			if ( c == '$' ) { continue; }
-			if ( charIsWordSeparator(c) ) { break; }
-			key += c;
-		}
-		if ( ScriptTextParser.allEntries.find(key) != ScriptTextParser.allEntries.end() )
+			auto found = ScriptTextParser.allEntries.find(key);
+			if ( found == ScriptTextParser.allEntries.end() )
+			{
+				return false;
+			}
+			script = found->second.formattedText;
+			return true;
+		});
+		if ( resolved.found )
 		{
-			return ScriptTextParser.allEntries[key].formattedText;
+			return resolved.script;
 		}
 	}
 	return buf;
@@ -5272,6 +5392,59 @@ void TextSourceScript::parseScriptInMapGeneration(Entity& src)
 	size_t foundScriptTag = script.find("@script");
 	if ( foundScriptTag != std::string::npos )
 	{
+		const auto parsed = TextSourceLanguage::parseTextSourceScript(script);
+		for ( const auto& diagnostic : parsed.diagnostics )
+		{
+			printlog("[SCRIPT]: %s line %d column %d: %s",
+				TextSourceLanguage::severityName(diagnostic.severity),
+				diagnostic.line, diagnostic.column, diagnostic.message.c_str());
+		}
+		if ( !parsed.success() )
+		{
+			printlog("[SCRIPT]: Map-generation validation reported errors; invalid tokens will be skipped.");
+		}
+		const bool hasValidScriptMarker = std::any_of(parsed.tokens.begin(),
+			parsed.tokens.end(), [](const TextSourceLanguage::Token& token) {
+				return token.valid && token.canonicalTag == "@script";
+			});
+		if ( !hasValidScriptMarker )
+		{
+			return;
+		}
+		script.clear();
+		for ( const auto& token : parsed.tokens )
+		{
+			if ( token.valid )
+			{
+				const auto* definition = TextSourceLanguage::definitionForToken(token);
+				if ( definition
+					&& !TextSourceLanguage::isNativeScriptOrigin(definition->origin.kind)
+					&& definition->execution.dispatchPhase
+						== TextSourceLanguage::ScriptDispatchPhase::MapGeneration )
+				{
+					std::string dispatchError;
+					if ( !TextSourceLanguage::dispatchScriptTagExtension(token, &src,
+						TextSourceLanguage::ScriptDispatchPhase::MapGeneration,
+						dispatchError) )
+					{
+						printlog("[SCRIPT]: Map-generation extension dispatch failed for %s (%s): %s",
+							token.command.c_str(), definition->origin.displayName,
+							dispatchError.c_str());
+					}
+					continue;
+				}
+				if ( !script.empty() )
+				{
+					script.push_back(' ');
+				}
+				script.append(token.raw);
+			}
+		}
+		foundScriptTag = script.find("@script");
+		if ( foundScriptTag == std::string::npos )
+		{
+			return;
+		}
 		if ( (foundScriptTag + strlen("@script")) < script.length()
 			&& script.at(foundScriptTag + strlen("@script")) == ' ' )
 		{
@@ -5330,7 +5503,7 @@ void TextSourceScript::parseScriptInMapGeneration(Entity& src)
 		for ( node_t* node = map.entities->first; node; node = node->next )
 		{
 			Entity* entity = (Entity*)node->element;
-			if ( entity )
+			if ( entity && textSourceEntitySharesFloor(src, *entity) )
 			{
 				if ( (entity->behavior == &actMonster && attachTo == TO_MONSTERS)
 					|| (entity->behavior == &actPlayer && attachTo == TO_PLAYERS)

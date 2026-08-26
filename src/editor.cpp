@@ -20,6 +20,7 @@
 #include "files.hpp"
 #include "init.hpp"
 #include "mod_tools.hpp"
+#include "text_source_script_tester.hpp"
 #include <sys/stat.h>
 #include <cmath>
 #include <fstream>
@@ -108,6 +109,18 @@ static int editorVirtualSpriteVisual(const int paletteIndex)
         default:
             return paletteIndex;
     }
+}
+
+static int editorPaletteSpriteVisual(const int paletteIndex)
+{
+	// The authored Mini Mimic marker is not a new runtime model. Use the
+	// existing chest marker artwork in Zed while retaining sprite 248 in the
+	// map record so assignActions() can resolve the real MINIMIMIC actor.
+	if ( paletteIndex == EDITOR_SPRITE_MINIMIMIC )
+	{
+		return 21;
+	}
+	return editorVirtualSpriteVisual(paletteIndex);
 }
 
 /* Per-map fog editor fields packed into MAP_FLAG_GENBYTES5/6. */
@@ -13378,6 +13391,10 @@ void handleButtons(void)
 					{
 						menuVisible = 5;
 					}
+					if ( button == butScripts && menuVisible )
+					{
+						menuVisible = 7;
+					}
 					if ( button == butHelp && menuVisible )
 					{
 						menuVisible = 6;
@@ -13431,7 +13448,7 @@ void handleButtons(void)
 			}
 			else
 			{
-				if ( (button != butFile || menuVisible != 1) && (button != butEdit || menuVisible != 2) && (button != butView || menuVisible != 3) && (button != butMap || menuVisible != 4) && (button != butDialogue || menuVisible != 5) && (button != butHelp || menuVisible != 6) )
+				if ( (button != butFile || menuVisible != 1) && (button != butEdit || menuVisible != 2) && (button != butView || menuVisible != 3) && (button != butMap || menuVisible != 4) && (button != butDialogue || menuVisible != 5) && (button != butScripts || menuVisible != 7) && (button != butHelp || menuVisible != 6) )
 				{
 					drawWindow(button->x, button->y, button->x + button->sizex, button->y + button->sizey);
 					printText(font8x8_bmp, button->x + (button->sizex - w) / 2, button->y + (button->sizey - h) / 2, button->label);
@@ -13551,7 +13568,13 @@ bool handleEvents(void)
 					}
 					else if ( event.key.keysym.sym == SDLK_v && SDL_GetModState()&KMOD_CTRL )
 					{
-						strncpy(inputstr, SDL_GetClipboardText(), inputlen);
+						char* clipboardText = SDL_GetClipboardText();
+						if ( clipboardText )
+						{
+							strncpy(inputstr, clipboardText, inputlen);
+							inputstr[inputlen] = '\0';
+							SDL_free(clipboardText);
+						}
 						cursorflash = ticks;
 					}
 				}
@@ -14501,9 +14524,17 @@ int main(int argc, char** argv)
 	button->sizey = 16;
 	button->action = &buttonDialogue;
 
+	button = butScripts = newButton();
+	strcpy(button->label, "Scripts");
+	button->x = 216;
+	button->y = 0;
+	button->sizex = 56;
+	button->sizey = 16;
+	button->action = &buttonScripts;
+
 	button = butHelp = newButton();
 	strcpy(button->label, "Help");
-	button->x = 216;
+	button->x = 272;
 	button->y = 0;
 	button->sizex = 40;
 	button->sizey = 16;
@@ -14810,10 +14841,20 @@ int main(int argc, char** argv)
 	button->action = &buttonDialogueEditor;
 	button->visible = 0;
 
+	// scripts menu
+	butTextSourceScriptTester = button = newButton();
+	strcpy(button->label, "Text Source Script Tester...");
+	button->x = 232;
+	button->y = 16;
+	button->sizex = 240;
+	button->sizey = 16;
+	button->action = &openTextSourceScriptTester;
+	button->visible = 0;
+
 	// help menu
 	butAbout = button = newButton();
 	strcpy(button->label, "About            F1");
-	button->x = 232;
+	button->x = 288;
 	button->y = 16;
 	button->sizex = 160;
 	button->sizey = 16;
@@ -14823,7 +14864,7 @@ int main(int argc, char** argv)
 	// controls menu
 	butEditorControls = button = newButton();
 	strcpy(button->label, "Editor Help       H");
-	button->x = 232;
+	button->x = 288;
 	button->y = 32;
 	button->sizex = 160;
 	button->sizey = 16;
@@ -14980,7 +15021,15 @@ int main(int argc, char** argv)
 			}
 			else if ( menuVisible == 5 )
 			{
-				if ((omousex > 168 + butDialogueEditor->sizex || omousex < 152 || omousey > 32 || (omousey < 16 && omousex > 256)) && mousestatus[SDL_BUTTON_LEFT])
+				if ((omousex > 168 + butDialogueEditor->sizex || omousex < 152 || omousey > 32 || (omousey < 16 && omousex > 216)) && mousestatus[SDL_BUTTON_LEFT])
+				{
+					menuVisible = 0;
+					menuDisappear = 1;
+				}
+			}
+			else if ( menuVisible == 7 )
+			{
+				if ((omousex > 232 + butTextSourceScriptTester->sizex || omousex < 216 || omousey > 32 || (omousey < 16 && omousex > 272)) && mousestatus[SDL_BUTTON_LEFT])
 				{
 					menuVisible = 0;
 					menuDisappear = 1;
@@ -14988,7 +15037,7 @@ int main(int argc, char** argv)
 			}
 			else if ( menuVisible == 6 )
 			{
-				if ((omousex > 232 + butAbout->sizex || omousex < 216 || omousey > 48 || (omousey < 32 && omousex > 256)) && mousestatus[SDL_BUTTON_LEFT])
+				if ((omousex > 288 + butAbout->sizex || omousex < 272 || omousey > 48 || (omousey < 16 && omousex > 312)) && mousestatus[SDL_BUTTON_LEFT])
 				{
 					menuVisible = 0;
 					menuDisappear = 1;
@@ -15445,6 +15494,8 @@ int main(int argc, char** argv)
 						editorSpriteType == 27;
 					const bool isVerticalLayerStair =
 						entity->verticalLayerTransitionDelta != 0;
+					const bool isAuthoredMiniMimic =
+						entity->sprite == EDITOR_SPRITE_MINIMIMIC;
 
 					int editor3DModelIndex =
 						entity->sprite;
@@ -15492,6 +15543,15 @@ int main(int argc, char** argv)
 
 					entity->flags[SPRITE] =
 						!hasEditorPreviewModel;
+
+					if ( isAuthoredMiniMimic
+						&& !hasEditorPreviewModel )
+					{
+						// Match the searchable 2D palette marker in the 3D view.
+						// The runtime actor still resolves to the existing two-part
+						// 1794/1795 voxel body after assignActions().
+						entity->sprite = 21;
+					}
 
 					if ( hasEditorPreviewModel )
 					{
@@ -16180,9 +16240,19 @@ int main(int argc, char** argv)
 				butDialogueEditor->visible = 0;
 			}
 
+			if ( menuVisible == 7 )
+			{
+				drawWindowFancy(216, 16, 232, 32);
+				butTextSourceScriptTester->visible = 1;
+			}
+			else
+			{
+				butTextSourceScriptTester->visible = 0;
+			}
+
 			if ( menuVisible == 6 )
 			{
-				drawWindowFancy(216, 16, 232, 48);
+				drawWindowFancy(272, 16, 288, 48);
 				butAbout->visible = 1;
 				butEditorControls->visible = 1;
 			}
@@ -17787,6 +17857,90 @@ int main(int argc, char** argv)
 									}
 								}
 							}
+							const bool showMiniMimicNPCControls =
+								spriteStats->type == MINIMIMIC;
+							if ( showMiniMimicNPCControls )
+							{
+								const int controlsY = suby1 + 348;
+								const int disposition = std::max(0, std::min(2,
+									atoi(spriteProperties[MONSTER_PROPERTY_DISPOSITION])));
+								const char* dispositionName = disposition == 1
+									? "Passive"
+									: (disposition == 2 ? "Friendly" : "Hostile");
+								const bool recruitable =
+									atoi(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]) != 0;
+								const bool dialogueEnabled =
+									atoi(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]) != 0;
+
+								printTextFormattedColor(
+									font8x8_bmp,
+									subx1 + 8,
+									controlsY,
+									makeColorRGB(255, 220, 128),
+									"Disposition: [%s]",
+									dispositionName
+								);
+								printTextFormattedColor(
+									font8x8_bmp,
+									subx1 + 184,
+									controlsY,
+									recruitable
+										? makeColorRGB(96, 255, 96)
+										: makeColorRGB(220, 220, 220),
+									"Recruitable: [%c]",
+									recruitable ? 'x' : ' '
+								);
+								printTextFormattedColor(
+									font8x8_bmp,
+									subx1 + 328,
+									controlsY,
+									dialogueEnabled
+										? makeColorRGB(96, 255, 96)
+										: makeColorRGB(220, 220, 220),
+									"Custom Dialogue: [%c]",
+									dialogueEnabled ? 'x' : ' '
+								);
+
+								if ( mousestatus[SDL_BUTTON_LEFT]
+									&& omousey >= controlsY - 3
+									&& omousey < controlsY + 12 )
+								{
+									if ( omousex >= subx1 + 8
+										&& omousex < subx1 + 176 )
+									{
+										mousestatus[SDL_BUTTON_LEFT] = 0;
+										snprintf(
+											spriteProperties[MONSTER_PROPERTY_DISPOSITION],
+											sizeof(spriteProperties[MONSTER_PROPERTY_DISPOSITION]),
+											"%d",
+											(disposition + 1) % 3
+										);
+									}
+									else if ( omousex >= subx1 + 184
+										&& omousex < subx1 + 320 )
+									{
+										mousestatus[SDL_BUTTON_LEFT] = 0;
+										snprintf(
+											spriteProperties[MONSTER_PROPERTY_RECRUITABLE],
+											sizeof(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]),
+											"%d",
+											recruitable ? 0 : 1
+										);
+									}
+									else if ( omousex >= subx1 + 328
+										&& omousex < subx2 - 8 )
+									{
+										mousestatus[SDL_BUTTON_LEFT] = 0;
+										snprintf(
+											spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED],
+											sizeof(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]),
+											"%d",
+											dialogueEnabled ? 0 : 1
+										);
+									}
+								}
+							}
+
 							/*
 							* Custom dialogue assignment.
 							*
@@ -17797,7 +17951,7 @@ int main(int argc, char** argv)
 								subx1 + 8;
 
 							const int dialogueLabelY =
-								suby1 + 360;
+								suby1 + (showMiniMimicNPCControls ? 368 : 360);
 
 							const int dialogueFieldX1 =
 								subx1 + 8;
@@ -17816,7 +17970,7 @@ int main(int argc, char** argv)
 								dialogueLabelX,
 								dialogueLabelY,
 								makeColorRGB(255, 255, 255),
-								"Custom Dialogue ID:"
+								"Dialogue Resource:"
 							);
 
 							drawDepressed(
@@ -17856,6 +18010,13 @@ int main(int argc, char** argv)
 								&& omousey < dialogueFieldY2 )
 							{
 								mousestatus[SDL_BUTTON_LEFT] = 0;
+								if ( showMiniMimicNPCControls )
+								{
+									strcpy(
+										spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED],
+										"1"
+									);
+								}
 
 								inputstr = spriteProperties[26];
 								editproperty = 26;
@@ -17896,6 +18057,13 @@ int main(int argc, char** argv)
 								&& omousey < dialogueEditorButtonY2 )
 							{
 								mousestatus[SDL_BUTTON_LEFT] = 0;
+								if ( showMiniMimicNPCControls )
+								{
+									strcpy(
+										spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED],
+										"1"
+									);
+								}
 								openQuestDialogueEditor();
 							}
 
@@ -18387,8 +18555,7 @@ int main(int argc, char** argv)
 												)
 											) * 8;
 										const int authoredCursorY =
-											suby1
-											+ 408
+											authoredStartY
 											+ authoredIndex * 22;
 
 										printText(
@@ -18408,7 +18575,7 @@ int main(int argc, char** argv)
 											) * 8;
 
 										const int dialogueCursorY =
-											suby1 + 374;
+											dialogueFieldY1;
 
 										/*
 										* Keep the cursor inside the visible field even when the stored ID
@@ -23297,6 +23464,10 @@ int main(int argc, char** argv)
 				{
 					drawMonsterTemplateBrowser();
 				}
+				else if ( newwindow == 41 )
+				{
+					drawTextSourceScriptTester();
+				}
 				else if ( newwindow == 25 )
 				{
 					//if ( selectedEntity[0] != nullptr )
@@ -25236,9 +25407,8 @@ int main(int argc, char** argv)
                 SDL_Surface* image = nullptr;
                 if ( paletteType == 1 )
                 {
-                    const int visualIndex = editorIsVirtualZStair(objectIndex)
-                        ? editorVirtualSpriteVisual(objectIndex)
-                        : objectIndex;
+                    const int visualIndex =
+                        editorPaletteSpriteVisual(objectIndex);
                     if ( visualIndex >= 0 && visualIndex < numsprites )
                     {
                         image = sprites[visualIndex] != nullptr ? sprites[visualIndex] : sprites[0];
