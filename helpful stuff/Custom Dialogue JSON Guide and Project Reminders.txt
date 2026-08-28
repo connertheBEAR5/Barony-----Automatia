@@ -2,13 +2,20 @@ BARONY AUTOMATIA CUSTOM DIALOGUE JSON GUIDE
 AND PROJECT REMINDERS
 ============================================================
 
-STATUS NOTE (2026-08-23)
+STATUS NOTE (2026-08-28)
 ------------------------
 This is a compact historical quick reference. The maintained authoring guide is
 "Custom Dialogue and Quest Editor Guide.txt"; the complete implementation and
 remaining-work summary is in "Barony Automatia Complete Features Guide.txt".
 Where this quick reference and those guides differ, use the maintained guides
 and current source tree.
+
+Current integration note: authored Mini Mimics can enable custom dialogue and
+recruitability independently. A dialogue choice may recruit the NPC, and that
+uses the generic follower/owner/HUD/network/persistence path. Per-player story
+state and NPC dialogue configuration persist through the existing world and
+character-save systems. Real two-client dialogue-plus-recruit acceptance remains
+manual.
 
 PER-PLAYER QUEST FOUNDATION
 ---------------------------
@@ -69,7 +76,12 @@ SUPPORTED ACTIONS
 quest_start, quest_accept, quest_stage, quest_complete, quest_fail,
 reward_gold, remove_gold, reward_item, remove_item, set_world_flag,
 set_npc_flag, set_world_variable, add_world_variable,
-set_npc_variable, add_npc_variable
+set_npc_variable, add_npc_variable, set_quest_variable,
+add_quest_variable, objective_complete, objective_clear, quest_reset,
+set_power, status_effect, recruit_npc
+
+`recruit_npc` is a boolean action. It does not require an NPC to lose its
+authored dialogue configuration, and dialogue plus recruitable is supported.
 
 MULTIPLAYER
 -----------

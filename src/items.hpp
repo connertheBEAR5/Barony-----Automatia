@@ -552,6 +552,10 @@ typedef enum ItemType
 } ItemType;
 const int NUMITEMS = ITEM_ENUM_MAX;
 
+/* LMP/Zed item property values reserve 0 for no item and 1 for random, so a
+ * concrete vanilla or S.A.M runtime item ID is stored as runtime ID + 2. */
+constexpr Sint32 EDITOR_ITEM_ID_OFFSET = 2;
+
 // Total item-definition storage capacity.
 //
 // NUMITEMS remains the vanilla item count and must continue to be used by

@@ -2557,8 +2557,9 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
     {
         // Preserve editor-owned data when rebuilding an existing
         // entity through undo, redo, cycling, or duplication.
-        entityNew->z = entityToCopy->z;
-        entityNew->persistentID = entityToCopy->persistentID;
+		entityNew->z = entityToCopy->z;
+		entityNew->persistentID = entityToCopy->persistentID;
+		entityNew->authoredItemStableID = entityToCopy->authoredItemStableID;
         entityNew->authoredMapLayer = entityToCopy->authoredMapLayer;
         entityNew->playableFloor = entityToCopy->playableFloor;
         entityNew->spatialRevision = 0;
@@ -2586,8 +2587,9 @@ void setSpriteAttributes(Entity* entityNew, Entity* entityToCopy, Entity* entity
     else
     {
         // Newly placed entities receive an ID on their first save.
-        entityNew->z = 0.0;
-        entityNew->persistentID = 0;
+		entityNew->z = 0.0;
+		entityNew->persistentID = 0;
+		entityNew->authoredItemStableID.clear();
         entityNew->authoredMapLayer = 0;
         entityNew->playableFloor = DEFAULT_PLAYABLE_FLOOR;
         entityNew->spatialRevision = 0;

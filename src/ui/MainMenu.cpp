@@ -26,6 +26,7 @@
 #include "../classdescriptions.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "../sam/sam_class_registry_foundation.hpp"
+#include "../sam/framework/sam_sync.hpp"
 #endif
 #include "../lobbies.hpp"
 #include "../interface/consolecommand.hpp"
@@ -12288,6 +12289,22 @@ bind_failed:
 	}
 
 	static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+#ifdef SAM_FRAMEWORK_ENABLED
+		{'SAMF', [](){
+			if (!net_packet || net_packet->len != 5)
+			{
+				printlog("[S.A.M SYNC] Lobby server rejected a malformed SAMF request.");
+				return;
+			}
+			const int player = decodeNetworkPlayerIndex(net_packet->data[4]);
+			if (player <= 0 || !lobbyPacketSenderMatchesPlayer(player))
+			{
+				printlog("[S.A.M SYNC] Lobby server rejected an unauthenticated SAMF request.");
+				return;
+			}
+			SAMSync::sendFingerprint(player);
+		}},
+#endif
 		// network scan
 		{'SCAN', [](){
 		    handleScanPacket();
@@ -12755,11 +12772,17 @@ bind_failed:
 
 					sendSvFlagsOverNet();
 					sendCustomScenarioOverNet(playerNum);
+#ifdef SAM_FRAMEWORK_ENABLED
+					SAMSync::sendFingerprint(playerNum);
+#endif
 				}
 				else if ( result == NetworkingLobbyJoinRequestResult::NET_LOBBY_JOIN_DIRECTIP_SUCCESS )
 				{
 					sendSvFlagsOverNet();
 					sendCustomScenarioOverNet(playerNum);
+#ifdef SAM_FRAMEWORK_ENABLED
+					SAMSync::sendFingerprint(playerNum);
+#endif
 				}
 
 			    // assume success after this point
@@ -12789,6 +12812,30 @@ bind_failed:
 	}
 
 	static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+#ifdef SAM_FRAMEWORK_ENABLED
+		{'SAMF', [](){
+			if (!net_packet || net_packet->len < 5 || !lobbyPacketSenderIsServer())
+			{
+				printlog("[S.A.M SYNC] Lobby client rejected an invalid SAMF packet.");
+				return;
+			}
+			const bool compared = SAMSync::receiveFingerprint(
+				reinterpret_cast<const char*>(&net_packet->data[4]),
+				net_packet->len - 4);
+			if (compared && SAMSync::hasMismatch())
+			{
+				const std::string details = SAMSync::getMismatchDetails();
+				const std::string warning =
+					"S.A.M content differs from the host. Room generation may desync.\n"
+					+ details;
+				addLobbyChatMessage(uint32ColorYellow, warning.c_str());
+				errorPrompt(
+					"S.A.M content differs from the host. Continuing may desync room generation. See the lobby log for details.",
+					"Okay",
+					[](Button&) { soundCancel(); closeMono(); });
+			}
+		}},
+#endif
 		{'LJBG', [](){
 			LateJoinProtocol::Begin begin;
 			if (!LateJoinProtocol::decodeBegin(
@@ -18605,6 +18652,9 @@ failed:
 		if (multiplayer == CLIENT) {
 			sendSvFlagsOverNet();
 			sendCustomScenarioOverNet(index);
+#ifdef SAM_FRAMEWORK_ENABLED
+			SAMSync::requestFingerprint();
+#endif
 		}
 
 		auto countdown = lobby->findFrame("countdown");

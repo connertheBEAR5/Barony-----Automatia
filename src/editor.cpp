@@ -183,6 +183,24 @@ enum RoomCopyContentMode
 static int roomCopyContentMode = ROOM_COPY_BOTH;
 static bool roomClipboardHasTiles = false;
 static bool roomClipboardHasSprites = false;
+static std::uint32_t roomGroupSelectedID = 0;
+static int roomGroupListScroll = 0;
+static char roomGroupNameText[AUTHORED_ROOM_GROUP_NAME_BYTES] = "Room Group";
+static char roomGroupStatusText[160] = "";
+static Uint32 roomGroupStatusUntil = 0;
+
+static std::uint8_t roomCopyContentMask()
+{
+	switch ( roomCopyContentMode )
+	{
+		case ROOM_COPY_TILES:
+			return AUTHORED_ROOM_GROUP_TILES;
+		case ROOM_COPY_SPRITES:
+			return AUTHORED_ROOM_GROUP_SPRITES;
+		default:
+			return AUTHORED_ROOM_GROUP_BOTH;
+	}
+}
 
 void roomSelectResetSelection()
 {
@@ -12055,6 +12073,7 @@ static void clearRoomClipboard()
 	roomClipboardMap.width = 0;
 	roomClipboardMap.height = 0;
 	roomClipboardMap.numLayers = 0;
+	authoredRoomGroupsReset(roomClipboardMap.roomGroups);
 
 	roomClipboardReady = false;
 	roomClipboardHasTiles = false;
@@ -12150,6 +12169,7 @@ void editorRoomCopySelection()
 	roomClipboardMap.height = roomClipboardHeight;
 	roomClipboardMap.numLayers = roomClipboardDepth;
 	roomClipboardMap.entities = &roomClipboardEntityList;
+	authoredRoomGroupsReset(roomClipboardMap.roomGroups);
 
 	roomClipboardHasTiles =
 		roomCopyContentMode == ROOM_COPY_BOTH
@@ -12296,6 +12316,38 @@ void editorRoomCopySelection()
 		}
 	}
 
+	/*
+	 * Named groups are clipboard metadata. Only fully-contained groups are
+	 * copied so a partial cuboid never silently changes a room definition.
+	 * The clipboard stores X/Y/authored-layer-relative bounds and never encodes
+	 * Entity::z or playableFloor; the existing sprite clipboard path remains
+	 * responsible for relocating those entity properties.
+	 */
+	const std::uint8_t copiedContentMask = roomCopyContentMask();
+	for ( std::uint32_t i = 0; i < map.roomGroups.count; ++i )
+	{
+		const AuthoredRoomGroup& sourceGroup = map.roomGroups.entries[i];
+		if ( !authoredRoomGroupFullyInside(sourceGroup,
+			selectedarea_x1, selectedarea_y1,
+			selectedarea_x2, selectedarea_y2,
+			static_cast<std::int16_t>(roomSelectBottomLayer),
+			static_cast<std::int16_t>(roomSelectTopLayer)) )
+		{
+			continue;
+		}
+		AuthoredRoomGroup relative = authoredRoomGroupTranslated(sourceGroup,
+			-selectedarea_x1, -selectedarea_y1,
+			static_cast<std::int16_t>(-roomSelectBottomLayer));
+		relative.contentMask &= copiedContentMask;
+		if ( relative.contentMask != 0 )
+		{
+			authoredRoomGroupAdd(roomClipboardMap.roomGroups, relative.name,
+				relative.x1, relative.y1, relative.x2, relative.y2,
+				relative.bottomLayer, relative.topLayer,
+				relative.contentMask);
+		}
+	}
+
 	roomClipboardReady =
 		roomClipboardHasTiles
 		|| roomClipboardHasSprites;
@@ -12331,6 +12383,32 @@ void editorRoomPlaceClipboard(
 	if ( !roomClipboardReady )
 	{
 		return;
+	}
+	if ( map.roomGroups.count + roomClipboardMap.roomGroups.count
+		> AUTHORED_ROOM_GROUP_MAX_COUNT )
+	{
+		std::snprintf(message, sizeof(message),
+			"Paste needs %u free Room Group slot(s).",
+			roomClipboardMap.roomGroups.count);
+		messagetime = 60;
+		return;
+	}
+	for ( std::uint32_t i = 0; i < roomClipboardMap.roomGroups.count; ++i )
+	{
+		const AuthoredRoomGroup placed = authoredRoomGroupTranslated(
+			roomClipboardMap.roomGroups.entries[i], destinationX, destinationY,
+			static_cast<std::int16_t>(destinationBottomLayer));
+		if ( placed.x1 < 0 || placed.y1 < 0
+			|| placed.x2 >= static_cast<std::int32_t>(map.width)
+			|| placed.y2 >= static_cast<std::int32_t>(map.height)
+			|| placed.bottomLayer < 0
+			|| placed.topLayer >= static_cast<std::int16_t>(map.numLayers) )
+		{
+			std::snprintf(message, sizeof(message),
+				"Named Room Groups must fit completely inside the map.");
+			messagetime = 60;
+			return;
+		}
 	}
 
 	makeUndo();
@@ -12463,6 +12541,24 @@ void editorRoomPlaceClipboard(
 		}
 	}
 
+	for ( std::uint32_t i = 0; i < roomClipboardMap.roomGroups.count; ++i )
+	{
+		const AuthoredRoomGroup placed = authoredRoomGroupTranslated(
+			roomClipboardMap.roomGroups.entries[i], destinationX, destinationY,
+			static_cast<std::int16_t>(destinationBottomLayer));
+		if ( placed.x1 < 0 || placed.y1 < 0
+			|| placed.x2 >= static_cast<std::int32_t>(map.width)
+			|| placed.y2 >= static_cast<std::int32_t>(map.height)
+			|| placed.bottomLayer < 0
+			|| placed.topLayer >= static_cast<std::int16_t>(map.numLayers) )
+		{
+			continue;
+		}
+		authoredRoomGroupAdd(map.roomGroups, placed.name,
+			placed.x1, placed.y1, placed.x2, placed.y2,
+			placed.bottomLayer, placed.topLayer, placed.contentMask);
+	}
+
 	pasting = false;
 	roomSelectStage = 5;
 
@@ -12500,6 +12596,7 @@ void editorRoomDeleteSelection()
 	const bool deleteSprites =
 		roomCopyContentMode == ROOM_COPY_BOTH
 		|| roomCopyContentMode == ROOM_COPY_SPRITES;
+	const std::uint8_t deletedContentMask = roomCopyContentMask();
 
 	if ( deleteTiles )
 	{
@@ -12568,6 +12665,29 @@ void editorRoomDeleteSelection()
 		}
 	}
 
+	for ( std::uint32_t i = 0; i < map.roomGroups.count; )
+	{
+		AuthoredRoomGroup& group = map.roomGroups.entries[i];
+		if ( !authoredRoomGroupFullyInside(group,
+			selectedarea_x1, selectedarea_y1,
+			selectedarea_x2, selectedarea_y2,
+			static_cast<std::int16_t>(roomSelectBottomLayer),
+			static_cast<std::int16_t>(roomSelectTopLayer)) )
+		{
+			++i;
+			continue;
+		}
+		group.contentMask &= static_cast<std::uint8_t>(~deletedContentMask);
+		if ( group.contentMask == 0 )
+		{
+			authoredRoomGroupRemove(map.roomGroups, group.id);
+		}
+		else
+		{
+			++i;
+		}
+	}
+
 	groupedEntities.clear();
 	selectedarea = false;
 	roomSelectStage = 6;
@@ -12593,6 +12713,307 @@ static const char* roomSelectStageText()
 			return "Area Deleted";
 		default:
 			return "Select Area";
+	}
+}
+
+static int selectedRoomGroupIndex()
+{
+	return authoredRoomGroupFindByID(map.roomGroups, roomGroupSelectedID);
+}
+
+static void roomGroupSetStatus(const char* text)
+{
+	std::snprintf(roomGroupStatusText, sizeof(roomGroupStatusText), "%s",
+		text ? text : "");
+	roomGroupStatusUntil = ticks + TICKS_PER_SECOND * 4;
+}
+
+static void roomGroupLoadEditorFields(const AuthoredRoomGroup& group)
+{
+	roomGroupSelectedID = group.id;
+	std::snprintf(roomGroupNameText, sizeof(roomGroupNameText), "%s", group.name);
+	if ( group.contentMask == AUTHORED_ROOM_GROUP_TILES )
+	{
+		roomCopyContentMode = ROOM_COPY_TILES;
+	}
+	else if ( group.contentMask == AUTHORED_ROOM_GROUP_SPRITES )
+	{
+		roomCopyContentMode = ROOM_COPY_SPRITES;
+	}
+	else
+	{
+		roomCopyContentMode = ROOM_COPY_BOTH;
+	}
+	inputstr = roomGroupNameText;
+	inputlen = static_cast<int>(sizeof(roomGroupNameText) - 1);
+	cursorflash = ticks;
+}
+
+static bool roomGroupApplyBoundsToSelection()
+{
+	const int index = selectedRoomGroupIndex();
+	if ( index < 0 )
+	{
+		roomGroupSetStatus("Choose a Room Group first.");
+		return false;
+	}
+	const AuthoredRoomGroup& group = map.roomGroups.entries[index];
+	selectedTool = 3;
+	selectedarea_x1 = group.x1;
+	selectedarea_y1 = group.y1;
+	selectedarea_x2 = group.x2;
+	selectedarea_y2 = group.y2;
+	roomSelectBottomLayer = group.bottomLayer;
+	roomSelectTopLayer = group.topLayer;
+	selectedarea = true;
+	selectingspace = false;
+	roomSelectStage = 2;
+	roomGroupLoadEditorFields(group);
+	reselectEntityGroup();
+	return true;
+}
+
+static void openRoomGroupManager()
+{
+	menuVisible = 0;
+	subwindow = 1;
+	newwindow = 42;
+	openwindow = 0;
+	savewindow = 0;
+	subx1 = std::max(16, xres / 2 - 330);
+	subx2 = std::min(xres - 16, xres / 2 + 330);
+	suby1 = std::max(24, yres / 2 - 230);
+	suby2 = std::min(yres - 16, yres / 2 + 230);
+	std::snprintf(subtext, sizeof(subtext), "Room Groups:");
+
+	const int selectedIndex = selectedRoomGroupIndex();
+	if ( selectedIndex >= 0 )
+	{
+		roomGroupLoadEditorFields(map.roomGroups.entries[selectedIndex]);
+	}
+	else
+	{
+		roomGroupSelectedID = 0;
+		std::snprintf(roomGroupNameText, sizeof(roomGroupNameText), "Room Group");
+		inputstr = roomGroupNameText;
+		inputlen = static_cast<int>(sizeof(roomGroupNameText) - 1);
+	}
+	roomGroupListScroll = std::clamp(roomGroupListScroll, 0,
+		std::max(0, static_cast<int>(map.roomGroups.count) - 1));
+	roomGroupStatusText[0] = '\0';
+	cursorflash = ticks;
+	SDL_StartTextInput();
+
+	button_t* closeButton = newButton();
+	std::snprintf(closeButton->label, sizeof(closeButton->label), "Close");
+	closeButton->x = subx2 - 64;
+	closeButton->y = suby2 - 24;
+	closeButton->sizex = 56;
+	closeButton->sizey = 16;
+	closeButton->action = &buttonCloseSubwindow;
+	closeButton->visible = 1;
+	closeButton->focused = 1;
+
+	button_t* closeX = newButton();
+	std::snprintf(closeX->label, sizeof(closeX->label), "X");
+	closeX->x = subx2 - 16;
+	closeX->y = suby1;
+	closeX->sizex = 16;
+	closeX->sizey = 16;
+	closeX->action = &buttonCloseSubwindow;
+	closeX->visible = 1;
+	closeX->focused = 1;
+}
+
+static void drawRoomGroupManager()
+{
+	const int left = subx1 + 16;
+	const int right = subx2 - 16;
+	printText(font8x8_bmp, left, suby1 + 28,
+		"Named cuboids retain X/Y and authored layers; sprite local Z is unchanged.");
+	printText(font8x8_bmp, left, suby1 + 44, "Name:");
+	drawDepressed(left + 48, suby1 + 40, right - 170, suby1 + 58);
+	printText(font8x8_bmp, left + 52, suby1 + 45, roomGroupNameText);
+
+	const char* contentLabel = roomCopyContentMode == ROOM_COPY_TILES
+		? "CONTENT: TILES"
+		: (roomCopyContentMode == ROOM_COPY_SPRITES
+			? "CONTENT: SPRITES" : "CONTENT: BOTH");
+	drawWindowFancy(right - 158, suby1 + 40, right, suby1 + 58);
+	printText(font8x8_bmp, right - 152, suby1 + 45, contentLabel);
+
+	auto clicked = [](const int x1, const int y1, const int x2, const int y2)
+	{
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= x1 && omousex < x2
+			&& omousey >= y1 && omousey < y2 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			return true;
+		}
+		return false;
+	};
+
+	if ( clicked(left + 48, suby1 + 40, right - 170, suby1 + 58) )
+	{
+		inputstr = roomGroupNameText;
+		inputlen = static_cast<int>(sizeof(roomGroupNameText) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+	else if ( clicked(right - 158, suby1 + 40, right, suby1 + 58) )
+	{
+		roomCopyContentMode = (roomCopyContentMode + 1) % 3;
+	}
+
+	const int listTop = suby1 + 72;
+	const int listBottom = suby2 - 112;
+	const int rowHeight = 20;
+	const int visibleRows = std::max(1, (listBottom - listTop) / rowHeight);
+	const int maximumScroll = std::max(0,
+		static_cast<int>(map.roomGroups.count) - visibleRows);
+	if ( omousex >= left && omousex < right
+		&& omousey >= listTop && omousey < listBottom && scroll != 0 )
+	{
+		roomGroupListScroll = std::clamp(roomGroupListScroll + scroll,
+			0, maximumScroll);
+		scroll = 0;
+	}
+	roomGroupListScroll = std::clamp(roomGroupListScroll, 0, maximumScroll);
+	for ( int row = 0; row < visibleRows; ++row )
+	{
+		const int index = roomGroupListScroll + row;
+		const int rowY = listTop + row * rowHeight;
+		if ( index >= static_cast<int>(map.roomGroups.count) )
+		{
+			break;
+		}
+		const AuthoredRoomGroup& group = map.roomGroups.entries[index];
+		if ( group.id == roomGroupSelectedID )
+		{
+			drawDepressed(left, rowY, right, rowY + 18);
+		}
+		else
+		{
+			drawWindowFancy(left, rowY, right, rowY + 18);
+		}
+		printTextFormatted(font8x8_bmp, left + 5, rowY + 5,
+			"%c %-31.31s  (%d,%d)-(%d,%d)  L%d-%d  %s",
+			group.id == roomGroupSelectedID ? '>' : ' ', group.name,
+			group.x1, group.y1, group.x2, group.y2,
+			group.bottomLayer, group.topLayer,
+			group.contentMask == AUTHORED_ROOM_GROUP_TILES ? "tiles"
+				: (group.contentMask == AUTHORED_ROOM_GROUP_SPRITES
+					? "sprites" : "both"));
+		if ( clicked(left, rowY, right, rowY + 18) )
+		{
+			roomGroupLoadEditorFields(group);
+		}
+	}
+
+	if ( map.roomGroups.count == 0 )
+	{
+		printText(font8x8_bmp, left + 8, listTop + 8,
+			"No named Room Groups. Select a cuboid, name it, then create one.");
+	}
+	printTextFormatted(font8x8_bmp, left, listBottom + 4,
+		"%u / %zu groups", map.roomGroups.count, AUTHORED_ROOM_GROUP_MAX_COUNT);
+	if ( roomGroupStatusText[0] && ticks < roomGroupStatusUntil )
+	{
+		printText(font8x8_bmp, left + 120, listBottom + 4, roomGroupStatusText);
+	}
+
+	auto actionButton = [&](const int x, const int y, const int width,
+		const char* label)
+	{
+		drawWindowFancy(x, y, x + width, y + 18);
+		printText(font8x8_bmp, x + 5, y + 5, label);
+		return clicked(x, y, x + width, y + 18);
+	};
+	const int firstActionY = suby2 - 82;
+	if ( actionButton(left, firstActionY, 152, "NEW FROM SELECTION") )
+	{
+		if ( !selectedarea )
+		{
+			roomGroupSetStatus("Select a cuboid first.");
+		}
+		else
+		{
+			normalizeRoomSelection();
+			makeUndo();
+			const int index = authoredRoomGroupAdd(map.roomGroups,
+				roomGroupNameText, selectedarea_x1, selectedarea_y1,
+				selectedarea_x2, selectedarea_y2,
+				static_cast<std::int16_t>(roomSelectBottomLayer),
+				static_cast<std::int16_t>(roomSelectTopLayer),
+				roomCopyContentMask());
+			if ( index >= 0 )
+			{
+				roomGroupLoadEditorFields(map.roomGroups.entries[index]);
+				roomGroupSetStatus("Room Group created.");
+			}
+			else
+			{
+				roomGroupSetStatus("Could not create Room Group (limit reached).");
+			}
+		}
+	}
+	if ( actionButton(left + 160, firstActionY, 136, "UPDATE SELECTED") )
+	{
+		const int index = selectedRoomGroupIndex();
+		if ( index < 0 || !selectedarea )
+		{
+			roomGroupSetStatus("Choose a group and select a cuboid.");
+		}
+		else
+		{
+			normalizeRoomSelection();
+			makeUndo();
+			if ( authoredRoomGroupUpdate(map.roomGroups, roomGroupSelectedID,
+				roomGroupNameText, selectedarea_x1, selectedarea_y1,
+				selectedarea_x2, selectedarea_y2,
+				static_cast<std::int16_t>(roomSelectBottomLayer),
+				static_cast<std::int16_t>(roomSelectTopLayer),
+				roomCopyContentMask()) )
+			{
+				roomGroupLoadEditorFields(
+					map.roomGroups.entries[selectedRoomGroupIndex()]);
+				roomGroupSetStatus("Room Group updated.");
+			}
+		}
+	}
+	if ( actionButton(left + 304, firstActionY, 112, "DELETE GROUP") )
+	{
+		if ( selectedRoomGroupIndex() < 0 )
+		{
+			roomGroupSetStatus("Choose a Room Group first.");
+		}
+		else
+		{
+			makeUndo();
+			authoredRoomGroupRemove(map.roomGroups, roomGroupSelectedID);
+			roomGroupSelectedID = 0;
+			std::snprintf(roomGroupNameText, sizeof(roomGroupNameText), "Room Group");
+			roomGroupSetStatus("Room Group deleted; room contents were not changed.");
+		}
+	}
+
+	const int secondActionY = suby2 - 54;
+	if ( actionButton(left, secondActionY, 120, "SELECT BOUNDS") )
+	{
+		if ( roomGroupApplyBoundsToSelection() )
+		{
+			buttonCloseSubwindow(nullptr);
+			reselectEntityGroup();
+		}
+	}
+	if ( actionButton(left + 128, secondActionY, 104, "COPY GROUP") )
+	{
+		if ( roomGroupApplyBoundsToSelection() )
+		{
+			buttonCloseSubwindow(nullptr);
+			editorRoomCopySelection();
+		}
 	}
 }
 void actGib(Entity* my) {} // dummy for draw.cpp
@@ -13852,6 +14273,8 @@ void makeUndo()
 	undomap->skybox = map.skybox;
 	undomap->width = map.width;
 	undomap->height = map.height;
+	undomap->numLayers = map.numLayers;
+	undomap->roomGroups = map.roomGroups;
 	for ( int c = 0; c < MAPFLAGS; c++ )
 	{
 		undomap->flags[c] = map.flags[c];
@@ -13919,6 +14342,8 @@ void undo()
 	map_t* undomap = (map_t*)undospot->element;
 	map.width = undomap->width;
 	map.height = undomap->height;
+	map.numLayers = undomap->numLayers;
+	map.roomGroups = undomap->roomGroups;
 	map.tiles = (Sint32*) malloc(sizeof(Sint32) * map.width * map.height * MAPLAYERS);
 	camera.vismap = (bool*) malloc(sizeof(bool) * map.height * map.width);
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
@@ -13930,6 +14355,7 @@ void undo()
 
 		setSpriteAttributes(entity, (Entity*)node->element, (Entity*)node->element);
 	}
+	roomSelectResetSelection();
 	if ( redospot != NULL )
 	{
 		redospot = redospot->prev;
@@ -13955,6 +14381,8 @@ void redo()
 	map_t* undomap = (map_t*)redospot->element;
 	map.width = undomap->width;
 	map.height = undomap->height;
+	map.numLayers = undomap->numLayers;
+	map.roomGroups = undomap->roomGroups;
 	map.tiles = (Sint32*) malloc(sizeof(Sint32) * map.width * map.height * MAPLAYERS);
 	camera.vismap = (bool*) malloc(sizeof(bool) * map.height * map.width);
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
@@ -13966,6 +14394,7 @@ void redo()
 
 		setSpriteAttributes(entity, (Entity*)node->element, (Entity*)node->element);
 	}
+	roomSelectResetSelection();
 	if ( undospot != NULL )
 	{
 		undospot = undospot->next;
@@ -14409,6 +14838,7 @@ int main(int argc, char** argv)
 	map.width = 32;
 	map.height = 24;
 	map.numLayers = MAPLAYERS;
+	authoredRoomGroupsReset(map.roomGroups);
 	map.entities = (list_t*) malloc(sizeof(list_t));
 	map.creatures = nullptr;
 	map.worldUI = nullptr;
@@ -15935,6 +16365,17 @@ int main(int argc, char** argv)
 						) )
 					{
 						editorRoomDeleteSelection();
+					}
+
+					panelY += 23;
+
+					if ( roomPanelButton(
+							buttonX,
+							buttonWidth,
+							"ROOM GROUPS"
+						) )
+					{
+						openRoomGroupManager();
 					}
 
 					panelY += 26;
@@ -18977,9 +19418,29 @@ int main(int argc, char** argv)
 							{
 								if ( i == 0 )
 								{
+									Sint32 previousEditorItemValue = 0;
+									const char* currentStableID = "";
+									if ( newwindow == 4 && selectedEntity[0] )
+									{
+										previousEditorItemValue = selectedEntity[0]->skill[10];
+										currentStableID =
+											selectedEntity[0]->authoredItemStableID.c_str();
+									}
+									else if ( newwindow == 5 && selectedEntity[0]
+										&& selectedEntity[0]->getStats() )
+									{
+										previousEditorItemValue = selectedEntity[0]->getStats()
+											->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES];
+										currentStableID = editorGetMonsterSlotStableID(
+											selectedEntity[0]->getStats(), itemSlotSelected);
+									}
+									const bool validSAMItemProperty =
+										editorSAMItemPropertyValueIsValid(propertyInt,
+											previousEditorItemValue, currentStableID);
 									if ( newwindow == 4 )
 									{
-										if ( propertyInt > totalNumItems - 2 || propertyInt < 0 )
+										if ( (propertyInt > totalNumItems - 2 || propertyInt < 0)
+											&& !validSAMItemProperty )
 										{
 											errorMessage = 60;
 											errorArr[i] = 1;
@@ -19000,7 +19461,8 @@ int main(int argc, char** argv)
 									}
 									else if ( newwindow == 5 )
 									{
-										if ( propertyInt > totalNumItems - 2 || propertyInt < 0 )
+										if ( (propertyInt > totalNumItems - 2 || propertyInt < 0)
+											&& !validSAMItemProperty )
 										{
 											errorMessage = 60;
 											errorArr[i] = 1;
@@ -19262,10 +19724,13 @@ int main(int argc, char** argv)
                             const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
                             char samName[128] = "";
                             char samDetail[256] = "";
-                            const char* slotStableID = editorGetMonsterSlotStableID(
-                                selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
-                                itemSlotSelected
-                            );
+                            const char* slotStableID = newwindow == 4
+                                ? (selectedEntity[0]
+                                    ? selectedEntity[0]->authoredItemStableID.c_str() : "")
+                                : editorGetMonsterSlotStableID(
+                                    selectedEntity[0] == nullptr
+                                        ? nullptr : selectedEntity[0]->getStats(),
+                                    itemSlotSelected);
                             if ( editorDescribeSAMItem(displayedItemID, slotStableID,
                                 samName, sizeof(samName), samDetail, sizeof(samDetail))
                                 && samDetail[0] != '\0' )
@@ -19380,10 +19845,13 @@ int main(int argc, char** argv)
                                 const Sint32 displayedItemID = static_cast<Sint32>(strtoll(spriteProperties[0], nullptr, 10));
                                 char samName[128] = "";
                                 char samDetail[256] = "";
-                                const char* slotStableID = editorGetMonsterSlotStableID(
-                                    selectedEntity[0] == nullptr ? nullptr : selectedEntity[0]->getStats(),
-                                    itemSlotSelected
-                                );
+                                const char* slotStableID = newwindow == 4
+                                    ? (selectedEntity[0]
+                                        ? selectedEntity[0]->authoredItemStableID.c_str() : "")
+                                    : editorGetMonsterSlotStableID(
+                                        selectedEntity[0] == nullptr
+                                            ? nullptr : selectedEntity[0]->getStats(),
+                                        itemSlotSelected);
                                 if ( editorDescribeSAMItem(displayedItemID, slotStableID,
                                     samName, sizeof(samName), samDetail, sizeof(samDetail)) )
                                 {
@@ -23468,6 +23936,10 @@ int main(int argc, char** argv)
 				{
 					drawTextSourceScriptTester();
 				}
+				else if ( newwindow == 42 )
+				{
+					drawRoomGroupManager();
+				}
 				else if ( newwindow == 25 )
 				{
 					//if ( selectedEntity[0] != nullptr )
@@ -24716,7 +25188,8 @@ int main(int argc, char** argv)
 					{
 						buttonCloseSubwindow(NULL);
 					}
-					if ( newwindow == 16 || newwindow == 17 )
+					if ( newwindow == 16 || newwindow == 17
+						|| newwindow == 42 )
 					{
 						buttonCloseSubwindow(NULL);
 					}

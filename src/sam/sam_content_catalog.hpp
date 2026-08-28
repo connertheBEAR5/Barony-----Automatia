@@ -4,8 +4,8 @@
     File: sam_content_catalog.hpp
     Stage: SAM-1F
 
-    Builds a deterministic catalog fingerprint from loaded S.A.M manifests and
-    registered stable content identifiers.
+    Builds a deterministic catalog fingerprint from loaded S.A.M manifests,
+    registered stable content identifiers, and effective injected room bytes.
 
 -------------------------------------------------------------------------------*/
 

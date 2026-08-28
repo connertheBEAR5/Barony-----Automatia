@@ -9,6 +9,7 @@
 #include "late_join_protocol.hpp"
 #include "late_join_state.hpp"
 #include "lan_discovery.hpp"
+#include "automatia_save.hpp"
 #include "party_chat.hpp"
 #include "party_protocol.hpp"
 #include "social_party_ui_model.hpp"
@@ -568,13 +569,31 @@ private:
             const std::string snapshot(
                 snapshotAssembler.snapshot().begin(),
                 snapshotAssembler.snapshot().end());
-            if (snapshot.find("\"schema_version\":2")
-                    == std::string::npos
-                || snapshot.find("\"snapshot_scope\":\"map_instance\"")
-                    == std::string::npos
-                || snapshot.find("\"party\"") == std::string::npos)
+            bool validSnapshot = false;
+            try
             {
-                return fail("invalid scoped schema-v2 snapshot");
+                const AutomatiaSave::Json document =
+                    AutomatiaSave::Json::parse(snapshot);
+                validSnapshot = document.is_object()
+                    && document.value("schema_version", std::uint32_t{0})
+                        == AutomatiaSave::CURRENT_SCHEMA_VERSION
+                    && document.value("snapshot_scope", std::string{})
+                        == "map_instance"
+                    && document.contains("map_instances")
+                    && document["map_instances"].is_array()
+                    && document["map_instances"].size() == 1
+                    && document.contains("party")
+                    && document["party"].is_object()
+                    && document.contains("sam_fingerprint")
+                    && document["sam_fingerprint"].is_string();
+            }
+            catch (const std::exception&)
+            {
+                validSnapshot = false;
+            }
+            if (!validSnapshot)
+            {
+                return fail("invalid scoped persistent-world snapshot");
             }
             LateJoinProtocol::Ready ready;
             ready.playerIndex = player;

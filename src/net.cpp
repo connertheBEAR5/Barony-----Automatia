@@ -24,6 +24,7 @@
 #include "items.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_sync.hpp"
 #endif
 #include "shops.hpp"
 #include "menu.hpp"
@@ -837,7 +838,9 @@ namespace
 			{'L', 'J', 'B', 'G'}, {'L', 'J', 'C', 'H'},
 			{'L', 'J', 'D', 'N'}, {'L', 'J', 'O', 'K'},
 			{'L', 'J', 'C', 'B'}, {'L', 'J', 'C', 'C'},
-			{'L', 'J', 'C', 'E'}, {'L', 'J', 'A', 'B'}
+			{'L', 'J', 'C', 'E'}, {'L', 'J', 'A', 'B'},
+			/* S.A.M's host catalog includes the effective room byte hashes. */
+			{'S', 'A', 'M', 'F'}
 		};
 		for (const auto& tag : authenticatedPackets)
 		{
@@ -1431,6 +1434,16 @@ void setLobbyPacketSenderHostIndex(const int senderHostIndex)
 		senderHostIndex >= 0 && senderHostIndex < MAXPLAYERS
 			? senderHostIndex
 			: -1;
+}
+
+bool lobbyPacketSenderMatchesPlayer(const int playerIndex)
+{
+	return currentPacketSenderMatchesPlayer(playerIndex);
+}
+
+bool lobbyPacketSenderIsServer()
+{
+	return currentClientPacketSenderMatchesServer();
 }
 
 static std::vector<std::uint8_t> makeCharacterSaveBeginRecord(
@@ -8021,6 +8034,18 @@ static void changeLevel()
 }
 
 static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
+#ifdef SAM_FRAMEWORK_ENABLED
+	{'SAMF', [](){
+		if (!net_packet || net_packet->len < 5)
+		{
+			printlog("[S.A.M SYNC] Client rejected a truncated SAMF packet.");
+			return;
+		}
+		SAMSync::receiveFingerprint(
+			reinterpret_cast<const char*>(&net_packet->data[4]),
+			net_packet->len - 4);
+	}},
+#endif
 	{'PTYS', [](){
 		AutomatiaParty::Protocol::PartyState state;
 		if (!AutomatiaParty::Protocol::decodePartyState(
@@ -15060,7 +15085,7 @@ void clientHandlePacket()
 		&& !currentClientPacketSenderMatchesServer())
 	{
 		printlog(
-			"[Automatia] Client rejected party/late-join state not sent by its server.");
+			"[Automatia] Client rejected authenticated state not sent by its server.");
 		return;
 	}
 	if (handleSafePacket())
@@ -15417,6 +15442,22 @@ void clientHandleMessages(Uint32 framerateBreakInterval)
 -------------------------------------------------------------------------------*/
 
 static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
+#ifdef SAM_FRAMEWORK_ENABLED
+	{'SAMF', [](){
+		if (!net_packet || net_packet->len != 5)
+		{
+			printlog("[S.A.M SYNC] Server rejected a malformed SAMF request.");
+			return;
+		}
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[4]);
+		if (player <= 0 || !currentPacketSenderMatchesPlayer(player))
+		{
+			printlog("[S.A.M SYNC] Server rejected an unauthenticated SAMF request.");
+			return;
+		}
+		SAMSync::sendFingerprint(player);
+	}},
+#endif
 	{'PCHT', [](){
 		AutomatiaPartyChat::Request request;
 		if (!AutomatiaPartyChat::decodeRequest(
@@ -15879,6 +15920,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
+#ifdef SAM_FRAMEWORK_ENABLED
+		/* Runtime/headless joins use the same existing catalog protocol as the
+		 * lobby. A client request remains the reorder-safe fallback. */
+		SAMSync::sendFingerprint(playerIndex);
+#endif
 		serverUnbindAutomatiaPartyIdentity(
 			playerIndex, "runtime slot allocation", true);
 
@@ -20345,7 +20391,7 @@ bool handleSafePacket()
 		&& !currentClientPacketSenderMatchesServer())
 	{
 		printlog(
-			"[Automatia] Client rejected party/late-join state not sent by its server.");
+			"[Automatia] Client rejected authenticated state not sent by its server.");
 		return true;
 	}
 	if (packetId == 'SAFE')

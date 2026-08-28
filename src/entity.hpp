@@ -99,6 +99,9 @@ public:
     // This is separate from the temporary runtime/network UID.
     // 0 means the entity has not received an ID yet.
 	Sint32 persistentID = 0;
+	/* Optional stable identity for an editor-authored custom ground item. The
+	 * ordinary numeric item field remains skill[10]. */
+	std::string authoredItemStableID;
 
 	/*
 	 * Editor-authored structural map layer. This is intentionally separate from

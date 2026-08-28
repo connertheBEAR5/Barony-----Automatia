@@ -30,6 +30,7 @@ typedef double real_t;
 #include <cstddef>
 #include <algorithm>
 #include "playable_z.hpp"
+#include "room_group.hpp"
 
 // the following functions are safe variants of C's string library.
 // they include the buffer length of each input as secondary parameters to
@@ -493,6 +494,11 @@ typedef struct map_t
 	std::set<int> liquidSfxPlayedTiles;
 	std::map<int, Uint32> tileAttributes;
 	PlayableFloorTable playableFloors;
+	/*
+	 * Named editor cuboids. Bounds are physical authored map layers; entity
+	 * gameplay-floor membership and local model Z remain independent fields.
+	 */
+	AuthoredRoomGroupCollection roomGroups;
 	// Optional V4.10 map metadata. This is environmental audio, not music.
 	AmbienceProperties ambience;
 	// Optional V4.10 map metadata. This is visual ambient light, not fog.

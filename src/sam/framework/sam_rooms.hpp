@@ -52,6 +52,13 @@ public:
 	// canonical order every machine agrees on. Empty for a levelset nobody added to.
 	static const std::vector<std::string>& roomsFor(const std::string& levelset);
 
+	// Canonical effective room-content descriptors used by the S.A.M multiplayer
+	// catalog. Each entry includes levelset, stable namespace/path, and a digest
+	// of the .lmp bytes. Invalid, missing, and duplicate declarations are omitted
+	// exactly as they are from the generated room pool.
+	static std::vector<std::string> contentFingerprintEntries(
+		const std::vector<SAMModManifest>& mods);
+
 	// Totals for the load summary.
 	static int count();        // rooms registered
 	static int levelsets();    // distinct levelsets added to

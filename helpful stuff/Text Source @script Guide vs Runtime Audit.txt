@@ -1,6 +1,6 @@
 TEXT SOURCE @SCRIPT GUIDE VS RUNTIME AUDIT
 Automatia second-pass code review, correction, verification, and library audit
-Date: 2026-08-26
+Date: 2026-08-28
 
 Authoritative implementation inspected:
   src/actgeneral.cpp
@@ -1480,20 +1480,20 @@ exact status displayed.
 
 Targeted characterization during implementation:
   PASS - text_source_script_tests target built.
-  PASS - ./build-super-posix/text_source_script_tests.
+  PASS - ./build/text_source_script_tests.
   PASS - editor target built.
   PASS - barony target built.
 
 Required final validation after the fresh review:
-  PASS - cmake --build build-super-posix -j6
+  PASS - cmake --build build -j6
          All configured targets completed, including editor, barony, and the
          Text Source characterization target.
-  PASS - ctest --test-dir build-super-posix --output-on-failure
-         8/8 tests passed, 0 failed. This includes text_source_script plus the
-         existing Automatia, S.A.M. 2.1, party, and Playable-Z suites.
-  PASS - ./build-super-posix/barony --automatia-stage4d-z3-transition-characterization
+  PASS - ctest --test-dir build --output-on-failure
+         11/11 tests passed, 0 failed. This includes Text Source, Mini Mimic,
+         Room Group, S.A.M. room generation, party, and Playable-Z suites.
+  PASS - ./build/barony --automatia-stage4d-z3-transition-characterization
          Exit 0. Reported the Stage 4D/Z3.4C stacked-sprite/fall runtime passed.
-  PASS - ./build-super-posix/text_source_script_tests
+  PASS - ./build/text_source_script_tests
          Exit 0 after the full build.
   PASS - git diff --check
          Exit 0 with no whitespace errors.

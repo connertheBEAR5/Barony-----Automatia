@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <poll.h>
 #include <string>
 #include <sys/socket.h>
@@ -133,20 +134,24 @@ bool validRuntimeHelo(const std::vector<std::uint8_t>& packet,
 }
 
 bool validRuntimeStart(const std::vector<std::uint8_t>& packet,
-    bool expectedReturning, std::string& mapFile)
+    bool expectedReturning, std::string& mapFile,
+    std::int32_t& playableFloor, std::uint64_t& spatialRevision)
 {
     if (packet.size() < 28 || std::memcmp(packet.data(), "STRT", 4) != 0
         || packet[12] != (expectedReturning ? 1 : 0)
-        || packet[17] < 1 || packet[17] > 4 || packet[18] == 0)
+        || packet[17] < 1 || packet[17] > 5 || packet[18] == 0)
     {
         return false;
     }
+    const std::uint8_t runtimeVersion = packet[17];
     const std::size_t mapLength = packet[18];
     const std::size_t metadataOffset = 19 + mapLength;
-    const std::size_t versionBytes = packet[17] >= 2 ? 24 : 0;
-    const std::size_t transformationBytes = packet[17] >= 3 ? 8 : 0;
-    const std::size_t visiblePlayerMaskBytes = packet[17] >= 4 ? 4 : 0;
-    if (packet.size() != metadataOffset + 9 + versionBytes
+    const std::size_t positionOffset = metadataOffset + 9;
+    const std::size_t positionBytes = runtimeVersion >= 5
+        ? 36 : (runtimeVersion >= 2 ? 24 : 0);
+    const std::size_t transformationBytes = runtimeVersion >= 3 ? 8 : 0;
+    const std::size_t visiblePlayerMaskBytes = runtimeVersion >= 4 ? 4 : 0;
+    if (packet.size() != positionOffset + positionBytes
             + transformationBytes + visiblePlayerMaskBytes
         || packet[metadataOffset + 8] > 1)
     {
@@ -156,6 +161,28 @@ bool validRuntimeStart(const std::vector<std::uint8_t>& packet,
         reinterpret_cast<const char*>(packet.data() + 19),
         mapLength
     );
+    playableFloor = 0;
+    spatialRevision = 0;
+    if (runtimeVersion >= 5)
+    {
+        const std::uint32_t floorRaw =
+            LateJoinProtocol::read32(packet.data(), positionOffset + 24);
+        std::int32_t floorSigned = 0;
+        static_assert(sizeof(floorRaw) == sizeof(floorSigned),
+            "late-join floor field must be 32-bit");
+        std::memcpy(&floorSigned, &floorRaw, sizeof(floorSigned));
+        if (floorSigned < std::numeric_limits<std::int16_t>::min()
+            || floorSigned > std::numeric_limits<std::int16_t>::max())
+        {
+            return false;
+        }
+        playableFloor = floorSigned;
+        const std::uint64_t revisionLow =
+            LateJoinProtocol::read32(packet.data(), positionOffset + 28);
+        const std::uint64_t revisionHigh =
+            LateJoinProtocol::read32(packet.data(), positionOffset + 32);
+        spatialRevision = revisionLow | (revisionHigh << 32U);
+    }
     return mapFile.size() >= 4
         && mapFile.compare(mapFile.size() - 4, 4, ".lmp") == 0;
 }
@@ -311,6 +338,8 @@ int main(int argc, char** argv)
     bool sentReady = false;
     bool sentGo = false;
     std::string selectedMap;
+    std::int32_t selectedFloor = 0;
+    std::uint64_t selectedSpatialRevision = 0;
     std::uint16_t heloTransferId = 0;
     std::uint16_t heloTotalBytes = 0;
     std::vector<std::vector<std::uint8_t>> heloChunks;
@@ -708,7 +737,8 @@ int main(int argc, char** argv)
 			continue;
 		}
         if (sentGo && catchupComplete
-			&& validRuntimeStart(packet, expectedReturning, selectedMap))
+                && validRuntimeStart(packet, expectedReturning, selectedMap,
+                    selectedFloor, selectedSpatialRevision))
         {
             std::cout
                 << "late join live probe passed: discovery=dedicated-late-join player="
@@ -717,6 +747,8 @@ int main(int argc, char** argv)
                 << " chunks=" << begin.chunkCount
                 << " bytes=" << begin.totalBytes
                 << " map=" << selectedMap
+                << " floor=" << selectedFloor
+                << " spatial_revision=" << selectedSpatialRevision
                 << " returning=" << expectedReturning << '\n';
             close(socketHandle);
             return 0;
@@ -728,7 +760,8 @@ int main(int argc, char** argv)
         << " player=" << static_cast<unsigned>(player)
         << " requested=" << requestedSnapshot
         << " ready=" << sentReady
-        << " go=" << sentGo << '\n';
+        << " go=" << sentGo
+        << " catchup=" << catchupComplete << '\n';
     close(socketHandle);
     return 1;
 }

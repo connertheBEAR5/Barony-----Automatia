@@ -76,6 +76,10 @@ bool testIntegratedSourceSeams()
     const std::string loader = readSource("src/sam/framework/sam_loader.cpp");
     const std::string lua = readSource("src/sam/framework/sam_lua_runtime.cpp");
     const std::string maps = readSource("src/maps.cpp");
+	const std::string rooms = readSource("src/sam/framework/sam_rooms.cpp");
+	const std::string catalog = readSource("src/sam/sam_content_catalog.cpp");
+	const std::string net = readSource("src/net.cpp");
+	const std::string mainMenu = readSource("src/ui/MainMenu.cpp");
     const std::string game = readSource("src/game.cpp");
     const std::string world = readSource("src/sam/framework/sam_world.cpp");
     const std::string itemsHeader = readSource("src/items.hpp");
@@ -88,6 +92,14 @@ bool testIntegratedSourceSeams()
     EXPECT(!contains(lua, "MAXPLAYERS == 4"));
     EXPECT(contains(lua, "std::array<double, MAXPLAYERS> g_samMoveSpeed"));
     EXPECT(contains(maps, "SAMRooms::roomsFor(levelset)"));
+	EXPECT(contains(rooms, "contentFingerprintEntries"));
+	EXPECT(contains(rooms, "room.sortKey"));
+	EXPECT(contains(catalog, "roomEntries"));
+	EXPECT(contains(net, "{'SAMF'"));
+	EXPECT(contains(net, "SAMSync::receiveFingerprint"));
+	EXPECT(contains(net, "SAMSync::sendFingerprint"));
+	EXPECT(contains(mainMenu, "SAMSync::requestFingerprint"));
+	EXPECT(contains(mainMenu, "lobbyPacketSenderIsServer"));
     EXPECT(contains(game, "SAMLua::dispatchTick"));
     EXPECT(contains(game, "isRegisteredRuntimeItemId(entity->skill[10])"));
     EXPECT(contains(world, "activeRuntimePlayableFloor()"));

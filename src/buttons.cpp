@@ -165,15 +165,6 @@ static button_t* monsterTemplateCloseButton = nullptr;
 static button_t* monsterTemplatePrevButton = nullptr;
 static button_t* monsterTemplateNextButton = nullptr;
 
-struct MonsterTemplateStableIDs
-{
-    std::array<std::string, ITEM_SLOT_INVENTORY_COUNT> inventory;
-    std::array<std::string, 10> equipment;
-};
-
-static std::unordered_map<Stat*, MonsterTemplateStableIDs> monsterTemplateStableIDs;
-
-
 struct SAMCatalogItem
 {
     Sint32 runtimeID = -1;
@@ -330,12 +321,15 @@ static void resolveTemplateCustomItem(Sint32& runtimeID, std::string& stableID)
     {
         if ( const SAMCatalogItem* item = findSAMCatalogItemByStableID(stableID) )
         {
-            runtimeID = item->runtimeID;
+            runtimeID = item->runtimeID + EDITOR_ITEM_ID_OFFSET;
         }
         return;
     }
 
-    if ( const SAMCatalogItem* item = findSAMCatalogItemByRuntimeID(runtimeID) )
+    const Sint32 decodedRuntimeID = runtimeID >= EDITOR_ITEM_ID_OFFSET
+        ? runtimeID - EDITOR_ITEM_ID_OFFSET : -1;
+    if ( const SAMCatalogItem* item =
+        findSAMCatalogItemByRuntimeID(decodedRuntimeID) )
     {
         stableID = item->stableID;
     }
@@ -349,8 +343,19 @@ bool editorDescribeSAMItem(Sint32 runtimeID, const char* stableIDText,
 
     const std::string stableID = stableIDText == nullptr ? "" : stableIDText;
     const SAMCatalogItem* item = nullptr;
-    if ( !stableID.empty() ) item = findSAMCatalogItemByStableID(stableID);
-    if ( item == nullptr ) item = findSAMCatalogItemByRuntimeID(runtimeID);
+    if ( !stableID.empty() )
+    {
+        item = findSAMCatalogItemByStableID(stableID);
+    }
+    else
+    {
+        item = findSAMCatalogItemByRuntimeID(runtimeID);
+        if ( item == nullptr && runtimeID >= EDITOR_ITEM_ID_OFFSET )
+        {
+            item = findSAMCatalogItemByRuntimeID(
+                runtimeID - EDITOR_ITEM_ID_OFFSET);
+        }
+    }
 
     if ( item != nullptr )
     {
@@ -387,11 +392,93 @@ const char* editorGetMonsterSlotStableID(Stat* stats, int itemSlot)
 {
     static const char* empty = "";
     if ( stats == nullptr ) return empty;
-    const auto found = monsterTemplateStableIDs.find(stats);
-    if ( found == monsterTemplateStableIDs.end() ) return empty;
-    if ( itemSlot >= 0 && itemSlot < 10 ) return found->second.equipment[itemSlot].c_str();
-    if ( itemSlot >= 10 && itemSlot < 10 + ITEM_SLOT_INVENTORY_COUNT ) return found->second.inventory[itemSlot - 10].c_str();
+	if ( itemSlot >= 0
+		&& itemSlot < static_cast<int>(stats->EDITOR_ITEM_STABLE_IDS.size()) )
+	{
+		return stats->EDITOR_ITEM_STABLE_IDS[itemSlot].c_str();
+	}
     return empty;
+}
+
+static const char* editorGetSAMItemStableIDForRuntimeID(
+	const Sint32 runtimeID)
+{
+	static const char* empty = "";
+	const SAMCatalogItem* item = findSAMCatalogItemByRuntimeID(runtimeID);
+	return item ? item->stableID.c_str() : empty;
+}
+
+const char* editorGetSAMItemStableIDForEditorValue(
+	const Sint32 editorItemValue)
+{
+	return editorItemValue >= EDITOR_ITEM_ID_OFFSET
+		? editorGetSAMItemStableIDForRuntimeID(
+			editorItemValue - EDITOR_ITEM_ID_OFFSET)
+		: "";
+}
+
+Sint32 editorResolveSAMItemStableIDToEditorValue(const char* stableID,
+	const Sint32 fallbackEditorValue)
+{
+	const SAMCatalogItem* item = findSAMCatalogItemByStableID(
+		stableID ? stableID : "");
+	return item ? item->runtimeID + EDITOR_ITEM_ID_OFFSET
+		: fallbackEditorValue;
+}
+
+static Sint32 editorItemPropertyValueForStoredValue(
+	const Sint32 editorItemValue, const std::string& stableID)
+{
+	if ( !stableID.empty() )
+	{
+		if ( const SAMCatalogItem* item = findSAMCatalogItemByStableID(stableID) )
+		{
+			return item->runtimeID;
+		}
+		return editorItemValue >= EDITOR_ITEM_ID_OFFSET
+			? editorItemValue - EDITOR_ITEM_ID_OFFSET : editorItemValue;
+	}
+	if ( editorItemValue >= EDITOR_ITEM_ID_OFFSET )
+	{
+		if ( const SAMCatalogItem* item = findSAMCatalogItemByRuntimeID(
+			editorItemValue - EDITOR_ITEM_ID_OFFSET) )
+		{
+			return item->runtimeID;
+		}
+	}
+	return editorItemValue;
+}
+
+bool editorSAMItemPropertyValueIsValid(const Sint32 propertyValue,
+	const Sint32 previousEditorValue, const char* stableIDText)
+{
+	const std::string stableID = stableIDText ? stableIDText : "";
+	if ( !stableID.empty()
+		&& !findSAMCatalogItemByStableID(stableID)
+		&& propertyValue == editorItemPropertyValueForStoredValue(
+			previousEditorValue, stableID) )
+	{
+		return true;
+	}
+	return findSAMCatalogItemByRuntimeID(propertyValue) != nullptr;
+}
+
+static Sint32 commitEditorItemPropertyValue(const Sint32 propertyValue,
+	const Sint32 previousEditorValue, std::string& stableID)
+{
+	if ( !stableID.empty() && !findSAMCatalogItemByStableID(stableID)
+		&& propertyValue == editorItemPropertyValueForStoredValue(
+			previousEditorValue, stableID) )
+	{
+		return previousEditorValue;
+	}
+	if ( const SAMCatalogItem* item = findSAMCatalogItemByRuntimeID(propertyValue) )
+	{
+		stableID = item->stableID;
+		return item->runtimeID + EDITOR_ITEM_ID_OFFSET;
+	}
+	stableID.clear();
+	return propertyValue;
 }
 
 static Sint32 parseNonnegativeRuntimeItemID(const char* text)
@@ -537,17 +624,15 @@ static bool saveMonsterInventoryTemplate(Stat* stats, const std::string& path)
         rapidjson::Value slotObject(rapidjson::kObjectType);
         slotObject.AddMember("slot", slot + 1, allocator);
         Sint32 savedRuntimeID = stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES + 0];
-        MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
-        resolveTemplateCustomItem(savedRuntimeID, stableIDs.inventory[slot]);
+		std::string& stableIDText = stats->EDITOR_ITEM_STABLE_IDS[itemIndex];
+		resolveTemplateCustomItem(savedRuntimeID, stableIDText);
         slotObject.AddMember("item_id", savedRuntimeID, allocator);
-        const auto stableIt = monsterTemplateStableIDs.find(stats);
-        if ( stableIt != monsterTemplateStableIDs.end()
-            && !stableIt->second.inventory[slot].empty() )
+		if ( !stableIDText.empty() )
         {
             rapidjson::Value stableID;
             stableID.SetString(
-                stableIt->second.inventory[slot].c_str(),
-                static_cast<rapidjson::SizeType>(stableIt->second.inventory[slot].size()),
+				stableIDText.c_str(),
+				static_cast<rapidjson::SizeType>(stableIDText.size()),
                 allocator
             );
             slotObject.AddMember("stable_id", stableID, allocator);
@@ -615,10 +700,9 @@ static bool loadMonsterInventoryTemplate(Stat* stats, const std::string& path)
         activeCount = std::max(1, std::min(ITEM_SLOT_INVENTORY_COUNT, document["active_slots"].GetInt()));
     }
 
-    MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
-    for ( std::string& stableID : stableIDs.inventory )
+	for ( int slot = 0; slot < ITEM_SLOT_INVENTORY_COUNT; ++slot )
     {
-        stableID.clear();
+		stats->EDITOR_ITEM_STABLE_IDS[10 + slot].clear();
     }
 
     for ( int slot = 0; slot < ITEM_SLOT_INVENTORY_COUNT; ++slot )
@@ -648,7 +732,7 @@ static bool loadMonsterInventoryTemplate(Stat* stats, const std::string& path)
         const int itemIndex = 10 + slot;
         if ( slotObject.HasMember("stable_id") && slotObject["stable_id"].IsString() )
         {
-            stableIDs.inventory[slot] = slotObject["stable_id"].GetString();
+			stats->EDITOR_ITEM_STABLE_IDS[itemIndex] = slotObject["stable_id"].GetString();
         }
         for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
         {
@@ -658,9 +742,9 @@ static bool loadMonsterInventoryTemplate(Stat* stats, const std::string& path)
                     clampMonsterTemplateProperty(property, slotObject[propertyNames[property]].GetInt());
             }
         }
-        resolveTemplateCustomItem(
+		resolveTemplateCustomItem(
             stats->EDITOR_ITEMS[itemIndex * ITEM_SLOT_NUMPROPERTIES],
-            stableIDs.inventory[slot]
+			stats->EDITOR_ITEM_STABLE_IDS[itemIndex]
         );
     }
 
@@ -697,17 +781,15 @@ static bool saveMonsterEquipmentTemplate(Stat* stats, const std::string& path)
         rapidjson::Value slotObject(rapidjson::kObjectType);
         slotObject.AddMember("slot", slot, allocator);
         Sint32 savedRuntimeID = stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES + 0];
-        MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
-        resolveTemplateCustomItem(savedRuntimeID, stableIDs.equipment[slot]);
+		std::string& stableIDText = stats->EDITOR_ITEM_STABLE_IDS[slot];
+		resolveTemplateCustomItem(savedRuntimeID, stableIDText);
         slotObject.AddMember("item_id", savedRuntimeID, allocator);
-        const auto stableIt = monsterTemplateStableIDs.find(stats);
-        if ( stableIt != monsterTemplateStableIDs.end()
-            && !stableIt->second.equipment[slot].empty() )
+		if ( !stableIDText.empty() )
         {
             rapidjson::Value stableID;
             stableID.SetString(
-                stableIt->second.equipment[slot].c_str(),
-                static_cast<rapidjson::SizeType>(stableIt->second.equipment[slot].size()),
+				stableIDText.c_str(),
+				static_cast<rapidjson::SizeType>(stableIDText.size()),
                 allocator
             );
             slotObject.AddMember("stable_id", stableID, allocator);
@@ -770,10 +852,9 @@ static bool loadMonsterEquipmentTemplate(Stat* stats, const std::string& path)
     }
 
     int loadedItems[10][ITEM_SLOT_NUMPROPERTIES] = {};
-    MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[stats];
-    for ( std::string& stableID : stableIDs.equipment )
+	for ( int slot = 0; slot < 10; ++slot )
     {
-        stableID.clear();
+		stats->EDITOR_ITEM_STABLE_IDS[slot].clear();
     }
     const char* propertyNames[ITEM_SLOT_NUMPROPERTIES] =
     {
@@ -793,7 +874,7 @@ static bool loadMonsterEquipmentTemplate(Stat* stats, const std::string& path)
         }
         if ( slotObject.HasMember("stable_id") && slotObject["stable_id"].IsString() )
         {
-            stableIDs.equipment[slot] = slotObject["stable_id"].GetString();
+			stats->EDITOR_ITEM_STABLE_IDS[slot] = slotObject["stable_id"].GetString();
         }
         for ( int property = 0; property < ITEM_SLOT_NUMPROPERTIES; ++property )
         {
@@ -803,7 +884,8 @@ static bool loadMonsterEquipmentTemplate(Stat* stats, const std::string& path)
                     clampMonsterTemplateProperty(property, slotObject[propertyNames[property]].GetInt());
             }
         }
-        resolveTemplateCustomItem(loadedItems[slot][0], stableIDs.equipment[slot]);
+		resolveTemplateCustomItem(loadedItems[slot][0],
+			stats->EDITOR_ITEM_STABLE_IDS[slot]);
     }
 
     for ( int slot = 0; slot < 10; ++slot )
@@ -1321,6 +1403,10 @@ void buttonNewConfirm(button_t* my)
 	free(map.tiles);
 	free(camera.vismap);
 	list_FreeAll(map.entities);
+	map.numLayers = MAPLAYERS;
+	map.playableFloors.resetToDefault();
+	authoredRoomGroupsReset(map.roomGroups);
+	roomSelectResetSelection();
 	strcpy(map.name, nametext);
 	strcpy(map.author, authortext);
 	map.skybox = atoi(skyboxtext);
@@ -1757,6 +1843,7 @@ void buttonOpenConfirm(button_t* my)
 		strcat(message, "Opened '");
 		strcat(message, filename);
 		strcat(message, "'");
+		roomSelectResetSelection();
 	}
 	messagetime = 60; // 60*50 ms = 3000 ms (3 seconds)
 	buttonCloseSubwindow(my);
@@ -1896,18 +1983,19 @@ void buttonPaste(button_t* my)
 void buttonDelete(button_t* my)
 {
 	menuVisible = 0;
-	makeUndo();
+	if ( selectedarea )
+	{
+		editorRoomDeleteSelection();
+		return;
+	}
 
 	// delete the selected entity, if there is one
 	if ( selectedEntity[0] != NULL)
 	{
+		makeUndo();
 		list_RemoveNode(selectedEntity[0]->mynode);
 		selectedEntity[0] = NULL;
 		lastSelectedEntity[0] = NULL;
-	}
-	if ( selectedarea )
-	{
-		editorRoomDeleteSelection();
 	}
 }
 
@@ -2445,6 +2533,8 @@ void buttonAttributesConfirm(button_t* my)
 		}
 	}
 	free(mapcopy.tiles);
+	authoredRoomGroupsClampToMap(map.roomGroups,
+		map.width, map.height, map.numLayers);
 	strcpy(message, "                       Modified map attributes.");
 	messagetime = 60;
 	buttonCloseSubwindow(my);
@@ -2508,6 +2598,8 @@ void buttonClearMapConfirm(button_t* my)
 		}
 	}
 	list_FreeAll(map.entities);
+	authoredRoomGroupsReset(map.roomGroups);
+	roomSelectResetSelection();
 	buttonCloseSubwindow(my);
 }
 
@@ -2984,7 +3076,10 @@ void buttonSpriteProperties(button_t* my)
 				break;
 			case 3: //items
 				itemSelect = 1;
-				snprintf(spriteProperties[0], 4, "%d", static_cast<int>(selectedEntity[0]->skill[10])); //ID
+				snprintf(spriteProperties[0], sizeof(spriteProperties[0]), "%d",
+					static_cast<int>(editorItemPropertyValueForStoredValue(
+						selectedEntity[0]->skill[10],
+						selectedEntity[0]->authoredItemStableID))); // ID
 				snprintf(spriteProperties[1], 4, "%d", static_cast<int>(selectedEntity[0]->skill[11])); //status
 				if ( (int)selectedEntity[0]->skill[12] == 10 )
 				{
@@ -4367,22 +4462,16 @@ void buttonSpritePropertiesConfirm(button_t* my)
 							strcpy(spriteProperties[0], "1");
 						}
 						const Sint32 previousItemID =
-                            tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected) * ITEM_SLOT_NUMPROPERTIES];
-                        const Sint32 newItemID = parseNonnegativeRuntimeItemID(spriteProperties[0]);
-                        tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected) * ITEM_SLOT_NUMPROPERTIES] = newItemID;
-                        if ( previousItemID != newItemID )
-                        {
-                            MonsterTemplateStableIDs& stableIDs = monsterTemplateStableIDs[tmpSpriteStats];
-                            if ( itemSlotSelected >= 0 && itemSlotSelected < 10 )
-                            {
-                                stableIDs.equipment[itemSlotSelected].clear();
-                            }
-                            else if ( itemSlotSelected >= 10
-                                && itemSlotSelected < 10 + ITEM_SLOT_INVENTORY_COUNT )
-                            {
-                                stableIDs.inventory[itemSlotSelected - 10].clear();
-                            }
-                        }
+							tmpSpriteStats->EDITOR_ITEMS[
+								itemSlotSelected * ITEM_SLOT_NUMPROPERTIES];
+						const Sint32 propertyItemID =
+							parseNonnegativeRuntimeItemID(spriteProperties[0]);
+						std::string& stableID =
+							tmpSpriteStats->EDITOR_ITEM_STABLE_IDS[itemSlotSelected];
+						tmpSpriteStats->EDITOR_ITEMS[
+								itemSlotSelected * ITEM_SLOT_NUMPROPERTIES] =
+							commitEditorItemPropertyValue(propertyItemID,
+								previousItemID, stableID);
 						tmpSpriteStats->EDITOR_ITEMS[(itemSlotSelected)* ITEM_SLOT_NUMPROPERTIES + 1] = (Sint32)atoi(spriteProperties[1]);
 						if ( strcmp(spriteProperties[2], "00") == 0 )
 						{
@@ -4615,7 +4704,15 @@ void buttonSpritePropertiesConfirm(button_t* my)
 				{
 					strcpy(spriteProperties[0], "1");
 				}
-				selectedEntity[0]->skill[10] = (Sint32)atoi(spriteProperties[0]); //id
+				{
+					const Sint32 previousItemID = selectedEntity[0]->skill[10];
+					const Sint32 propertyItemID =
+						parseNonnegativeRuntimeItemID(spriteProperties[0]);
+					selectedEntity[0]->skill[10] =
+						commitEditorItemPropertyValue(propertyItemID,
+							previousItemID,
+							selectedEntity[0]->authoredItemStableID);
+				}
 				selectedEntity[0]->skill[11] = (Sint32)atoi(spriteProperties[1]); //status
 				if ( strcmp(spriteProperties[2], "00") == 0 )
 				{
@@ -6392,7 +6489,11 @@ void buttonMonsterItems(button_t* my)
 	{
 		butMonsterX->visible = 0;
 	}
-	snprintf(spriteProperties[0], sizeof(spriteProperties[0]), "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 0]);
+	snprintf(spriteProperties[0], sizeof(spriteProperties[0]), "%d",
+		static_cast<int>(editorItemPropertyValueForStoredValue(
+			tmpSpriteStats->EDITOR_ITEMS[
+				itemSlotSelected * ITEM_SLOT_NUMPROPERTIES],
+			tmpSpriteStats->EDITOR_ITEM_STABLE_IDS[itemSlotSelected])));
 	snprintf(spriteProperties[1], 5, "%d", tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 1]);
 	if ( (int)tmpSpriteStats->EDITOR_ITEMS[itemSlotSelected * ITEM_SLOT_NUMPROPERTIES + 2] == 10 )
 	{

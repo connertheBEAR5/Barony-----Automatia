@@ -12,6 +12,37 @@ limitations, multiplayer notes, and current status.
 
 It does not explain the internal C++ implementation.
 
+CURRENT BASELINE - 2026-08-28
+-----------------------------
+
+This baseline supersedes older status sentences later in this chronological
+guide where they differ. The current configured build is `build`; use:
+
+    cmake --build build -j6
+
+The game/editor build, all 11 registered CTest tests, the Stage 4D/Z3
+characterization, and the source diff check pass. Contained headless/direct-LAN
+process tests also cover divergent MapInstances, party persistence, SAMF, save,
+restart, and a new-player late join. The exact one-headless plus two-real-
+graphical-client acceptance has not been run, so the tree is not yet fully
+accepted for Z4. Z4 AI has not begun.
+
+Current integrated feature set includes Playable-Z, Divergent Paths and
+MapInstances, schema-v3 persistent world state, headless and 15-player
+multiplayer, the persistent party backend, S.A.M. Framework 2.1, the Text Source
+Script Tester/Library, custom map ambience, authored Mini Mimics, persistent
+named Room Groups, custom dialogue/quests, and the existing editor systems.
+
+The spatial axes are always independent:
+
+    authoredMapLayer = physical authored structural layer, 0..31
+    playableFloor    = gameplay/spatial-simulation membership
+    Entity::z        = local model/animation height
+    MapInstance      = the owning world instance
+
+Do not convert structural layers into local Z or merge two MapInstances merely
+because they share a map filename or X/Y coordinate.
+
 
 ======================================================================
 1. EXPANDED 32-LAYER MAPS
@@ -58,6 +89,10 @@ Newer map versions save additional Automatia properties such as:
 - Custom exit IDs
 - Additional mechanism properties
 - Special power-crystal settings
+- Optional map ambience and authored light metadata
+- Named Room Groups and their multi-layer cuboid descriptors
+- S.A.M. stable item metadata (`SMID`)
+- Playable-Z floor, local-Z, transition, and explicit authored-layer metadata
 
 Older Barony map formats are detected and loaded automatically.
 
@@ -73,8 +108,9 @@ Each custom exit has:
 - This Exit ID
 - Destination Exit ID
 
-When used, the destination map finds the matching ID and places the party at
-that exit.
+When used, the destination map finds the matching ID and places the selected
+traveler and the followers that belong to that traveler at that exit. Other
+players may remain in their current MapInstance.
 
 This allows:
 
@@ -885,9 +921,9 @@ DIVERGENT PATHS / LATE JOIN FOUNDATION
 --------------------------------------
 DIVERGENT-1A adds validated per-player map-instance identity. Every player now
 has a map filename, instance ID, and revision counter. New players default to
-start.lmp#world. The server now has compile-tested independent custom-tunnel
-transitions and occupied-map simulation, but these paths still require real
-two-client runtime verification. A bounded, revision-keyed late-join snapshot
+start.lmp#world. Contained two-client process tests now exercise independent
+MapInstances, scoped party state, save/restart, and SAMF; the paths still require
+real graphical-client verification. A bounded, revision-keyed late-join snapshot
 transaction now suppresses live map simulation until explicit authorization,
 rejects malformed chunk accounting, and resets safely when a network slot is
 reused or disconnected. An explicit direct-LAN runtime JOIN now drives the
@@ -901,7 +937,7 @@ Late Join Developer Guide.txt" for the remaining acceptance work.
 35. PROJECT COMPLETION STATUS
 ======================================================================
 
-Status synchronization date: 2026-08-23
+Status synchronization date: 2026-08-28
 Source basis: current dirty tree in /home/conner/Barony-----Automatia
 
 This matrix records verified implementation state rather than the intended
@@ -961,15 +997,15 @@ Phase 1 - Divergent paths
     teleports, NPC/container UI, walls, signs, follower, death, and mechanism
     updates are filtered to active-instance occupants; discovery, latency probes,
     and preference traffic remains session-global. These new
-    scheduler/transition paths compile but
-    have not passed the required live two-client regression. Empty instances now
+    scheduler/transition paths pass the contained two-client cross-map process
+    regression but not the required real graphical-client run. Empty instances now
     capture persistence before releasing their owned runtime storage and reload
     under preserved validated metadata; saves rotate through every loaded map
     and retain inactive player positions. Steam/EOS queued packets also retain
     the transport peer index and reject mismatched claimed players. Followers
     owned by the moving player are copied to the destination instance with
     relative placement and server ownership updates, then removed from the
-    source instance. This transfer path compiles but still needs the live
+    source instance. This transfer path still needs the real graphical
     two-client regression. Live P2P verification and complete packet coverage
     also remain incomplete.
 
@@ -1086,25 +1122,28 @@ Phase 6 - Dialogue and quests
     regression tests remain.
 
 Phase 7 - Editor roadmap
-    Status: Implemented in parts but not fully verified.
-    Searchable palettes, expanded monster inventory work, 3D previews, and mass
-    copy/paste code are present in recent history. Cuboid tools, complete
-    selection semantics, UID/persistent-ID collision behavior, and full editor
-    regression coverage still require source-level verification.
+    Status: Major intended workflows implemented; graphical acceptance pending.
+    Searchable palettes, expanded monster inventory work, 3D previews, mass
+    copy/paste, Mini Mimic authoring, map ambience, Text Source Tester/Library,
+    and persistent named multi-layer Room Groups are present. Room Groups use
+    authored-layer cuboids, preserve tiles/sprites/air and generic entity
+    metadata, and participate in undo/redo and map save/load. Deterministic
+    characterization covers their core and S.A.M. interoperability; complete
+    GUI selection semantics and collision behavior still need manual testing.
 
 Phase 8 - Release readiness
-    Status: Not started.
-    The primary Linux Steamworks/FMOD compile gate passes. A contained Linux
-    single-map headless start/save/restart/resave cycle and direct-LAN
-    new-player probes pass. Windows, graphical/editor runtime, real two-client
-    divergent-map, token-matched reconnect, multi-map restart, broad save
-    migration, and S.A.M. mismatch acceptance remain required.
+    Status: Automated stabilization gate passes; real-client acceptance pending.
+    The current Linux Steamworks/FMOD compile gate, 11 CTest tests, Stage4D,
+    Room Group/S.A.M. characterizations, contained divergent two-client party
+    save/restart, and contained late-join probe pass. Windows, graphical/editor
+    runtime, the exact headless plus two-real-client scenario, token-matched
+    returning reconnect, real custom S.A.M. content, and audio acceptance remain.
 
 Foundation regression target
     Configure with BUILD_TESTING=ON and run:
 
-        cmake --build build-super-posix --target automatia_foundation_tests -j6
-        ctest --test-dir build-super-posix --output-on-failure
+        cmake --build build -j6
+        ctest --test-dir build --output-on-failure
 
     The current test covers canonical map-instance identity validation,
     revision behavior, map-local packet classification, global chat exclusion,
@@ -1187,11 +1226,145 @@ same axes. Tile overrides are unique by map instance, playable floor, X, Y, and
 geometry layer. Schema-v3 validation checks these spatial fields while schema-1
 and schema-2 saves remain readable through explicit legacy semantics.
 
-The primary build is build-super-posix and uses:
+The primary configured build is build and uses:
 
-    cmake --build build-super-posix -j6
+    cmake --build build -j6
 
 --nosteam retains local gameplay and Steam-independent LAN/direct-connect
 capabilities, but disables Steam services and Steam DLC. It does not read a
 Steam cache or verify ownership. Steam client Offline Mode plus a normal launch
 is the supported offline path when Steam entitlements are needed.
+
+
+======================================================================
+36. CUSTOM MAP AMBIENCE
+======================================================================
+
+Status: Implemented; audible/graphical acceptance remains manual.
+
+Zed can author optional map ambience resource, enabled/loop flags, volume, fade
+timing, and crossfade behavior. The data is stored as optional V4.10 map
+metadata, so old maps remain readable. Runtime ambience belongs to the active
+MapInstance: switching instances updates it, while an ordinary Playable-Z stair
+inside the same instance does not manufacture a map change or restart the loop.
+Headless and no-sound modes suppress playback without changing saved metadata.
+
+
+======================================================================
+37. AUTHORED MINI MIMIC CREATURE
+======================================================================
+
+Status: Implemented and characterized; editor/live multiplayer acceptance remains.
+
+The searchable Mini Mimic palette entry exposes the existing runtime monster.
+It supports all 32 authored layers, normal selection/copy/paste/delete/save/load,
+an optional display name, hostile/passive/friendly disposition, independent
+recruitability, and optional custom dialogue resource. Dialogue and recruitment
+are not mutually exclusive.
+
+Combat, faction, followers, ownership, HUD, networking, dialogue/quests,
+persistence, inventory, and equipment use the generic systems. S.A.M. items in
+its equipment use the shared stable-ID/runtime-ID mapping; there is no Mini
+Mimic-specific item or save implementation.
+
+
+======================================================================
+38. PERSISTENT NAMED ROOM GROUPS
+======================================================================
+
+Status: Core/editor integration implemented and characterized; GUI acceptance remains.
+
+A Room Group is authored metadata for a stable-ID/name plus X/Y/authored-layer
+cuboid and a content mode: tiles, sprites, or both. The workflow supports
+create/update/select/copy/paste/delete, undo/redo, save/reload, all 32 authored
+layers, relative cross-layer copying, and explicit empty/air tile copying.
+Generic sprite serialization preserves mechanisms, custom properties,
+persistent IDs, Mini Mimic and Text Source fields, and S.A.M. stable metadata.
+
+Room Groups are not procedural S.A.M. room hooks. S.A.M. room providers append
+deterministically selected prefab paths to the existing generator; their
+effective selection contributes to SAMF. Both systems share ordinary map/entity
+serialization without collapsing their distinct authored and procedural roles.
+
+
+======================================================================
+39. TEXT SOURCE SCRIPT TESTER AND LIBRARY
+======================================================================
+
+Status: Implemented and characterized; live world/GUI effects remain manual.
+
+Zed's Scripts menu opens a Tester and searchable Library backed by the shared
+runtime parser catalog. It reports parser/dispatch/behavior verification depth,
+prevents unsafe world mutations in editor test mode, inserts known-good example
+scripts, and exposes a lifecycle-safe extension registry. Current S.A.M. 2.1.0
+registers zero Text Source commands; its Lua/JavaScript/TypeScript VMs are a
+different surface. A future supported S.A.M. adapter should register through the
+existing extension API instead of inventing a second command language.
+
+
+======================================================================
+40. S.A.M. FRAMEWORK 2.1 INTEGRATION
+======================================================================
+
+Status: Integrated at the supported identity, persistence, hook, and handshake
+seams; real mod-content acceptance remains manual.
+
+S.A.M. stable IDs are cross-session item identity. Numeric runtime item IDs are
+assigned for the current loaded catalog and must never be written as durable
+identity when a stable ID exists. Zed's historical concrete item fields use
+`runtime ID + 2`; the V4.10 SMID metadata preserves the stable ID for authored
+ground items, containers, monster inventory, and equipment.
+
+The effective item/catalog and deterministic room-provider selection contribute
+to SAMF. Late join hard-rejects an incompatible fingerprint; the current lobby
+path warns and should be treated as a failed acceptance rather than ignored.
+Duplicate logical room declarations are resolved deterministically before both
+generation and fingerprinting. Server generation remains authoritative and
+MapInstances do not share generation state.
+
+S.A.M. hooks extend existing item/entity/room behavior. They do not replace
+Automatia persistence, Room Groups, Text Source, Mini Mimic, party, networking,
+or Playable-Z authority. See the dedicated S.A.M. compatibility audit for the
+full overlap matrix and deferred surfaces.
+
+
+======================================================================
+41. PERSISTENT PARTY BACKEND
+======================================================================
+
+Status: Implemented and characterized; real-client/15-player acceptance remains.
+
+Parties have durable Party IDs, members, leader and invitation state, scoped
+chat/UI behavior, save/restart hydration, and bounds for the 15-player build.
+Party identity is social state, not MapInstance or playableFloor membership:
+members may occupy different instances/floors without the server merging their
+world state. Quest runtime scope remains player-only unless a future explicit
+party quest model is implemented.
+
+Contained two-client processes cover divergent placement, scoped party traffic,
+SAMF, save/shutdown/restart, and Party ID restoration. Real graphical clients,
+the full 15-player boundary, transport-specific Steam/EOS behavior, and the
+complete manual cross-feature scenario remain acceptance work.
+
+
+======================================================================
+42. CURRENT AUTOMATED AND MANUAL ACCEPTANCE
+======================================================================
+
+Current automated commands:
+
+    cmake --build build -j6
+    ctest --test-dir build --output-on-failure
+    ./build/barony --automatia-stage4d-z3-transition-characterization
+    git diff --check
+
+CTest currently registers 11 targets: foundation, S.A.M. 2.1 contract, Text
+Source, Mini Mimic, Room Group, S.A.M. room generation, party backend, party UI,
+party chat, Playable-Z characterization, and Playable-Z runtime characterization.
+
+The remaining release/Z4 gate is the exact one-headless plus two-real-graphical-
+client run in "Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt".
+It covers divergent MapInstances/floors, custom S.A.M. content, persistence,
+Mini Mimic dialogue/recruitment and durable ownership, Room Groups, ambience,
+late join, save, dedicated restart, reconnect, and restoration. Do not claim
+that scenario, editor visuals, or audible ambience as verified until run.

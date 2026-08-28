@@ -10,24 +10,23 @@ existing Automatia, S.A.M., editor, audio, persistence, late-join, and
 headless work unless a specific task requires a narrower change.
 
 Current status:
-- The primary Linux target is the existing Steamworks-enabled 15-player
-  `build-super-posix`; build it with `cmake --build build-super-posix -j6`.
-- The game, editor, all six registered tests, and the Stage 4D/Z3 executable
+- The primary Linux target is the configured Steamworks-enabled 15-player
+  `build`; build it with `cmake --build build -j6`.
+- The game, editor, all 11 registered tests, and the Stage 4D/Z3 executable
   characterization pass in that build. FMOD remains enabled and OpenAL remains
   outside the supported current profile.
-- The latest stabilization work covered late-join, reconnect, persistence,
-  headless diagnostics, runtime character/lobby flow, and the complete
-  Playable-Z local-Z/structural-layer correction.
-- The latest Playable-Z follow-ups cover full vertical rendering, structural
-  lighting and legacy ceiling models, lower-floor landing, upper-floor HUD and
-  cameras, Project Spirit, sustained Light/Deep Shade, persistence, and Zed
-  ceiling-model preview. Remaining graphical and multi-client checks are
-  explicitly documented rather than claimed complete.
+- The latest stabilization covers Playable-Z, divergent MapInstances,
+  persistence, headless/late join, the persistent party backend, S.A.M. 2.1,
+  Text Source Tester/Library, custom ambience, authored Mini Mimics, named Room
+  Groups, room-generation hooks, dialogue/quests, and cross-feature tests.
+- Contained two-client processes passed divergent MapInstance party/save/restart
+  and new-player late-join probes. The exact headless plus two-real-graphical-
+  client acceptance remains open and is not implied by those probes.
 - The remaining work should be validated with the FMOD build path and relevant
   automated tests before claiming completion.
 
 Build expectations:
-- Use only `cmake --build build-super-posix -j6` on the current development
+- Use only `cmake --build build -j6` on the current development
   host; unrestricted `$(nproc)` builds have caused system instability.
 - Preserve the Steamworks-enabled 15-player/FMOD profile. Do not create a
   separate four-player or no-Steam build for ordinary validation.
@@ -38,17 +37,18 @@ Build expectations:
 - When significant progress is made, update this document with the new status,
   validated results, and remaining blockers so the master prompt stays current.
 
-Last updated: 2026-08-23
+Last updated: 2026-08-28
 
 CURRENT CHECKPOINT
 ==================
 
-The current divergent-map, persistence, late-join, headless, and Playable-Z
-architecture has been statically audited and strengthened. The primary Linux
-game/editor build and deterministic suite pass. This checkpoint is ready for
-the manual graphical Playable-Z checks and complete two-client acceptance test
-below; divergent paths, multi-map restart persistence, token-matched reconnect,
-and renderer appearance are not declared complete without that evidence.
+The cross-feature stabilization pass is complete at the automated and contained-
+process level. Mini Mimic authoring, Room Groups/S.A.M. room interoperability,
+S.A.M. stable/runtime item remapping, party persistence, Text Source seams,
+Playable-Z, divergent instances, save/restart, and late join have focused test
+coverage. The current gate is the exact real headless plus two-client acceptance
+documented in the cross-feature audit. Z4 has not begun and is not fully accepted
+until that run, editor GUI checks, and relevant audio/custom-mod checks succeed.
 
 WORK COMPLETED
 ==============
@@ -514,10 +514,13 @@ RUNTIME TESTS STILL REQUIRING THE USER
 EXACT NEXT TASK
 ===============
 
-Run the revised manual two-client acceptance test above, beginning with the
-character-selection/individual-Ready and graphical lighting checks, and return
-the host/client logs plus both save files. Fix only failures demonstrated by
-that evidence before starting another broad feature phase.
+Run the exact "REAL MULTIPLAYER ACCEPTANCE" procedure in
+"Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt" with one
+headless server and two real graphical clients. Preserve the server/client logs,
+save files, S.A.M. fingerprints, persistent IDs, Party ID, Mini Mimic owner,
+MapInstances, playable floors, authored layers, and local Z before and after the
+dedicated-server restart. Fix only demonstrated integration bugs. Do not begin
+Z4 until the remaining acceptance decision is explicit.
 
 FINAL VERIFICATION
 ==================
@@ -1536,3 +1539,45 @@ The last source validation remains the immediately preceding `-j6` build,
 6/6 CTest pass, Stage 4D/Z3 characterization pass, and `git diff --check` pass.
 This documentation-only synchronization intentionally did not rerun or alter
 that source validation.
+
+2026-08-28 CROSS-FEATURE STABILIZATION AND DOCUMENTATION CHECKPOINT
+===================================================================
+
+This checkpoint supersedes every older "current" build/test count above while
+retaining dated entries as history.
+
+Implemented/current architecture:
+
+* Four independent spatial axes: MapInstance, playableFloor,
+  authoredMapLayer 0..31, and local Entity::z.
+* Schema-v3 world persistence, divergent routes, late-join staging, headless
+  save/restart, 15-player bounds, and persistent Party IDs.
+* S.A.M. Framework 2.1 stable item identity, authenticated SAMF catalog/room
+  fingerprinting, deterministic room-provider selection, and generic
+  container/monster-equipment persistence.
+* Zed-authored Mini Mimics with hostile/passive/friendly disposition,
+  independent dialogue and recruitment, display name, generic follower owner,
+  inventory/equipment, networking, and persistence.
+* Persistent named Room Groups covering multi-layer authored cuboids, tiles,
+  sprites, and air with editor operations, undo/redo, and V4.10 save/load.
+  These remain distinct from S.A.M. procedural room hooks.
+* Text Source Script Tester/Library and extension registry. S.A.M. 2.1.0 itself
+  supplies zero Text Source commands.
+* MapInstance-aware custom ambience and the existing dialogue/quest/editor
+  systems.
+
+Latest validation during this documentation refresh:
+
+* `cmake --build build -j6`: PASS.
+* `ctest --test-dir build --output-on-failure`: PASS, 11/11.
+* `./build/barony --automatia-stage4d-z3-transition-characterization`: PASS.
+* `git diff --check`: PASS.
+* Contained divergent two-client party/SAMF/save/restart process run: PASS.
+* Contained direct-LAN new-player late-join process run: PASS.
+
+Not claimed complete: the exact one-headless plus two-real-graphical-client
+acceptance, token-matched returning character with real clients, GUI Room Group
+and Mini Mimic workflows, audible MapInstance ambience, real S.A.M. custom-mod
+content, Windows, Steam/EOS P2P, or adversarial network stress. The authoritative
+instructions and readiness decision are in the cross-feature compatibility
+audit. Z4 was not started.

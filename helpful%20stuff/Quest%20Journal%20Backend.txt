@@ -83,10 +83,18 @@ first interacted with.
 
 A future quest manifest can preload every authored quest definition.
 
-Persistence and scope status (2026-08-23)
+Persistence and scope status (2026-08-28)
 -----------------------------------------
 Quest and dialogue state is serialized through the Automatia companion save;
 dedicated per-character saves export/import the selected player's story state.
 Player scope is the only quest ownership mode currently executed by the
 dialogue runtime. Authored party/world scope values are accepted by the editor
-but load safely as player scope until real party/world ownership is implemented.
+but load safely as player scope until those quest ownership models are
+implemented. The persistent party backend now exists, but Party ID/membership
+does not by itself make quest state party-scoped.
+
+Authored Mini Mimics may offer dialogue and recruitment together. Their dialogue
+uses this same per-player journal backend; recruitment uses the separate generic
+follower/owner system. Contained multiplayer processes and deterministic tests
+do not replace the remaining real two-client quest privacy, save/restart, and
+reconnect acceptance.

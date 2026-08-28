@@ -174,6 +174,8 @@ bool copyAutomatiaPartySnapshotForLocalPlayer(
  * UDP endpoint.
  */
 void setLobbyPacketSenderHostIndex(int senderHostIndex);
+bool lobbyPacketSenderMatchesPlayer(int playerIndex);
+bool lobbyPacketSenderIsServer();
 
 // server/game flags
 extern Uint32 svFlags;

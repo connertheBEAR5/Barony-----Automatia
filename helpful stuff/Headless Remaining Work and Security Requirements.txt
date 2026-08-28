@@ -48,10 +48,12 @@ stable custom-item identity, graceful shutdown save, and fail-closed validation.
 The headless process-only slot 0 is not serialized as a player. Player and
 dynamic-entity spatial records preserve map instance, playable floor, authored
 structural layer, and local Z separately. A single-map FMOD
-start/save/restart/resave acceptance cycle passes. Remaining work is divergent-
-player recovery, unknown-item removal/rehydration acceptance, corrupted-save
-fixtures, clean-shutdown/crash markers, migration coverage, and Windows runtime
-verification.
+start/save/restart/resave acceptance cycle passes. The contained cross-map party
+process test now covers two divergent simulated
+clients, SAMF, save/shutdown/restart, and durable Party ID hydration. Remaining
+work includes the equivalent real-client divergent recovery, unknown-item
+removal/rehydration acceptance, corrupted-save fixtures, clean-shutdown/crash
+markers, migration coverage, and Windows runtime verification.
 
 Steam note: --nosteam skips SteamAPI and therefore disables Steam ownership and
 DLC checks rather than emulating them. DLC remains locked. Use the Steam
@@ -65,15 +67,16 @@ Test pre-game join, disconnect, autostart, terminal start/shutdown, invalid
 ports, occupied ports, malformed packets, catalog mismatch, long runtimes, and
 vanilla graphical startup. Unsupported options must fail closed.
 
-CURRENT VALIDATION SNAPSHOT (2026-08-23)
+CURRENT VALIDATION SNAPSHOT (2026-08-28)
 ----------------------------------------
-The primary build is the Steamworks-enabled 15-player `build-super-posix` and
-must use `cmake --build build-super-posix -j6` on the current host. The latest
-source validation passed that build, all six CTest targets, and the Stage 4D/Z3
-Playable-Z characterization. The Linux single-map headless
-start/save/restart/resave cycle and contained direct-LAN new-player probes are
-runtime evidence already recorded; divergent multi-map restart, normal
-graphical two-client late join, token-matched returning reconnect, and Windows
+The primary configured Steamworks-enabled 15-player build is `build`; use
+`cmake --build build -j6` on the current host. The latest source validation
+passed that build, all 11 CTest targets, the Stage 4D/Z3 Playable-Z
+characterization, and the diff check. The Linux single-map headless cycle,
+contained divergent two-client party/SAMF/save/restart run, and contained
+direct-LAN new-player late-join probe are runtime evidence already recorded.
+The exact one-headless plus two-real-graphical-client divergent/restart run,
+token-matched returning reconnect, real S.A.M. mod content, and Windows
 headless acceptance remain open.
 
 Playable-Z persistence keeps map instance, playable floor, authored structural

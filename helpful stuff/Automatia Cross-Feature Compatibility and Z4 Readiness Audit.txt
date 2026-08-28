@@ -1,0 +1,556 @@
+AUTOMATIA CROSS-FEATURE COMPATIBILITY AND Z4 READINESS AUDIT
+============================================================
+
+Working tree: /home/conner/Barony-----Automatia
+Date: 2026-08-27
+Scope: stabilization before Z4 AI; Z4 was not started.
+
+
+1. EVIDENCE RULES
+=================
+
+RUNTIME TESTED
+    Production serialization, loading or state logic ran inside an automated
+    executable with concrete objects and assertions.
+
+SOURCE-CONTRACT TESTED
+    A focused test guards the required integration seams or editor wiring, but
+    does not prove graphical interaction.
+
+CONTAINED LIVE TESTED
+    A real headless server process and synthetic authenticated UDP clients ran.
+    This proves the named protocol/server behavior, not rendering, audio, player
+    input, real inventory UI or human reconnect workflow.
+
+MANUAL REQUIRED
+    The current harness cannot honestly establish the result. No check in this
+    category is reported as passed.
+
+
+2. ARCHITECTURE PRESERVED
+=========================
+
+The stabilization work keeps these axes independent:
+
+    MapInstance        independent loaded/persistent world identity
+    playableFloor      gameplay floor inside that instance
+    authoredMapLayer   physical LMP layer, including the full 0..31 range
+    Entity::z          local model elevation only
+
+S.A.M stable IDs remain cross-session identity; runtime item IDs remain a
+session-local lookup. Mini Mimic uses the generic monster, faction, dialogue,
+follower, networking and persistence systems. Room Groups are authored editor
+metadata; S.A.M room hooks add deterministic prefab paths to the existing
+generator. None of these features received a duplicate ownership, inventory,
+quest, room-generation or persistence system in this pass.
+
+
+3. COMBINATION AUDIT
+====================
+
+Playable-Z + divergent MapInstances + world persistence
+--------------------------------------------------------
+
+Result: RUNTIME TESTED for the highest-risk identity collision.
+
+Stage4D saves an entity on playable floor 5/authored layer 5, reloads it from
+the production disk snapshot, and verifies local z separately. A sibling
+MapInstance contains the same persistent ID at the same X/Y, floor and layer;
+applying the first instance's record does not alias or mutate the sibling.
+
+Remaining: real clients occupying both instances across a server restart.
+
+
+S.A.M item + upper floor + container + save/reload
+--------------------------------------------------
+
+Result: RUNTIME TESTED.
+
+Stage4D registers fixture:persistent_item at runtime ID 6123, puts it in a
+persistent chest on floor/layer 5, writes and reloads the world save, clears the
+registry, re-registers the same stable ID at runtime ID 7123, and restores it.
+The chest contains one resolved item after restore; a generated placeholder is
+removed rather than duplicated.
+
+Remaining: the same cycle with a packaged mod and graphical inventory UI.
+
+
+S.A.M item + monster equipment + stable/runtime remapping
+---------------------------------------------------------
+
+Result: RUNTIME TESTED.
+
+The same Stage4D cycle equips the fixture item on a persistent Mini Mimic. The
+equipment slot, stable ID, new runtime ID, floor, layer and local z restore
+through generic monster persistence without Mini Mimic-specific S.A.M code.
+
+Remaining: visual equipment/custom model behavior and a packaged real mod.
+
+
+Mini Mimic recruit + durable owner + upper floor + reconnect
+------------------------------------------------------------
+
+Result: PARTIAL.
+
+The authored-creature test guards the Mini Mimic palette/properties, independent
+recruit/dialogue flags and generic durable-owner/follower seams. Party and
+persistence tests cover durable identity independently. Stage4D covers a
+persistent upper-floor Mini Mimic and S.A.M equipment. These components have not
+been driven as one real remote recruit/disconnect/restart/reconnect sequence.
+
+Remaining: the real-client acceptance in section 7.
+
+
+Mini Mimic dialogue + per-player quest state + multiplayer
+-----------------------------------------------------------
+
+Result: PARTIAL.
+
+The authored test guards the shared custom-dialogue/quest dispatch and confirms
+dialogue and recruitment are not encoded as mutually exclusive properties.
+Existing persistence uses player-scoped story state. No graphical two-client
+conversation was run in this pass.
+
+Remaining: have both clients take different choices, then recruit through a
+dialogue action and verify journals/ownership before and after restart.
+
+
+Room Group + S.A.M content + multi-layer room + save/reload
+-----------------------------------------------------------
+
+Result: RUNTIME/SOURCE-CONTRACT TESTED; GUI MANUAL.
+
+room_group covers stable names/IDs, normalized cuboids, 32 authored layers,
+content masks, translation, capacity, malformed data and resize clamping.
+Stage4D round-trips LMP V4.10 Room Groups spanning 0..31 and 5..7 next to S.A.M
+ground-item and monster-equipment stable metadata. Editor contracts cover
+create/update/select/copy/paste/delete, air/tile/sprite copying, relative layer
+translation, fresh pasted identities and undo/redo.
+
+Remaining: a human must perform the editor gestures and visually inspect the
+saved/reloaded multi-layer room. The editor was not launched during this pass.
+
+
+Room generation + S.A.M hooks + MapInstance
+--------------------------------------------
+
+Result: RUNTIME TESTED for provider determinism; LIVE PEERS MANUAL.
+
+sam_room_generation uses real temporary prefab bytes to verify canonical sort,
+deduplication, unsafe-path rejection and byte-sensitive fingerprints. A repeated
+namespace/path with conflicting bytes is selected by content digest, not by an
+absolute installation path; mirrored roots therefore select the same bytes.
+Valid S.A.M rooms append to the existing mapList and use the existing map RNG.
+The generated map receives its own level_N_regular/secret MapInstance only after
+generation; MapInstance is not part of provider selection.
+
+SAMF includes the effective content/room fingerprint. Lobby mismatch currently
+warns rather than refusing admission. Late-join snapshot staging hard-rejects a
+fingerprint mismatch. Two real peers did not regenerate an injected room here.
+
+
+Text Source + supported S.A.M item references + upper-floor context
+-------------------------------------------------------------------
+
+Result: SOURCE-CONTRACT TESTED; LIVE ITEM FLOW MANUAL.
+
+Current S.A.M 2.1 contributes exactly zero Text Source commands. Text Source has
+no stable-ID or direct numeric-item literal. Its supported overlap is attachment
+to an already-existing world item: conversion requires the runtime custom ID to
+resolve to a nonempty stable ID, then uses normal inventory/chest/equipment
+paths. Upper-floor/MapInstance target filtering is guarded by text_source_script.
+
+Remaining: place a real custom world item and Text Source on an upper floor and
+exercise transfer/removal without cross-floor or cross-instance targeting.
+
+
+Map ambience + different MapInstances + Playable-Z stair
+---------------------------------------------------------
+
+Result: RUNTIME CONTROL-FLOW TESTED; AUDIO MANUAL.
+
+Stage4D checks same-signature and changed-MapInstance restart decisions plus
+headless/no_sound suppression. The signature contains the MapInstance key and
+map ambience configuration. A stair within one instance must not manufacture a
+new instance identity. No audible output was evaluated.
+
+
+Headless + S.A.M + persistence + divergent players
+---------------------------------------------------
+
+Result: CONTAINED LIVE TESTED, but without a real custom item.
+
+The headless party runner attached two authenticated synthetic clients, moved
+them to different MapInstances, observed SAMF for both, exercised scoped party/
+chat/entity traffic, saved, shut down, restarted and hydrated the durable PartyID.
+The passing run is under build/party-live-acceptance.hI0hyh.
+
+Remaining: real graphical inventories, upper floors, custom items, followers and
+character reconnect tokens.
+
+
+Late join + upper floors + custom S.A.M content
+-----------------------------------------------
+
+Result: CONTAINED LIVE TESTED only for a new floor-0 join and current protocol.
+
+The new-player late-join runner reached Ready/Go, received SAMF and the staged
+world snapshot, and entered live simulation. The probe decoded current STRT v5,
+including playableFloor and spatialRevision. The passing server log is
+build/late-join-acceptance.0jHKIT/server-console.log.
+
+Remaining: returning-character token flow, upper floor and a real custom item.
+
+
+4. DEMONSTRATED BUGS AND FIXES
+==============================
+
+1. party_cross_map_live_probe hard-coded persistence schema version 2. Current
+   saves use schema 3, so a valid restarted server was falsely rejected. The
+   probe now parses JSON and compares against
+   AutomatiaSave::CURRENT_SCHEMA_VERSION while validating map_instance scope,
+   one map, party state and sam_fingerprint.
+
+2. late_join_live_probe accepted STRT only through version 4 and assumed the
+   old 24-byte position. The current server sends version 5 with a 36-byte
+   position containing playableFloor and spatialRevision. The probe now decodes
+   and reports those fields; the contained late join then passed.
+
+3. Persistent-world restore diagnostics supplied the mechanism counters in an
+   order different from the log labels. Restoration state was correct, but a
+   chest could be reported as a campfire/wall-lock/other mechanism. The argument
+   order now matches the labels.
+
+4. Zed/LMP concrete item fields reserve 0 for none and 1 for random, so they
+   store a concrete runtime item ID as runtime ID + 2. The initial authored
+   S.A.M metadata path treated those fields as raw IDs. A custom ground item or
+   Mini Mimic equipment slot could consequently resolve two IDs low during map
+   activation. Editor entry/display, templates, SMID save/load and runtime
+   activation now consistently decode/encode that existing representation.
+   Stable identity remains authoritative; when the stable definition is absent,
+   a ground item is omitted and a monster slot becomes empty instead of being
+   reinterpreted as unrelated content.
+
+5. Duplicate S.A.M room declarations with the same namespace/path were formerly
+   de-duplicated after an absolute-path tie-break. Different installation roots
+   could therefore choose different bytes. The effective room set now sorts
+   duplicate logical keys by byte digest before any path tie-break, and the
+   generation pool and SAMF catalog are built from that same selection.
+
+No speculative production redesign was made. No demonstrated state corruption,
+cross-MapInstance alias or S.A.M inventory duplication remained in the exercised
+paths.
+
+
+5. AUTOMATED AND CONTAINED-LIVE COVERAGE
+========================================
+
+The required local validation set is:
+
+    cmake --build build -j6
+    ctest --test-dir build --output-on-failure
+    ./build/barony --automatia-stage4d-z3-transition-characterization
+    git diff --check
+
+CTest contains 11 tests:
+
+    automatia_foundation
+    sam_21_integration_contract
+    text_source_script
+    minimimic_authored_characterization
+    room_group
+    sam_room_generation
+    party_backend
+    social_party_ui_model
+    party_chat
+    playable_z_characterization
+    playable_z_runtime_characterization
+
+Contained live commands used during this pass:
+
+    tests/run_party_cross_map_live_acceptance.sh 57497
+    tests/run_late_join_live_acceptance.sh \
+      build/party-live-acceptance.hI0hyh/output 99 57509 new
+
+Both passed after the probe compatibility fixes above. They use synthetic UDP
+clients and therefore do not replace section 7.
+
+
+6. MANUAL FIXTURE PREPARATION
+=============================
+
+Use three separate machines or three isolated OS user profiles: one dedicated
+server and two graphical clients. Do not let the two clients share one output/
+save directory. All three must use the same current build, maps, dialogue file,
+S.A.M mod set and load order. Record the generated S.A.M fingerprint from each
+log; any mismatch warning fails the test even though the lobby currently allows
+continuation.
+
+Choose a confirmed-unused numeric save slot. The commands below use slot 95. If
+slot 95 contains data, preserve it and substitute another unused 0..99 slot in
+every command.
+
+Install one known-working S.A.M 2.1 mod with a custom item on all three machines.
+Record these values before starting:
+
+    TEST_ITEM_STABLE_ID = namespace:item
+    TEST_ITEM_DISPLAY_NAME = visible name
+    TEST_ITEM_RUNTIME_ID = value in this session's exported/logged catalog
+
+Author and distribute byte-identical maps named:
+
+    maps/automatia_cross_feature_a.lmp
+    maps/automatia_cross_feature_b.lmp
+
+Map A requirements:
+
+1. Keep 32 authored layers. Define playable floors 0 and 5 through Playable-Z
+   metadata. Do not encode floor 5 by changing Entity::z.
+2. Add a working stair pair between floors 0 and 5.
+3. On floor 5, place an empty persistent chest and a nearby authored TEST_ITEM.
+   Enter TEST_ITEM_RUNTIME_ID in Zed and require its stable-ID label to resolve
+   to TEST_ITEM_STABLE_ID after save/reload. Record the chest and item persistent
+   IDs plus local z. The item will be deposited into the chest during the run;
+   Zed does not author a concrete chest inventory through the chest-properties
+   panel.
+4. On floor 5, place a searchable Mini Mimic named Cross Feature Mimic with a
+   recorded persistent ID. Set Disposition Friendly, Recruitable Yes, Custom
+   Dialogue Yes and Dialogue Resource automatia_cross_feature_recruit. Give it
+   exactly one TEST_ITEM in a known equipment slot.
+5. Add a separate persistent mechanism on floor 0 and record its initial state.
+6. Add a second world TEST_ITEM at a known floor-5 coordinate. On floor 5, add a
+   Text Source using only supported existing-world-item attachment, for example:
+
+       @script @attachto=items @attachrange=2,2 @triggerif=attached#dies
+       @power=3,3
+
+   Adjust both coordinates to the actual item/output tile. Do not invent a
+   stable-ID or numeric-item argument; the language has neither.
+7. Create a named Room Group around the multi-floor fixture. Its cuboid must
+   include layers 0..5, tiles, intentionally empty/air cells, the chest,
+   mechanism, Text Source and Mini Mimic. Save, close/reopen the map manually,
+   copy the group to another legal X/Y location, undo, redo, save/reload, and
+   confirm relative authored layers/properties remain intact.
+8. Set map ambience to enabled, loop enabled, resource sound/buzz.ogg, volume
+   25, fade-in 250 ms and fade-out 250 ms.
+9. Add a player-specific/named custom tunnel to Map B with matching unique exit
+   IDs. Only the interacting player must transfer.
+
+Create this test-only existing-schema dialogue resource on all three machines as
+dialogue/automatia_cross_feature_recruit.json:
+
+    {
+      "version": 1,
+      "quest_id": "automatia_cross_feature_recruit",
+      "quest": {
+        "title": "Cross Feature Recruit",
+        "summary": "Recruit the persistent Mini Mimic.",
+        "scope": "player",
+        "repeatable": false,
+        "origin": {
+          "label": "Cross Feature Mimic",
+          "map": "automatia_cross_feature_a.lmp",
+          "track_npc": true,
+          "npc_persistent_id": 91002
+        },
+        "objectives": []
+      },
+      "start_node": 0,
+      "nodes": [
+        {
+          "id": 0,
+          "text": "Will you take me with you?",
+          "choices": [
+            {
+              "id": "join",
+              "text": "Join me.",
+              "next": 1,
+              "once": true,
+              "action": {
+                "quest_start": true,
+                "quest_accept": true,
+                "recruit_npc": true
+              }
+            },
+            { "id": "later", "text": "Later.", "next": 0 }
+          ]
+        },
+        { "id": 1, "text": "I will follow you.", "next": 1 }
+      ]
+    }
+
+Use persistent ID 91002 for the Mini Mimic or change npc_persistent_id above to
+the actual recorded ID. This is a test fixture for the existing dialogue schema,
+not a new dialogue system.
+
+Map B requirements:
+
+1. Add a matching return tunnel to Map A with unique reciprocal exit IDs.
+2. Add a persistent mechanism whose ID is different from Map A's fixture.
+3. Set ambience to enabled, loop enabled, resource music/ruins00.ogg, volume 20,
+   fade-in 250 ms and fade-out 250 ms.
+4. Provide a normal player arrival and at least one playable stair/floor change.
+
+Before networking, open each map once in Zed and verify place/select/copy/paste/
+delete plus save/load for the Mini Mimic and Room Group. Record screenshots of
+the layer range, persistent IDs, local z, item stable IDs and all Mini Mimic
+properties. This editor check was not run by the stabilization pass.
+
+
+7. EXACT ONE-HEADLESS/TWO-CLIENT ACCEPTANCE
+===========================================
+
+Initial server and lobby
+------------------------
+
+From the server's build directory run:
+
+    cd /home/conner/Barony-----Automatia/build
+    ./barony --headless --LAN --port=57165 \
+      --server-name=AutomatiaZ4Gate --late-join \
+      --character-save=local --save=95 --autosave=0 \
+      -map=automatia_cross_feature_a.lmp
+
+Do not use --autostart on this first launch. Require these facts in the log:
+
+* the configured slot is empty/new rather than silently replacing an old save;
+* the listener is on UDP 0.0.0.0:57165;
+* the S.A.M mod/catalog loads without errors.
+
+On Client A and Client B, start the same graphical build. Use Multiplayer ->
+Direct Connect and connect to SERVER_LAN_IP:57165. Create distinct character
+names (for example AutomatiaClientA and AutomatiaClientB), keep the same local
+character records for the entire test, and Ready both clients. In the server
+terminal enter:
+
+    status
+    start
+
+Verify both players enter automatia_cross_feature_a.lmp#world and the headless
+host has no slot-0 player entity.
+
+Playable-Z, S.A.M, dialogue and recruitment
+-------------------------------------------
+
+1. Move both clients up the authored stair to playable floor 5 and confirm only
+   floor-appropriate entities, mechanisms, lights and positional sounds are
+   visible. Client B interacts with Cross Feature Mimic first and chooses Later;
+   confirm no quest was accepted and it remains unrecruited.
+2. Return Client B to floor 0 while Client A remains on floor 5. Confirm both are
+   controllable and same-X/Y activity does not cross floors.
+3. On Client A, interact and choose Join me. Confirm the player-scoped quest is
+   present only for Client A, the Mini Mimic becomes Client A's follower, its
+   follower HUD/commands work, and the dialogue does not immediately reopen.
+4. Confirm the authored chest-side item and Mini Mimic equipment each resolve to
+   TEST_ITEM with the expected visible definition. Client A picks up the
+   chest-side item and deposits exactly one stack into the empty chest. Exercise
+   the separate Text Source-attached TEST_ITEM by pick up/drop/replace as needed;
+   confirm no floor-0 item or mechanism at the same X/Y is targeted. Leave the
+   chest with exactly one TEST_ITEM stack for the persistence check.
+5. Record the Mini Mimic persistent ID, owner character name/identity, HP/state,
+   equipment stable ID, playableFloor, authoredMapLayer and local z.
+
+Divergence and ambience
+-----------------------
+
+6. Have only Client B use the custom tunnel to Map B. Client A and the recruited
+   Mini Mimic must remain in Map A on floor 5. Both clients must remain playable.
+7. Enter status twice several seconds apart. Require two loaded, initialized,
+   simulation-active MapInstances with the correct single occupant in each and
+   advancing ticks. No entity/update/chat/interaction from one map may affect the
+   other except intentionally session-global traffic.
+8. Client A must hear Map A's buzz ambience. Client B must hear Map B's ruins
+   ambience. A stair transition within one map must retain that map's ambience;
+   a MapInstance transition must stop/fade the old resource and start the new one.
+   Headless silence is expected and is not evidence of client audio.
+
+Save, disconnect and restart
+----------------------------
+
+9. Change both persistent mechanisms to easily recognized states. Leave Client A
+   on Map A floor 5 with the Mini Mimic and Client B in Map B on a different
+   playable floor. In the server terminal run:
+
+       status
+       save
+
+   Require:
+
+       HEADLESS SAVE: slot 95 saved successfully
+
+   Confirm the normal host save and adjacent .automatia-world.json companion
+   exist and share the completed transaction. Preserve copies of both plus all
+   three logs.
+10. Disconnect Client A cleanly, then Client B cleanly, so their local character
+    saves retain the issued reconnect identities. Run status and then:
+
+       shutdown
+
+    Require a successful graceful-shutdown save and normal process exit.
+11. Restart from the same server build and slot. Omit -map so recovery, not a
+    command-line map, chooses the saved world:
+
+       cd /home/conner/Barony-----Automatia/build
+       ./barony --headless --LAN --port=57165 \
+         --server-name=AutomatiaZ4Gate --late-join --autostart \
+         --character-save=local --save=95 --autosave=0
+
+    Require:
+
+       HEADLESS RECOVERY: slot 95 validated and is ready to resume
+
+Reconnect and restoration checks
+--------------------------------
+
+12. Reconnect Client A and Client B using their original local character records,
+    names and issued tokens. Do not create replacement characters. Ready each
+    client and wait for snapshot/catch-up/Go before moving.
+13. Require Client A to return to Map A floor 5 and Client B to Map B at its saved
+    floor. status must again show the two correct MapInstances and memberships.
+14. Require exactly one Cross Feature Mimic, still owned by Client A, with the
+    same persistent ID, name, HP/state, dialogue configuration, follower HUD and
+    one equipped TEST_ITEM. There must be no source-map ghost or duplicate.
+15. Require the floor-5 chest to contain exactly one TEST_ITEM, both persistent
+    mechanisms to retain their changed states, and the runtime item to resolve to
+    TEST_ITEM_STABLE_ID. No vanilla substitution is acceptable.
+16. Require Client A's quest/journal state to remain distinct from Client B's.
+    Confirm map ambience and stair behavior again after reconnect.
+17. Run status, save and shutdown once more. Retain server/client logs, S.A.M
+    fingerprints, save pair, character files and screenshots.
+
+Any crash, mismatch warning, timeout, wrong instance/floor, cross-map update,
+lost owner, duplicate persistent entity/item, wrong item definition, quest leak,
+stale dialogue configuration or incorrect ambience is a failed acceptance.
+
+
+8. REMAINING MANUAL ACCEPTANCE OUTSIDE THE CORE 1+2 RUN
+=======================================================
+
+* Repeat with a real S.A.M injected multi-layer room and identical seed/content
+  on server and both clients; compare selected room/layout and generated entity
+  stable metadata. Deliberately change one room byte on one client and confirm
+  SAMF warns; abort rather than continuing because pregame admission is not hard.
+* Repeat a late join while the returning character is already saved on an upper
+  floor with a custom item and follower.
+* Exercise 15 actual players, including slot 14; current tests prove bounds and
+  storage contracts, not a fifteen-client session.
+* Verify graphical editor gestures, custom model rendering, visual equipment,
+  positional audio and real audible ambience.
+* Test missing-mod then restored-mod behavior only on copied saves and with all
+  peers changed in lockstep. Do not use a mismatched public lobby.
+
+
+9. Z4 READINESS DECISION
+========================
+
+The automated and contained-live baseline is coherent: build/tests pass, the
+highest-risk stable-ID/upper-floor/MapInstance persistence collision is exercised,
+Room Group/S.A.M serialization and provider determinism are guarded, and current
+headless/late-join probes pass after their stale assumptions were fixed.
+
+The tree is not yet fully accepted for Z4 because the required one-headless plus
+two-real-graphical-client save/restart/reconnect run has not been performed. Z4
+should begin only after section 7 passes or after the owner explicitly accepts
+that manual risk. This audit did not begin Z4.
+
+END OF AUTOMATIA CROSS-FEATURE COMPATIBILITY AND Z4 READINESS AUDIT

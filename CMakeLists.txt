@@ -72,6 +72,40 @@ if(BUILD_TESTING)
 		NAME minimimic_authored_characterization
 		COMMAND minimimic_authored_characterization_tests)
 
+	add_executable(
+		room_group_tests
+		tests/room_group_tests.cpp
+		src/room_group.cpp
+	)
+	target_include_directories(
+		room_group_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		room_group_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(room_group_tests PRIVATE cxx_std_17)
+	add_test(NAME room_group COMMAND room_group_tests)
+
+	add_executable(
+		sam_room_generation_tests
+		tests/sam_room_generation_tests.cpp
+		src/sam/framework/sam_rooms.cpp
+		src/sam/framework/sam_logger.cpp
+	)
+	target_include_directories(
+		sam_room_generation_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+		"${PROJECT_SOURCE_DIR}/src/sam"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework"
+	)
+	target_compile_features(sam_room_generation_tests PRIVATE cxx_std_17)
+	add_test(NAME sam_room_generation COMMAND sam_room_generation_tests)
+
     add_executable(
         party_backend_tests
         tests/party_backend_tests.cpp

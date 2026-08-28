@@ -10,6 +10,12 @@
 #include "../src/light.hpp"
 #include "../src/player.hpp"
 #include "../src/paths.hpp"
+#include "../src/items.hpp"
+#include "../src/automatia_save.hpp"
+#include "../src/world_state.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "../src/sam/sam_item_registry_foundation.hpp"
+#endif
 
 #include <array>
 #include <chrono>
@@ -86,6 +92,7 @@ void clearGlobalMapHarness()
     map.height = 0;
     map.numLayers = MAPLAYERS;
     map.playableFloors.resetToDefault();
+	authoredRoomGroupsReset(map.roomGroups);
     map.entities = &stageEntities;
     map.creatures = &stageCreatures;
     map.worldUI = &stageWorldUI;
@@ -350,6 +357,8 @@ bool verifySyntheticMap(
     EXPECT(!loaded.ambience.enabled);
     EXPECT(loaded.ambience.resource[0] == '\0');
     EXPECT(!loaded.ambientLight.enabled);
+	EXPECT(loaded.roomGroups.count == 0);
+	EXPECT(loaded.roomGroups.nextID == 1);
     clearLoadedMap(loaded, entities, creatures);
     return true;
 }
@@ -404,6 +413,19 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
         upperFloor.tiles[index] = map.tiles[index] + 5000;
     }
     EXPECT(map.playableFloors.addFloor(std::move(upperFloor)));
+	for (const PlayableFloorId floorID : {5, 7})
+	{
+		PlayableFloorData authoredFloor;
+		authoredFloor.id = floorID;
+		authoredFloor.tiles.resize(
+			static_cast<std::size_t>(map.width)
+			* static_cast<std::size_t>(map.height) * MAPLAYERS);
+		for (std::size_t index = 0; index < authoredFloor.tiles.size(); ++index)
+		{
+			authoredFloor.tiles[index] = map.tiles[index] + 5000 * floorID;
+		}
+		EXPECT(map.playableFloors.addFloor(std::move(authoredFloor)));
+	}
 
     // Include a model-backed ceiling editor sprite in the current-format
     // round-trip. Its fixed -24 runtime height is local; ELYR owns the
@@ -412,9 +434,13 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     Entity* saved = newEntity(0, 1, map.entities, nullptr);
     Entity* lowerTransition = newEntity(0, 1, map.entities, nullptr);
     Entity* savedCeiling = newEntity(119, 1, map.entities, nullptr);
+	Entity* savedCustomItem = newEntity(8, 1, map.entities, nullptr);
+	Entity* savedCustomInventoryMonster = newEntity(10, 1, map.entities, nullptr);
     EXPECT(saved != nullptr);
     EXPECT(lowerTransition != nullptr);
     EXPECT(savedCeiling != nullptr);
+	EXPECT(savedCustomItem != nullptr);
+	EXPECT(savedCustomInventoryMonster != nullptr);
     saved->persistentID = 77;
     saved->authoredMapLayer = 3;
     saved->x = 21.75;
@@ -465,6 +491,35 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     savedCeiling->ceilingTileDir = 3;
     savedCeiling->ceilingTileAllowTrap = 1;
     savedCeiling->ceilingTileBreakable = 1;
+
+	// Generic authored stable-item metadata shares the ordinary Entity/Stat
+	// copy paths. LMP item fields retain the legacy runtime-ID-plus-two encoding;
+	// stable identity must remap that value rather than treating it as raw.
+	savedCustomItem->persistentID = 80;
+	savedCustomItem->authoredMapLayer = 5;
+	savedCustomItem->playableFloor = 5;
+	savedCustomItem->x = 16.0;
+	savedCustomItem->y = 16.0;
+	savedCustomItem->z = 2.25;
+	savedCustomItem->skill[10] = 6123 + EDITOR_ITEM_ID_OFFSET;
+	savedCustomItem->authoredItemStableID = "fixture:custom_item";
+	setSpriteAttributes(savedCustomInventoryMonster, nullptr, nullptr);
+	savedCustomInventoryMonster->behavior = &actMonster;
+	Stat* savedMonsterStats = savedCustomInventoryMonster->getStats();
+	EXPECT(savedMonsterStats != nullptr);
+	savedCustomInventoryMonster->persistentID = 81;
+	savedCustomInventoryMonster->authoredMapLayer = 7;
+	savedCustomInventoryMonster->playableFloor = 7;
+	savedCustomInventoryMonster->x = 24.0;
+	savedCustomInventoryMonster->y = 24.0;
+	savedCustomInventoryMonster->z = -1.5;
+	savedMonsterStats->EDITOR_ITEMS[0] = 6124 + EDITOR_ITEM_ID_OFFSET;
+	savedMonsterStats->EDITOR_ITEM_STABLE_IDS[0] = "fixture:monster_weapon";
+
+	EXPECT(authoredRoomGroupAdd(map.roomGroups, "Whole tower",
+		0, 0, 1, 1, 0, 31, AUTHORED_ROOM_GROUP_BOTH) == 0);
+	EXPECT(authoredRoomGroupAdd(map.roomGroups, "Upper cache",
+		1, 1, 1, 1, 5, 7, AUTHORED_ROOM_GROUP_SPRITES) == 1);
     // This remains independent from the existing packed custom-fog fields.
     map.flags[MAP_FLAG_GENBYTES5] = (static_cast<Uint32>(0xA5) << 24)
         | (static_cast<Uint32>(24) << 16) | (static_cast<Uint32>(180) << 8);
@@ -490,22 +545,32 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     output.read(header.data(), static_cast<std::streamsize>(header.size()));
     EXPECT(std::string(header.data(), header.size()) == "BARONY LMPV4.10");
 
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMItemRegistryFoundation::clear();
+	EXPECT(SAMItemRegistryFoundation::registerFrameworkBuiltin(
+		"fixture:custom_item", 7123, "Custom map fixture", "TOOL"));
+	EXPECT(SAMItemRegistryFoundation::registerFrameworkBuiltin(
+		"fixture:monster_weapon", 7124, "Monster map fixture", "WEAPON"));
+#endif
+
     map_t loaded{};
     list_t entities{};
     list_t creatures{};
     loaded.entities = &entities;
     loaded.creatures = &creatures;
-    EXPECT(loadMap(
+	EXPECT(loadMap(
         "stage4b_roundtrip.lmp",
         &loaded,
         &entities,
         &creatures,
-        nullptr) == 3);
-    EXPECT(loaded.numLayers == MAPLAYERS);
-    EXPECT(list_Size(&entities) == 3);
+		nullptr) == 5);
+	EXPECT(loaded.numLayers == MAPLAYERS);
+	EXPECT(list_Size(&entities) == 5);
     Entity* restored = nullptr;
     Entity* restoredLowerTransition = nullptr;
     Entity* restoredCeiling = nullptr;
+	Entity* restoredCustomItem = nullptr;
+	Entity* restoredCustomInventoryMonster = nullptr;
     for (node_t* node = entities.first; node; node = node->next)
     {
         Entity* candidate = static_cast<Entity*>(node->element);
@@ -521,10 +586,20 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
         {
             restoredCeiling = candidate;
         }
+		else if (candidate && candidate->persistentID == 80)
+		{
+			restoredCustomItem = candidate;
+		}
+		else if (candidate && candidate->persistentID == 81)
+		{
+			restoredCustomInventoryMonster = candidate;
+		}
     }
     EXPECT(restored != nullptr);
     EXPECT(restoredLowerTransition != nullptr);
     EXPECT(restoredCeiling != nullptr);
+	EXPECT(restoredCustomItem != nullptr);
+	EXPECT(restoredCustomInventoryMonster != nullptr);
     // Existing LMP x/y are integral even though runtime coordinates are real_t.
     EXPECT(restored->x == 21.0);
     EXPECT(restored->y == 14.0);
@@ -568,6 +643,51 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(restoredCeiling->ceilingTileDir == 3);
     EXPECT(restoredCeiling->ceilingTileAllowTrap == 1);
     EXPECT(restoredCeiling->ceilingTileBreakable == 1);
+	EXPECT(restoredCustomItem->authoredItemStableID == "fixture:custom_item");
+	EXPECT(restoredCustomItem->skill[10]
+		== 7123 + EDITOR_ITEM_ID_OFFSET);
+	EXPECT(restoredCustomItem->authoredMapLayer == 5);
+	EXPECT(restoredCustomItem->playableFloor == 5);
+	EXPECT(restoredCustomItem->z == 2.25);
+	restoredCustomInventoryMonster->behavior = &actMonster;
+	Stat* restoredMonsterStats = restoredCustomInventoryMonster->getStats();
+	EXPECT(restoredMonsterStats != nullptr);
+	EXPECT(restoredMonsterStats->EDITOR_ITEMS[0]
+		== 7124 + EDITOR_ITEM_ID_OFFSET);
+	EXPECT(restoredMonsterStats->EDITOR_ITEM_STABLE_IDS[0]
+		== "fixture:monster_weapon");
+	EXPECT(restoredCustomInventoryMonster->authoredMapLayer == 7);
+	EXPECT(restoredCustomInventoryMonster->playableFloor == 7);
+	EXPECT(restoredCustomInventoryMonster->z == -1.5);
+
+	Entity* copiedCustomItem = newEntity(8, 1, &entities, nullptr);
+	EXPECT(copiedCustomItem != nullptr);
+	setSpriteAttributes(copiedCustomItem, restoredCustomItem, restoredCustomItem);
+	EXPECT(copiedCustomItem->authoredItemStableID == "fixture:custom_item");
+	list_RemoveNode(copiedCustomItem->mynode);
+	Entity* copiedCustomMonster = newEntity(10, 1, &entities, nullptr);
+	EXPECT(copiedCustomMonster != nullptr);
+	setSpriteAttributes(copiedCustomMonster, restoredCustomInventoryMonster,
+		restoredCustomInventoryMonster);
+	copiedCustomMonster->behavior = &actMonster;
+	EXPECT(copiedCustomMonster->getStats() != nullptr);
+	EXPECT(copiedCustomMonster->getStats()->EDITOR_ITEM_STABLE_IDS[0]
+		== "fixture:monster_weapon");
+	list_RemoveNode(copiedCustomMonster->mynode);
+#ifdef SAM_FRAMEWORK_ENABLED
+	SAMItemRegistryFoundation::clear();
+#endif
+
+	EXPECT(loaded.roomGroups.count == 2);
+	EXPECT(std::string(loaded.roomGroups.entries[0].name) == "Whole tower");
+	EXPECT(loaded.roomGroups.entries[0].bottomLayer == 0);
+	EXPECT(loaded.roomGroups.entries[0].topLayer == 31);
+	EXPECT(loaded.roomGroups.entries[0].contentMask == AUTHORED_ROOM_GROUP_BOTH);
+	EXPECT(std::string(loaded.roomGroups.entries[1].name) == "Upper cache");
+	EXPECT(loaded.roomGroups.entries[1].bottomLayer == 5);
+	EXPECT(loaded.roomGroups.entries[1].topLayer == 7);
+	EXPECT(loaded.roomGroups.entries[1].contentMask
+		== AUTHORED_ROOM_GROUP_SPRITES);
     EXPECT(loaded.flags[MAP_FLAG_GENBYTES5] == map.flags[MAP_FLAG_GENBYTES5]);
     EXPECT(loaded.flags[MAP_FLAG_GENBYTES6] == map.flags[MAP_FLAG_GENBYTES6]);
     EXPECT(loaded.ambience.enabled);
@@ -581,21 +701,63 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(loaded.ambientLight.red == 32);
     EXPECT(loaded.ambientLight.green == 12);
     EXPECT(loaded.ambientLight.blue == 6);
-    EXPECT(loaded.playableFloors.floors.size() == 2);
+    EXPECT(loaded.playableFloors.floors.size() == 4);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
+	EXPECT(loaded.playableFloors.hasFloor(5));
+	EXPECT(loaded.playableFloors.hasFloor(7));
     const PlayableFloorData* restoredUpper = loaded.playableFloors.find(2);
     EXPECT(restoredUpper != nullptr);
     EXPECT(restoredUpper->tiles.size()
         == static_cast<std::size_t>(map.width)
             * static_cast<std::size_t>(map.height) * MAPLAYERS);
-    for (Uint32 index = 0; index < map.width * map.height * MAPLAYERS; ++index)
-    {
-        EXPECT(loaded.tiles[index] == map.tiles[index]);
-        EXPECT(restoredUpper->tiles[index] == map.tiles[index] + 5000);
-    }
-    clearLoadedMap(loaded, entities, creatures);
+	for (Uint32 index = 0; index < map.width * map.height * MAPLAYERS; ++index)
+	{
+		EXPECT(loaded.tiles[index] == map.tiles[index]);
+		EXPECT(restoredUpper->tiles[index] == map.tiles[index] + 5000);
+	}
+	clearLoadedMap(loaded, entities, creatures);
 
-    /*
+#ifdef SAM_FRAMEWORK_ENABLED
+	// Loading the same authored map without its S.A.M definitions preserves the
+	// stable metadata but must not reinterpret either old numeric ID as another
+	// mod's item. Ground-item activation will omit the unavailable stable item;
+	// a zero monster slot generates no equipment.
+	SAMItemRegistryFoundation::clear();
+	map_t missingContentMap{};
+	list_t missingContentEntities{};
+	list_t missingContentCreatures{};
+	missingContentMap.entities = &missingContentEntities;
+	missingContentMap.creatures = &missingContentCreatures;
+	EXPECT(loadMap("stage4b_roundtrip.lmp", &missingContentMap,
+		&missingContentEntities, &missingContentCreatures, nullptr) == 5);
+	Entity* missingGroundItem = nullptr;
+	Entity* missingMonster = nullptr;
+	for (node_t* node = missingContentEntities.first; node; node = node->next)
+	{
+		Entity* candidate = static_cast<Entity*>(node->element);
+		if (candidate && candidate->persistentID == 80)
+		{
+			missingGroundItem = candidate;
+		}
+		else if (candidate && candidate->persistentID == 81)
+		{
+			missingMonster = candidate;
+		}
+	}
+	EXPECT(missingGroundItem != nullptr);
+	EXPECT(missingGroundItem->authoredItemStableID == "fixture:custom_item");
+	EXPECT(missingGroundItem->skill[10] == 0);
+	EXPECT(missingMonster != nullptr);
+	missingMonster->behavior = &actMonster;
+	EXPECT(missingMonster->getStats() != nullptr);
+	EXPECT(missingMonster->getStats()->EDITOR_ITEM_STABLE_IDS[0]
+		== "fixture:monster_weapon");
+	EXPECT(missingMonster->getStats()->EDITOR_ITEMS[0] == 0);
+	clearLoadedMap(missingContentMap, missingContentEntities,
+		missingContentCreatures);
+#endif
+
+	/*
      * PZLV v1 identifies the Z3.4A/B/C baked-Z representation explicitly.
      * ELYR layer 5 must unbake -80 from serialized Z and must override the
      * deliberately stale EFLR floor 4 assignment for this ordinary sprite.
@@ -689,6 +851,282 @@ bool testMapAmbienceLifecycleCharacterization()
     no_sound = previousNoSound;
     return true;
 }
+
+#ifdef SAM_FRAMEWORK_ENABLED
+list_t* attachEmptyChestInventory(Entity& chest)
+{
+	node_t* inventoryNode = list_AddNodeFirst(&chest.children);
+	if (!inventoryNode)
+	{
+		return nullptr;
+	}
+	list_t* inventory = static_cast<list_t*>(std::calloc(1, sizeof(list_t)));
+	if (!inventory)
+	{
+		list_RemoveNode(inventoryNode);
+		return nullptr;
+	}
+	inventoryNode->element = inventory;
+	inventoryNode->deconstructor = &listDeconstructor;
+	inventoryNode->size = sizeof(list_t);
+	return inventory;
+}
+
+const AutomatiaSave::Json* persistentMechanismById(
+	const AutomatiaSave::Json& document,
+	const std::string& mapKey,
+	const Sint32 persistentID)
+{
+	if (!document.contains("map_instances")
+		|| !document["map_instances"].is_array())
+	{
+		return nullptr;
+	}
+	for (const AutomatiaSave::Json& savedMap : document["map_instances"])
+	{
+		if (!savedMap.is_object()
+			|| savedMap.value("map_file", std::string{}) + "#"
+				+ savedMap.value("instance_id", std::string{}) != mapKey
+			|| !savedMap.contains("persistent_state")
+			|| !savedMap["persistent_state"].is_object())
+		{
+			continue;
+		}
+		const AutomatiaSave::Json& persistent = savedMap["persistent_state"];
+		if (!persistent.contains("mechanisms")
+			|| !persistent["mechanisms"].is_array())
+		{
+			return nullptr;
+		}
+		for (const AutomatiaSave::Json& mechanism : persistent["mechanisms"])
+		{
+			if (mechanism.is_object()
+				&& mechanism.value("persistent_id", Sint32{0}) == persistentID)
+			{
+				return &mechanism;
+			}
+		}
+	}
+	return nullptr;
+}
+
+bool testSAMPersistentContainersAndMonsterEquipment(
+	TemporaryDataDirectory& temporary)
+{
+	constexpr Sint32 capturedRuntimeID = 6123;
+	constexpr Sint32 restoredRuntimeID = 7123;
+	constexpr Sint32 chestPersistentID = 7101;
+	constexpr Sint32 mimicPersistentID = 7201;
+	constexpr PlayableFloorId upperFloor = 5;
+	const std::string stableID = "fixture:persistent_item";
+	const std::string activeKey = "cross_feature.lmp#instance_a";
+	const std::string otherKey = "cross_feature.lmp#instance_b";
+	const std::string sessionID = "cross-feature-session";
+	const std::string transactionID = "cross-feature-transaction";
+
+	multiplayer = SINGLE;
+	resetPersistentWorldSession();
+	SAMItemRegistryFoundation::clear();
+	EXPECT(SAMItemRegistryFoundation::registerFrameworkBuiltin(
+		stableID, capturedRuntimeID, "Persistent fixture", "TOOL"));
+	EXPECT(resetGlobalMapHarness(4, 4, 1));
+	EXPECT(map.ensurePlayableFloorGeometry(upperFloor, false));
+	std::snprintf(
+		map.filename, sizeof(map.filename), "%s", "cross_feature.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_a"));
+
+	MapInstanceSummary otherInstance;
+	EXPECT(otherInstance.identity.set("cross_feature.lmp", "instance_b"));
+	otherInstance.identity.revision = 1;
+	otherInstance.playableFloors = {DEFAULT_PLAYABLE_FLOOR, upperFloor};
+	EXPECT(worldState.registerUnloadedInstance(otherInstance));
+
+	Entity* chest = newEntity(21, 1, map.entities, nullptr);
+	EXPECT(chest != nullptr);
+	chest->behavior = &actChest;
+	chest->persistentID = chestPersistentID;
+	chest->authoredMapLayer = upperFloor;
+	chest->playableFloor = upperFloor;
+	chest->x = 24.0;
+	chest->y = 24.0;
+	chest->z = 1.25;
+	chest->chestHealth = 31;
+	chest->chestMaxHealth = 40;
+	chest->chestLocked = 1;
+	chest->chestVoidState = 0;
+	list_t* chestInventory = attachEmptyChestInventory(*chest);
+	EXPECT(chestInventory != nullptr);
+	Item* chestItem = newItem(
+		static_cast<ItemType>(capturedRuntimeID),
+		EXCELLENT, 2, 3, 0x12345678U, true, chestInventory);
+	EXPECT(chestItem != nullptr);
+	EXPECT(static_cast<Sint32>(chestItem->type) == capturedRuntimeID);
+	chestItem->x = 2;
+	chestItem->y = 1;
+
+	Entity* miniMimic = newEntity(10, 1, map.entities, nullptr);
+	EXPECT(miniMimic != nullptr);
+	setSpriteAttributes(miniMimic, nullptr, nullptr);
+	miniMimic->behavior = &actMonster;
+	miniMimic->persistentID = mimicPersistentID;
+	miniMimic->authoredMapLayer = upperFloor;
+	miniMimic->playableFloor = upperFloor;
+	miniMimic->x = 40.0;
+	miniMimic->y = 48.0;
+	miniMimic->z = -1.5;
+	miniMimic->yaw = 0.75;
+	miniMimic->skill[3] = 2;
+	Stat* mimicStats = miniMimic->getStats();
+	EXPECT(mimicStats != nullptr);
+	mimicStats->type = MINIMIMIC;
+	mimicStats->HP = 37;
+	mimicStats->MAXHP = 50;
+	mimicStats->MP = 4;
+	mimicStats->MAXMP = 9;
+	Item* mimicWeapon = newItem(
+		static_cast<ItemType>(capturedRuntimeID),
+		SERVICABLE, -1, 1, 0x87654321U, true, &mimicStats->inventory);
+	EXPECT(mimicWeapon != nullptr);
+	EXPECT(static_cast<Sint32>(mimicWeapon->type) == capturedRuntimeID);
+	mimicStats->weapon = mimicWeapon;
+
+	std::string snapshot;
+	std::string error;
+	EXPECT(serializeAutomatiaPersistentWorldSnapshot(
+		sessionID, 0, snapshot, error));
+	const AutomatiaSave::Json scoped = AutomatiaSave::Json::parse(snapshot);
+	EXPECT(scoped.value("snapshot_scope", std::string{}) == "map_instance");
+	EXPECT(scoped["map_instances"].size() == 1);
+	EXPECT(scoped["map_instances"][0]["instance_id"] == "instance_a");
+	const AutomatiaSave::Json* savedChest = persistentMechanismById(
+		scoped, activeKey, chestPersistentID);
+	const AutomatiaSave::Json* savedMimic = persistentMechanismById(
+		scoped, activeKey, mimicPersistentID);
+	EXPECT(savedChest != nullptr);
+	EXPECT(savedMimic != nullptr);
+	EXPECT((*savedChest)["playable_floor"] == upperFloor);
+	EXPECT((*savedChest)["authored_map_layer"] == upperFloor);
+	EXPECT((*savedChest)["chest_inventory"].size() == 1);
+	EXPECT((*savedChest)["chest_inventory"][0]["stable_id"] == stableID);
+	EXPECT((*savedMimic)["playable_floor"] == upperFloor);
+	EXPECT((*savedMimic)["authored_map_layer"] == upperFloor);
+	EXPECT((*savedMimic)["monster_items"].size() == 1);
+	EXPECT((*savedMimic)["monster_items"][0]["stable_id"] == stableID);
+	EXPECT((*savedMimic)["monster_items"][0]["slot"] == 1);
+
+	const std::filesystem::path savePath =
+		temporary.mapPath("cross_feature_world.json");
+	const std::string savePathText = savePath.string();
+	EXPECT(writeAutomatiaPersistentWorldSave(
+		savePathText.c_str(), sessionID, transactionID, error));
+	AutomatiaSave::Json diskDocument;
+	EXPECT(AutomatiaSave::load(savePath, diskDocument).ok);
+	EXPECT(diskDocument["map_instances"].size() == 2);
+	EXPECT(persistentMechanismById(
+		diskDocument, activeKey, chestPersistentID) != nullptr);
+	EXPECT(persistentMechanismById(
+		diskDocument, otherKey, chestPersistentID) == nullptr);
+	EXPECT(loadAutomatiaPersistentWorldSave(
+		savePathText.c_str(), sessionID, transactionID, error));
+
+	clearGlobalMapHarness();
+	resetPersistentWorldSession();
+	SAMItemRegistryFoundation::clear();
+	EXPECT(SAMItemRegistryFoundation::registerFrameworkBuiltin(
+		stableID, restoredRuntimeID, "Persistent fixture", "TOOL"));
+	EXPECT(SAMItemRegistryFoundation::runtimeIdForStableId(stableID)
+		== restoredRuntimeID);
+	EXPECT(!SAMItemRegistryFoundation::isRegisteredRuntimeItemId(
+		capturedRuntimeID));
+
+	EXPECT(resetGlobalMapHarness(4, 4, 1));
+	EXPECT(map.ensurePlayableFloorGeometry(upperFloor, false));
+	std::snprintf(
+		map.filename, sizeof(map.filename), "%s", "cross_feature.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_a"));
+
+	Entity* restoredChest = newEntity(21, 1, map.entities, nullptr);
+	EXPECT(restoredChest != nullptr);
+	restoredChest->behavior = &actChest;
+	restoredChest->persistentID = chestPersistentID;
+	restoredChest->authoredMapLayer = upperFloor;
+	restoredChest->playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	restoredChest->chestVoidState = 0;
+	list_t* restoredChestInventory = attachEmptyChestInventory(*restoredChest);
+	EXPECT(restoredChestInventory != nullptr);
+	EXPECT(newItem(GEM_ROCK, WORN, 0, 1, 0, false,
+		restoredChestInventory) != nullptr);
+
+	Entity* restoredMimic = newEntity(10, 1, map.entities, nullptr);
+	EXPECT(restoredMimic != nullptr);
+	setSpriteAttributes(restoredMimic, nullptr, nullptr);
+	restoredMimic->behavior = &actMonster;
+	restoredMimic->persistentID = mimicPersistentID;
+	restoredMimic->authoredMapLayer = upperFloor;
+	restoredMimic->playableFloor = DEFAULT_PLAYABLE_FLOOR;
+	restoredMimic->skill[3] = 2;
+	Stat* restoredMimicStats = restoredMimic->getStats();
+	EXPECT(restoredMimicStats != nullptr);
+	restoredMimicStats->type = MINIMIMIC;
+	restoredMimicStats->HP = 1;
+	restoredMimicStats->MAXHP = 1;
+	Item* generatedWeapon = newItem(
+		GEM_ROCK, WORN, 0, 1, 0, false, &restoredMimicStats->inventory);
+	EXPECT(generatedWeapon != nullptr);
+	restoredMimicStats->weapon = generatedWeapon;
+
+	applyPersistentMechanismStates();
+	EXPECT(applyPersistentMonsterLivingState(restoredMimic));
+	EXPECT(restoredChest->playableFloor == upperFloor);
+	EXPECT(restoredChest->authoredMapLayer == upperFloor);
+	EXPECT(list_Size(restoredChestInventory) == 1);
+	Item* restoredChestItem = restoredChestInventory->first
+		? static_cast<Item*>(restoredChestInventory->first->element)
+		: nullptr;
+	EXPECT(restoredChestItem != nullptr);
+	EXPECT(static_cast<Sint32>(restoredChestItem->type) == restoredRuntimeID);
+	EXPECT(restoredChestItem->count == 3);
+	EXPECT(restoredMimic->playableFloor == upperFloor);
+	EXPECT(restoredMimic->authoredMapLayer == upperFloor);
+	EXPECT(restoredMimic->z == -1.5);
+	EXPECT(list_Size(&restoredMimicStats->inventory) == 1);
+	EXPECT(restoredMimicStats->weapon != nullptr);
+	EXPECT(static_cast<Sint32>(restoredMimicStats->weapon->type)
+		== restoredRuntimeID);
+
+	// The same persistent IDs in the sibling MapInstance have no saved state.
+	clearGlobalMapHarness();
+	EXPECT(resetGlobalMapHarness(4, 4, 1));
+	EXPECT(map.ensurePlayableFloorGeometry(upperFloor, false));
+	std::snprintf(
+		map.filename, sizeof(map.filename), "%s", "cross_feature.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_b"));
+	Entity* siblingChest = newEntity(21, 1, map.entities, nullptr);
+	EXPECT(siblingChest != nullptr);
+	siblingChest->behavior = &actChest;
+	siblingChest->persistentID = chestPersistentID;
+	siblingChest->authoredMapLayer = upperFloor;
+	siblingChest->playableFloor = upperFloor;
+	siblingChest->x = 24.0;
+	siblingChest->y = 24.0;
+	siblingChest->z = 1.25;
+	siblingChest->chestVoidState = 0;
+	list_t* siblingInventory = attachEmptyChestInventory(*siblingChest);
+	EXPECT(siblingInventory != nullptr);
+	EXPECT(newItem(GEM_ROCK, WORN, 0, 1, 0, false, siblingInventory)
+		!= nullptr);
+	applyPersistentMechanismStates();
+	EXPECT(list_Size(siblingInventory) == 1);
+	EXPECT(static_cast<Item*>(siblingInventory->first->element)->type == GEM_ROCK);
+	EXPECT(siblingChest->playableFloor == upperFloor);
+	EXPECT(siblingChest->authoredMapLayer == upperFloor);
+
+	SAMItemRegistryFoundation::clear();
+	resetPersistentWorldSession();
+	clearGlobalMapHarness();
+	return true;
+}
+#endif
 
 bool testOneFloorCollisionAndSpatialIndex()
 {
@@ -1887,6 +2325,9 @@ int runPlayableZRuntimeCharacterization()
 		&& testUpperFloorMonsterPathing()
 		&& testAdjacentVerticalCircuitNeighbors()
         && testPersistentMinimapAndPlacement()
+#ifdef SAM_FRAMEWORK_ENABLED
+		&& testSAMPersistentContainersAndMonsterEquipment(temporary)
+#endif
         && testMapAmbienceLifecycleCharacterization();
     clearGlobalMapHarness();
     multiplayer = previousMultiplayer;

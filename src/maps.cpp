@@ -29,10 +29,12 @@
 #include "menu.hpp"
 #include "ui/MainMenu.hpp"
 #include <cstdint>
+#include <limits>
 #ifndef EDITOR
 #include "world_state.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/framework/sam_rooms.hpp"
+#include "sam/sam_item_registry_foundation.hpp"
 #endif
 #endif
 // ==================== SECRET DOORWAY GLOBALS ====================
@@ -2791,6 +2793,12 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 				}
 
 				setSpriteAttributes(childEntity, entity, entity);
+				/* A reusable room template may be stamped more than once. Its
+				 * authored ID identifies the source record, not every generated
+				 * instance. Let the existing deterministic generated-ID pass give
+				 * each placed instance a unique persistent identity. Stable S.A.M.
+				 * item/entity metadata remains on the copied Entity/Stat. */
+				childEntity->persistentID = 0;
 				childEntity->x = entity->x + x * 16;
 				childEntity->y = entity->y + y * 16;
 				childEntity->mapGenerationRoomX = x;
@@ -2819,6 +2827,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					}
 
 					setSpriteAttributes(childEntity, entity, entity);
+					childEntity->persistentID = 0;
 					childEntity->x = entity->x + subRoom_tileStartx * 16;
 					childEntity->y = entity->y + subRoom_tileStarty * 16;
 					childEntity->mapGenerationRoomX = subRoom_tileStartx;
@@ -7758,6 +7767,33 @@ void assignActions(
 			case 69:
 			case 8:
 			{
+				if ( !entity->authoredItemStableID.empty() )
+				{
+					Sint32 resolvedRuntimeID = -1;
+#ifdef SAM_FRAMEWORK_ENABLED
+					resolvedRuntimeID =
+						SAMItemRegistryFoundation::runtimeIdForStableId(
+							entity->authoredItemStableID);
+#endif
+					if ( resolvedRuntimeID < 0
+#ifdef SAM_FRAMEWORK_ENABLED
+						|| !SAMItemRegistryFoundation::isRegisteredRuntimeItemId(
+							resolvedRuntimeID)
+#endif
+						|| resolvedRuntimeID > std::numeric_limits<Sint32>::max()
+							- EDITOR_ITEM_ID_OFFSET )
+					{
+						printlog(
+							"[S.A.M] Omitting authored ground item ID %d because stable ID '%s' is unavailable.",
+							entity->persistentID,
+							entity->authoredItemStableID.c_str());
+						list_RemoveNode(entity->mynode);
+						entity = nullptr;
+						break;
+					}
+					entity->skill[10] =
+						resolvedRuntimeID + EDITOR_ITEM_ID_OFFSET;
+				}
 				entity->sizex = 4;
 				entity->sizey = 4;
 				entity->x += 8;

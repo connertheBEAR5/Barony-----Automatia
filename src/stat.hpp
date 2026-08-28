@@ -15,6 +15,8 @@
 #include <fmod.hpp>
 #endif
 #include <cassert>
+#include <array>
+#include <string>
 #include "items.hpp"
 
 enum Monster : int;
@@ -495,6 +497,14 @@ char customDialogueID[64] = "";
 	void copyNPCStatsAndInventoryFrom(Stat& src);
 	void printStats();
 	Sint32 EDITOR_ITEMS[ITEM_SLOT_NUM];
+	/*
+	 * Stable authored identity for each equipment/inventory template slot.
+	 * Runtime IDs remain in EDITOR_ITEMS for vanilla compatibility; S.A.M.
+	 * resolves these names when a map is loaded. Keeping the names on Stat makes
+	 * normal entity copy/undo/cuboid operations generic rather than S.A.M.-aware.
+	 */
+	std::array<std::string, ITEM_SLOT_NUM / ITEM_SLOT_NUMPROPERTIES>
+		EDITOR_ITEM_STABLE_IDS;
 	int pickRandomEquippedItemToDegradeOnHit(Item** returnItem, bool excludeWeapon, bool excludeShield, bool excludeArmor, bool excludeJewelry);
 	int pickRandomEquippedItem(Item** returnItem, bool excludeWeapon, bool excludeShield, bool excludeArmor, bool excludeJewelry);
 	enum MonsterForceAllegiance : int

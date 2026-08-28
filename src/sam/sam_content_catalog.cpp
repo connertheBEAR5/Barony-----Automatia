@@ -11,6 +11,7 @@
 #include "sam_class_registry_foundation.hpp"
 #include "sam_item_registry_foundation.hpp"
 #include "framework/sam_logger.hpp"
+#include "framework/sam_rooms.hpp"
 #include "framework/sam_workshop.hpp"
 
 #include <algorithm>
@@ -100,10 +101,17 @@ void SAMContentCatalog::rebuild(
         );
     }
 
+	const std::vector<std::string> roomEntries =
+		SAMRooms::contentFingerprintEntries(manifests);
+	currentEntries.insert(currentEntries.end(),
+		roomEntries.begin(), roomEntries.end());
+
     std::sort(
         currentEntries.begin(),
         currentEntries.end()
     );
+	currentEntries.erase(std::unique(currentEntries.begin(), currentEntries.end()),
+		currentEntries.end());
 
     std::uint64_t hash = 0;
 

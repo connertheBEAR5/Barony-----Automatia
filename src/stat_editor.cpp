@@ -87,6 +87,7 @@ Stat* Stat::copyStats()
 	{
 		newStat->EDITOR_ITEMS[c] = this->EDITOR_ITEMS[c];
 	}
+	newStat->EDITOR_ITEM_STABLE_IDS = this->EDITOR_ITEM_STABLE_IDS;
 
 	for ( c = 0; c < 32; c++ )
 	{
@@ -97,4 +98,3 @@ Stat* Stat::copyStats()
 
 	return newStat;
 }
-

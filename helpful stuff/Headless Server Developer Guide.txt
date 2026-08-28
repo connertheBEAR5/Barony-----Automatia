@@ -1,6 +1,16 @@
 BARONY AUTOMATIA HEADLESS SERVER DEVELOPER GUIDE
 ================================================
 
+CURRENT BASELINE (2026-08-28)
+
+The maintained build is `build`; use `cmake --build build -j6`. The game/editor,
+11/11 CTest tests, Stage4D characterization, and diff check pass. A contained
+two-client direct-LAN run exercised divergent MapInstances, scoped party state,
+SAMF, save/shutdown/restart, and durable Party ID hydration. A separate contained
+new-player late-join run reached ready/go through the staged snapshot. These are
+real process-level probes but are not the pending one-headless plus two-real-
+graphical-client acceptance.
+
 IMPLEMENTED LAUNCH MODES
 
 Safe idle mode:
@@ -200,6 +210,10 @@ instance and playable-Z coordinates.
 CURRENT VALIDATION SNAPSHOT (2026-08-23)
 ========================================
 
+Historical note: the snapshot below records the 2026-08-23 build profile. Use
+the 2026-08-28 baseline at the top of this guide for current commands and test
+counts.
+
 The maintained Linux build is the Steamworks-enabled 15-player
 build-super-posix profile. Build it with:
 
@@ -228,3 +242,21 @@ not verify Steam base-game ownership, and Steam DLC remains unavailable. It
 does not read or reproduce Steam's offline cache. For an offline session that
 must retain owned DLC, start the real Steam client in Offline Mode and launch
 without --nosteam so Steamworks remains the entitlement authority.
+
+CURRENT CROSS-FEATURE SERVER CONTRACT (2026-08-28)
+===================================================
+
+MapInstance, playableFloor, authoredMapLayer, and local Entity::z remain
+independent in snapshots and saves. Party membership and durable Party ID are
+also independent of current MapInstance occupancy. S.A.M. custom items persist
+by stable ID and remap to session-local runtime IDs; room/provider content is
+included in the SAMF fingerprint. Authored Room Groups are map metadata and are
+not selected independently by clients. Mini Mimic followers use the generic
+durable owner/follower restoration path, including inventory and S.A.M.
+equipment. Headless/no-sound mode suppresses map ambience playback without
+discarding its MapInstance metadata.
+
+Before Z4, run the exact server/two-client save/restart/reconnect procedure in
+"Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt". That run,
+real custom S.A.M. content, graphical floor/instance isolation, audible
+ambience, token-matched returning characters, and Windows remain manual.

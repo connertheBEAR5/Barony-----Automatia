@@ -242,6 +242,11 @@ void drawMonsterTemplateBrowser();
 bool editorDescribeSAMItem(Sint32 runtimeID, const char* stableID,
     char* nameOut, size_t nameOutSize, char* detailOut, size_t detailOutSize);
 const char* editorGetMonsterSlotStableID(Stat* stats, int itemSlot);
+const char* editorGetSAMItemStableIDForEditorValue(Sint32 editorItemValue);
+Sint32 editorResolveSAMItemStableIDToEditorValue(
+    const char* stableID, Sint32 fallbackEditorValue);
+bool editorSAMItemPropertyValueIsValid(
+    Sint32 propertyValue, Sint32 previousEditorValue, const char* stableID);
 void buttonMonsterEffectsOpen(button_t* my);
 void buttonMonsterEffectsDone(button_t* my);
 void buttonMonsterEffectsAdd(button_t* my);

@@ -47,6 +47,9 @@
 #ifdef EDITOR
 #include "editor.hpp"
 #endif
+#if defined(SAM_FRAMEWORK_ENABLED) && !defined(EDITOR)
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 
 char datadir[PATH_MAX];
 char outputdir[PATH_MAX];
@@ -71,7 +74,12 @@ constexpr std::size_t kPlayableZMaximumPayloadBytes = 512U * 1024U * 1024U;
 constexpr char kMapMetadataMagic[4] = {'M', 'P', 'M', 'D'};
 constexpr std::uint16_t kMapMetadataVersion = 1;
 constexpr std::size_t kMapMetadataHeaderBytes = 12;
-constexpr std::size_t kMapMetadataMaximumPayloadBytes = 1024;
+/* Room groups and stable authored-content identities are bounded, variable-size
+ * chunks. Keep one defensive envelope cap without constraining normal maps. */
+constexpr std::size_t kMapMetadataMaximumPayloadBytes = 16U * 1024U * 1024U;
+constexpr std::uint16_t kAuthoredStableIdentityVersion = 1;
+constexpr std::uint16_t kAuthoredGroundItemSlot = 0xffffu;
+constexpr std::size_t kAuthoredStableIdentityMaximumBytes = 255;
 
 bool isSafeMapAmbienceResource(const char* resource)
 {
@@ -110,10 +118,11 @@ bool isSafeMapAmbienceResource(const char* resource)
 	});
 }
 
-void resetMapAmbience(map_t& loadedMap)
+void resetMapMetadata(map_t& loadedMap)
 {
 	loadedMap.ambience = {};
 	loadedMap.ambientLight = {};
+	authoredRoomGroupsReset(loadedMap.roomGroups);
 }
 
 void appendMapMetadataU16(std::vector<std::uint8_t>& output, const std::uint16_t value)
@@ -158,6 +167,247 @@ bool readMapMetadataU32(
 	return true;
 }
 
+bool isSafeAuthoredStableID(const std::string& stableID)
+{
+	if (stableID.empty()
+		|| stableID.size() > kAuthoredStableIdentityMaximumBytes
+		|| stableID.find(':') == std::string::npos)
+	{
+		return false;
+	}
+	return std::none_of(stableID.begin(), stableID.end(), [](const unsigned char c) {
+		return c < 33 || c == 127;
+	});
+}
+
+std::string authoredStableIDForEditorItemValue(const Sint32 editorItemValue)
+{
+	if (editorItemValue < EDITOR_ITEM_ID_OFFSET)
+	{
+		return {};
+	}
+	const Sint32 runtimeID = editorItemValue - EDITOR_ITEM_ID_OFFSET;
+#ifdef EDITOR
+	return editorGetSAMItemStableIDForEditorValue(editorItemValue);
+#elif defined(SAM_FRAMEWORK_ENABLED)
+	if (SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeID))
+	{
+		return SAMItemRegistryFoundation::stableIdForRuntimeId(runtimeID);
+	}
+#endif
+	return {};
+}
+
+Sint32 resolveAuthoredStableItemID(const std::string& stableID,
+	const Sint32 fallbackEditorItemValue)
+{
+#ifdef EDITOR
+	return editorResolveSAMItemStableIDToEditorValue(
+		stableID.c_str(), fallbackEditorItemValue);
+#else
+#ifdef SAM_FRAMEWORK_ENABLED
+	const Sint32 resolved =
+		SAMItemRegistryFoundation::runtimeIdForStableId(stableID);
+	if (resolved >= 0
+		&& resolved <= std::numeric_limits<Sint32>::max()
+			- EDITOR_ITEM_ID_OFFSET
+		&& SAMItemRegistryFoundation::isRegisteredRuntimeItemId(resolved))
+	{
+		return resolved + EDITOR_ITEM_ID_OFFSET;
+	}
+#endif
+	/* A game build must not reinterpret the saved session-local number as
+	 * another mod's item. Zero makes monster slots unavailable, while authored
+	 * ground items are explicitly removed by assignActions(). */
+	return 0;
+#endif
+}
+
+/* Raw map entities have their editor Stat child before assignActions() gives
+ * them actMonster. Map metadata is loaded in that interval, so getStats()
+ * would incorrectly hide the child in the game build. */
+const Stat* authoredMonsterStats(const Entity* entity)
+{
+	if (!entity || checkSpriteType(entity->sprite) != 1
+		|| !entity->children.first || !entity->children.first->next)
+	{
+		return nullptr;
+	}
+	return static_cast<const Stat*>(entity->children.first->next->element);
+}
+
+Stat* authoredMonsterStats(Entity* entity)
+{
+	return const_cast<Stat*>(
+		authoredMonsterStats(static_cast<const Entity*>(entity)));
+}
+
+struct AuthoredStableIdentityRecord
+{
+	std::uint32_t persistentID = 0;
+	std::uint16_t slot = 0;
+	std::string stableID;
+};
+
+bool appendAuthoredStableIdentityChunk(std::vector<std::uint8_t>& payload,
+	const map_t& loadedMap)
+{
+	std::vector<AuthoredStableIdentityRecord> records;
+	if (loadedMap.entities)
+	{
+		for (node_t* node = loadedMap.entities->first; node; node = node->next)
+		{
+			const Entity* entity = static_cast<const Entity*>(node->element);
+			if (!entity || entity->persistentID <= 0)
+			{
+				continue;
+			}
+			const int spriteType = checkSpriteType(entity->sprite);
+			if (spriteType == 3)
+			{
+				std::string stableID = entity->authoredItemStableID;
+				if (stableID.empty())
+				{
+					stableID = authoredStableIDForEditorItemValue(entity->skill[10]);
+				}
+				if (isSafeAuthoredStableID(stableID))
+				{
+					records.push_back({static_cast<std::uint32_t>(entity->persistentID),
+						kAuthoredGroundItemSlot, std::move(stableID)});
+				}
+			}
+			else if (spriteType == 1)
+			{
+				const Stat* stats = authoredMonsterStats(entity);
+				if (!stats)
+				{
+					continue;
+				}
+				for (std::size_t slot = 0;
+					slot < stats->EDITOR_ITEM_STABLE_IDS.size(); ++slot)
+				{
+					std::string stableID = stats->EDITOR_ITEM_STABLE_IDS[slot];
+					if (stableID.empty())
+					{
+						stableID = authoredStableIDForEditorItemValue(
+							stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES]);
+					}
+					if (isSafeAuthoredStableID(stableID))
+					{
+						records.push_back({static_cast<std::uint32_t>(entity->persistentID),
+							static_cast<std::uint16_t>(slot), std::move(stableID)});
+					}
+				}
+			}
+		}
+	}
+
+	std::vector<std::uint8_t> chunk;
+	appendMapMetadataU16(chunk, kAuthoredStableIdentityVersion);
+	appendMapMetadataU16(chunk, 0);
+	appendMapMetadataU32(chunk, static_cast<std::uint32_t>(records.size()));
+	for (const AuthoredStableIdentityRecord& record : records)
+	{
+		appendMapMetadataU32(chunk, record.persistentID);
+		appendMapMetadataU16(chunk, record.slot);
+		appendMapMetadataU16(chunk,
+			static_cast<std::uint16_t>(record.stableID.size()));
+		chunk.insert(chunk.end(), record.stableID.begin(), record.stableID.end());
+	}
+	payload.insert(payload.end(), {'S', 'M', 'I', 'D'});
+	appendMapMetadataU32(payload, static_cast<std::uint32_t>(chunk.size()));
+	payload.insert(payload.end(), chunk.begin(), chunk.end());
+	return true;
+}
+
+bool loadAuthoredStableIdentityChunk(const std::vector<std::uint8_t>& payload,
+	std::size_t& offset, const std::size_t chunkEnd, list_t* entities)
+{
+	if (offset > chunkEnd || chunkEnd - offset < 8)
+	{
+		return false;
+	}
+	std::uint16_t version = 0;
+	std::uint16_t reserved = 0;
+	std::uint32_t count = 0;
+	if (!readMapMetadataU16(payload, offset, version)
+		|| !readMapMetadataU16(payload, offset, reserved)
+		|| !readMapMetadataU32(payload, offset, count)
+		|| version != kAuthoredStableIdentityVersion || reserved != 0
+		|| count > (chunkEnd - offset) / 9)
+	{
+		return false;
+	}
+
+	std::unordered_map<std::uint32_t, Entity*> byPersistentID;
+	if (entities)
+	{
+		for (node_t* node = entities->first; node; node = node->next)
+		{
+			Entity* entity = static_cast<Entity*>(node->element);
+			if (entity && entity->persistentID > 0)
+			{
+				byPersistentID.emplace(
+					static_cast<std::uint32_t>(entity->persistentID), entity);
+			}
+		}
+	}
+	std::set<std::pair<std::uint32_t, std::uint16_t>> seen;
+	for (std::uint32_t i = 0; i < count; ++i)
+	{
+		std::uint32_t persistentID = 0;
+		std::uint16_t slot = 0;
+		std::uint16_t stableLength = 0;
+		if (!readMapMetadataU32(payload, offset, persistentID)
+			|| !readMapMetadataU16(payload, offset, slot)
+			|| !readMapMetadataU16(payload, offset, stableLength)
+			|| persistentID == 0 || stableLength == 0
+			|| stableLength > kAuthoredStableIdentityMaximumBytes
+			|| offset > chunkEnd || chunkEnd - offset < stableLength
+			|| !seen.emplace(persistentID, slot).second)
+		{
+			return false;
+		}
+		const std::string stableID(
+			reinterpret_cast<const char*>(payload.data() + offset), stableLength);
+		offset += stableLength;
+		if (!isSafeAuthoredStableID(stableID))
+		{
+			return false;
+		}
+		const auto found = byPersistentID.find(persistentID);
+		if (found == byPersistentID.end())
+		{
+			continue;
+		}
+		Entity* entity = found->second;
+		if (slot == kAuthoredGroundItemSlot)
+		{
+			if (checkSpriteType(entity->sprite) != 3)
+			{
+				return false;
+			}
+			entity->authoredItemStableID = stableID;
+			entity->skill[10] = resolveAuthoredStableItemID(
+				stableID, entity->skill[10]);
+		}
+		else
+		{
+			Stat* stats = authoredMonsterStats(entity);
+			if (!stats
+				|| slot >= stats->EDITOR_ITEM_STABLE_IDS.size())
+			{
+				return false;
+			}
+			stats->EDITOR_ITEM_STABLE_IDS[slot] = stableID;
+			Sint32& runtimeID =
+				stats->EDITOR_ITEMS[slot * ITEM_SLOT_NUMPROPERTIES];
+			runtimeID = resolveAuthoredStableItemID(stableID, runtimeID);
+		}
+	}
+	return offset == chunkEnd;
+}
+
 bool saveMapMetadata(File* fp, const map_t& loadedMap)
 {
 	if (!fp)
@@ -194,6 +444,19 @@ bool saveMapMetadata(File* fp, const map_t& loadedMap)
 	payload.insert(payload.end(), {'A', 'M', 'B', 'L'});
 	appendMapMetadataU32(payload, sizeof(ambientLight));
 	payload.insert(payload.end(), std::begin(ambientLight), std::end(ambientLight));
+
+	std::vector<std::uint8_t> roomGroups;
+	if (!serializeAuthoredRoomGroups(loadedMap.roomGroups, roomGroups))
+	{
+		return false;
+	}
+	payload.insert(payload.end(), {'R', 'G', 'R', 'P'});
+	appendMapMetadataU32(payload, static_cast<std::uint32_t>(roomGroups.size()));
+	payload.insert(payload.end(), roomGroups.begin(), roomGroups.end());
+	if (!appendAuthoredStableIdentityChunk(payload, loadedMap))
+	{
+		return false;
+	}
 	if (payload.size() > kMapMetadataMaximumPayloadBytes)
 	{
 		return false;
@@ -207,9 +470,10 @@ bool saveMapMetadata(File* fp, const map_t& loadedMap)
 		&& fp->write(payload.data(), sizeof(std::uint8_t), payload.size()) == payload.size();
 }
 
-bool loadMapMetadata(File* fp, map_t& loadedMap, const char* filename)
+bool loadMapMetadata(File* fp, map_t& loadedMap, list_t* entities,
+	const char* filename)
 {
-	resetMapAmbience(loadedMap);
+	resetMapMetadata(loadedMap);
 	if (!fp)
 	{
 		return false;
@@ -241,6 +505,8 @@ bool loadMapMetadata(File* fp, map_t& loadedMap, const char* filename)
 	std::size_t offset = 0;
 	bool sawAmbience = false;
 	bool sawAmbientLight = false;
+	bool sawRoomGroups = false;
+	bool sawStableIdentities = false;
 	while (offset < payload.size())
 	{
 		if (payload.size() - offset < 8)
@@ -310,6 +576,33 @@ bool loadMapMetadata(File* fp, map_t& loadedMap, const char* filename)
 			loadedMap.ambientLight.red = payload[offset++];
 			loadedMap.ambientLight.green = payload[offset++];
 			loadedMap.ambientLight.blue = payload[offset++];
+		}
+		else if (std::memcmp(tag, "RGRP", 4) == 0)
+		{
+			if (sawRoomGroups)
+			{
+				return false;
+			}
+			sawRoomGroups = true;
+			AuthoredRoomGroupCollection decoded;
+			authoredRoomGroupsReset(decoded);
+			if (!deserializeAuthoredRoomGroups(payload.data() + offset, chunkLength,
+				loadedMap.width, loadedMap.height, loadedMap.numLayers, decoded))
+			{
+				return false;
+			}
+			loadedMap.roomGroups = decoded;
+			offset = chunkEnd;
+		}
+		else if (std::memcmp(tag, "SMID", 4) == 0)
+		{
+			if (sawStableIdentities
+				|| !loadAuthoredStableIdentityChunk(payload, offset,
+					chunkEnd, entities))
+			{
+				return false;
+			}
+			sawStableIdentities = true;
 		}
 		else
 		{
@@ -3777,6 +4070,10 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 		return -1;
 	}
 
+	/* Old maps have no MPMD envelope, and temporary submap objects are commonly
+	 * reused. Clear optional authored metadata before parsing any version. */
+	resetMapMetadata(*destmap);
+
 	// read map version number
 	fp->read(
 		valid_data,
@@ -4034,7 +4331,7 @@ int loadMap(const char* filename2, map_t* destmap, list_t* entlist, list_t* crea
 			}
 		}
 	}
-	resetMapAmbience(*destmap);
+	resetMapMetadata(*destmap);
 	fp->read(destmap->name, sizeof(char), 32); // map name
 	fp->read(destmap->author, sizeof(char), 32); // map author
 	fp->read(&destmap->width, sizeof(Uint32), 1); // map width
@@ -4962,7 +5259,7 @@ fp->read(&numentities, sizeof(Uint32), 1);
 	}
 
 	if (editorVersion >= 50
-		&& !loadMapMetadata(fp, *destmap, filename))
+		&& !loadMapMetadata(fp, *destmap, entlist, filename))
 	{
 		FileIO::close(fp);
 		list_FreeAll(entlist);
@@ -5828,7 +6125,7 @@ int saveMap(const char* filename2)
 		}
 		if (!saveMapMetadata(fp, map))
 		{
-			printlog("[Map Metadata] Failed to serialize ambience metadata for '%s'.", filename);
+			printlog("[Map Metadata] Failed to serialize authored map metadata for '%s'.", filename);
 			FileIO::close(fp);
 			return 1;
 		}

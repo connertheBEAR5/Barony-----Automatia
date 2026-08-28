@@ -1,6 +1,22 @@
 BARONY AUTOMATIA - DIVERGENT PATHS AND LATE JOIN DEVELOPER GUIDE
 ================================================================
 
+CURRENT BASELINE (2026-08-28)
+-----------------------------
+
+The contained cross-map two-client process run now passes divergent
+MapInstances, party scoping, SAMF delivery, save/shutdown/restart, and durable
+Party ID hydration. The contained new-player late-join run also passes the
+ready/go snapshot sequence. Earlier statements below that call these paths only
+compile-tested are historical. A normal one-headless plus two-real-graphical-
+client run, token-matched returning character, real custom S.A.M. content,
+Windows, Steam/EOS P2P, and adverse network conditions remain unverified.
+
+The current spatial contract is four-axis: MapInstance chooses the world;
+playableFloor chooses gameplay membership; authoredMapLayer 0..31 chooses
+physical structure; Entity::z remains local model/animation height. Party ID is
+a fifth, social identity axis and must never be inferred from location.
+
 CURRENT IMPLEMENTED STAGE
 -------------------------
 DIVERGENT-1A through DIVERGENT-1E now have an implementation path, but the
@@ -220,3 +236,10 @@ S.A.M. INVARIANT
 ----------------
 Custom items in snapshots and saves remain authoritative by stable_id. Runtime
 item IDs are only local session mappings.
+
+The authenticated SAMF value covers the effective S.A.M. catalog and
+deterministically selected room providers. Server generation remains
+authoritative; clients do not independently choose room content. Authored Room
+Groups are saved map metadata and coexist with, but are not replaced by, S.A.M.
+procedural room hooks. Mini Mimic equipment and containers use the same generic
+stable-ID remapping path.

@@ -5,12 +5,15 @@ This is the single maintained guide for the custom dialogue/quest
 system. Future packages update this file instead of adding a new
 documentation file for every code change.
 
-Current integration status (2026-08-23): the quest journal UI is implemented;
+Current integration status (2026-08-28): the quest journal UI is implemented;
 Automatia companion saves serialize quest/dialogue state; and dedicated
 per-character saves export/import player-scoped story state. The live dialogue
 runtime still executes only player ownership. Authored party/world scope values
 are retained by the editor but load safely as player scope until those ownership
-models are implemented. Broad multiplayer/reconnect acceptance remains open.
+models are implemented. Authored Mini Mimics can keep dialogue and
+recruitability enabled together; `recruit_npc` uses the generic persistent
+follower-owner path. Broad real-client multiplayer/reconnect acceptance remains
+open even though deterministic and contained process tests pass.
 
 
 1. FILE LOCATION AND DIALOGUE IDS
@@ -489,10 +492,12 @@ Rewards:
 The editor intentionally does not generate unsupported item names.
 
 
-11. EDITOR WORK STILL PLANNED
-=============================
+11. HISTORICAL EDITOR ROADMAP (NOW IMPLEMENTED BELOW)
+=====================================================
 
-The editor still needs expanded controls for:
+The following was the earlier roadmap. Parts 12B and 13 plus the follow-up
+sections later in this guide document the implemented controls; do not read
+this historical list as current missing work:
 
 - quest start, fail, and reset actions,
 - objective complete and clear actions,
@@ -1086,3 +1091,26 @@ VALIDATE now additionally rejects:
 All earlier guided condition controls, quest selectors, item selectors,
 tooltips, summaries, giver markers, and the Restart Game journal fix are
 included.
+
+
+CURRENT MINI MIMIC AND MULTIPLAYER CONTRACT (2026-08-28)
+========================================================
+
+The Zed Mini Mimic property panel independently stores disposition,
+recruitability, custom-dialogue enabled state, dialogue resource, and optional
+display name. Enabling dialogue does not disable recruitment, and recruiting an
+NPC does not erase its authored dialogue configuration. Dialogue choices remain
+host-authoritative and per-player quest state remains private to the interacting
+character. The generic persistent follower system owns recruitment, networking,
+HUD restoration, durable owner identity, inventory/equipment, and reconnect.
+
+MapInstance and playableFloor scope interaction; authoredMapLayer and local Z
+remain physical/presentation coordinates. A dialogue or Mini Mimic copied in a
+multi-layer Room Group retains those fields and generic persistent metadata.
+S.A.M. equipment uses stable item IDs through the shared item/persistence layer;
+there is no dialogue-specific or Mini Mimic-specific S.A.M. format.
+
+Automated parser/editor characterization and the full 11-test suite pass. The
+real two-client dialogue-plus-recruit, per-player quest visibility, upper-floor
+interaction, save/restart, and reconnect scenario remains part of the manual
+cross-feature acceptance; it is not claimed by editor compilation.
