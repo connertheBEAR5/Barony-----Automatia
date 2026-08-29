@@ -34,9 +34,10 @@ constexpr Sint32 MINIMIMIC_LID_MODEL = 1795;
 
 /*
  * Baby appearance uses the dedicated Mini Mimic slabs. Those assets retain the
- * authored shell and now contain only downsampled regular-Mimic mouth voxels in
- * previously empty cells. The optional Scaled Mimic appearance instead reuses
- * the complete regular trunk/lid and fits it into the 9x11 Mini silhouette.
+ * authored shell silhouette, reline only its inward-facing mouth surfaces, and
+ * add downsampled regular-Mimic flesh/teeth inside the cavity. The optional
+ * Scaled Mimic appearance instead reuses the complete regular trunk/lid and
+ * fits it into the 9x11 Mini silhouette.
  */
 constexpr real_t MINIMIMIC_VISUAL_SCALE_X = 9.0 / 13.0;
 constexpr real_t MINIMIMIC_VISUAL_SCALE_Y = 11.0 / 17.0;

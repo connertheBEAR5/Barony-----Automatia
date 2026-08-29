@@ -19,7 +19,7 @@ manual.
 
 Mini Mimic Appearance is independent of dialogue and recruitment. `Baby` is the
 backward-compatible default and keeps the dedicated shell with its generated
-mouth interior; `Scaled Mimic` fits the complete regular Mimic slabs into the
+relined mouth surfaces and cavity teeth; `Scaled Mimic` fits the complete regular Mimic slabs into the
 Mini footprint. Changing appearance does not clear a dialogue resource, alter
 quest scope, or change the `recruit_npc` action. Both modes use the calm idle.
 

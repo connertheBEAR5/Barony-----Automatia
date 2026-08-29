@@ -1273,8 +1273,9 @@ Dialogue and recruitment are not mutually exclusive.
 Appearance has two authored values:
 
 - Baby (0/default): keeps the dedicated Mini Mimic trunk/lid models 1794/1795
-  and their original scale. The shell artwork is retained; only previously
-  empty cells contain downsampled regular-Mimic flesh/gum interior colors.
+  and their original scale. The exterior silhouette and boundary shell cells
+  remain authored Mini artwork. Inward-facing shell cells are relined and
+  existing cavity space receives downsampled regular-Mimic flesh/gum/teeth.
   Existing maps that predate the property remain Baby.
 - Scaled Mimic (1): uses the complete regular Mimic models 1247/1248, scaled
   to X=9/13, Y=11/17, and Z=0.55 so they fit the Mini Mimic footprint.
@@ -1296,9 +1297,19 @@ mode so a late join can receive its model choice.
 
 The Baby interior assets are reproducible with
 tools/generate_minimimic_interiors.py. The generator verifies the exact source
-asset hashes, preserves every original shell voxel, reserves palette slots
-240..254 only for generated interior colors, and is idempotent. It adds 40
-interior voxels to the trunk and 12 to the lid.
+asset hashes, preserves every original shell voxel's geometry, and is
+reversible/idempotent. Palette slots 208..239 encode relined flesh/teeth plus
+the original Mini palette index; 240..254 encode added cavity geometry. The
+trunk relines 70 cells and adds 40 cavity voxels, including 15 teeth and 48
+surfaces exposed toward its upward-facing mouth. The lid relines 47 cells and
+adds 12 cavity voxels, including 13 teeth and 59 surfaces exposed on its
+downward-facing interior. The two directions deliberately differ because the
+lid interior is its underside in Barony slab coordinates.
+
+Barony's polygon-model cache now records a fingerprint of all loaded voxel
+dimensions, occupancy, and palette data. An older cache automatically rebuilds
+after either Mini Mimic `.vox` file changes, preventing the game from continuing
+to display the pre-interior model from `~/.barony/models.cache`.
 
 
 ======================================================================

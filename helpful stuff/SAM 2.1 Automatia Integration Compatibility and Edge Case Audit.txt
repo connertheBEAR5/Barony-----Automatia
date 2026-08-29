@@ -18,8 +18,8 @@ complete, while the exact one-headless plus two-real-graphical-client run and
 real packaged S.A.M. mod acceptance remain manual.
 
 Mini Mimic now has authored Baby and Scaled Mimic appearances plus a calm idle.
-Baby is zero/default and retains the Mini shell while generated interior voxels
-reuse regular-Mimic mouth colors; Scaled Mimic reuses the complete regular
+Baby is zero/default and retains the Mini shell silhouette while inward-facing
+surfaces and cavity voxels reuse regular-Mimic flesh/teeth; Scaled Mimic reuses the complete regular
 Mimic slabs fitted to the Mini footprint. This did not create a S.A.M.-specific
 monster, item identity, save record, room representation, pathfinder, or packet.
 S.A.M. equipment still uses generic stable-ID/runtime-ID remapping and custom

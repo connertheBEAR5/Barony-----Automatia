@@ -153,7 +153,8 @@ bool testMiniMimicCompleteVisualAndCalmIdle()
 	EXPECT(trunk != nullptr);
 	EXPECT(lid != nullptr);
 	// Zero is the backward-compatible Baby appearance: retain the original
-	// Mini shell models (their slabs now contain interior-only mouth voxels).
+	// Mini shell models (their slabs retain the silhouette while relining the
+	// visible mouth surfaces and adding downsampled flesh/teeth).
 	EXPECT(miniStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE]
 		== MINIMIMIC_APPEARANCE_BABY);
 	EXPECT(trunk->sprite == 1794);

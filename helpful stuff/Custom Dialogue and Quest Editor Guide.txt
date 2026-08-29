@@ -1106,6 +1106,7 @@ HUD restoration, durable owner identity, inventory/equipment, and reconnect.
 
 Appearance is another independent authored field. `Baby` is zero/default for
 old maps and keeps the dedicated Mini shell with generated mouth-interior voxels;
+its inward surfaces are relined and its cavity includes regular-Mimic teeth.
 `Scaled Mimic` uses the complete regular Mimic trunk/lid fitted to the Mini
 footprint. Both use the calm idle. Toggling appearance does not change the
 dialogue-enabled flag, resource path, recruitability, owner, or per-player quest

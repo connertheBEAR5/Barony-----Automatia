@@ -421,8 +421,8 @@ Before networking, open each map once in Zed and verify place/select/copy/paste/
 delete plus save/load for the Mini Mimic and Room Group. Record screenshots of
 the layer range, persistent IDs, local z, item stable IDs and all Mini Mimic
 properties. Also place a second disposable Mini Mimic, leave Appearance Baby,
-save/reload, and verify the dedicated shell, added mouth interior, and calm idle
-before deleting it. Old maps without an appearance field must also load as
+save/reload, and verify the dedicated shell, visible relined mouth surfaces,
+cavity teeth, and calm idle before deleting it. Old maps without an appearance field must also load as
 Baby. This editor/visual check was not run by the stabilization pass.
 
 

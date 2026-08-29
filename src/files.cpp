@@ -6610,6 +6610,54 @@ bool physfsModelIndexUpdate(int &start, int &end)
 
 -------------------------------------------------------------------------------*/
 
+namespace
+{
+constexpr std::array<char, 8> kModelCacheSourceFingerprintMagic = {
+	'V', 'O', 'X', 'S', 'I', 'G', '0', '1'
+};
+constexpr std::uint64_t kModelCacheFingerprintOffset = 14695981039346656037ULL;
+constexpr std::uint64_t kModelCacheFingerprintPrime = 1099511628211ULL;
+
+void appendModelCacheFingerprint(
+	std::uint64_t& fingerprint,
+	const void* data,
+	const std::size_t size)
+{
+	const auto* bytes = static_cast<const Uint8*>(data);
+	for (std::size_t index = 0; index < size; ++index)
+	{
+		fingerprint ^= bytes[index];
+		fingerprint *= kModelCacheFingerprintPrime;
+	}
+}
+
+std::uint64_t calculateModelSourceFingerprint()
+{
+	std::uint64_t fingerprint = kModelCacheFingerprintOffset;
+	appendModelCacheFingerprint(fingerprint, &nummodels, sizeof(nummodels));
+	for (std::size_t modelIndex = 0; modelIndex < nummodels; ++modelIndex)
+	{
+		const voxel_t* model = models[modelIndex];
+		const Uint8 present = model ? 1 : 0;
+		appendModelCacheFingerprint(fingerprint, &present, sizeof(present));
+		if (!model)
+		{
+			continue;
+		}
+
+		appendModelCacheFingerprint(fingerprint, &model->sizex, sizeof(model->sizex));
+		appendModelCacheFingerprint(fingerprint, &model->sizey, sizeof(model->sizey));
+		appendModelCacheFingerprint(fingerprint, &model->sizez, sizeof(model->sizez));
+		const std::size_t voxelCount = static_cast<std::size_t>(model->sizex)
+			* static_cast<std::size_t>(model->sizey)
+			* static_cast<std::size_t>(model->sizez);
+		appendModelCacheFingerprint(fingerprint, model->data, voxelCount);
+		appendModelCacheFingerprint(fingerprint, model->palette, sizeof(model->palette));
+	}
+	return fingerprint;
+}
+}
+
 void saveModelCache() {
 	File* model_cache;
 	const std::string cache_path = std::string(outputdir) + "/models.cache";
@@ -6617,6 +6665,15 @@ void saveModelCache() {
 		char modelCacheHeader[32] = "BARONY";
 		strcat(modelCacheHeader, VERSION);
 		model_cache->write(&modelCacheHeader, sizeof(char), strlen(modelCacheHeader));
+		model_cache->write(
+			kModelCacheSourceFingerprintMagic.data(),
+			sizeof(char),
+			kModelCacheSourceFingerprintMagic.size());
+		const std::uint64_t modelSourceFingerprint = calculateModelSourceFingerprint();
+		model_cache->write(
+			&modelSourceFingerprint,
+			sizeof(modelSourceFingerprint),
+			1);
 		for (size_t model_index = 0; model_index < nummodels; model_index++) {
 			polymodel_t* cur = &polymodels[model_index];
 			model_cache->write(&cur->numfaces, sizeof(cur->numfaces), 1);
@@ -6697,6 +6754,31 @@ void generatePolyModels(int start, int end, bool forceCacheRebuild)
 				else
 				{
 					printlog("[MODEL CACHE]: Detected legacy cache without embedded version data, upgrading cache to %s...", VERSION);
+					FileIO::close(model_cache);
+					goto generate;
+				}
+
+				std::array<char, kModelCacheSourceFingerprintMagic.size()>
+					cachedFingerprintMagic{};
+				const std::size_t fingerprintMagicBytes = model_cache->read(
+					cachedFingerprintMagic.data(),
+					sizeof(char),
+					cachedFingerprintMagic.size());
+				std::uint64_t cachedModelSourceFingerprint = 0;
+				const std::size_t fingerprintValues = model_cache->read(
+					&cachedModelSourceFingerprint,
+					sizeof(cachedModelSourceFingerprint),
+					1);
+				const std::uint64_t currentModelSourceFingerprint =
+					calculateModelSourceFingerprint();
+				if (fingerprintMagicBytes != cachedFingerprintMagic.size()
+					|| cachedFingerprintMagic != kModelCacheSourceFingerprintMagic
+					|| fingerprintValues != 1
+					|| cachedModelSourceFingerprint != currentModelSourceFingerprint)
+				{
+					printlog(
+						"[MODEL CACHE]: Voxel sources changed or cache predates source "
+						"fingerprinting; rebuilding...");
 					FileIO::close(model_cache);
 					goto generate;
 				}

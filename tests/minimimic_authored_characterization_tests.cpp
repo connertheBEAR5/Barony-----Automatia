@@ -62,6 +62,7 @@ bool testExistingRuntimeActorIsReused()
 	const std::string entityShared = readFile("src/entity_shared.cpp");
 	const std::string maps = readFile("src/maps.cpp");
 	const std::string stats = readFile("src/stat_shared.cpp");
+	const std::string files = readFile("src/files.cpp");
 	const std::string interiorGenerator =
 		readFile("tools/generate_minimimic_interiors.py");
 
@@ -89,9 +90,25 @@ bool testExistingRuntimeActorIsReused()
 	EXPECT(contains(mimic, "createMonsterEquipment(myStats, rng)"));
 	EXPECT(contains(mimic, "createCustomInventory(myStats"));
 	EXPECT(contains(interiorGenerator, "preserves every original shell"));
+	EXPECT(contains(interiorGenerator, "RELINED_FLESH_PALETTE_FIRST = 208"));
+	EXPECT(contains(interiorGenerator, "RELINED_TOOTH_PALETTE_FIRST = 224"));
 	EXPECT(contains(interiorGenerator, "GENERATED_PALETTE_FIRST = 240"));
 	EXPECT(contains(interiorGenerator, "is_mimic_interior_color"));
+	EXPECT(contains(interiorGenerator, "is_mimic_tooth_color"));
+	EXPECT(contains(interiorGenerator, "shell_cell_faces_interior"));
+	EXPECT(contains(interiorGenerator, "interior_count < shell_count"));
+	EXPECT(contains(interiorGenerator, "minimum_interior_facing"));
+	EXPECT(contains(interiorGenerator, "interior_z_direction=-1"));
+	EXPECT(contains(interiorGenerator, "interior_z_direction=1"));
+	EXPECT(contains(interiorGenerator, "expected_relined=70"));
+	EXPECT(contains(interiorGenerator, "expected_relined=47"));
+	EXPECT(contains(interiorGenerator, "expected_teeth=15"));
+	EXPECT(contains(interiorGenerator, "expected_teeth=13"));
 	EXPECT(contains(interiorGenerator, "reconstruct_original_shell"));
+	EXPECT(contains(files, "kModelCacheSourceFingerprintMagic"));
+	EXPECT(contains(files, "calculateModelSourceFingerprint"));
+	EXPECT(contains(files, "cachedModelSourceFingerprint != currentModelSourceFingerprint"));
+	EXPECT(contains(files, "Voxel sources changed or cache predates source"));
 	EXPECT(contains(actMonster, "case MINIMIMIC: initMiniMimic(my, myStats);"));
 	EXPECT(contains(actMonster, "case MINIMIMIC: mimicAnimate(my, myStats, dist);"));
 

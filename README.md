@@ -256,14 +256,21 @@ recruitability, optional custom dialogue resource, and a two-state appearance
 selector. Dialogue and recruitment may be enabled together.
 
 The default `Baby` appearance keeps the dedicated Mini Mimic trunk and lid
-(models 1794/1795) and fills only their previously empty mouth cells with
-downsampled flesh/gum colors from the regular Mimic assets. Old maps therefore
-remain Baby by default. `Scaled Mimic` instead reuses the complete regular
+(models 1794/1795), relines their inward-facing mouth surfaces, and adds
+downsampled flesh/gum/teeth inside existing cavity space. Its exterior
+silhouette and boundary shell cells remain unchanged. Old maps therefore remain
+Baby by default. `Scaled Mimic` instead reuses the complete regular
 Mimic trunk/lid (1247/1248), scaled independently on X/Y/Z to fit the Mini
 Mimic footprint. Both appearances use a calm idle: a stationary, non-attacking
 Mini Mimic settles instead of hopping in place and breathes through a small lid
 motion. Movement, pursuit, and attack animations remain the shared Mimic
 behavior.
+
+The polygon-model cache includes a fingerprint of the loaded voxel dimensions,
+occupancy, and palettes. Changing either Mini Mimic slab therefore invalidates
+an older `~/.barony/models.cache` automatically instead of silently rendering
+stale geometry. The first launch after a voxel update rebuilds that cache;
+later launches reuse it normally.
 
 Mini Mimics reuse the normal monster combat, faction, follower ownership, HUD,
 networking, dialogue/quest, persistence, and S.A.M. item identity paths. Their

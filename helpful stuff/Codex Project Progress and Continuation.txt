@@ -1613,9 +1613,11 @@ The final appearance design follows both parts of the owner's clarification:
 
 * Baby is value 0 and the old-map-compatible default. It keeps the dedicated
   Mini Mimic trunk and lid models 1794/1795 at their original scale. A
-  deterministic generator fills only empty shell cells with red/purple
-  flesh/gum sampled from the regular Mimic; it never replaces wood/metal shell
-  voxels. The trunk gained 40 interior voxels and the lid gained 12.
+  deterministic generator retains the exterior silhouette and boundary shell
+  cells, relines only inward-facing surfaces, and adds regular-Mimic
+  flesh/gum/teeth in existing cavity space. The trunk relines 70 cells and adds
+  40 cavity voxels, including 15 teeth; the lid relines 47 and adds 12,
+  including 13 teeth.
 * Scaled Mimic is value 1. It reuses the complete regular Mimic models
   1247/1248 at scale X=9/13, Y=11/17, Z=0.55. It is an authored option rather
   than a replacement for Baby.
@@ -1637,14 +1639,21 @@ The final appearance design follows both parts of the owner's clarification:
 Asset reproducibility:
 
 * `tools/generate_minimimic_interiors.py` validates exact original Mini and
-  regular-Mimic input hashes, reserves palette slots 240..254 for generated
-  colors, reconstructs the original shell byte-for-byte, and is idempotent.
+  regular-Mimic input hashes. Relined palette ranges 208..239 reversibly encode
+  the original Mini palette index; 240..254 identify added cavity voxels. The
+  script reconstructs the original shell byte-for-byte and is idempotent.
 * Final `MinimimicTrunk.vox` SHA-256:
-  `547ad2650da84c757f9de818e3cb8c40cb9129aa7e297927a105814ba42c9079`.
+  `c73dde28841c8d305d312605ed636b5692bcd478b7f23acbe100dee05760f8e3`.
 * Final `MinimimicLid.vox` SHA-256:
-  `da414aa9cc68b906af342789937bb3a78ef66b310ed19c3cc5cb7d02be68f6a5`.
+  `8ce4568ced26ddd710e9a42ad7b1afc9033379c584f387e1f6878f82b2137124`.
 
-Validation immediately before this documentation synchronization:
+The first empty-cell-only version produced the prior hashes recorded in the AI
+handoff but left all 40 trunk additions below the top-facing shell and exposed
+only a one-sided 12-voxel lid patch. The relining correction above supersedes
+that visually hidden result while retaining its old-map/runtime architecture.
+
+Validation of the initial appearance implementation before the visibility
+correction:
 
 * `cmake --build build-super-posix -j6`: PASS.
 * `ctest --test-dir build-super-posix --output-on-failure`: PASS, 13/13.
@@ -1658,3 +1667,96 @@ modes, calm-idle-to-movement transitions, the complete property panel at the
 target resolution, and a real remote/late-joining client seeing the same scaled
 appearance. The exact headless plus two-real-client cross-feature run also
 remains open.
+
+2026-08-29 BABY INTERIOR VISIBILITY CORRECTION (SUPERSEDED BELOW)
+==================================================================
+
+A live report showed that the first generated Baby interior was not actually
+readable in game. Binary slab/surface inspection found a concrete cause: all 40
+trunk additions were below the brown top-facing shell, while the lid exposed
+only a small one-sided 12-voxel red patch. The two runtime limb transforms did
+not require another offset or bodypart.
+
+The generator now intersects normalized regular-Mimic material sampling with a
+Mini-shell interior mask. A per-Z horizontal exterior-air flood fill protects
+outer walls; central top/cavity faces may be relined. A source region must have
+at least as much flesh/tooth material as shell material, preventing isolated red
+source pixels from bleeding onto wood. Warm ivory teeth are now preserved as
+well as red/purple flesh.
+
+Relining is reversible without a second shell asset: palette ranges 208..223
+and 224..239 encode flesh/tooth plus the original 0..15 Mini palette index.
+Added cavity voxels remain in 240..254. Reconstruction restores every relined
+cell, removes additions, zeroes those reserved palettes, and reproduces the
+original asset hashes exactly.
+
+Current data result:
+
+* Trunk: 59 relined cells, 40 additions, 13 teeth, 17 top-facing generated
+  voxels; SHA-256
+  `6a9e761df6dc90d35136a682fe81e6917ed970da89836270ebb5b39cf817a054`.
+* Lid: 47 relined cells, 12 additions, 13 teeth, 59 top-facing generated
+  voxels; SHA-256
+  `8ce4568ced26ddd710e9a42ad7b1afc9033379c584f387e1f6878f82b2137124`.
+* All occupied X/Y boundary shell cells retain their original palette indices.
+* Two in-place generator runs and an independent output-root rebuild were
+  byte-identical.
+
+Validation after this correction:
+
+* `cmake --build build-super-posix -j6`: PASS.
+* `ctest --test-dir build-super-posix --output-on-failure`: PASS, 13/13.
+* Stage 4D/Z4D executable characterization: PASS.
+* Generator syntax, original-shell reconstruction, boundary preservation,
+  surface-count guards, independent byte comparison, and idempotence: PASS.
+
+An offline two-angle voxel-surface rendering was used to inspect the corrected
+slabs and showed red mouth lining/ivory teeth while keeping the Mini exterior.
+The actual game/editor GUI was not opened, so final in-engine appearance remains
+a short manual check rather than a claimed graphical pass.
+
+2026-08-29 LIVE SCREENSHOT, SLAB-AXIS, AND MODEL-CACHE CORRECTION
+================================================================
+
+A subsequent live screenshot proved that the game still rendered a hollow Baby
+Mini Mimic. The game log and filesystem timestamps identified why: the launch at
+18:17 loaded `/home/conner/.barony/models.cache`, which dated from August 16,
+while the two edited Mini slabs dated August 29. The old cache format checked
+only `VERSION`, so it silently supplied pre-interior polygon geometry even after
+the `.vox` files changed.
+
+`src/files.cpp` now stores an FNV-1a fingerprint of every loaded model's count,
+presence, dimensions, voxel occupancy, and palette immediately after the model-
+cache version header. Cache loading compares the stored value with the current
+voxel sources before accepting any cached faces. A legacy cache or changed voxel
+asset logs the reason, regenerates polygon models, and writes a fresh cache.
+Unchanged later launches retain the normal fast cache path. No user cache file
+was manually deleted during implementation.
+
+The screenshot also exposed an error in the previous offline visibility metric.
+Barony generates the trunk mouth's visible horizontal faces toward decreasing
+model Z, while the lid interior is its underside toward increasing model Z.
+The generator now carries an explicit per-slab interior Z direction and both its
+relining mask and visibility guard use that actual engine orientation.
+
+Final current assets:
+
+* Trunk: 70 relined cells, 40 additions, 15 teeth, and 48 generated cells
+  exposed toward the upward-facing mouth; SHA-256
+  `c73dde28841c8d305d312605ed636b5692bcd478b7f23acbe100dee05760f8e3`.
+* Lid: 47 relined cells, 12 additions, 13 teeth, and 59 generated cells exposed
+  toward the downward-facing underside; SHA-256
+  `8ce4568ced26ddd710e9a42ad7b1afc9033379c584f387e1f6878f82b2137124`.
+* All occupied X/Y boundary shell cells still match the original Mini slabs.
+* Independent generation remains byte-identical and reversible.
+
+Validation after the cache/axis correction:
+
+* `cmake --build build-super-posix -j6`: PASS.
+* `ctest --test-dir build-super-posix --output-on-failure`: PASS, 13/13.
+* Stage 4D/Z4D executable characterization: PASS.
+
+The supplied screenshot verifies the failure and the log verifies that stale
+cached geometry was used. A fresh graphical launch with this rebuilt executable
+is still required to confirm the final colors/shape after the automatic cache
+rebuild; that post-fix visual result is not claimed here yet.
