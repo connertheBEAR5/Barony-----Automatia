@@ -263,6 +263,15 @@ static const int STAT_FLAG_ALLY_SUMMON2_LVLHP = 9;
 static const int STAT_FLAG_ALLY_SUMMON2_STRDEXCONINT = 10;
 static const int STAT_FLAG_ALLY_SUMMON2_PERCHR = 11;
 static const int STAT_FLAG_MYSTERIOUS_SHOPKEEP = 16;
+/*
+ * Species-specific reuse: index 16 is only interpreted as the mysterious-shop
+ * flag when type == SHOPKEEPER. Mini Mimics use the same already-serialized
+ * slot for their authored appearance, avoiding a parallel save/network field.
+ */
+static const int STAT_FLAG_MINIMIMIC_APPEARANCE =
+	STAT_FLAG_MYSTERIOUS_SHOPKEEP;
+static const Sint32 MINIMIMIC_APPEARANCE_BABY = 0;
+static const Sint32 MINIMIMIC_APPEARANCE_SCALED_MIMIC = 1;
 static const int STAT_FLAG_NO_DROP_ITEMS = 19;
 static const int STAT_FLAG_FORCE_ALLEGIANCE_TO_PLAYER = 20;
 static const int STAT_FLAG_DISABLE_MINIBOSS = 21;

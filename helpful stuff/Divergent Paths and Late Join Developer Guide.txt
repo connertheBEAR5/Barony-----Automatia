@@ -1,9 +1,11 @@
 BARONY AUTOMATIA - DIVERGENT PATHS AND LATE JOIN DEVELOPER GUIDE
 ================================================================
 
-CURRENT BASELINE (2026-08-28)
+CURRENT BASELINE (2026-08-29)
 -----------------------------
 
+The current validation profile is `build-super-posix`; its game/editor build,
+13/13 registered tests, and Stage 4D/Z4D characterization pass with `-j6`.
 The contained cross-map two-client process run now passes divergent
 MapInstances, party scoping, SAMF delivery, save/shutdown/restart, and durable
 Party ID hydration. The contained new-player late-join run also passes the
@@ -16,6 +18,12 @@ The current spatial contract is four-axis: MapInstance chooses the world;
 playableFloor chooses gameplay membership; authoredMapLayer 0..31 chooses
 physical structure; Entity::z remains local model/animation height. Party ID is
 a fifth, social identity axis and must never be inferred from location.
+
+Z4A/B/C/D are now present on top of that contract. Vertical transition graphs
+and routes remain MapInstance-local; followers and already-legitimate hostile
+targets may consume them through server-authoritative transitions. This does
+not allow same-X/Y adjacency, acquisition, attacks, or packet lookup across
+floors or instances.
 
 CURRENT IMPLEMENTED STAGE
 -------------------------
@@ -242,4 +250,8 @@ deterministically selected room providers. Server generation remains
 authoritative; clients do not independently choose room content. Authored Room
 Groups are saved map metadata and coexist with, but are not replaced by, S.A.M.
 procedural room hooks. Mini Mimic equipment and containers use the same generic
-stable-ID remapping path.
+stable-ID remapping path. The authored Baby/Scaled Mimic appearance remains
+ordinary monster metadata. Existing bodypart model updates carry the selected
+models and clients derive their scale; no new late-join packet layout or
+MapInstance-crossing representation was added. A real remote late join seeing
+the same Scaled Mimic remains manual acceptance.

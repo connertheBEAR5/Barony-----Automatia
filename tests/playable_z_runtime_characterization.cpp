@@ -128,6 +128,97 @@ bool resetGlobalMapHarness(
     return true;
 }
 
+bool testMiniMimicCompleteVisualAndCalmIdle()
+{
+	multiplayer = SINGLE;
+	clientnum = 0;
+	EXPECT(resetGlobalMapHarness(3, 3, 1));
+
+	Entity* miniMimic = newEntity(
+		EDITOR_SPRITE_MINIMIMIC, 1, map.entities, nullptr);
+	EXPECT(miniMimic != nullptr);
+	setSpriteAttributes(miniMimic, nullptr, nullptr);
+	miniMimic->behavior = &actMonster;
+	miniMimic->skill[3] = 1; // MONSTER_INIT: construct visuals without random loot.
+	Stat* miniStats = miniMimic->getStats();
+	EXPECT(miniStats != nullptr);
+	miniStats->type = MINIMIMIC;
+	initMiniMimic(miniMimic, miniStats);
+
+	EXPECT(miniMimic->sprite == 1794);
+	EXPECT(miniMimic->getMonsterTypeFromSprite() == MINIMIMIC);
+	EXPECT(miniMimic->bodyparts.size() == 2);
+	Entity* trunk = miniMimic->bodyparts[0];
+	Entity* lid = miniMimic->bodyparts[1];
+	EXPECT(trunk != nullptr);
+	EXPECT(lid != nullptr);
+	// Zero is the backward-compatible Baby appearance: retain the original
+	// Mini shell models (their slabs now contain interior-only mouth voxels).
+	EXPECT(miniStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE]
+		== MINIMIMIC_APPEARANCE_BABY);
+	EXPECT(trunk->sprite == 1794);
+	EXPECT(lid->sprite == 1795);
+	EXPECT(std::abs(trunk->scalex - 1.0) < 0.0001);
+	EXPECT(std::abs(trunk->scaley - 1.0) < 0.0001);
+	EXPECT(std::abs(trunk->scalez - 1.0) < 0.0001);
+
+	// The authored Scaled Mimic option reuses the complete regular Mimic slabs.
+	miniStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE] =
+		MINIMIMIC_APPEARANCE_SCALED_MIMIC;
+	mimicAnimate(miniMimic, miniStats, 0.0);
+	EXPECT(trunk->sprite == 1247);
+	EXPECT(lid->sprite == 1248);
+	EXPECT(std::abs(trunk->scalex - (9.0 / 13.0)) < 0.0001);
+	EXPECT(std::abs(trunk->scaley - (11.0 / 17.0)) < 0.0001);
+	EXPECT(std::abs(trunk->scalez - 0.55) < 0.0001);
+	EXPECT(std::abs(lid->scalex - trunk->scalex) < 0.0001);
+	EXPECT(std::abs(lid->scaley - trunk->scaley) < 0.0001);
+	EXPECT(std::abs(lid->scalez - trunk->scalez) < 0.0001);
+
+	// Switching back restores both the authored shell models and unit scale.
+	miniStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE] =
+		MINIMIMIC_APPEARANCE_BABY;
+	mimicAnimate(miniMimic, miniStats, 0.0);
+	EXPECT(trunk->sprite == 1794);
+	EXPECT(lid->sprite == 1795);
+	EXPECT(std::abs(trunk->scalex - 1.0) < 0.0001);
+	EXPECT(std::abs(lid->scalez - 1.0) < 0.0001);
+
+	// An active Mini Mimic at rest eases out of any old shuffle pose and only
+	// breathes with its lid. It must not keep advancing the hopping walk cycle.
+	miniMimic->monsterSpecialState = MIMIC_ACTIVE;
+	miniMimic->monsterState = MONSTER_STATE_WAIT;
+	miniMimic->monsterAttack = 0;
+	trunk->skill[3] = 1;
+	trunk->fskill[3] = 0.75;
+	trunk->fskill[6] = 1.0;
+	for (int tick = 0; tick < 12; ++tick)
+	{
+		miniMimic->ticks = TICKS_PER_SECOND + tick;
+		mimicAnimate(miniMimic, miniStats, 0.0);
+	}
+	EXPECT(trunk->skill[3] == 1);
+	EXPECT(std::abs(trunk->monsterWeaponYaw) < 0.0001);
+	EXPECT(std::abs(trunk->roll) < 0.0001);
+	EXPECT(std::abs(trunk->fskill[4]) < 0.0001);
+	EXPECT(lid->fskill[6] > 0.0);
+	EXPECT(lid->pitch < -0.01);
+
+	// Movement/pathing still consumes the shared Mimic walk cycle.
+	const real_t oldWalkRate = limbs[MINIMIMIC][12][1];
+	const real_t oldWalkSetpoint = limbs[MINIMIMIC][12][2];
+	limbs[MINIMIMIC][12][1] = 0.02;
+	limbs[MINIMIMIC][12][2] = -0.3;
+	miniMimic->monsterState = MONSTER_STATE_PATH;
+	trunk->skill[3] = 0;
+	trunk->monsterWeaponYaw = 0.0;
+	mimicAnimate(miniMimic, miniStats, 0.1);
+	EXPECT(trunk->monsterWeaponYaw < 0.0);
+	limbs[MINIMIMIC][12][1] = oldWalkRate;
+	limbs[MINIMIMIC][12][2] = oldWalkSetpoint;
+	return true;
+}
+
 class TemporaryDataDirectory
 {
 public:
@@ -3352,7 +3443,8 @@ int runPlayableZRuntimeCharacterization()
 
     loading = true;
     const bool passed =
-        testLmpCompatibilityAndRoundTrip(temporary)
+		testMiniMimicCompleteVisualAndCalmIdle()
+		&& testLmpCompatibilityAndRoundTrip(temporary)
         && testOneFloorCollisionAndSpatialIndex()
 		&& testWallBusterUsesOwningPlayableFloor()
         && testPlayableFloorCollisionIsolation()

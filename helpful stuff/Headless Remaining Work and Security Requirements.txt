@@ -67,12 +67,13 @@ Test pre-game join, disconnect, autostart, terminal start/shutdown, invalid
 ports, occupied ports, malformed packets, catalog mismatch, long runtimes, and
 vanilla graphical startup. Unsupported options must fail closed.
 
-CURRENT VALIDATION SNAPSHOT (2026-08-28)
+CURRENT VALIDATION SNAPSHOT (2026-08-29)
 ----------------------------------------
-The primary configured Steamworks-enabled 15-player build is `build`; use
-`cmake --build build -j6` on the current host. The latest source validation
-passed that build, all 13 CTest targets, the Stage 4D/Z3 Playable-Z
-characterization, and the diff check. The Linux single-map headless cycle,
+The primary configured Steamworks-enabled 15-player build is
+`build-super-posix`; use `cmake --build build-super-posix -j6` on the current
+host. The latest source validation passed that build, all 13 CTest targets, the
+Stage 4D/Z4D Playable-Z/navigation characterization, and the diff check. The
+Linux single-map headless cycle,
 contained divergent two-client party/SAMF/save/restart run, and contained
 direct-LAN new-player late-join probe are runtime evidence already recorded.
 The exact one-headless plus two-real-graphical-client divergent/restart run,
@@ -83,3 +84,11 @@ Playable-Z persistence keeps map instance, playable floor, authored structural
 layer, and local Z separate. Legacy ceiling-model visual-light compatibility is
 a client renderer rule and does not alter headless save records, floor scoping,
 or map classification.
+
+Z4A/B/C/D do not remove any headless boundary above. The dedicated server owns
+follower and hostile stair transitions and still rejects cross-MapInstance
+routes, while graphical clients render the result through ordinary entity/
+bodypart updates. Mini Mimic Baby/Scaled appearance is normal monster metadata;
+its S.A.M. equipment, durable owner, floor/layer/local-Z state, and persistence
+remain generic. A headless process cannot prove either appearance or calm-idle
+visual quality, and the real two-client/late-join observation remains open.

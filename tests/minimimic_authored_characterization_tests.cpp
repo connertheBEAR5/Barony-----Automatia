@@ -62,16 +62,36 @@ bool testExistingRuntimeActorIsReused()
 	const std::string entityShared = readFile("src/entity_shared.cpp");
 	const std::string maps = readFile("src/maps.cpp");
 	const std::string stats = readFile("src/stat_shared.cpp");
+	const std::string interiorGenerator =
+		readFile("tools/generate_minimimic_interiors.py");
 
 	EXPECT(!monsterHeader.empty());
 	EXPECT(!mimic.empty());
 	EXPECT(contains(monsterHeader, "MINIMIMIC"));
 	EXPECT(contains(monsterHeader, "1794"));
 	EXPECT(contains(mimic, "void initMiniMimic(Entity* my, Stat* myStats)"));
-	EXPECT(contains(mimic, "my->initMonster(1794)"));
-	EXPECT(contains(mimic, "newEntity(1795"));
+	EXPECT(contains(mimic, "MINIMIMIC_ROOT_MODEL = 1794"));
+	EXPECT(contains(mimic, "my->initMonster(MINIMIMIC_ROOT_MODEL)"));
+	EXPECT(contains(mimic, "newEntity(MINIMIMIC_ROOT_MODEL"));
+	EXPECT(contains(mimic, "newEntity(MINIMIMIC_LID_MODEL"));
+	EXPECT(contains(mimic, "MINIMIMIC_VISUAL_SCALE_X = 9.0 / 13.0"));
+	EXPECT(contains(mimic, "MINIMIMIC_VISUAL_SCALE_Y = 11.0 / 17.0"));
+	EXPECT(contains(mimic, "miniMimicUsesScaledAppearance"));
+	EXPECT(contains(mimic, "updateMiniMimicVisualLimb"));
+	EXPECT(contains(mimic, "serverUpdateEntityBodypart(root, bodypart)"));
+	EXPECT(contains(mimic, "limb->skill[7] = desiredModel"));
+	EXPECT(contains(mimic, "configureMiniMimicVisualLimb(entity, false)"));
+	EXPECT(contains(mimic, "const bool calmMiniMimicIdle"));
+	EXPECT(contains(mimic, "bWalkCycle = !calmMiniMimicIdle"));
+	EXPECT(contains(mimic, "MINIMIMIC_CALM_IDLE_LID_BASE"));
+	EXPECT(contains(mimic, "auto& calmIdleBlend = entity->fskill[6]"));
+	EXPECT(!contains(mimic, "auto& calmIdleBlend = entity->fskill[5]"));
 	EXPECT(contains(mimic, "createMonsterEquipment(myStats, rng)"));
 	EXPECT(contains(mimic, "createCustomInventory(myStats"));
+	EXPECT(contains(interiorGenerator, "preserves every original shell"));
+	EXPECT(contains(interiorGenerator, "GENERATED_PALETTE_FIRST = 240"));
+	EXPECT(contains(interiorGenerator, "is_mimic_interior_color"));
+	EXPECT(contains(interiorGenerator, "reconstruct_original_shell"));
 	EXPECT(contains(actMonster, "case MINIMIMIC: initMiniMimic(my, myStats);"));
 	EXPECT(contains(actMonster, "case MINIMIMIC: mimicAnimate(my, myStats, dist);"));
 
@@ -95,6 +115,7 @@ bool testEditorAuthoringAndThirtyTwoLayers()
 	const std::string draw = readFile("src/draw.cpp");
 	const std::string entityShared = readFile("src/entity_shared.cpp");
 	const std::string files = readFile("src/files.cpp");
+	const std::string main = readFile("src/main.cpp");
 
 	EXPECT(contains(mainHeader, "#define MAPLAYERS 32"));
 	EXPECT(contains(entityShared, "\"MINI MIMIC\""));
@@ -113,6 +134,10 @@ bool testEditorAuthoringAndThirtyTwoLayers()
 	EXPECT(contains(entityShared, "entityNew->authoredMapLayer"));
 	EXPECT(contains(editor, "buttonDelete(NULL)"));
 	EXPECT(contains(editorHeader, "MONSTER_PROPERTY_DISPOSITION = 32"));
+	EXPECT(contains(editorHeader,
+		"MONSTER_PROPERTY_MINIMIMIC_APPEARANCE = 35"));
+	EXPECT(contains(editorHeader, "spriteProperties[36][128]"));
+	EXPECT(contains(main, "char spriteProperties[36][128]"));
 	EXPECT(contains(buttons, "copyMonsterStatToPropertyStrings"));
 	EXPECT(contains(files, "&entity->persistentID"));
 	EXPECT(contains(files, "&myStats->MISC_FLAGS"));
@@ -127,6 +152,7 @@ bool testDispositionRecruitmentAndDialogueAreIndependent()
 	const std::string statHeader = readFile("src/stat.hpp");
 	const std::string entity = readFile("src/entity.cpp");
 	const std::string editor = readFile("src/editor.cpp");
+	const std::string editorHeader = readFile("src/editor.hpp");
 	const std::string buttons = readFile("src/buttons.cpp");
 	const std::string actMonster = readFile("src/actmonster.cpp");
 	const std::string scores = readFile("src/scores.cpp");
@@ -135,17 +161,45 @@ bool testDispositionRecruitmentAndDialogueAreIndependent()
 	EXPECT(contains(statHeader, "MONSTER_FORCE_PLAYER_ENEMY"));
 	EXPECT(contains(statHeader, "MONSTER_FORCE_PLAYER_NEUTRAL"));
 	EXPECT(contains(statHeader, "STAT_FLAG_MONSTER_RECRUITABLE = 30"));
+	EXPECT(contains(statHeader, "STAT_FLAG_MINIMIMIC_APPEARANCE"));
+	EXPECT(contains(statHeader, "MINIMIMIC_APPEARANCE_BABY = 0"));
+	EXPECT(contains(statHeader,
+		"MINIMIMIC_APPEARANCE_SCALED_MIMIC = 1"));
 	EXPECT(contains(statHeader, "bool monsterIsRecruitable() const"));
 	EXPECT(occurrences(entity, "MONSTER_FORCE_PLAYER_NEUTRAL") == 4);
 
 	EXPECT(contains(editor, "Disposition: [%s]"));
 	EXPECT(contains(editor, "Recruitable: [%c]"));
 	EXPECT(contains(editor, "Custom Dialogue: [%c]"));
+	EXPECT(contains(editor, "Appearance: [%s]"));
+	EXPECT(contains(editor, "Mini shell + mimic insides"));
+	EXPECT(contains(editor, "full mimic, fitted to Mini size"));
 	EXPECT(contains(editor, "Dialogue Resource:"));
+	EXPECT(contains(editorHeader,
+		"MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET = 336"));
+	EXPECT(contains(editorHeader,
+		"MINIMIMIC_NPC_CONTROLS_Y_OFFSET = 360"));
+	EXPECT(contains(editorHeader,
+		"MINIMIMIC_RECRUITABLE_X_OFFSET = 200"));
+	EXPECT(contains(editorHeader,
+		"MINIMIMIC_DIALOGUE_TOGGLE_X_OFFSET = 336"));
+	EXPECT(contains(editorHeader,
+		"MINIMIMIC_APPEARANCE_ROW_OFFSET = 20"));
+	EXPECT(contains(editorHeader,
+		"MINIMIMIC_DIALOGUE_LABEL_ROW_OFFSET = 40"));
+	EXPECT(contains(editorHeader,
+		"Mini Mimic controls must not overlap monster inventory file buttons"));
+	EXPECT(contains(editor,
+		"suby1 + MINIMIMIC_NPC_CONTROLS_Y_OFFSET"));
+	EXPECT(contains(editor,
+		"subx1 + MINIMIMIC_RECRUITABLE_X_OFFSET"));
+	EXPECT(contains(buttons,
+		"suby1 + MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET"));
 	EXPECT(contains(buttons, "Stat::MONSTER_FORCE_PLAYER_ENEMY"));
 	EXPECT(contains(buttons, "Stat::MONSTER_FORCE_PLAYER_NEUTRAL"));
 	EXPECT(contains(buttons, "Stat::MONSTER_FORCE_PLAYER_ALLY"));
 	EXPECT(contains(buttons, "STAT_FLAG_MONSTER_RECRUITABLE"));
+	EXPECT(contains(buttons, "STAT_FLAG_MINIMIMIC_APPEARANCE"));
 	EXPECT(occurrences(actMonster, "myStats->monsterIsRecruitable()") >= 3);
 
 	// Custom dialogue takes interaction priority, while recruitment remains

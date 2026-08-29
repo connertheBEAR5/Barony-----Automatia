@@ -83,7 +83,7 @@ first interacted with.
 
 A future quest manifest can preload every authored quest definition.
 
-Persistence and scope status (2026-08-28)
+Persistence and scope status (2026-08-29)
 -----------------------------------------
 Quest and dialogue state is serialized through the Automatia companion save;
 dedicated per-character saves export/import the selected player's story state.
@@ -98,3 +98,11 @@ uses this same per-player journal backend; recruitment uses the separate generic
 follower/owner system. Contained multiplayer processes and deterministic tests
 do not replace the remaining real two-client quest privacy, save/restart, and
 reconnect acceptance.
+
+The authored Baby/Scaled Mimic appearance selector is presentation state, not
+quest scope. Baby remains the old-map default and both modes use the calm idle.
+Changing appearance neither clears the dialogue definition nor merges player
+journals; it travels with ordinary monster metadata independently of this API.
+The current `build-super-posix` baseline passes all 13 registered tests, but a
+real two-client dialogue/recruit/reconnect run with matching remote appearance
+is still manual.

@@ -127,11 +127,36 @@ extern char message[256];
 extern Uint32 cursorflash;
 extern char widthtext[4], heighttext[4], nametext[32], authortext[32], skyboxtext[4];
 extern char mapflagtext[MAPFLAGTEXTS][32];
-extern char spriteProperties[35][128];
-extern char tmpSpriteProperties[35][128];
+extern char spriteProperties[36][128];
+extern char tmpSpriteProperties[36][128];
 static constexpr int MONSTER_PROPERTY_DISPOSITION = 32;
 static constexpr int MONSTER_PROPERTY_RECRUITABLE = 33;
 static constexpr int MONSTER_PROPERTY_DIALOGUE_ENABLED = 34;
+static constexpr int MONSTER_PROPERTY_MINIMIMIC_APPEARANCE = 35;
+
+/*
+ * Shared monster-properties layout anchors. The inventory/equipment template
+ * buttons are created in buttons.cpp while the Mini Mimic NPC row is drawn in
+ * editor.cpp, so keep their vertical contract in one place. Font text is 8 px
+ * high; the extra 8 px leaves a full blank row between the button and text.
+ */
+static constexpr int MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET = 336;
+static constexpr int MONSTER_INVENTORY_FILE_BUTTON_HEIGHT = 16;
+static constexpr int MINIMIMIC_NPC_CONTROLS_Y_OFFSET = 360;
+static constexpr int MINIMIMIC_APPEARANCE_ROW_OFFSET = 20;
+static constexpr int MINIMIMIC_DIALOGUE_LABEL_ROW_OFFSET = 40;
+static constexpr int MINIMIMIC_DISPOSITION_X_OFFSET = 8;
+static constexpr int MINIMIMIC_RECRUITABLE_X_OFFSET = 200;
+static constexpr int MINIMIMIC_DIALOGUE_TOGGLE_X_OFFSET = 336;
+static_assert(
+	MINIMIMIC_NPC_CONTROLS_Y_OFFSET
+		>= MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET
+			+ MONSTER_INVENTORY_FILE_BUTTON_HEIGHT + 8,
+	"Mini Mimic controls must not overlap monster inventory file buttons");
+static_assert(
+	MINIMIMIC_DIALOGUE_LABEL_ROW_OFFSET
+		>= MINIMIMIC_APPEARANCE_ROW_OFFSET + 20,
+	"Mini Mimic appearance and dialogue rows must not overlap");
 extern int editproperty;
 extern bool mode3d;
 extern bool selectingspace;

@@ -20,6 +20,11 @@ Current status:
   persistence, headless/late join, the persistent party backend, S.A.M. 2.1,
   Text Source Tester/Library, custom ambience, authored Mini Mimics, named Room
   Groups, room-generation hooks, dialogue/quests, and cross-feature tests.
+- Authored Mini Mimics retain the existing actor and now expose Baby (default,
+  dedicated shell plus generated interior) and Scaled Mimic (complete regular
+  Mimic slabs fitted to the Mini footprint) appearances. Both use a calm idle.
+  Existing Stat/bodypart replication and persistence carry the choice; no new
+  monster or packet layout was added.
 - Z4A is complete: each MapInstance owns a vertical transition graph derived
   from existing ZLDR/ZTRN metadata, and dropped authored-stack items continue
   onto lower playable floors. No AI navigation consumer was added.
@@ -1596,3 +1601,60 @@ and Mini Mimic workflows, audible MapInstance ambience, real S.A.M. custom-mod
 content, Windows, Steam/EOS P2P, or adversarial network stress. The authoritative
 instructions and readiness decision are in the cross-feature compatibility
 audit. Z4 was not started.
+
+2026-08-29 MINI MIMIC APPEARANCE AND DOCUMENTATION CHECKPOINT
+==============================================================
+
+This checkpoint supersedes older "current" Mini Mimic descriptions and build/
+test counts while preserving the dated entries above as implementation history.
+Z4A/B/C/D remain complete; this Mini Mimic work did not begin Z5 or Z6.
+
+The final appearance design follows both parts of the owner's clarification:
+
+* Baby is value 0 and the old-map-compatible default. It keeps the dedicated
+  Mini Mimic trunk and lid models 1794/1795 at their original scale. A
+  deterministic generator fills only empty shell cells with red/purple
+  flesh/gum sampled from the regular Mimic; it never replaces wood/metal shell
+  voxels. The trunk gained 40 interior voxels and the lid gained 12.
+* Scaled Mimic is value 1. It reuses the complete regular Mimic models
+  1247/1248 at scale X=9/13, Y=11/17, Z=0.55. It is an authored option rather
+  than a replacement for Baby.
+* Both appearances use a calm idle when stationary and outside attack, hunt,
+  or path states. The old stationary hop settles and the lid uses a small,
+  gently breathing opening. Movement and combat still use shared Mimic code;
+  regular Mimics are unaffected.
+* Zed exposes `Appearance: [Baby]` / `[Scaled Mimic]` on a separate row. The
+  Mini Mimic NPC controls, appearance control, and dialogue resource label no
+  longer overlap. Compile-time layout assertions guard the row spacing.
+* The property uses the normal authored monster property/Stat machinery. Baby
+  remains zero for maps lacking the field. Existing bodypart model updates and
+  Stat persistence carry the result; no packet field, second monster actor, or
+  Mini-specific persistence system was created.
+* S.A.M. item identity, Room Group copying, dialogue plus recruitment,
+  follower ownership, Playable-Z, MapInstance isolation, and Z4C/Z4D consumers
+  continue through their existing generic systems.
+
+Asset reproducibility:
+
+* `tools/generate_minimimic_interiors.py` validates exact original Mini and
+  regular-Mimic input hashes, reserves palette slots 240..254 for generated
+  colors, reconstructs the original shell byte-for-byte, and is idempotent.
+* Final `MinimimicTrunk.vox` SHA-256:
+  `547ad2650da84c757f9de818e3cb8c40cb9129aa7e297927a105814ba42c9079`.
+* Final `MinimimicLid.vox` SHA-256:
+  `da414aa9cc68b906af342789937bb3a78ef66b310ed19c3cc5cb7d02be68f6a5`.
+
+Validation immediately before this documentation synchronization:
+
+* `cmake --build build-super-posix -j6`: PASS.
+* `ctest --test-dir build-super-posix --output-on-failure`: PASS, 13/13.
+* Stage 4D/Z4D executable characterization: PASS.
+* Generator rebuild compared byte-for-byte with both installed assets: PASS.
+* `git diff --check`: PASS before the documentation edits.
+
+No editor or game GUI was opened for the corrected appearance pass. Manual
+acceptance still requires checking visual fit and interior visibility for both
+modes, calm-idle-to-movement transitions, the complete property panel at the
+target resolution, and a real remote/late-joining client seeing the same scaled
+appearance. The exact headless plus two-real-client cross-feature run also
+remains open.

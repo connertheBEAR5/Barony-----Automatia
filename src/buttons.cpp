@@ -4342,9 +4342,11 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterInventorySaveTemplate = newButton();
 					strcpy(butMonsterInventorySaveTemplate->label, "Inv Files");
 					butMonsterInventorySaveTemplate->x = pad_x4 - 18;
-					butMonsterInventorySaveTemplate->y = pad_y2 + 2 * spacing + 60;
+					butMonsterInventorySaveTemplate->y =
+						suby1 + MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET;
 					butMonsterInventorySaveTemplate->sizex = 88;
-					butMonsterInventorySaveTemplate->sizey = 16;
+					butMonsterInventorySaveTemplate->sizey =
+						MONSTER_INVENTORY_FILE_BUTTON_HEIGHT;
 					butMonsterInventorySaveTemplate->action = &buttonMonsterInventorySaveTemplateFile;
 					butMonsterInventorySaveTemplate->visible = 1;
 					butMonsterInventorySaveTemplate->focused = 1;
@@ -4352,9 +4354,11 @@ void buttonSpriteProperties(button_t* my)
 					butMonsterEquipmentSaveTemplate = newButton();
 					strcpy(butMonsterEquipmentSaveTemplate->label, "Equip Files");
 					butMonsterEquipmentSaveTemplate->x = pad_x4 + 76;
-					butMonsterEquipmentSaveTemplate->y = pad_y2 + 2 * spacing + 60;
+					butMonsterEquipmentSaveTemplate->y =
+						suby1 + MONSTER_INVENTORY_FILE_BUTTON_Y_OFFSET;
 					butMonsterEquipmentSaveTemplate->sizex = 96;
-					butMonsterEquipmentSaveTemplate->sizey = 16;
+					butMonsterEquipmentSaveTemplate->sizey =
+						MONSTER_INVENTORY_FILE_BUTTON_HEIGHT;
 					butMonsterEquipmentSaveTemplate->action = &buttonMonsterEquipmentSaveTemplateFile;
 					butMonsterEquipmentSaveTemplate->visible = 1;
 					butMonsterEquipmentSaveTemplate->focused = 1;
@@ -4663,6 +4667,10 @@ void buttonSpritePropertiesConfirm(button_t* my)
 							}
 							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_MONSTER_RECRUITABLE] =
 								atoi(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]) != 0;
+							tmpSpriteStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE] =
+								atoi(spriteProperties[MONSTER_PROPERTY_MINIMIMIC_APPEARANCE]) != 0
+									? MINIMIMIC_APPEARANCE_SCALED_MIMIC
+									: MINIMIMIC_APPEARANCE_BABY;
 							if ( atoi(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]) == 0 )
 							{
 								tmpSpriteStats->customDialogueID[0] = '\0';
@@ -6656,6 +6664,16 @@ void copyMonsterStatToPropertyStrings(Stat* tmpSpriteStats)
 			sizeof(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]),
 			"%d",
 			tmpSpriteStats->customDialogueID[0] != '\0' ? 1 : 0
+		);
+		snprintf(
+			spriteProperties[MONSTER_PROPERTY_MINIMIMIC_APPEARANCE],
+			sizeof(spriteProperties[MONSTER_PROPERTY_MINIMIMIC_APPEARANCE]),
+			"%d",
+			tmpSpriteStats->type == MINIMIMIC
+				&& tmpSpriteStats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE]
+					== MINIMIMIC_APPEARANCE_SCALED_MIMIC
+				? MINIMIMIC_APPEARANCE_SCALED_MIMIC
+				: MINIMIMIC_APPEARANCE_BABY
 		);
 
 		/* Restore authored squad fields when reopening monster properties. */

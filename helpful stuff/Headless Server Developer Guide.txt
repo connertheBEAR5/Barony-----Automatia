@@ -1,10 +1,11 @@
 BARONY AUTOMATIA HEADLESS SERVER DEVELOPER GUIDE
 ================================================
 
-CURRENT BASELINE (2026-08-28)
+CURRENT BASELINE (2026-08-29)
 
-The maintained build is `build`; use `cmake --build build -j6`. The game/editor,
-13/13 CTest tests, Stage4D characterization, and diff check pass. A contained
+The maintained build is `build-super-posix`; use
+`cmake --build build-super-posix -j6`. The game/editor, 13/13 CTest tests,
+Stage 4D/Z4D characterization, and diff check pass. A contained
 two-client direct-LAN run exercised divergent MapInstances, scoped party state,
 SAMF, save/shutdown/restart, and durable Party ID hydration. A separate contained
 new-player late-join run reached ready/go through the staged snapshot. These are
@@ -211,7 +212,7 @@ CURRENT VALIDATION SNAPSHOT (2026-08-23)
 ========================================
 
 Historical note: the snapshot below records the 2026-08-23 build profile. Use
-the 2026-08-28 baseline at the top of this guide for current commands and test
+the 2026-08-29 baseline at the top of this guide for current commands and test
 counts.
 
 The maintained Linux build is the Steamworks-enabled 15-player
@@ -243,7 +244,7 @@ does not read or reproduce Steam's offline cache. For an offline session that
 must retain owned DLC, start the real Steam client in Offline Mode and launch
 without --nosteam so Steamworks remains the entitlement authority.
 
-CURRENT CROSS-FEATURE SERVER CONTRACT (2026-08-28)
+CURRENT CROSS-FEATURE SERVER CONTRACT (2026-08-29)
 ===================================================
 
 MapInstance, playableFloor, authoredMapLayer, and local Entity::z remain
@@ -256,7 +257,15 @@ durable owner/follower restoration path, including inventory and S.A.M.
 equipment. Headless/no-sound mode suppresses map ambience playback without
 discarding its MapInstance metadata.
 
-Before Z4, run the exact server/two-client save/restart/reconnect procedure in
-"Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt". That run,
-real custom S.A.M. content, graphical floor/instance isolation, audible
-ambience, token-matched returning characters, and Windows remain manual.
+Z4A/B/C/D preserve this authority model: graphs and routes are MapInstance-local,
+followers and hostiles cross only real transitions, and clients cannot initiate
+an actor floor change. Mini Mimic Baby/Scaled appearance is ordinary monster
+metadata and existing bodypart updates carry its models; the headless server
+does not need a visual-only packet or separate persistence path.
+
+Run the exact server/two-client save/restart/reconnect procedure in "Automatia
+Cross-Feature Compatibility and Z4 Readiness Audit.txt". It now includes a
+Scaled Mimic replication/reconnect observation and a separate Baby/calm-idle
+editor check. That run, real custom S.A.M. content, graphical floor/instance
+isolation, audible ambience, token-matched returning characters, and Windows
+remain manual.

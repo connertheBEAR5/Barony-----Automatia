@@ -2,7 +2,7 @@ BARONY AUTOMATIA CUSTOM DIALOGUE JSON GUIDE
 AND PROJECT REMINDERS
 ============================================================
 
-STATUS NOTE (2026-08-28)
+STATUS NOTE (2026-08-29)
 ------------------------
 This is a compact historical quick reference. The maintained authoring guide is
 "Custom Dialogue and Quest Editor Guide.txt"; the complete implementation and
@@ -16,6 +16,12 @@ uses the generic follower/owner/HUD/network/persistence path. Per-player story
 state and NPC dialogue configuration persist through the existing world and
 character-save systems. Real two-client dialogue-plus-recruit acceptance remains
 manual.
+
+Mini Mimic Appearance is independent of dialogue and recruitment. `Baby` is the
+backward-compatible default and keeps the dedicated shell with its generated
+mouth interior; `Scaled Mimic` fits the complete regular Mimic slabs into the
+Mini footprint. Changing appearance does not clear a dialogue resource, alter
+quest scope, or change the `recruit_npc` action. Both modes use the calm idle.
 
 PER-PLAYER QUEST FOUNDATION
 ---------------------------

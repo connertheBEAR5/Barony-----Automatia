@@ -8,6 +8,24 @@ Exact source version marker: SAM_FRAMEWORK_VERSION "2.1.0"
 Audit state: FINAL IMPLEMENTATION AUDIT plus 2026-08-27 stabilization evidence
 Date: 2026-08-27
 
+CURRENT TREE ADDENDUM (2026-08-29)
+----------------------------------
+This audit's implementation evidence remains valid, but later "Z4 not started",
+`build`, and 11/11 status lines are historical. The current validation profile
+is `build-super-posix`; the game/editor build, all 13 CTest targets, Stage
+4D/Z4D characterization, and the diff check pass with `-j6`. Z4A/B/C/D are
+complete, while the exact one-headless plus two-real-graphical-client run and
+real packaged S.A.M. mod acceptance remain manual.
+
+Mini Mimic now has authored Baby and Scaled Mimic appearances plus a calm idle.
+Baby is zero/default and retains the Mini shell while generated interior voxels
+reuse regular-Mimic mouth colors; Scaled Mimic reuses the complete regular
+Mimic slabs fitted to the Mini footprint. This did not create a S.A.M.-specific
+monster, item identity, save record, room representation, pathfinder, or packet.
+S.A.M. equipment still uses generic stable-ID/runtime-ID remapping and custom
+hooks still receive the normal MapInstance/playableFloor/authoredMapLayer/local-Z
+context.
+
 Status vocabulary
 -----------------
 RESOLVED              Implementation is present and source-reviewed.
@@ -1185,11 +1203,16 @@ them in persistent multiplayer.
 
 Mini Mimic is no longer future work. Zed authors the existing runtime monster with
 hostile/passive/friendly disposition, independent recruitable and custom-dialogue flags,
-an existing dialogue resource and optional display name. Its persistent ID, durable
-owner, MapInstance, playableFloor, authoredMapLayer, local z, monster state and S.A.M
-inventory/equipment remain on generic Automatia paths. Automated tests cover the editor
-contract and S.A.M item remapping in a persistent upper-floor Mini Mimic; a real remote
-recruit/disconnect/restart/reconnect remains manual.
+an existing dialogue resource, optional display name, and independent appearance. Baby
+is the old-map-compatible default and keeps models 1794/1795 with generated mouth
+interiors; Scaled Mimic uses models 1247/1248 fitted to the Mini footprint. Both use the
+calm idle, while movement/combat and Z4 navigation remain generic. Its persistent ID,
+durable owner, MapInstance, playableFloor, authoredMapLayer, local z, monster state and
+S.A.M inventory/equipment remain on generic Automatia paths. Existing Stat/bodypart
+replication carries appearance without a packet-layout change. Automated tests cover
+the editor/appearance contract and S.A.M item remapping in a persistent upper-floor Mini
+Mimic; a real remote recruit/disconnect/restart/reconnect and visual appearance check
+remain manual.
 
 
 L. COMPILE-TIME, MEMORY, THREADING, AND PERFORMANCE
@@ -1503,9 +1526,10 @@ Compatibility conclusion
 
 No S.A.M-specific Mini Mimic persistence and no S.A.M-specific Room Group entity format
 were added. Stable item identity remains generic; authored groups remain editor metadata;
-SAMRooms remains an additive deterministic generation provider. The automated and
-contained-live baseline is suitable for a Z4 readiness decision, but the exact one-host/
-two-graphical-client restart acceptance in the cross-feature audit must pass before the
-tree is declared fully accepted for Z4.
+SAMRooms remains an additive deterministic generation provider. The owner accepted the
+documented real-client risk and Z4A/B/C/D are now complete on the generic Automatia
+navigation and actor-transition seams. The exact one-host/two-graphical-client restart,
+late-join appearance, and real packaged-mod acceptance in the cross-feature audit remain
+manual and must not be reported as verified.
 
 END OF FINAL S.A.M. 2.1 / AUTOMATIA AUDIT

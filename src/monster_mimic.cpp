@@ -25,12 +25,105 @@
 #include "prng.hpp"
 #include "mod_tools.hpp"
 
+namespace
+{
+constexpr Sint32 MIMIC_TRUNK_MODEL = 1247;
+constexpr Sint32 MIMIC_LID_MODEL = 1248;
+constexpr Sint32 MINIMIMIC_ROOT_MODEL = 1794;
+constexpr Sint32 MINIMIMIC_LID_MODEL = 1795;
+
+/*
+ * Baby appearance uses the dedicated Mini Mimic slabs. Those assets retain the
+ * authored shell and now contain only downsampled regular-Mimic mouth voxels in
+ * previously empty cells. The optional Scaled Mimic appearance instead reuses
+ * the complete regular trunk/lid and fits it into the 9x11 Mini silhouette.
+ */
+constexpr real_t MINIMIMIC_VISUAL_SCALE_X = 9.0 / 13.0;
+constexpr real_t MINIMIMIC_VISUAL_SCALE_Y = 11.0 / 17.0;
+constexpr real_t MINIMIMIC_VISUAL_SCALE_Z = 0.55;
+constexpr double MINIMIMIC_CALM_IDLE_MOVEMENT_EPSILON = 0.001;
+constexpr real_t MINIMIMIC_CALM_IDLE_BLEND_IN = 0.05;
+constexpr real_t MINIMIMIC_CALM_IDLE_BLEND_OUT = 0.1;
+constexpr real_t MINIMIMIC_CALM_IDLE_LID_BASE = -PI / 18.0;
+constexpr real_t MINIMIMIC_CALM_IDLE_LID_SWAY = PI / 90.0;
+
+void configureMiniMimicVisualLimb(Entity* limb, const bool scaledMimic)
+{
+	if ( !limb )
+	{
+		return;
+	}
+	limb->scalex = scaledMimic ? MINIMIMIC_VISUAL_SCALE_X : 1.0;
+	limb->scaley = scaledMimic ? MINIMIMIC_VISUAL_SCALE_Y : 1.0;
+	limb->scalez = scaledMimic ? MINIMIMIC_VISUAL_SCALE_Z : 1.0;
+}
+
+bool miniMimicUsesScaledAppearance(const Stat* stats)
+{
+	return stats
+		&& stats->MISC_FLAGS[STAT_FLAG_MINIMIMIC_APPEARANCE]
+			== MINIMIMIC_APPEARANCE_SCALED_MIMIC;
+}
+
+void updateMiniMimicVisualLimb(
+	Entity* root,
+	Entity* limb,
+	const Stat* stats,
+	const int bodypart,
+	const Sint32 babyModel,
+	const Sint32 scaledModel)
+{
+	if ( !root || !limb )
+	{
+		return;
+	}
+
+	if ( multiplayer != CLIENT )
+	{
+		const Sint32 desiredModel = miniMimicUsesScaledAppearance(stats)
+			? scaledModel
+			: babyModel;
+		const bool changed = limb->sprite != desiredModel;
+		limb->sprite = desiredModel;
+		// ENTB stores the authoritative sprite in limb skill[7] on clients.
+		limb->skill[7] = desiredModel;
+		const Uint32 syncPeriod = 5 * TICKS_PER_SECOND;
+		const bool periodicScaledSync = desiredModel == scaledModel
+			&& syncPeriod > 0
+			&& root->ticks % syncPeriod == root->getUID() % syncPeriod;
+		if ( changed || periodicScaledSync )
+		{
+			serverUpdateEntityBodypart(root, bodypart);
+		}
+	}
+	else
+	{
+		// Clients do not need the authored Stat flag. Preserve the model delivered
+		// by the existing ENTB bodypart update and derive its scale locally.
+		if ( limb->skill[7] == babyModel || limb->skill[7] == scaledModel )
+		{
+			limb->sprite = limb->skill[7];
+		}
+		else if ( limb->sprite == babyModel || limb->sprite == scaledModel )
+		{
+			limb->skill[7] = limb->sprite;
+		}
+		else
+		{
+			limb->sprite = babyModel;
+			limb->skill[7] = babyModel;
+		}
+	}
+	configureMiniMimicVisualLimb(limb, limb->sprite == scaledModel);
+}
+}
+
 void initMimic(Entity* my, Stat* myStats)
 {
 	node_t* node;
 
 	my->z = 0;
-	my->initMonster(1247);
+	my->initMonster(MIMIC_TRUNK_MODEL);
 	my->flags[INVISIBLE] = true; // hide the "AI" bodypart
 	if ( multiplayer != CLIENT )
 	{
@@ -86,7 +179,7 @@ void initMimic(Entity* my, Stat* myStats)
 	}
 
 	// trunk
-	Entity* entity = newEntity(1247, 1, map.entities, nullptr); //Limb entity.
+	Entity* entity = newEntity(MIMIC_TRUNK_MODEL, 1, map.entities, nullptr); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -107,7 +200,7 @@ void initMimic(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// lid
-	entity = newEntity(1248, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntity(MIMIC_LID_MODEL, 1, map.entities, nullptr); //Limb entity.
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
@@ -137,7 +230,7 @@ void initMiniMimic(Entity* my, Stat* myStats)
 	node_t* node;
 
 	my->z = 0;
-	my->initMonster(1794);
+	my->initMonster(MINIMIMIC_ROOT_MODEL);
 	my->flags[INVISIBLE] = true; // hide the "AI" bodypart
 	if ( multiplayer != CLIENT )
 	{
@@ -192,11 +285,13 @@ void initMiniMimic(Entity* my, Stat* myStats)
 		}
 	}
 
-	// trunk
-	Entity* entity = newEntity(1794, 1, map.entities, nullptr); //Limb entity.
+	// Default/legacy appearance: original Mini shell plus generated mouth voxels.
+	Entity* entity = newEntity(MINIMIMIC_ROOT_MODEL, 1, map.entities, nullptr); //Limb entity.
+	configureMiniMimicVisualLimb(entity, false);
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
+	entity->skill[7] = MINIMIMIC_ROOT_MODEL;
 	entity->flags[PASSABLE] = true;
 	entity->flags[NOUPDATE] = true;
 	entity->yaw = my->yaw;
@@ -214,10 +309,12 @@ void initMiniMimic(Entity* my, Stat* myStats)
 	my->bodyparts.push_back(entity);
 
 	// lid
-	entity = newEntity(1795, 1, map.entities, nullptr); //Limb entity.
+	entity = newEntity(MINIMIMIC_LID_MODEL, 1, map.entities, nullptr); //Limb entity.
+	configureMiniMimicVisualLimb(entity, false);
 	entity->sizex = 2;
 	entity->sizey = 2;
 	entity->skill[2] = my->getUID();
+	entity->skill[7] = MINIMIMIC_LID_MODEL;
 	entity->flags[PASSABLE] = true;
 	entity->flags[NOUPDATE] = true;
 	entity->yaw = my->yaw;
@@ -391,7 +488,7 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 					createParticleErupt(my, 625);
 					serverSpawnMiscParticles(my, PARTICLE_EFFECT_ERUPT, 625);
 				}
-				my->sprite = 1247;
+				my->sprite = MIMIC_TRUNK_MODEL;
 			}
 		}
 	}
@@ -401,6 +498,10 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 		|| my->monsterState == MONSTER_STATE_HUNT
 		|| my->monsterState == MONSTER_STATE_PATH;
 		//(my->monsterState == MONSTER_STATE_ATTACK || my->monsterState == MONSTER_STATE_HUNT) && dist > 0.1;
+	const bool calmMiniMimicIdle = monsterType == MINIMIMIC
+		&& my->monsterAttack == 0
+		&& !aggressiveMove
+		&& dist <= MINIMIMIC_CALM_IDLE_MOVEMENT_EPSILON;
 
 	//Move bodyparts
 	for ( bodypart = 0, node = my->children.first; node != nullptr; node = node->next, ++bodypart )
@@ -419,7 +520,20 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 
 		if ( bodypart == MIMIC_TRUNK )
 		{
-			entity->sprite = my->sprite;
+			if ( monsterType == MINIMIMIC )
+			{
+				updateMiniMimicVisualLimb(
+					my,
+					entity,
+					myStats,
+					bodypart,
+					MINIMIMIC_ROOT_MODEL,
+					MIMIC_TRUNK_MODEL);
+			}
+			else
+			{
+				entity->sprite = my->sprite;
+			}
 			head = entity;
 
 			auto& attackStageSwing = entity->skill[0];
@@ -641,14 +755,15 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 			}
 			else if ( my->monsterAttack == 0 && !my->isInertMimic() )
 			{
-				// walk cycle
-				bWalkCycle = true;
+				// A stationary Mini Mimic rests instead of shuffling/hopping in place.
+				bWalkCycle = !calmMiniMimicIdle;
 			}
 
 			bounceFromRoll = 0.0;
 
 			bool resetAnimation = (my->isInertMimic() && my->monsterAttack == 0) 
-				|| (my->monsterSpecialState == MIMIC_STATUS_IMMOBILE);
+				|| (my->monsterSpecialState == MIMIC_STATUS_IMMOBILE)
+				|| calmMiniMimicIdle;
 			if ( !resetAnimation )
 			{
 				resetToInert = 1.0;
@@ -773,10 +888,24 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 		}
 		else if ( bodypart == MIMIC_LID )
 		{
-			entity->sprite = my->sprite + 1;
+			if ( monsterType == MINIMIMIC )
+			{
+				updateMiniMimicVisualLimb(
+					my,
+					entity,
+					myStats,
+					bodypart,
+					MINIMIMIC_LID_MODEL,
+					MIMIC_LID_MODEL);
+			}
+			else
+			{
+				entity->sprite = my->sprite + 1;
+			}
 			auto& attackStageSwing = entity->skill[0];
 			auto& lidBounceStage = entity->skill[1];
 			auto& lidBounceAngle = entity->fskill[1];
+			auto& calmIdleBlend = entity->fskill[6];
 
 			entity->pitch = head->pitch;
 
@@ -948,6 +1077,31 @@ void mimicAnimate(Entity* my, Stat* myStats, double dist)
 				pitchAmount *= .1;
 			}
 			entity->pitch += pitchAmount;
+
+			if ( monsterType == MINIMIMIC )
+			{
+				if ( calmMiniMimicIdle )
+				{
+					calmIdleBlend = std::min(
+						static_cast<real_t>(1.0),
+						calmIdleBlend + MINIMIMIC_CALM_IDLE_BLEND_IN);
+				}
+				else
+				{
+					calmIdleBlend = std::max(
+						static_cast<real_t>(0.0),
+						calmIdleBlend - MINIMIMIC_CALM_IDLE_BLEND_OUT);
+				}
+
+				if ( my->monsterAttack == 0 && calmIdleBlend > 0.0 )
+				{
+					const real_t idlePhase = static_cast<real_t>(my->ticks)
+						* PI / (2.0 * TICKS_PER_SECOND);
+					entity->pitch += calmIdleBlend
+						* (MINIMIMIC_CALM_IDLE_LID_BASE
+							+ MINIMIMIC_CALM_IDLE_LID_SWAY * sin(idlePhase));
+				}
+			}
 
 			entity->roll = head->roll;
 

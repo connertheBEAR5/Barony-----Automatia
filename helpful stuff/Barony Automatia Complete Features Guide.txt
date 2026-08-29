@@ -38,6 +38,8 @@ MapInstances, schema-v3 persistent world state, headless and 15-player
 multiplayer, the persistent party backend, S.A.M. Framework 2.1, the Text Source
 Script Tester/Library, custom map ambience, authored Mini Mimics, persistent
 named Room Groups, custom dialogue/quests, and the existing editor systems.
+Authored Mini Mimics now include the backward-compatible Baby shell appearance,
+an optional Scaled Mimic appearance, and a calm non-hopping idle for both.
 
 The spatial axes are always independent:
 
@@ -1148,8 +1150,8 @@ Phase 8 - Release readiness
 Foundation regression target
     Configure with BUILD_TESTING=ON and run:
 
-        cmake --build build -j6
-        ctest --test-dir build --output-on-failure
+        cmake --build build-super-posix -j6
+        ctest --test-dir build-super-posix --output-on-failure
 
     The current test covers canonical map-instance identity validation,
     revision behavior, map-local packet classification, global chat exclusion,
@@ -1232,9 +1234,9 @@ same axes. Tile overrides are unique by map instance, playable floor, X, Y, and
 geometry layer. Schema-v3 validation checks these spatial fields while schema-1
 and schema-2 saves remain readable through explicit legacy semantics.
 
-The primary configured build is build and uses:
+The primary configured build is build-super-posix and uses:
 
-    cmake --build build -j6
+    cmake --build build-super-posix -j6
 
 --nosteam retains local gameplay and Steam-independent LAN/direct-connect
 capabilities, but disables Steam services and Steam DLC. It does not read a
@@ -1265,13 +1267,38 @@ Status: Implemented and characterized; editor/live multiplayer acceptance remain
 The searchable Mini Mimic palette entry exposes the existing runtime monster.
 It supports all 32 authored layers, normal selection/copy/paste/delete/save/load,
 an optional display name, hostile/passive/friendly disposition, independent
-recruitability, and optional custom dialogue resource. Dialogue and recruitment
-are not mutually exclusive.
+recruitability, optional custom dialogue resource, and an Appearance selector.
+Dialogue and recruitment are not mutually exclusive.
+
+Appearance has two authored values:
+
+- Baby (0/default): keeps the dedicated Mini Mimic trunk/lid models 1794/1795
+  and their original scale. The shell artwork is retained; only previously
+  empty cells contain downsampled regular-Mimic flesh/gum interior colors.
+  Existing maps that predate the property remain Baby.
+- Scaled Mimic (1): uses the complete regular Mimic models 1247/1248, scaled
+  to X=9/13, Y=11/17, and Z=0.55 so they fit the Mini Mimic footprint.
+
+Both appearances have the same calm idle. When the actor is stationary, not
+attacking, and not hunting/pathing, the old in-place hop settles to neutral and
+the lid holds a small opening with a gentle breathing sway. Walking, pursuit,
+cross-floor navigation, and attack animations continue to use the existing
+shared Mimic behavior. Regular Mimics are unchanged.
 
 Combat, faction, followers, ownership, HUD, networking, dialogue/quests,
 persistence, inventory, and equipment use the generic systems. S.A.M. items in
 its equipment use the shared stable-ID/runtime-ID mapping; there is no Mini
-Mimic-specific item or save implementation.
+Mimic-specific item or save implementation. Appearance is stored in the normal
+monster Stat flags and model changes use existing bodypart updates; no packet
+layout, persistent record type, or duplicate Mini Mimic actor was introduced.
+The server periodically repeats the ordinary bodypart baseline for the scaled
+mode so a late join can receive its model choice.
+
+The Baby interior assets are reproducible with
+tools/generate_minimimic_interiors.py. The generator verifies the exact source
+asset hashes, preserves every original shell voxel, reserves palette slots
+240..254 only for generated interior colors, and is idempotent. It adds 40
+interior voxels to the trunk and 12 to the lid.
 
 
 ======================================================================
@@ -1375,7 +1402,9 @@ Readiness Audit.txt".
 It covers divergent MapInstances/floors, custom S.A.M. content, persistence,
 Mini Mimic dialogue/recruitment and durable ownership, Room Groups, ambience,
 late join, save, dedicated restart, reconnect, and restoration. Do not claim
-that scenario, editor visuals, or audible ambience as verified until run.
+that scenario, editor visuals, or audible ambience as verified until run. Mini
+Mimic visual acceptance must include both appearance choices, the calm-to-walk
+animation transition, and a remote late join seeing the same scaled model.
 
 
 ======================================================================

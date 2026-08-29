@@ -2,6 +2,21 @@ TEXT SOURCE @SCRIPT GUIDE VS RUNTIME AUDIT
 Automatia second-pass code review, correction, verification, and library audit
 Date: 2026-08-28
 
+CURRENT TREE ADDENDUM (2026-08-29)
+----------------------------------
+The Text Source findings and language table remain authoritative. Later lines
+that say Z4 was not started or record `build` with 11/11 tests are dated
+implementation history. The current profile is `build-super-posix`; all 13
+registered tests and Stage 4D/Z4D pass. Z4A/B/C/D do not add or alter a Text
+Source command, and current S.A.M. 2.1.0 still contributes zero commands to this
+registry.
+
+Mini Mimic Baby/Scaled appearance and calm idle are independent of its optional
+dialogue resource and of Text Source parsing. A Mini Mimic copied in a Room
+Group continues to carry Text Source-adjacent custom properties and S.A.M.
+stable metadata through generic entity serialization; appearance adds no script
+alias, item-reference syntax, extension hook, or separate VM.
+
 Authoritative implementation inspected:
   src/actgeneral.cpp
   src/text_source_script.cpp
@@ -1527,3 +1542,22 @@ Validation boundary:
      rejected. Stable owner identity is required to restore retained metadata.
  13. Origin and availability are independent of verification depth; registration
      never implies Behavior or Manual Game Test verification.
+
+
+22. CURRENT CROSS-FEATURE STATUS (2026-08-29)
+
+The current source baseline keeps the parser, Tester/Library, extension
+registry, and S.A.M. boundary described above unchanged. Mini Mimic appearance
+uses monster Stat/bodypart state, not Text Source. Z4 transitions use navigation
+and actor APIs, not script-language additions. Consequently no compatibility
+adapter was needed in this subsystem for either change.
+
+Current automated baseline:
+  PASS - cmake --build build-super-posix -j6
+  PASS - ctest --test-dir build-super-posix --output-on-failure (13/13)
+  PASS - Stage 4D/Z4D executable characterization
+
+The earlier focused Text Source validation remains evidence for that feature.
+Manual Tester/Library GUI behavior, live-world effects, real S.A.M. extensions,
+upper-floor item-reference scenarios, and the full real-client acceptance are
+still not claimed.

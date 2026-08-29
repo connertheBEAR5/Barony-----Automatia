@@ -17,12 +17,13 @@ A typical existing-build command is:
 
 ```bash
 cd /home/conner/Barony-----Automatia
-cmake --build build -j6
+cmake --build build-super-posix -j6
 ```
 
-`build` is the current configured Steamworks-enabled, FMOD, 15-player
-development tree. The six-job limit is intentional on the current development
-host to avoid CPU/RAM instability from an unrestricted parallel build.
+`build-super-posix` is the current configured Steamworks-enabled, FMOD,
+15-player development tree. The six-job limit is intentional on the current
+development host to avoid CPU/RAM instability from an unrestricted parallel
+build.
 
 ## Expanded maps and rendering
 
@@ -53,10 +54,10 @@ mapLayerWorldZ(N)= -16 * N
 Status snapshot: the current local-Z/structural-layer implementation, legacy
 ceiling-model compatibility, upper/lower rendered-stack visibility, structural
 lighting, lower-floor landing, HUD/camera attachments, ELYR/PZLV persistence,
-and deterministic regressions compile in `build`. Z4A adds a MapInstance-local
-vertical transition graph derived from existing ZLDR/ZTRN metadata; dropped
-items crossing an authored-floor boundary now continue onto the next lower
-playable floor while retaining local Z and identity. The latest automated run
+and deterministic regressions compile in `build-super-posix`. Z4A adds a
+MapInstance-local vertical transition graph derived from existing ZLDR/ZTRN
+metadata; dropped items crossing an authored-floor boundary now continue onto
+the next lower playable floor while retaining local Z and identity. The latest automated run
 passed all 13 CTest targets and the Stage 4D/Z3 executable characterization.
 Graphical acceptance items are listed below and are not claimed by those
 deterministic tests.
@@ -251,14 +252,27 @@ Automatia preserves arbitrary nonnegative runtime item IDs rather than assuming 
 Zed exposes the existing runtime Mini Mimic as a searchable creature entry; it
 does not duplicate the monster implementation. Authored properties include an
 optional display name, hostile/passive/friendly disposition, independent
-recruitability, and optional custom dialogue resource. Dialogue and recruitment
-may be enabled together.
+recruitability, optional custom dialogue resource, and a two-state appearance
+selector. Dialogue and recruitment may be enabled together.
+
+The default `Baby` appearance keeps the dedicated Mini Mimic trunk and lid
+(models 1794/1795) and fills only their previously empty mouth cells with
+downsampled flesh/gum colors from the regular Mimic assets. Old maps therefore
+remain Baby by default. `Scaled Mimic` instead reuses the complete regular
+Mimic trunk/lid (1247/1248), scaled independently on X/Y/Z to fit the Mini
+Mimic footprint. Both appearances use a calm idle: a stationary, non-attacking
+Mini Mimic settles instead of hopping in place and breathes through a small lid
+motion. Movement, pursuit, and attack animations remain the shared Mimic
+behavior.
 
 Mini Mimics reuse the normal monster combat, faction, follower ownership, HUD,
 networking, dialogue/quest, persistence, and S.A.M. item identity paths. Their
 persistent records keep MapInstance, playable floor, authored layer, local Z,
 durable owner identity, dialogue configuration, inventory/equipment, and monster
-state without Mini-Mimic-specific save formats.
+state without Mini-Mimic-specific save formats. Appearance also travels through
+the existing monster stat/bodypart replication paths; no new packet layout or
+second monster implementation was added. The deterministic asset generator is
+`tools/generate_minimimic_interiors.py`.
 
 ## Dialogue and quests
 
@@ -294,8 +308,8 @@ Implemented editor work includes:
 - 32-layer editing and vertical 3D navigation
 - Custom exit, mechanism, persistence, dialogue, quest, fog, and other Automatia properties
 - Named elites and enemy-squad organization
-- Searchable authored Mini Mimics with disposition, recruitment, dialogue, and
-  display-name properties
+- Searchable authored Mini Mimics with disposition, recruitment, dialogue,
+  display-name, and Baby/Scaled Mimic appearance properties
 - Persistent named Room Groups: multi-layer X/Y/layer cuboids supporting
   tile-only, sprite-only, or combined copy/paste, including air/empty space
 - Room Group create/update/select/copy/paste/delete workflows integrated with
@@ -514,7 +528,9 @@ following areas still require manual or broader platform acceptance:
 - Named Room Group graphical create/select/copy/paste/delete/save/reload,
   including air, multiple authored layers, and S.A.M. entities
 - Mini Mimic dialogue plus recruitment, durable owner restoration, and
-  per-player dialogue/quest behavior with real clients
+  per-player dialogue/quest behavior with real clients; visually inspect both
+  Baby and Scaled Mimic modes, calm idle/movement transitions, and a remote
+  late join observing the authored appearance
 - MapInstance-specific ambience and same-instance Playable-Z stair audio
 - Text Source Tester/Library GUI behavior and supported S.A.M.-item references
 - Original-map regression testing with 32 layers and hybrid visibility
@@ -570,6 +586,11 @@ list above.
   — current cross-feature matrix and exact one-headless/two-client acceptance.
 - `helpful%20stuff/Quest%20Journal%20Backend.txt` — journal backend contract and
   current UI/persistence status.
+- `build-super-posix/Automatia_Z4D_AI_Catchup_2026-08-29.txt` — detailed
+  implementation handoff through Z4D and the Mini Mimic appearance/idle pass.
+- `build-super-posix/Automatia_Z4D_AI_Catchup_2026-08-29.zip` — a verified
+  snapshot containing that handoff and every source, test, asset, generator,
+  and maintained documentation file changed by the covered work.
 
 ## Licensing
 

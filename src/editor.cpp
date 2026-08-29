@@ -15978,8 +15978,8 @@ int main(int argc, char** argv)
 						&& !hasEditorPreviewModel )
 					{
 						// Match the searchable 2D palette marker in the 3D view.
-						// The runtime actor still resolves to the existing two-part
-						// 1794/1795 voxel body after assignActions().
+						// Runtime keeps the existing Mini Mimic root and resolves the
+						// authored Baby/Scaled Mimic appearance after assignActions().
 						entity->sprite = 21;
 					}
 
@@ -18302,7 +18302,14 @@ int main(int argc, char** argv)
 								spriteStats->type == MINIMIMIC;
 							if ( showMiniMimicNPCControls )
 							{
-								const int controlsY = suby1 + 348;
+								const int controlsY =
+									suby1 + MINIMIMIC_NPC_CONTROLS_Y_OFFSET;
+								const int dispositionX =
+									subx1 + MINIMIMIC_DISPOSITION_X_OFFSET;
+								const int recruitableX =
+									subx1 + MINIMIMIC_RECRUITABLE_X_OFFSET;
+								const int customDialogueX =
+									subx1 + MINIMIMIC_DIALOGUE_TOGGLE_X_OFFSET;
 								const int disposition = std::max(0, std::min(2,
 									atoi(spriteProperties[MONSTER_PROPERTY_DISPOSITION])));
 								const char* dispositionName = disposition == 1
@@ -18312,10 +18319,13 @@ int main(int argc, char** argv)
 									atoi(spriteProperties[MONSTER_PROPERTY_RECRUITABLE]) != 0;
 								const bool dialogueEnabled =
 									atoi(spriteProperties[MONSTER_PROPERTY_DIALOGUE_ENABLED]) != 0;
+								const bool scaledMimicAppearance =
+									atoi(spriteProperties[
+										MONSTER_PROPERTY_MINIMIMIC_APPEARANCE]) != 0;
 
 								printTextFormattedColor(
 									font8x8_bmp,
-									subx1 + 8,
+									dispositionX,
 									controlsY,
 									makeColorRGB(255, 220, 128),
 									"Disposition: [%s]",
@@ -18323,7 +18333,7 @@ int main(int argc, char** argv)
 								);
 								printTextFormattedColor(
 									font8x8_bmp,
-									subx1 + 184,
+									recruitableX,
 									controlsY,
 									recruitable
 										? makeColorRGB(96, 255, 96)
@@ -18333,7 +18343,7 @@ int main(int argc, char** argv)
 								);
 								printTextFormattedColor(
 									font8x8_bmp,
-									subx1 + 328,
+									customDialogueX,
 									controlsY,
 									dialogueEnabled
 										? makeColorRGB(96, 255, 96)
@@ -18346,8 +18356,8 @@ int main(int argc, char** argv)
 									&& omousey >= controlsY - 3
 									&& omousey < controlsY + 12 )
 								{
-									if ( omousex >= subx1 + 8
-										&& omousex < subx1 + 176 )
+									if ( omousex >= dispositionX
+										&& omousex < recruitableX - 8 )
 									{
 										mousestatus[SDL_BUTTON_LEFT] = 0;
 										snprintf(
@@ -18357,8 +18367,8 @@ int main(int argc, char** argv)
 											(disposition + 1) % 3
 										);
 									}
-									else if ( omousex >= subx1 + 184
-										&& omousex < subx1 + 320 )
+									else if ( omousex >= recruitableX
+										&& omousex < customDialogueX - 8 )
 									{
 										mousestatus[SDL_BUTTON_LEFT] = 0;
 										snprintf(
@@ -18368,7 +18378,7 @@ int main(int argc, char** argv)
 											recruitable ? 0 : 1
 										);
 									}
-									else if ( omousex >= subx1 + 328
+									else if ( omousex >= customDialogueX
 										&& omousex < subx2 - 8 )
 									{
 										mousestatus[SDL_BUTTON_LEFT] = 0;
@@ -18379,6 +18389,46 @@ int main(int argc, char** argv)
 											dialogueEnabled ? 0 : 1
 										);
 									}
+								}
+
+								const int appearanceY = controlsY
+									+ MINIMIMIC_APPEARANCE_ROW_OFFSET;
+								printTextFormattedColor(
+									font8x8_bmp,
+									subx1 + 8,
+									appearanceY,
+									makeColorRGB(160, 220, 255),
+									"Appearance: [%s]",
+									scaledMimicAppearance
+										? "Scaled Mimic"
+										: "Baby"
+								);
+								printTextFormattedColor(
+									font8x8_bmp,
+									subx1 + 240,
+									appearanceY,
+									makeColorRGB(180, 180, 180),
+									scaledMimicAppearance
+										? "full mimic, fitted to Mini size"
+										: "Mini shell + mimic insides"
+								);
+								if ( mousestatus[SDL_BUTTON_LEFT]
+									&& omousex >= subx1 + 8
+									&& omousex < subx2 - 8
+									&& omousey >= appearanceY - 3
+									&& omousey < appearanceY + 12 )
+								{
+									mousestatus[SDL_BUTTON_LEFT] = 0;
+									snprintf(
+										spriteProperties[
+											MONSTER_PROPERTY_MINIMIMIC_APPEARANCE],
+										sizeof(spriteProperties[
+											MONSTER_PROPERTY_MINIMIMIC_APPEARANCE]),
+										"%d",
+										scaledMimicAppearance
+											? MINIMIMIC_APPEARANCE_BABY
+											: MINIMIMIC_APPEARANCE_SCALED_MIMIC
+									);
 								}
 							}
 
@@ -18392,7 +18442,10 @@ int main(int argc, char** argv)
 								subx1 + 8;
 
 							const int dialogueLabelY =
-								suby1 + (showMiniMimicNPCControls ? 368 : 360);
+								suby1 + MINIMIMIC_NPC_CONTROLS_Y_OFFSET
+								+ (showMiniMimicNPCControls
+									? MINIMIMIC_DIALOGUE_LABEL_ROW_OFFSET
+									: 0);
 
 							const int dialogueFieldX1 =
 								subx1 + 8;

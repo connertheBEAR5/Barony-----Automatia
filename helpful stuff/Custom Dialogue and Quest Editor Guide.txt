@@ -1093,7 +1093,7 @@ tooltips, summaries, giver markers, and the Restart Game journal fix are
 included.
 
 
-CURRENT MINI MIMIC AND MULTIPLAYER CONTRACT (2026-08-28)
+CURRENT MINI MIMIC AND MULTIPLAYER CONTRACT (2026-08-29)
 ========================================================
 
 The Zed Mini Mimic property panel independently stores disposition,
@@ -1104,13 +1104,23 @@ host-authoritative and per-player quest state remains private to the interacting
 character. The generic persistent follower system owns recruitment, networking,
 HUD restoration, durable owner identity, inventory/equipment, and reconnect.
 
+Appearance is another independent authored field. `Baby` is zero/default for
+old maps and keeps the dedicated Mini shell with generated mouth-interior voxels;
+`Scaled Mimic` uses the complete regular Mimic trunk/lid fitted to the Mini
+footprint. Both use the calm idle. Toggling appearance does not change the
+dialogue-enabled flag, resource path, recruitability, owner, or per-player quest
+state. The editor places Appearance on its own row between the Mini NPC controls
+and Dialogue Resource so the controls and text do not overlap.
+
 MapInstance and playableFloor scope interaction; authoredMapLayer and local Z
 remain physical/presentation coordinates. A dialogue or Mini Mimic copied in a
 multi-layer Room Group retains those fields and generic persistent metadata.
 S.A.M. equipment uses stable item IDs through the shared item/persistence layer;
 there is no dialogue-specific or Mini Mimic-specific S.A.M. format.
 
-Automated parser/editor characterization and the full 11-test suite pass. The
-real two-client dialogue-plus-recruit, per-player quest visibility, upper-floor
-interaction, save/restart, and reconnect scenario remains part of the manual
-cross-feature acceptance; it is not claimed by editor compilation.
+Automated parser/editor characterization and the full 13-test suite pass in
+`build-super-posix`. The real two-client dialogue-plus-recruit, per-player quest
+visibility, upper-floor
+interaction, save/restart, reconnect, and matching remote appearance scenario
+remains part of the manual cross-feature acceptance; it is not claimed by
+editor compilation.

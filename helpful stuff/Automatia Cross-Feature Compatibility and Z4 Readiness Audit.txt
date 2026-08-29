@@ -18,6 +18,15 @@ on acquisition and attacks. The original conclusion below remains historically
 accurate for this audit's 2026-08-27 scope, and the real-client procedure remains
 unrun.
 
+The current Mini Mimic authoring contract also includes a zero/default Baby
+appearance (dedicated Mini shell plus generated regular-Mimic mouth interior),
+an optional Scaled Mimic appearance (complete regular Mimic slabs fitted to the
+Mini footprint), and a calm idle for both. This remains the same runtime actor
+and uses existing Stat, bodypart replication, persistence, follower, dialogue,
+Playable-Z, MapInstance, and S.A.M. paths. The latest implementation validation
+uses `build-super-posix`, passes 13/13 CTest targets and Stage 4D/Z4D, and has
+not received graphical or real-client appearance acceptance.
+
 
 1. EVIDENCE RULES
 =================
@@ -260,18 +269,20 @@ paths.
 
 The required local validation set is:
 
-    cmake --build build -j6
-    ctest --test-dir build --output-on-failure
-    ./build/barony --automatia-stage4d-z3-transition-characterization
+    cmake --build build-super-posix -j6
+    ctest --test-dir build-super-posix --output-on-failure
+    ./build-super-posix/barony --automatia-stage4d-z3-transition-characterization
     git diff --check
 
-CTest contains 11 tests:
+CTest contains 13 tests:
 
     automatia_foundation
     sam_21_integration_contract
     text_source_script
     minimimic_authored_characterization
     room_group
+    vertical_navigation
+    cross_floor_path
     sam_room_generation
     party_backend
     social_party_ui_model
@@ -328,8 +339,10 @@ Map A requirements:
    panel.
 4. On floor 5, place a searchable Mini Mimic named Cross Feature Mimic with a
    recorded persistent ID. Set Disposition Friendly, Recruitable Yes, Custom
-   Dialogue Yes and Dialogue Resource automatia_cross_feature_recruit. Give it
-   exactly one TEST_ITEM in a known equipment slot.
+   Dialogue Yes, Dialogue Resource automatia_cross_feature_recruit and
+   Appearance Scaled Mimic. Give it exactly one TEST_ITEM in a known equipment
+   slot. The scaled choice makes the real-client run exercise appearance
+   replication in addition to the generic follower/dialogue state.
 5. Add a separate persistent mechanism on floor 0 and record its initial state.
 6. Add a second world TEST_ITEM at a known floor-5 coordinate. On floor 5, add a
    Text Source using only supported existing-world-item attachment, for example:
@@ -407,7 +420,10 @@ Map B requirements:
 Before networking, open each map once in Zed and verify place/select/copy/paste/
 delete plus save/load for the Mini Mimic and Room Group. Record screenshots of
 the layer range, persistent IDs, local z, item stable IDs and all Mini Mimic
-properties. This editor check was not run by the stabilization pass.
+properties. Also place a second disposable Mini Mimic, leave Appearance Baby,
+save/reload, and verify the dedicated shell, added mouth interior, and calm idle
+before deleting it. Old maps without an appearance field must also load as
+Baby. This editor/visual check was not run by the stabilization pass.
 
 
 7. EXACT ONE-HEADLESS/TWO-CLIENT ACCEPTANCE
@@ -418,7 +434,7 @@ Initial server and lobby
 
 From the server's build directory run:
 
-    cd /home/conner/Barony-----Automatia/build
+    cd /home/conner/Barony-----Automatia/build-super-posix
     ./barony --headless --LAN --port=57165 \
       --server-name=AutomatiaZ4Gate --late-join \
       --character-save=local --save=95 --autosave=0 \
@@ -461,7 +477,9 @@ Playable-Z, S.A.M, dialogue and recruitment
    confirm no floor-0 item or mechanism at the same X/Y is targeted. Leave the
    chest with exactly one TEST_ITEM stack for the persistence check.
 5. Record the Mini Mimic persistent ID, owner character name/identity, HP/state,
-   equipment stable ID, playableFloor, authoredMapLayer and local z.
+   equipment stable ID, Scaled Mimic appearance, playableFloor,
+   authoredMapLayer and local z. Observe the calm idle, movement transition,
+   and attack/follow animation on both connected clients.
 
 Divergence and ambience
 -----------------------
@@ -503,7 +521,7 @@ Save, disconnect and restart
 11. Restart from the same server build and slot. Omit -map so recovery, not a
     command-line map, chooses the saved world:
 
-       cd /home/conner/Barony-----Automatia/build
+       cd /home/conner/Barony-----Automatia/build-super-posix
        ./barony --headless --LAN --port=57165 \
          --server-name=AutomatiaZ4Gate --late-join --autostart \
          --character-save=local --save=95 --autosave=0
@@ -522,7 +540,9 @@ Reconnect and restoration checks
     floor. status must again show the two correct MapInstances and memberships.
 14. Require exactly one Cross Feature Mimic, still owned by Client A, with the
     same persistent ID, name, HP/state, dialogue configuration, follower HUD and
-    one equipped TEST_ITEM. There must be no source-map ghost or duplicate.
+    one equipped TEST_ITEM. Its Scaled Mimic appearance must match on the
+    reconnecting/late-joining clients. There must be no source-map ghost or
+    duplicate.
 15. Require the floor-5 chest to contain exactly one TEST_ITEM, both persistent
     mechanisms to retain their changed states, and the runtime item to resolve to
     TEST_ITEM_STABLE_ID. No vanilla substitution is acceptable.
@@ -548,13 +568,14 @@ stale dialogue configuration or incorrect ambience is a failed acceptance.
 * Exercise 15 actual players, including slot 14; current tests prove bounds and
   storage contracts, not a fifteen-client session.
 * Verify graphical editor gestures, custom model rendering, visual equipment,
-  positional audio and real audible ambience.
+  both Mini Mimic appearances and calm idle/movement transitions, positional
+  audio and real audible ambience.
 * Test missing-mod then restored-mod behavior only on copied saves and with all
   peers changed in lockstep. Do not use a mismatched public lobby.
 
 
-9. Z4 READINESS DECISION
-========================
+9. ORIGINAL 2026-08-27 Z4 READINESS DECISION
+=============================================
 
 The automated and contained-live baseline is coherent: build/tests pass, the
 highest-risk stable-ID/upper-floor/MapInstance persistence collision is exercised,
@@ -565,5 +586,21 @@ The tree is not yet fully accepted for Z4 because the required one-headless plus
 two-real-graphical-client save/restart/reconnect run has not been performed. Z4
 should begin only after section 7 passes or after the owner explicitly accepts
 that manual risk. This audit did not begin Z4.
+
+
+10. CURRENT POST-DECISION STATUS - 2026-08-29
+==============================================
+
+The owner explicitly chose the second branch above and accepted the documented
+manual risk. Z4A/B/C/D are complete and automated-characterized; this audit's
+real-client procedure remains the acceptance gate for claims about graphical
+multiplayer, remote appearance, audio, reconnect identity, and packaged S.A.M.
+content. The Mini Mimic fixture now deliberately uses Scaled Mimic so the same
+run exercises appearance persistence/replication, while the pre-network editor
+check separately covers the Baby default, generated interior, and calm idle.
+
+The current `build-super-posix -j6`, 13/13 CTest, Stage 4D/Z4D, and diff-check
+baseline is green. Those automated results do not change any `MANUAL REQUIRED`
+classification above. No Z5 or Z6 work is implied by this status update.
 
 END OF AUTOMATIA CROSS-FEATURE COMPATIBILITY AND Z4 READINESS AUDIT

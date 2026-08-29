@@ -3297,8 +3297,8 @@ void drawEntities2D(long camx, long camy)
 				if ( entity->sprite == EDITOR_SPRITE_MINIMIMIC )
 				{
 					// Zed keeps the authored marker ID but previews it with the
-					// familiar chest artwork. Runtime uses the existing 1794/1795
-					// Mini Mimic voxel body through initMiniMimic().
+					// familiar chest artwork. Runtime retains the Mini Mimic root
+					// and uses scaled full-Mimic limbs through initMiniMimic().
 					drawImageScaled(sprites[21], nullptr, &pos);
 				}
 				else if ( entity->sprite == 8 && entity->skill[10] > 1 )
