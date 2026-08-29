@@ -24546,6 +24546,25 @@ void Entity::monsterAcquireAttackTarget(const Entity& target, Sint32 state, bool
 		{
 			return;
 		}
+		// Z4D authorizes cross-floor pursuit only through its route coordinator.
+		// Raw acquisition remains floor-local so equal X/Y can never become an
+		// ATTACK state across a ceiling or floor.
+		if ( target.playableFloor != playableFloor )
+		{
+			return;
+		}
+		if ( target.behavior == &actPlayer )
+		{
+			const int player = target.skill[2];
+			const MapInstance* activeInstance = worldState.activeInstance();
+			if ( activeInstance
+				&& activeInstance->loadedMap == &map
+				&& (player < 0 || player >= MAXPLAYERS
+					|| !worldState.playerSharesActiveInstance(player)) )
+			{
+				return;
+			}
+		}
 	}
 	
 	if ( myStats->type == GYROBOT )

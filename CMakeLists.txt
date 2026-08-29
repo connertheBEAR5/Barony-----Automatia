@@ -91,6 +91,33 @@ if(BUILD_TESTING)
 	add_test(NAME room_group COMMAND room_group_tests)
 
 	add_executable(
+		vertical_navigation_tests
+		tests/vertical_navigation_tests.cpp
+		src/vertical_navigation.cpp
+	)
+	target_include_directories(
+		vertical_navigation_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_features(vertical_navigation_tests PRIVATE cxx_std_17)
+	add_test(NAME vertical_navigation COMMAND vertical_navigation_tests)
+
+	add_executable(
+		cross_floor_path_tests
+		tests/cross_floor_path_tests.cpp
+		src/cross_floor_path.cpp
+		src/vertical_navigation.cpp
+	)
+	target_include_directories(
+		cross_floor_path_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_features(cross_floor_path_tests PRIVATE cxx_std_17)
+	add_test(NAME cross_floor_path COMMAND cross_floor_path_tests)
+
+	add_executable(
 		sam_room_generation_tests
 		tests/sam_room_generation_tests.cpp
 		src/sam/framework/sam_rooms.cpp

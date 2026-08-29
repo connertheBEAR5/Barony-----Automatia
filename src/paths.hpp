@@ -25,7 +25,7 @@ typedef struct pathnode
 
 // function prototypes
 Uint32 heuristic(int x1, int y1, int x2, int y2);
-enum GeneratePathTypes
+enum GeneratePathTypes : int
 {
 	GENERATE_PATH_DEFAULT,
 	GENERATE_PATH_BOULDER_BREAK,
@@ -45,6 +45,14 @@ enum GeneratePathTypes
 };
 extern int lastGeneratePathTries;
 list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target, GeneratePathTypes pathingType, bool lavaIsPassable = false);
+// Query the same existing A* on an explicit playable floor without assigning
+// AI state or firing monster/follower path success/failure callbacks.
+list_t* generatePathOnPlayableFloor(
+	int x1, int y1, int x2, int y2,
+	PlayableFloorId playableFloor,
+	Entity* my, Entity* target,
+	GeneratePathTypes pathingType,
+	bool lavaIsPassable = false);
 void generatePathMaps();
 // return true if an entity is blocks pathing
 bool isPathObstacle(Entity* entity);

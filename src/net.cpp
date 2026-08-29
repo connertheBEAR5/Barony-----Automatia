@@ -5114,7 +5114,12 @@ static bool sendServerLateJoinCatchup(int playerIndex)
 	return true;
 }
 
-void sendEntityUDP(Entity* entity, int c, bool guarantee)
+static void sendEntityUDPImpl(
+	Entity* entity,
+	int c,
+	bool guarantee,
+	bool requirePlayableFloorScope,
+	bool updateEffects)
 {
 	int j;
 
@@ -5126,7 +5131,9 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		return;
 	}
-    if ( !serverPlayerCanReceiveEntityUpdates(c, entity) )
+	if (requirePlayableFloorScope
+		? !serverPlayerCanReceiveEntityUpdates(c, entity)
+		: !serverPlayerCanReceiveActiveMapUpdates(c))
 	{
 		return;
 	}
@@ -5205,10 +5212,24 @@ void sendEntityUDP(Entity* entity, int c, bool guarantee)
 	{
 		sendPacket(net_sock, -1, net_packet, c - 1);
 	}
-	if ( entity->clientsHaveItsStats )
+	if ( updateEffects && entity->clientsHaveItsStats )
 	{
 		entity->serverUpdateEffectsForEntity(false);
 	}
+}
+
+void sendEntityUDP(Entity* entity, int c, bool guarantee)
+{
+	sendEntityUDPImpl(entity, c, guarantee, true, true);
+}
+
+void sendEntityUDPToActiveMap(Entity* entity, int c, bool guarantee)
+{
+	// This wrapper is called once per eligible active-instance client. Effects
+	// have not changed during a floor transition, and the legacy updater itself
+	// broadcasts to every client, so invoking it here would produce N squared
+	// duplicate EFFE traffic on a populated server.
+	sendEntityUDPImpl(entity, c, guarantee, false, false);
 }
 
 /*-------------------------------------------------------------------------------
@@ -6926,6 +6947,8 @@ Entity* receiveEntity(Entity* entity)
 	entity->setUID((int)SDLNet_Read32(&net_packet->data[4])); // remember who I am
 	const SpatialSpawnContext receivedSpatialContext =
 		receivedEntitySpatialContext();
+	const bool receivedFloorChanged = !newentity
+		&& entity->playableFloor != receivedSpatialContext.playableFloor;
 	/*
 	 * Stage Z3 turns spatialRevision into the stale-packet barrier it was
 	 * reserved for in Z2A. A reliable PZTR floor transition may overtake an
@@ -6947,13 +6970,25 @@ Entity* receiveEntity(Entity* entity)
 		// already exist locally.
 		entity->applySpatialSpawnContext(receivedSpatialContext);
 	}
-	else if (entity->playableFloor != receivedSpatialContext.playableFloor)
+	else if (receivedFloorChanged)
 	{
+		entity->removeLightField();
 		entity->setPlayableFloor(receivedSpatialContext.playableFloor);
+		// Existing dynamic entities need the same structural context as newly
+		// received ones. Dropped items use this when they cross an authored floor.
+		entity->authoredMapLayer =
+			receivedSpatialContext.authoredMapLayer;
 	}
 	if (!newentity)
 	{
 		entity->spatialRevision = receivedSpatialContext.spatialRevision;
+	}
+	if (receivedFloorChanged && entity->behavior != &actPlayer)
+	{
+		// A reliable ENTU is sufficient for non-player transitions. Keep the
+		// client's locally constructed limbs/name tags in the same structural
+		// context without introducing a follower-specific packet.
+		syncAutomatiaNonPlayerEntitySpatialAttachments(*entity);
 	}
 	entity->new_x = ((Sint16)SDLNet_Read16(&net_packet->data[10])) / 32.0;
 	entity->new_y = ((Sint16)SDLNet_Read16(&net_packet->data[12])) / 32.0;

@@ -4,7 +4,7 @@ BARONY AUTOMATIA HEADLESS SERVER DEVELOPER GUIDE
 CURRENT BASELINE (2026-08-28)
 
 The maintained build is `build`; use `cmake --build build -j6`. The game/editor,
-11/11 CTest tests, Stage4D characterization, and diff check pass. A contained
+13/13 CTest tests, Stage4D characterization, and diff check pass. A contained
 two-client direct-LAN run exercised divergent MapInstances, scoped party state,
 SAMF, save/shutdown/restart, and durable Party ID hydration. A separate contained
 new-player late-join run reached ready/go through the staged snapshot. These are

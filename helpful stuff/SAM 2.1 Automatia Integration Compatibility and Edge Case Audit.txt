@@ -722,7 +722,17 @@ Workshop dependency ordering.
 
 * Text Source Script Tester -- subsequently authorized and implemented through a shared
   native/extension registry; current S.A.M. 2.1.0 contributes zero Text Source commands.
-* Z4 -- still not started.
+* Z4 -- Z4A and query-only Z4B were subsequently authorized and completed. The
+  per-MapInstance ZLDR/ZTRN graph and generic A* route adapter add no S.A.M.-
+  specific pathfinder, identity, or persistence. Z4C now lets compatible S.A.M.
+  followers benefit when they use the normal monster/follower APIs and generic
+  non-player floor transition; it adds no S.A.M.-specific owner, packet, or
+  persistence path. Z4D likewise lets compatible hostile S.A.M. monsters using
+  normal `actMonster` targeting/path APIs continue a valid player target through
+  the shared route and transition core. MapInstance, playableFloor,
+  authoredMapLayer and local z remain distinct hook context, and S.A.M. metadata
+  is not copied into Z4D-specific storage. Custom AI that bypasses normal monster
+  APIs still requires mod-level acceptance.
 * A protocol redesign, if additive validated packets are insufficient -- stop/report
   boundary per task.
 * Per-instance mod sets and hot unloading content used by live entities.

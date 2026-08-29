@@ -13,6 +13,10 @@
 #include "../src/items.hpp"
 #include "../src/automatia_save.hpp"
 #include "../src/world_state.hpp"
+#include "../src/vertical_navigation.hpp"
+#include "../src/cross_floor_path.hpp"
+#include "../src/follower_vertical_navigation.hpp"
+#include "../src/hostile_vertical_navigation.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "../src/sam/sam_item_registry_foundation.hpp"
 #endif
@@ -537,6 +541,23 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     map.ambientLight.red = 32;
     map.ambientLight.green = 12;
     map.ambientLight.blue = 6;
+	// Keep both saved ZLDR stairs traversable after reload so the Z4A graph can
+	// be reconstructed solely from the existing map metadata.
+	map.tiles[tileIndex(0, 1, 1, map.height)] = 71;
+	map.tiles[tileIndex(0, 1, 2, map.height)] = 0;
+	map.tiles[tileIndex(1, 1, 1, map.height)] = 71;
+	map.tiles[tileIndex(1, 1, 2, map.height)] = 0;
+	PlayableFloorData* savedUpperGeometry = map.playableFloors.find(2);
+	EXPECT(savedUpperGeometry != nullptr);
+	for (const std::size_t changedIndex : {
+		tileIndex(0, 1, 1, map.height),
+		tileIndex(0, 1, 2, map.height),
+		tileIndex(1, 1, 1, map.height),
+		tileIndex(1, 1, 2, map.height)})
+	{
+		savedUpperGeometry->tiles[changedIndex] =
+			map.tiles[changedIndex] + 5000;
+	}
     EXPECT(saveMap("stage4b_roundtrip") == 0);
 
     std::ifstream output(
@@ -701,8 +722,24 @@ bool testLmpCompatibilityAndRoundTrip(TemporaryDataDirectory& temporary)
     EXPECT(loaded.ambientLight.red == 32);
     EXPECT(loaded.ambientLight.green == 12);
     EXPECT(loaded.ambientLight.blue == 6);
-    EXPECT(loaded.playableFloors.floors.size() == 4);
+	VerticalNavigationGraph restoredVerticalGraph;
+	EXPECT(rebuildVerticalNavigationGraphFromMap(
+		restoredVerticalGraph, "stage4b_roundtrip.lmp#world", loaded));
+	EXPECT(restoredVerticalGraph.instanceKey()
+		== "stage4b_roundtrip.lmp#world");
+	EXPECT(restoredVerticalGraph.edgeCount() == 2);
+	EXPECT(restoredVerticalGraph.canReachFloor(
+		"stage4b_roundtrip.lmp#world", 0,
+		"stage4b_roundtrip.lmp#world", 1));
+	EXPECT(restoredVerticalGraph.canReachFloor(
+		"stage4b_roundtrip.lmp#world", 2,
+		"stage4b_roundtrip.lmp#world", 1));
+	EXPECT(!restoredVerticalGraph.canReachFloor(
+		"stage4b_roundtrip.lmp#world", 1,
+		"stage4b_roundtrip.lmp#world", 2));
+    EXPECT(loaded.playableFloors.floors.size() == 5);
     EXPECT(loaded.playableFloors.hasFloor(DEFAULT_PLAYABLE_FLOOR));
+	EXPECT(loaded.playableFloors.hasFloor(1));
 	EXPECT(loaded.playableFloors.hasFloor(5));
 	EXPECT(loaded.playableFloors.hasFloor(7));
     const PlayableFloorData* restoredUpper = loaded.playableFloors.find(2);
@@ -1811,9 +1848,9 @@ bool testZ34CStructuralLayersAndFalling()
 		ordinaryProjectile->parent = fallingEntity->getUID();
 		ordinaryProjectile->z = 7.5;
 
-		// Followers are gameplay actors, not visual attachments. They must be
-		// relocated by the authoritative player-floor transaction, and their
-		// passive name-tag child must follow the same structural slice.
+		// Followers are gameplay actors, not visual attachments. Z4C deliberately
+		// leaves them on their source floor here; their AI must walk a real graph
+		// route rather than riding the player's falling/PZTR transaction.
 		Stat* followerOwnerStats = new Stat(0);
 		EXPECT(followerOwnerStats != nullptr);
 		stats[0] = followerOwnerStats;
@@ -1865,10 +1902,10 @@ bool testZ34CStructuralLayersAndFalling()
 		EXPECT(ordinaryProjectile->playableFloor == 1);
 		EXPECT(ordinaryProjectile->authoredMapLayer == 1);
 		EXPECT(ordinaryProjectile->z == 7.5);
-		EXPECT(floorFollower->playableFloor == 0);
-		EXPECT(floorFollower->authoredMapLayer == 0);
-		EXPECT(followerNameTag->playableFloor == 0);
-		EXPECT(followerNameTag->authoredMapLayer == 0);
+		EXPECT(floorFollower->playableFloor == 1);
+		EXPECT(floorFollower->authoredMapLayer == 1);
+		EXPECT(followerNameTag->playableFloor == 1);
+		EXPECT(followerNameTag->authoredMapLayer == 1);
 
 		list_FreeAll(&followerOwnerStats->FOLLOWERS);
 		delete followerOwnerStats;
@@ -1929,6 +1966,160 @@ bool testZ34CStructuralLayersAndFalling()
         landingFloor, floorsFallen));
     EXPECT(floorsFallen == 0);
     return true;
+}
+
+bool testZ4AVerticalNavigationAndItemFalling()
+{
+	multiplayer = SINGLE;
+	EXPECT(resetGlobalMapHarness(5, 5, 1));
+
+	// Only a small upper platform exists on authored layer 1. The clear tile
+	// west of it is a valid floor-0 stair landing; equal X/Y alone creates no
+	// edge anywhere in the graph.
+	map.tiles[tileIndex(2, 1, 1, map.height)] = 71;
+	map.tiles[tileIndex(2, 1, 2, map.height)] = 0;
+	EXPECT(map.ensurePlayableFloorGeometry(1, false));
+
+	Entity* up = newEntity(0, 1, map.entities, nullptr);
+	Entity* down = newEntity(0, 1, map.entities, nullptr);
+	Entity* endpointSource = newEntity(0, 1, map.entities, nullptr);
+	Entity* endpointTarget = newEntity(0, 1, map.entities, nullptr);
+	Entity* blocked = newEntity(0, 1, map.entities, nullptr);
+	Entity* malformed = newEntity(0, 1, map.entities, nullptr);
+	EXPECT(up && down && endpointSource && endpointTarget && blocked && malformed);
+
+	up->persistentID = 8101;
+	up->x = 24.0;
+	up->y = 24.0;
+	up->playableFloor = 0;
+	up->authoredMapLayer = 1;
+	up->verticalLayerTransitionDelta = 1;
+	up->verticalLayerTransitionRotation = 0; // east onto the upper platform
+
+	down->persistentID = 8102;
+	down->x = 40.0;
+	down->y = 24.0;
+	down->playableFloor = 1;
+	down->authoredMapLayer = 2;
+	down->verticalLayerTransitionDelta = -1;
+	down->verticalLayerTransitionRotation = 4; // west to the floor-0 landing
+
+	endpointSource->persistentID = 8103;
+	endpointSource->x = 8.0;
+	endpointSource->y = 8.0;
+	endpointSource->playableFloor = 0;
+	endpointSource->playableFloorTransitionEnabled = true;
+	endpointSource->playableFloorTransitionDestination = 1;
+	endpointSource->playableFloorTransitionTargetPersistentID = 8104;
+	endpointTarget->persistentID = 8104;
+	endpointTarget->x = 40.0;
+	endpointTarget->y = 24.0;
+	endpointTarget->playableFloor = 1;
+	endpointTarget->authoredMapLayer = 1;
+
+	blocked->persistentID = 8105;
+	blocked->x = 72.0;
+	blocked->y = 72.0;
+	blocked->playableFloor = 0;
+	blocked->authoredMapLayer = 1;
+	blocked->verticalLayerTransitionDelta = 1;
+	blocked->verticalLayerTransitionRotation = 0;
+
+	malformed->persistentID = 8106;
+	malformed->x = 24.0;
+	malformed->y = 56.0;
+	malformed->playableFloor = 0;
+	malformed->authoredMapLayer = 1;
+	malformed->verticalLayerTransitionDelta = 2;
+
+	VerticalNavigationGraph graphA;
+	EXPECT(rebuildVerticalNavigationGraphFromMap(
+		graphA, "tower.lmp#instance_a", map));
+	EXPECT(graphA.edgeCount() == 3);
+	EXPECT(graphA.rejectedCount() == 2);
+	EXPECT(graphA.canReachFloor(
+		"tower.lmp#instance_a", 0,
+		"tower.lmp#instance_a", 1));
+	EXPECT(graphA.canReachFloor(
+		"tower.lmp#instance_a", 1,
+		"tower.lmp#instance_a", 0));
+	EXPECT(!graphA.canReachFloor(
+		"tower.lmp#instance_a", 0,
+		"tower.lmp#instance_b", 1));
+	EXPECT(graphA.edgesFrom(
+		"tower.lmp#instance_a", {0, 4, 4}).empty());
+
+	VerticalNavigationGraph graphB;
+	EXPECT(rebuildVerticalNavigationGraphFromMap(
+		graphB, "tower.lmp#instance_b", map));
+	EXPECT(graphB.edgeCount() == graphA.edgeCount());
+	EXPECT(!graphB.canReachFloor(
+		"tower.lmp#instance_a", 0,
+		"tower.lmp#instance_b", 1));
+
+	// A dropped item crossing the second-floor boundary keeps the same world
+	// height by subtracting one 16-unit step from local Z, retains identity and
+	// lands in floor 0 on its next ordinary item-physics tick.
+	Entity* item = newEntity(8, 1, map.entities, nullptr);
+	EXPECT(item != nullptr);
+	item->behavior = &actItem;
+	item->persistentID = 8201;
+	item->authoredItemStableID = "fixture:falling_item";
+	item->x = 24.0;
+	item->y = 56.0;
+	item->z = 23.5;
+	item->new_z = item->z;
+	item->playableFloor = 1;
+	item->authoredMapLayer = 1;
+	const std::uint64_t itemRevision = item->spatialRevision;
+	EXPECT(transitionAutomatiaFallingItemToLowerPlayableFloor(*item, 7.5));
+	EXPECT(item->playableFloor == 0);
+	EXPECT(item->authoredMapLayer == 0);
+	EXPECT(item->z == 7.5);
+	EXPECT(item->new_z == 7.5);
+	EXPECT(item->spatialRevision > itemRevision);
+	EXPECT(item->persistentID == 8201);
+	EXPECT(item->authoredItemStableID == "fixture:falling_item");
+	EXPECT(item->mynode != nullptr);
+
+	// Empty intermediate floors are crossed one boundary at a time rather than
+	// converting authored layers into a large local-Z jump.
+	Entity* multiFloorItem = newEntity(8, 1, map.entities, nullptr);
+	EXPECT(multiFloorItem != nullptr);
+	multiFloorItem->behavior = &actItem;
+	multiFloorItem->x = 24.0;
+	multiFloorItem->y = 56.0;
+	multiFloorItem->z = 23.5;
+	multiFloorItem->playableFloor = 2;
+	multiFloorItem->authoredMapLayer = 2;
+	EXPECT(map.ensurePlayableFloorGeometry(2, false));
+	EXPECT(transitionAutomatiaFallingItemToLowerPlayableFloor(
+		*multiFloorItem, 7.5));
+	EXPECT(multiFloorItem->playableFloor == 1);
+	EXPECT(multiFloorItem->authoredMapLayer == 1);
+	EXPECT(multiFloorItem->z == 7.5);
+	EXPECT(!transitionAutomatiaFallingItemToLowerPlayableFloor(
+		*multiFloorItem, 7.5));
+	multiFloorItem->z = 23.5;
+	EXPECT(transitionAutomatiaFallingItemToLowerPlayableFloor(
+		*multiFloorItem, 7.5));
+	EXPECT(multiFloorItem->playableFloor == 0);
+	EXPECT(multiFloorItem->authoredMapLayer == 0);
+	EXPECT(multiFloorItem->z == 7.5);
+
+	const real_t legacyZ = item->z;
+	EXPECT(!transitionAutomatiaFallingItemToLowerPlayableFloor(*item, 7.5));
+	EXPECT(item->z == legacyZ);
+	const int previousMultiplayer = multiplayer;
+	multiplayer = CLIENT;
+	EXPECT(multiFloorItem->setPlayableFloor(1));
+	multiFloorItem->authoredMapLayer = 1;
+	multiFloorItem->z = 23.5;
+	EXPECT(!transitionAutomatiaFallingItemToLowerPlayableFloor(
+		*multiFloorItem, 7.5));
+	EXPECT(multiFloorItem->playableFloor == 1);
+	multiplayer = previousMultiplayer;
+	return true;
 }
 
 bool testZ2CRuntimeFloorIsolation()
@@ -2146,6 +2337,854 @@ bool testUpperFloorMonsterPathing()
     return true;
 }
 
+bool testZ4BCrossFloorPathQuery()
+{
+	multiplayer = SINGLE;
+	resetPersistentWorldSession();
+	EXPECT(resetGlobalMapHarness(7, 7, 1));
+	const bool previousLoading = loading;
+	loading = false;
+
+	// Authored-layer geometry mirrors real stacked construction. Floor 1 has a
+	// small corridor from the first landing to the second stair; floor 2 has a
+	// separate landing/target platform. Re-derivation during graph rebuild must
+	// therefore preserve these paths without a synthetic FLOR-only buffer.
+	for (int x = 3; x <= 4; ++x)
+	{
+		for (int y = 1; y <= 2; ++y)
+		{
+			map.tiles[tileIndex(x, y, 1, map.height)] = 1;
+		}
+	}
+	for (int x = 5; x <= 6; ++x)
+	{
+		for (int y = 2; y <= 4; ++y)
+		{
+			map.tiles[tileIndex(x, y, 2, map.height)] = 1;
+		}
+	}
+	EXPECT(map.ensurePlayableFloorGeometry(1, false));
+	EXPECT(map.ensurePlayableFloorGeometry(2, false));
+	EXPECT(map.ensurePlayableFloorGeometry(3, false));
+
+	Entity* firstStair = newEntity(0, 1, map.entities, nullptr);
+	Entity* secondStair = newEntity(0, 1, map.entities, nullptr);
+	EXPECT(firstStair && secondStair);
+	firstStair->persistentID = 8301;
+	firstStair->x = 40.0;
+	firstStair->y = 24.0;
+	firstStair->playableFloor = 0;
+	firstStair->authoredMapLayer = 1;
+	firstStair->verticalLayerTransitionDelta = 1;
+	firstStair->verticalLayerTransitionRotation = 0;
+	firstStair->flags[PASSABLE] = true;
+
+	secondStair->persistentID = 8302;
+	secondStair->x = 72.0;
+	secondStair->y = 40.0;
+	secondStair->playableFloor = 1;
+	secondStair->authoredMapLayer = 2;
+	secondStair->verticalLayerTransitionDelta = 1;
+	secondStair->verticalLayerTransitionRotation = 0;
+	secondStair->flags[PASSABLE] = true;
+
+	std::snprintf(map.filename, sizeof(map.filename), "%s", "z4b_path.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_a"));
+	MapInstanceSummary siblingSummary;
+	EXPECT(siblingSummary.identity.set("z4b_path.lmp", "instance_b"));
+	EXPECT(worldState.registerUnloadedInstance(siblingSummary));
+	EXPECT(worldState.rebuildVerticalNavigation(map));
+	generatePathMaps();
+	worldState.refreshActiveContext();
+	const MapInstance* instance = worldState.activeInstance();
+	const MapInstance* sibling = worldState.find("z4b_path.lmp#instance_b");
+	EXPECT(instance && sibling);
+	EXPECT(instance->verticalNavigation.edgeCount() == 2);
+
+	Entity* mover = newEntity(-1, 1, map.entities, nullptr);
+	EXPECT(mover != nullptr);
+	mover->x = 104.0;
+	mover->y = 72.0;
+	mover->playableFloor = 0;
+	mover->authoredMapLayer = 0;
+
+	// Same-floor planning is the ordinary A* result, with no graph traversal.
+	list_t* ordinary = generatePath(
+		6, 4, 6, 5, mover, nullptr, GENERATE_PATH_DEFAULT);
+	EXPECT(ordinary != nullptr);
+	CrossFloorPathRoute localRoute;
+	EXPECT(generateCrossFloorPath(
+		*instance, {0, 6, 4}, *instance, {0, 6, 5},
+		mover, nullptr, GENERATE_PATH_DEFAULT, localRoute));
+	EXPECT(localRoute.transitionCount == 0);
+	EXPECT(localRoute.steps.size() == 1);
+	EXPECT(localRoute.steps[0].localPath.size() == list_Size(ordinary));
+	std::size_t ordinaryIndex = 0;
+	for (node_t* node = ordinary->first; node; node = node->next)
+	{
+		const pathnode_t* pathNode =
+			static_cast<const pathnode_t*>(node->element);
+		EXPECT(pathNode != nullptr);
+		EXPECT(localRoute.steps[0].localPath[ordinaryIndex].tileX
+			== pathNode->x);
+		EXPECT(localRoute.steps[0].localPath[ordinaryIndex].tileY
+			== pathNode->y);
+		++ordinaryIndex;
+	}
+	list_FreeAll(ordinary);
+	std::free(ordinary);
+
+	CrossFloorPathRoute upperRoute;
+	EXPECT(generateCrossFloorPath(
+		*instance, {0, 6, 4}, *instance, {1, 4, 1},
+		mover, nullptr, GENERATE_PATH_DEFAULT, upperRoute));
+	EXPECT(upperRoute.transitionCount == 1);
+	EXPECT(upperRoute.steps.size() == 3);
+
+	CrossFloorPathRoute multiFloorRoute;
+	EXPECT(generateCrossFloorPath(
+		*instance, {0, 6, 4}, *instance, {2, 6, 3},
+		mover, nullptr, GENERATE_PATH_DEFAULT, multiFloorRoute));
+	EXPECT(multiFloorRoute.transitionCount == 2);
+	EXPECT(multiFloorRoute.steps.size() == 5);
+	EXPECT(multiFloorRoute.steps[1].transition.sourcePersistentID == 8301);
+	EXPECT(multiFloorRoute.steps[3].transition.sourcePersistentID == 8302);
+
+	// Equal X/Y on another floor still needs both authored transitions.
+	CrossFloorPathRoute equalCoordinatesRoute;
+	EXPECT(generateCrossFloorPath(
+		*instance, {0, 6, 4}, *instance, {2, 6, 4},
+		mover, nullptr, GENERATE_PATH_DEFAULT, equalCoordinatesRoute));
+	EXPECT(equalCoordinatesRoute.transitionCount == 2);
+	EXPECT(!equalCoordinatesRoute.steps.empty());
+
+	CrossFloorPathRoute rejectedRoute;
+	EXPECT(!generateCrossFloorPath(
+		*instance, {0, 6, 4}, *instance, {3, 6, 4},
+		mover, nullptr, GENERATE_PATH_DEFAULT, rejectedRoute));
+	EXPECT(!generateCrossFloorPath(
+		*instance, {0, 6, 4}, *sibling, {2, 6, 4},
+		mover, nullptr, GENERATE_PATH_DEFAULT, rejectedRoute));
+
+	loading = previousLoading;
+	resetPersistentWorldSession();
+	clearGlobalMapHarness();
+	return true;
+}
+
+bool testZ4CFollowerVerticalNavigation()
+{
+	multiplayer = SINGLE;
+	resetPersistentWorldSession();
+	EXPECT(resetGlobalMapHarness(7, 7, 1));
+	const bool previousLoading = loading;
+	const bool previousHeadless = headless;
+	const bool previousDisconnected = client_disconnected[0];
+	Player* const previousPlayer = players[0];
+	Stat* const previousPlayerStats = stats[0];
+	loading = false;
+	client_disconnected[0] = false;
+
+	// The same two authored stair segments used by the Z4B characterization.
+	// Floor 3 is a valid domain but intentionally has no transition edge.
+	for (int x = 3; x <= 4; ++x)
+	{
+		for (int y = 1; y <= 2; ++y)
+		{
+			map.tiles[tileIndex(x, y, 1, map.height)] = 1;
+		}
+	}
+	for (int x = 5; x <= 6; ++x)
+	{
+		for (int y = 2; y <= 4; ++y)
+		{
+			map.tiles[tileIndex(x, y, 2, map.height)] = 1;
+		}
+	}
+	EXPECT(map.ensurePlayableFloorGeometry(1, false));
+	EXPECT(map.ensurePlayableFloorGeometry(2, false));
+	EXPECT(map.ensurePlayableFloorGeometry(3, false));
+
+	Entity* firstStair = newEntity(0, 1, map.entities, nullptr);
+	Entity* secondStair = newEntity(0, 1, map.entities, nullptr);
+	EXPECT(firstStair && secondStair);
+	firstStair->persistentID = 8401;
+	firstStair->x = 40.0;
+	firstStair->y = 24.0;
+	firstStair->playableFloor = 0;
+	firstStair->authoredMapLayer = 1;
+	firstStair->verticalLayerTransitionDelta = 1;
+	firstStair->verticalLayerTransitionRotation = 0;
+	firstStair->flags[PASSABLE] = true;
+	secondStair->persistentID = 8402;
+	secondStair->x = 72.0;
+	secondStair->y = 40.0;
+	secondStair->playableFloor = 1;
+	secondStair->authoredMapLayer = 2;
+	secondStair->verticalLayerTransitionDelta = 1;
+	secondStair->verticalLayerTransitionRotation = 0;
+	secondStair->flags[PASSABLE] = true;
+
+	std::snprintf(map.filename, sizeof(map.filename), "%s", "z4c_follow.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_a"));
+	MapInstanceSummary siblingSummary;
+	EXPECT(siblingSummary.identity.set("z4c_follow.lmp", "instance_b"));
+	siblingSummary.playableFloors = {0, 1, 2, 3};
+	EXPECT(worldState.registerUnloadedInstance(siblingSummary));
+	EXPECT(worldState.rebuildVerticalNavigation(map));
+	generatePathMaps();
+	worldState.refreshActiveContext();
+	MapInstance* instance = worldState.activeInstance();
+	MapInstance* sibling = worldState.find("z4c_follow.lmp#instance_b");
+	EXPECT(instance && sibling);
+	EXPECT(instance->verticalNavigation.edgeCount() == 2);
+
+	Stat* ownerStats = nullptr;
+	{
+		Player ownerPlayer(0, false);
+		ownerStats = new Stat(0);
+		EXPECT(ownerStats != nullptr);
+		stats[0] = ownerStats;
+		players[0] = &ownerPlayer;
+		Entity* owner = newEntity(0, 1, map.entities, nullptr);
+		EXPECT(owner != nullptr);
+		owner->behavior = &actPlayer;
+		owner->skill[2] = 0;
+		owner->x = 104.0;
+		owner->y = 56.0;
+		owner->z = 7.5;
+		owner->playableFloor = 2;
+		owner->authoredMapLayer = 2;
+		ownerPlayer.entity = owner;
+		EXPECT(worldState.placePlayer(0, map));
+		EXPECT(TileEntityList.addEntity(*owner) != nullptr);
+
+		Entity* follower = newEntity(10, 1, map.entities, nullptr);
+		EXPECT(follower != nullptr);
+		setSpriteAttributes(follower, nullptr, nullptr);
+		follower->behavior = &actMonster;
+		follower->skill[3] = 2;
+		follower->persistentID = 8501;
+		follower->monsterAllyIndex = 0;
+		follower->x = 104.0;
+		follower->y = 72.0;
+		follower->z = -1.5;
+		follower->new_x = follower->x;
+		follower->new_y = follower->y;
+		follower->playableFloor = 0;
+		follower->authoredMapLayer = 0;
+		follower->sizex = 4;
+		follower->sizey = 4;
+		Stat* followerStats = follower->getStats();
+		EXPECT(followerStats != nullptr);
+		followerStats->type = MINIMIMIC;
+		followerStats->leader_uid = owner->getUID();
+		EXPECT(TileEntityList.addEntity(*follower) != nullptr);
+
+		Entity* bodypart = newEntityWithSpatialContext(
+			0, 1, map.entities, nullptr, follower);
+		Entity* nameTag = newEntityWithSpatialContext(
+			-1, 1, map.entities, nullptr, follower);
+		EXPECT(bodypart && nameTag);
+		bodypart->parent = follower->getUID();
+		bodypart->x = follower->x + 2.0;
+		bodypart->y = follower->y;
+		bodypart->new_x = bodypart->x;
+		bodypart->new_y = bodypart->y;
+		follower->bodyparts.push_back(bodypart);
+		nameTag->parent = follower->getUID();
+		nameTag->flags[NOUPDATE] = true;
+		nameTag->behavior = &actSpriteNametag;
+		nameTag->x = follower->x;
+		nameTag->y = follower->y;
+		nameTag->new_x = nameTag->x;
+		nameTag->new_y = nameTag->y;
+		EXPECT(TileEntityList.addEntity(*bodypart) != nullptr);
+		EXPECT(TileEntityList.addEntity(*nameTag) != nullptr);
+
+		Uint32* rosterUID = static_cast<Uint32*>(std::malloc(sizeof(Uint32)));
+		EXPECT(rosterUID != nullptr);
+		*rosterUID = follower->getUID();
+		node_t* rosterNode = list_AddNodeLast(&ownerStats->FOLLOWERS);
+		EXPECT(rosterNode != nullptr);
+		rosterNode->element = rosterUID;
+		rosterNode->deconstructor = &defaultDeconstructor;
+		rosterNode->size = sizeof(Uint32);
+		const Uint32 followerUID = follower->getUID();
+		const Sint32 followerPersistentID = follower->persistentID;
+		const Uint32 leaderUID = followerStats->leader_uid;
+
+		// A floor-local obstruction must make the transition route unavailable;
+		// Z4C does not bypass ordinary collision/path rules to reach a stair.
+		for (int y = 0; y < static_cast<int>(map.height); ++y)
+		{
+			map.tiles[tileIndex(4, y, 1, map.height)] = 1;
+		}
+		generatePathMaps();
+		const auto blockedStatus =
+			updateAutomatiaFollowerVerticalNavigation(*follower, true);
+		if (blockedStatus
+			!= AutomatiaFollowerVerticalNavigationStatus::RouteUnavailable)
+		{
+			std::cerr << "Z4C blocked status: "
+				<< static_cast<int>(blockedStatus) << '\n';
+		}
+		EXPECT(blockedStatus
+			== AutomatiaFollowerVerticalNavigationStatus::RouteUnavailable);
+		EXPECT(follower->playableFloor == 0);
+		for (int y = 0; y < static_cast<int>(map.height); ++y)
+		{
+			if (y < 1 || y > 2)
+			{
+				map.tiles[tileIndex(4, y, 1, map.height)] = 0;
+			}
+		}
+		generatePathMaps();
+
+		// A cross-floor owner assigns an ordinary floor-local HUNT path; no
+		// actor is teleported while the Mini Mimic is away from the stair.
+		const AutomatiaFollowerVerticalNavigationStatus initialStatus =
+			updateAutomatiaFollowerVerticalNavigation(*follower, true);
+		if (initialStatus
+			!= AutomatiaFollowerVerticalNavigationStatus::PathAssigned)
+		{
+			std::cerr << "Z4C initial status: "
+				<< static_cast<int>(initialStatus) << '\n';
+		}
+		EXPECT(initialStatus
+			== AutomatiaFollowerVerticalNavigationStatus::PathAssigned);
+		EXPECT(follower->playableFloor == 0);
+		EXPECT(follower->monsterState == MONSTER_STATE_HUNT);
+		EXPECT(follower->children.first != nullptr);
+		EXPECT(follower->children.first->element != nullptr);
+		EXPECT(static_cast<list_t*>(follower->children.first->element)->first
+			!= nullptr);
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, false)
+			== AutomatiaFollowerVerticalNavigationStatus::PathInProgress);
+
+		auto moveActorTreeTo = [&](const int tileX, const int tileY)
+		{
+			const real_t destinationX = tileX * 16.0 + 8.0;
+			const real_t destinationY = tileY * 16.0 + 8.0;
+			const real_t deltaX = destinationX - follower->x;
+			const real_t deltaY = destinationY - follower->y;
+			follower->x = destinationX;
+			follower->y = destinationY;
+			follower->new_x = destinationX;
+			follower->new_y = destinationY;
+			for (Entity* attachment : {bodypart, nameTag})
+			{
+				attachment->x += deltaX;
+				attachment->y += deltaY;
+				attachment->new_x += deltaX;
+				attachment->new_y += deltaY;
+				TileEntityList.updateEntity(*attachment);
+			}
+			TileEntityList.updateEntity(*follower);
+		};
+
+		const auto edgeForFloor = [&](const PlayableFloorId floor)
+			-> const VerticalNavigationEdge*
+		{
+			for (const VerticalNavigationEdge& edge :
+				instance->verticalNavigation.edges())
+			{
+				if (edge.source.playableFloor == floor)
+				{
+					return &edge;
+				}
+			}
+			return nullptr;
+		};
+
+		const VerticalNavigationEdge* firstEdge = edgeForFloor(0);
+		const VerticalNavigationEdge* secondEdge = edgeForFloor(1);
+		EXPECT(firstEdge && secondEdge);
+		moveActorTreeTo(firstEdge->source.tileX, firstEdge->source.tileY);
+		const std::uint64_t firstRevision = follower->spatialRevision;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::Transitioned);
+		EXPECT(follower->playableFloor == 1);
+		EXPECT(follower->authoredMapLayer == 1);
+		EXPECT(follower->z == -1.5);
+		EXPECT(follower->spatialRevision > firstRevision);
+		EXPECT(bodypart->playableFloor == 1);
+		EXPECT(nameTag->playableFloor == 1);
+		EXPECT(bodypart->authoredMapLayer == 1);
+		EXPECT(nameTag->authoredMapLayer == 1);
+		EXPECT(follower->getUID() == followerUID);
+		EXPECT(follower->persistentID == followerPersistentID);
+		EXPECT(follower->monsterAllyIndex == 0);
+		EXPECT(followerStats->leader_uid == leaderUID);
+		EXPECT(list_Size(&ownerStats->FOLLOWERS) == 1);
+		EXPECT(*static_cast<Uint32*>(ownerStats->FOLLOWERS.first->element)
+			== followerUID);
+
+		// A second query reconstructs the route from the new floor; no route
+		// cursor or S.A.M./Mini-Mimic-specific state is persisted.
+		moveActorTreeTo(secondEdge->source.tileX, secondEdge->source.tileY);
+		headless = true;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::Transitioned);
+		headless = previousHeadless;
+		EXPECT(follower->playableFloor == 2);
+		EXPECT(follower->authoredMapLayer == 2);
+		EXPECT(bodypart->playableFloor == 2);
+		EXPECT(nameTag->playableFloor == 2);
+		EXPECT(instance->dirty);
+
+		// Once co-located, Z4C exits without touching ordinary one-floor AI.
+		const Sint32 sameFloorState = follower->monsterState;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::SameFloor);
+		EXPECT(!follower->followerVerticalNavigationActive);
+		EXPECT(follower->monsterState == sameFloorState);
+
+		// Same X/Y on a disconnected floor remains unreachable, and a player in
+		// a sibling MapInstance is never treated as a vertical destination.
+		EXPECT(follower->setPlayableFloor(0));
+		follower->authoredMapLayer = 0;
+		syncAutomatiaNonPlayerEntitySpatialAttachments(*follower);
+		moveActorTreeTo(6, 3);
+		EXPECT(owner->setPlayableFloor(3));
+		owner->authoredMapLayer = 3;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::RouteUnavailable);
+		EXPECT(follower->playableFloor == 0);
+		ownerPlayer.worldInstance = sibling->identity;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::OwnerUnavailable);
+		EXPECT(follower->playableFloor == 0);
+		ownerPlayer.worldInstance = instance->identity;
+
+		// Disconnect/reconnect pauses and resumes the same actor/roster. This
+		// characterizes representation only; no duplicate follower is created.
+		EXPECT(owner->setPlayableFloor(1));
+		owner->authoredMapLayer = 1;
+		owner->x = 72.0;
+		owner->y = 40.0;
+		client_disconnected[0] = true;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::OwnerUnavailable);
+		EXPECT(list_Size(&ownerStats->FOLLOWERS) == 1);
+		client_disconnected[0] = false;
+		EXPECT(updateAutomatiaFollowerVerticalNavigation(*follower, true)
+			== AutomatiaFollowerVerticalNavigationStatus::PathAssigned);
+		EXPECT(follower->getUID() == followerUID);
+		EXPECT(follower->persistentID == followerPersistentID);
+		EXPECT(followerStats->type == MINIMIMIC);
+		EXPECT(followerStats->leader_uid == leaderUID);
+		EXPECT(list_Size(&ownerStats->FOLLOWERS) == 1);
+
+		list_FreeAll(&ownerStats->FOLLOWERS);
+		ownerPlayer.entity = nullptr;
+	}
+	players[0] = previousPlayer;
+	stats[0] = previousPlayerStats;
+	delete ownerStats;
+	client_disconnected[0] = previousDisconnected;
+	headless = previousHeadless;
+	loading = previousLoading;
+	resetPersistentWorldSession();
+	clearGlobalMapHarness();
+	return true;
+}
+
+bool testZ4DHostileVerticalNavigation()
+{
+	const int previousMultiplayer = multiplayer;
+	const bool previousLoading = loading;
+	const bool previousHeadless = headless;
+	const bool previousIntro = intro;
+	const bool previousEverybodyFriendly = everybodyfriendly;
+	Player* const previousPlayer = players[0];
+	Stat* const previousPlayerStats = stats[0];
+	std::array<bool, MAXPLAYERS> previousDisconnected{};
+	for (int player = 0; player < MAXPLAYERS; ++player)
+	{
+		previousDisconnected[player] = client_disconnected[player];
+		client_disconnected[player] = true;
+	}
+	client_disconnected[0] = false;
+	multiplayer = SINGLE;
+	loading = false;
+	headless = false;
+	intro = false;
+	everybodyfriendly = false;
+	resetPersistentWorldSession();
+	EXPECT(resetGlobalMapHarness(7, 7, 1));
+	loading = false;
+
+	// Two real authored stair segments connect floors 0 -> 1 -> 2. Floor 3
+	// remains a valid but disconnected navigation domain.
+	for (int x = 3; x <= 4; ++x)
+	{
+		for (int y = 1; y <= 2; ++y)
+		{
+			map.tiles[tileIndex(x, y, 1, map.height)] = 1;
+		}
+	}
+	for (int x = 5; x <= 6; ++x)
+	{
+		for (int y = 2; y <= 4; ++y)
+		{
+			map.tiles[tileIndex(x, y, 2, map.height)] = 1;
+		}
+	}
+	EXPECT(map.ensurePlayableFloorGeometry(1, false));
+	EXPECT(map.ensurePlayableFloorGeometry(2, false));
+	EXPECT(map.ensurePlayableFloorGeometry(3, false));
+
+	Entity* firstStair = newEntity(0, 1, map.entities, nullptr);
+	Entity* secondStair = newEntity(0, 1, map.entities, nullptr);
+	EXPECT(firstStair && secondStair);
+	firstStair->persistentID = 8601;
+	firstStair->x = 40.0;
+	firstStair->y = 24.0;
+	firstStair->playableFloor = 0;
+	firstStair->authoredMapLayer = 1;
+	firstStair->verticalLayerTransitionDelta = 1;
+	firstStair->verticalLayerTransitionRotation = 0;
+	firstStair->flags[PASSABLE] = true;
+	secondStair->persistentID = 8602;
+	secondStair->x = 72.0;
+	secondStair->y = 40.0;
+	secondStair->playableFloor = 1;
+	secondStair->authoredMapLayer = 2;
+	secondStair->verticalLayerTransitionDelta = 1;
+	secondStair->verticalLayerTransitionRotation = 0;
+	secondStair->flags[PASSABLE] = true;
+
+	std::snprintf(map.filename, sizeof(map.filename), "%s", "z4d_hostile.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "instance_a"));
+	MapInstanceSummary siblingSummary;
+	EXPECT(siblingSummary.identity.set("z4d_hostile.lmp", "instance_b"));
+	siblingSummary.playableFloors = {0, 1, 2, 3};
+	EXPECT(worldState.registerUnloadedInstance(siblingSummary));
+	EXPECT(worldState.rebuildVerticalNavigation(map));
+	generatePathMaps();
+	worldState.refreshActiveContext();
+	MapInstance* instance = worldState.activeInstance();
+	MapInstance* sibling = worldState.find("z4d_hostile.lmp#instance_b");
+	EXPECT(instance && sibling);
+	EXPECT(instance->verticalNavigation.edgeCount() == 2);
+
+	Stat* playerStats = nullptr;
+	{
+		Player player(0, false);
+		playerStats = new Stat(0);
+		EXPECT(playerStats != nullptr);
+		playerStats->type = HUMAN;
+		playerStats->HP = playerStats->MAXHP = 100;
+		stats[0] = playerStats;
+		players[0] = &player;
+		Entity* target = newEntity(0, 1, map.entities, nullptr);
+		EXPECT(target != nullptr);
+		target->behavior = &actPlayer;
+		target->skill[2] = 0;
+		target->x = 104.0;
+		target->y = 72.0;
+		target->z = 2.5;
+		target->playableFloor = 0;
+		target->authoredMapLayer = 0;
+		target->sizex = 4;
+		target->sizey = 4;
+		player.entity = target;
+		EXPECT(worldState.placePlayer(0, map));
+		EXPECT(TileEntityList.addEntity(*target) != nullptr);
+
+		auto moveTargetTo = [&](const PlayableFloorId floor,
+			const int tileX, const int tileY)
+		{
+			target->setPlayableFloor(floor);
+			target->authoredMapLayer = floor;
+			target->x = tileX * 16.0 + 8.0;
+			target->y = tileY * 16.0 + 8.0;
+			target->new_x = target->x;
+			target->new_y = target->y;
+			TileEntityList.updateEntity(*target);
+		};
+
+		Sint32 nextPersistentID = 8700;
+		auto makeMonster = [&](const Monster type,
+			const Stat::MonsterForceAllegiance disposition,
+			const int tileX, const int tileY) -> Entity*
+		{
+			// Exercise the real authored Mini Mimic palette marker in every mimic
+			// role. setSpriteAttributes() resolves it to the existing MINIMIMIC
+			// runtime actor; the fixture then applies the editor-authored
+			// disposition just as the monster property loader does.
+			const Sint32 sprite = type == MINIMIMIC
+				? EDITOR_SPRITE_MINIMIMIC
+				: 10;
+			Entity* monster = newEntity(sprite, 1, map.entities, nullptr);
+			if (!monster)
+			{
+				return nullptr;
+			}
+			setSpriteAttributes(monster, nullptr, nullptr);
+			monster->behavior = &actMonster;
+			monster->skill[3] = 2;
+			monster->persistentID = ++nextPersistentID;
+			monster->monsterAllyIndex = -1;
+			monster->monsterState = MONSTER_STATE_WAIT;
+			monster->x = tileX * 16.0 + 8.0;
+			monster->y = tileY * 16.0 + 8.0;
+			monster->new_x = monster->x;
+			monster->new_y = monster->y;
+			monster->z = -1.25;
+			monster->playableFloor = 0;
+			monster->authoredMapLayer = 0;
+			monster->sizex = 4;
+			monster->sizey = 4;
+			Stat* monsterStats = monster->getStats();
+			if (!monsterStats)
+			{
+				return nullptr;
+			}
+			monsterStats->type = type;
+			monsterStats->HP = monsterStats->MAXHP = 40;
+			monsterStats->monsterForceAllegiance = disposition;
+			if (!TileEntityList.addEntity(*monster))
+			{
+				return nullptr;
+			}
+			return monster;
+		};
+
+		const auto edgeForFloor = [&](const PlayableFloorId floor)
+			-> const VerticalNavigationEdge*
+		{
+			for (const VerticalNavigationEdge& edge :
+				instance->verticalNavigation.edges())
+			{
+				if (edge.source.playableFloor == floor)
+				{
+					return &edge;
+				}
+			}
+			return nullptr;
+		};
+		const VerticalNavigationEdge* firstEdge = edgeForFloor(0);
+		const VerticalNavigationEdge* secondEdge = edgeForFloor(1);
+		EXPECT(firstEdge && secondEdge);
+
+		// Hostile Mini Mimics retain ordinary same-floor acquisition. Once the
+		// already-known player changes floor, raw acquisition cannot manufacture
+		// an ATTACK state from equal X/Y coordinates.
+		Entity* hostileMimic = makeMonster(
+			MINIMIMIC, Stat::MONSTER_FORCE_PLAYER_ENEMY, 6, 4);
+		EXPECT(hostileMimic != nullptr);
+		Stat* hostileStats = hostileMimic->getStats();
+		EXPECT(hostileStats != nullptr);
+		EXPECT(hostileStats->type == MINIMIMIC);
+		EXPECT(hostileStats->monsterForceAllegiance
+			== Stat::MONSTER_FORCE_PLAYER_ENEMY);
+		hostileMimic->monsterAcquireAttackTarget(*target, MONSTER_STATE_PATH);
+		EXPECT(hostileMimic->monsterTarget == target->getUID());
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::SameFloor);
+		moveTargetTo(2, 6, 4);
+		const Sint32 stateBeforeRejectedAcquire = hostileMimic->monsterState;
+		hostileMimic->monsterAcquireAttackTarget(*target, MONSTER_STATE_ATTACK);
+		EXPECT(hostileMimic->monsterState == stateBeforeRejectedAcquire);
+		EXPECT(std::isinf(entityDist(hostileMimic, target)));
+		EXPECT(!entityInsideEntity(hostileMimic, target));
+
+		Entity* rawCoordinateGuard = makeMonster(
+			GOBLIN, Stat::MONSTER_FORCE_PLAYER_ENEMY, 6, 4);
+		EXPECT(rawCoordinateGuard != nullptr);
+		rawCoordinateGuard->monsterAcquireAttackTarget(
+			*target, MONSTER_STATE_ATTACK);
+		EXPECT(rawCoordinateGuard->monsterTarget == 0);
+		EXPECT(rawCoordinateGuard->monsterState == MONSTER_STATE_WAIT);
+		rawCoordinateGuard->x = 8.0;
+		rawCoordinateGuard->y = 104.0;
+		rawCoordinateGuard->new_x = rawCoordinateGuard->x;
+		rawCoordinateGuard->new_y = rawCoordinateGuard->y;
+		rawCoordinateGuard->setPlayableFloor(3);
+		rawCoordinateGuard->authoredMapLayer = 3;
+		TileEntityList.updateEntity(*rawCoordinateGuard);
+		// Keep the equal-X/Y isolation assertions above, then use the same valid
+		// upper landing exercised by the Z4B/C route fixtures.
+		moveTargetTo(2, 6, 3);
+
+		const int targetHPBeforeAttack = playerStats->HP;
+		const Sint32 hitTimeBeforeAttack = hostileMimic->monsterHitTime;
+		hostileMimic->handleMonsterAttack(hostileStats, target, 0.0);
+		EXPECT(playerStats->HP == targetHPBeforeAttack);
+		EXPECT(hostileMimic->monsterHitTime == hitTimeBeforeAttack);
+
+		// Clients never assign or consume the cross-floor route. The authoritative
+		// single-player/server code path then parks the combat target and assigns
+		// only the first ordinary HUNT leg. Live SERVER networking is covered by
+		// source contracts and remains a manual acceptance item for this harness.
+		multiplayer = CLIENT;
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::NotHostile);
+		EXPECT(hostileMimic->playableFloor == 0);
+		EXPECT(hostileMimic->monsterTarget == target->getUID());
+		multiplayer = SINGLE;
+		const AutomatiaHostileVerticalNavigationStatus initialHostileStatus =
+			updateAutomatiaHostileVerticalNavigation(*hostileMimic, true);
+		if (initialHostileStatus
+			!= AutomatiaHostileVerticalNavigationStatus::PathAssigned)
+		{
+			std::cerr << "Z4D initial hostile status: "
+				<< static_cast<int>(initialHostileStatus) << '\n';
+		}
+		EXPECT(initialHostileStatus
+			== AutomatiaHostileVerticalNavigationStatus::PathAssigned);
+		EXPECT(hostileMimic->playableFloor == 0);
+		EXPECT(hostileMimic->monsterTarget == 0);
+		EXPECT(hostileMimic->hostileVerticalNavigationActive);
+		EXPECT(hostileMimic->hostileVerticalNavigationTarget
+			== target->getUID());
+		EXPECT(hostileMimic->monsterState == MONSTER_STATE_HUNT);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, false)
+			== AutomatiaHostileVerticalNavigationStatus::PathInProgress);
+
+		auto moveMonsterToEdge = [&](Entity& monster,
+			const VerticalNavigationEdge& edge)
+		{
+			monster.x = edge.source.tileX * 16.0 + 8.0;
+			monster.y = edge.source.tileY * 16.0 + 8.0;
+			monster.new_x = monster.x;
+			monster.new_y = monster.y;
+			TileEntityList.updateEntity(monster);
+		};
+		moveMonsterToEdge(*hostileMimic, *firstEdge);
+		headless = true;
+		const std::uint64_t firstRevision = hostileMimic->spatialRevision;
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::Transitioned);
+		EXPECT(hostileMimic->playableFloor == 1);
+		EXPECT(hostileMimic->authoredMapLayer == 1);
+		EXPECT(hostileMimic->z == -1.25);
+		EXPECT(hostileMimic->spatialRevision > firstRevision);
+		moveMonsterToEdge(*hostileMimic, *secondEdge);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::Transitioned);
+		headless = false;
+		EXPECT(hostileMimic->playableFloor == 2);
+		EXPECT(hostileMimic->authoredMapLayer == 2);
+		EXPECT(hostileMimic->hostileVerticalNavigationActive);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*hostileMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::ResumedSameFloor);
+		EXPECT(!hostileMimic->hostileVerticalNavigationActive);
+		EXPECT(hostileMimic->monsterTarget == target->getUID());
+		multiplayer = SINGLE;
+
+		// A valid gameplay floor with no graph edge is unreachable even when the
+		// target shares horizontal coordinates.
+		moveTargetTo(0, 6, 5);
+		Entity* disconnectedHostile = makeMonster(
+			GOBLIN, Stat::MONSTER_FORCE_PLAYER_ENEMY, 6, 5);
+		EXPECT(disconnectedHostile != nullptr);
+		disconnectedHostile->monsterAcquireAttackTarget(
+			*target, MONSTER_STATE_PATH);
+		EXPECT(disconnectedHostile->monsterTarget == target->getUID());
+		moveTargetTo(3, 6, 5);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(
+			*disconnectedHostile, true)
+			== AutomatiaHostileVerticalNavigationStatus::RouteUnavailable);
+		EXPECT(disconnectedHostile->playableFloor == 0);
+
+		// A stale target owned by another MapInstance is rejected both by the
+		// coordinator and by fresh same-floor target acquisition.
+		moveTargetTo(0, 5, 5);
+		Entity* differentInstanceHostile = makeMonster(
+			GOBLIN, Stat::MONSTER_FORCE_PLAYER_ENEMY, 5, 5);
+		EXPECT(differentInstanceHostile != nullptr);
+		differentInstanceHostile->monsterAcquireAttackTarget(
+			*target, MONSTER_STATE_PATH);
+		EXPECT(differentInstanceHostile->monsterTarget == target->getUID());
+		player.worldInstance = sibling->identity;
+		EXPECT(updateAutomatiaHostileVerticalNavigation(
+			*differentInstanceHostile, true)
+			== AutomatiaHostileVerticalNavigationStatus::TargetUnavailable);
+		EXPECT(differentInstanceHostile->monsterTarget == 0);
+		differentInstanceHostile->monsterAcquireAttackTarget(
+			*target, MONSTER_STATE_PATH);
+		EXPECT(differentInstanceHostile->monsterTarget == 0);
+		player.worldInstance = instance->identity;
+
+		// Stationary dialogue NPCs and passive authored Mini Mimics never consume
+		// hostile vertical routes, even if a stale target UID is injected.
+		moveTargetTo(0, 4, 1);
+		Entity* dialogueNpc = makeMonster(
+			HUMAN, Stat::MONSTER_FORCE_PLAYER_ENEMY, 6, 6);
+		EXPECT(dialogueNpc != nullptr);
+		Stat* dialogueStats = dialogueNpc->getStats();
+		EXPECT(dialogueStats != nullptr);
+		dialogueStats->MISC_FLAGS[STAT_FLAG_NPC] = 1;
+		std::snprintf(dialogueStats->customDialogueID,
+			sizeof(dialogueStats->customDialogueID), "%s", "z4d_dialogue");
+		dialogueNpc->monsterTarget = target->getUID();
+		dialogueNpc->monsterState = MONSTER_STATE_PATH;
+		moveTargetTo(1, 4, 1);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*dialogueNpc, true)
+			== AutomatiaHostileVerticalNavigationStatus::TargetUnavailable);
+		EXPECT(dialogueNpc->playableFloor == 0);
+
+		moveTargetTo(0, 5, 6);
+		Entity* passiveMimic = makeMonster(
+			MINIMIMIC, Stat::MONSTER_FORCE_PLAYER_NEUTRAL, 5, 6);
+		EXPECT(passiveMimic != nullptr);
+		passiveMimic->monsterTarget = target->getUID();
+		passiveMimic->monsterState = MONSTER_STATE_PATH;
+		moveTargetTo(1, 4, 1);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*passiveMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::TargetUnavailable);
+		EXPECT(!passiveMimic->hostileVerticalNavigationActive);
+
+		// Recruited Mini Mimics remain owned by Z4C, never by hostile routing.
+		moveTargetTo(0, 4, 6);
+		Entity* recruitedMimic = makeMonster(
+			MINIMIMIC, Stat::MONSTER_FORCE_PLAYER_RECRUITABLE, 4, 6);
+		EXPECT(recruitedMimic != nullptr);
+		recruitedMimic->monsterAllyIndex = 0;
+		moveTargetTo(1, 4, 1);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*recruitedMimic, true)
+			== AutomatiaHostileVerticalNavigationStatus::NotHostile);
+		EXPECT(recruitedMimic->playableFloor == 0);
+
+		// A S.A.M.-compatible monster is still an ordinary actMonster consumer;
+		// custom metadata survives because no parallel S.A.M. path state exists.
+		moveTargetTo(0, 1, 5);
+		Entity* samCompatible = makeMonster(
+			GOBLIN, Stat::MONSTER_FORCE_PLAYER_ENEMY, 1, 5);
+		EXPECT(samCompatible != nullptr);
+		Stat* samStats = samCompatible->getStats();
+		EXPECT(samStats != nullptr);
+		samStats->setAttribute("sam_fixture", "z4d_compatible");
+		samCompatible->monsterAcquireAttackTarget(*target, MONSTER_STATE_PATH);
+		moveTargetTo(1, 4, 1);
+		EXPECT(updateAutomatiaHostileVerticalNavigation(*samCompatible, true)
+			== AutomatiaHostileVerticalNavigationStatus::PathAssigned);
+		EXPECT(samCompatible->hostileVerticalNavigationTarget
+			== target->getUID());
+		EXPECT(samStats->getAttribute("sam_fixture") == "z4d_compatible");
+
+		player.entity = nullptr;
+	}
+	players[0] = previousPlayer;
+	stats[0] = previousPlayerStats;
+	delete playerStats;
+	for (int player = 0; player < MAXPLAYERS; ++player)
+	{
+		client_disconnected[player] = previousDisconnected[player];
+	}
+	multiplayer = previousMultiplayer;
+	loading = previousLoading;
+	headless = previousHeadless;
+	intro = previousIntro;
+	everybodyfriendly = previousEverybodyFriendly;
+	resetPersistentWorldSession();
+	clearGlobalMapHarness();
+	return true;
+}
+
 bool testAdjacentVerticalCircuitNeighbors()
 {
     multiplayer = SINGLE;
@@ -2321,8 +3360,12 @@ int runPlayableZRuntimeCharacterization()
         && testPlayableFloorGeometryIsolation()
         && testLocalElevationAndRuntimeSpawns()
         && testZ34CStructuralLayersAndFalling()
+		&& testZ4AVerticalNavigationAndItemFalling()
 		&& testZ2CRuntimeFloorIsolation()
 		&& testUpperFloorMonsterPathing()
+		&& testZ4BCrossFloorPathQuery()
+		&& testZ4CFollowerVerticalNavigation()
+		&& testZ4DHostileVerticalNavigation()
 		&& testAdjacentVerticalCircuitNeighbors()
         && testPersistentMinimapAndPlacement()
 #ifdef SAM_FRAMEWORK_ENABLED
@@ -2338,10 +3381,13 @@ int runPlayableZRuntimeCharacterization()
     if (passed)
     {
         std::cout
-            << "Stage 4D/Z3.4C stacked-sprite/fall runtime passed: legacy Entity::z remains "
+            << "Stage 4D/Z4D stacked-sprite/fall runtime passed: legacy Entity::z remains "
             << "Z0-safe, ELYR authored-layer round-trip, structural runtime rendering/light "
             << "context, floor-aware multipart spawns, lower-floor landing search, persistent "
-            << "Hermit ownership contracts, and same-map stacked stairs.\n";
+            << "Hermit ownership contracts, dropped-item floor transfer, MapInstance-local "
+            << "Z4A vertical transition graphs, query-only Z4B cross-floor routes, and "
+			<< "Z4C follower plus Z4D hostile authoritative stair traversal and "
+			<< "cross-floor combat isolation.\n";
     }
     return passed ? 0 : 1;
 }

@@ -10,15 +10,29 @@ existing Automatia, S.A.M., editor, audio, persistence, late-join, and
 headless work unless a specific task requires a narrower change.
 
 Current status:
-- The primary Linux target is the configured Steamworks-enabled 15-player
-  `build`; build it with `cmake --build build -j6`.
-- The game, editor, all 11 registered tests, and the Stage 4D/Z3 executable
+- The current Linux validation target is the configured Steamworks-enabled
+  15-player `build-super-posix`; build it with
+  `cmake --build build-super-posix -j6`.
+- The game, editor, all 13 registered tests, and the Stage 4D/Z4D executable
   characterization pass in that build. FMOD remains enabled and OpenAL remains
   outside the supported current profile.
 - The latest stabilization covers Playable-Z, divergent MapInstances,
   persistence, headless/late join, the persistent party backend, S.A.M. 2.1,
   Text Source Tester/Library, custom ambience, authored Mini Mimics, named Room
   Groups, room-generation hooks, dialogue/quests, and cross-feature tests.
+- Z4A is complete: each MapInstance owns a vertical transition graph derived
+  from existing ZLDR/ZTRN metadata, and dropped authored-stack items continue
+  onto lower playable floors. No AI navigation consumer was added.
+- Z4B is complete: a generic query-only route planner composes existing
+  floor-local A* paths with ordered Z4A transitions. It does not assign AI
+  paths, initiate pursuit, or add a S.A.M.-specific pathfinder.
+- Z4C is complete: normal player-owned monsters use Z4B to walk to real
+  transitions, cross floors through a generic server-authoritative non-player
+  transaction, and resume ordinary following.
+- Z4D is complete: normal hostiles can continue an existing legitimate player
+  target across floors through valid same-MapInstance stairs. Acquisition and
+  attacks remain floor-local; passive/dialogue/stationary NPCs and followers do
+  not inherit hostile stair behavior.
 - Contained two-client processes passed divergent MapInstance party/save/restart
   and new-player late-join probes. The exact headless plus two-real-graphical-
   client acceptance remains open and is not implied by those probes.
@@ -26,7 +40,7 @@ Current status:
   automated tests before claiming completion.
 
 Build expectations:
-- Use only `cmake --build build -j6` on the current development
+- Use only `cmake --build build-super-posix -j6` on the current development
   host; unrestricted `$(nproc)` builds have caused system instability.
 - Preserve the Steamworks-enabled 15-player/FMOD profile. Do not create a
   separate four-player or no-Steam build for ordinary validation.
@@ -37,7 +51,7 @@ Build expectations:
 - When significant progress is made, update this document with the new status,
   validated results, and remaining blockers so the master prompt stays current.
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 CURRENT CHECKPOINT
 ==================
@@ -46,9 +60,12 @@ The cross-feature stabilization pass is complete at the automated and contained-
 process level. Mini Mimic authoring, Room Groups/S.A.M. room interoperability,
 S.A.M. stable/runtime item remapping, party persistence, Text Source seams,
 Playable-Z, divergent instances, save/restart, and late join have focused test
-coverage. The current gate is the exact real headless plus two-client acceptance
-documented in the cross-feature audit. Z4 has not begun and is not fully accepted
-until that run, editor GUI checks, and relevant audio/custom-mod checks succeed.
+coverage. The owner explicitly authorized Z4 with the documented real-client
+risk still open. Z4A and query-only Z4B are complete and deliberately contain
+no behavior by themselves. Z4C is the scoped follower consumer and Z4D is the
+scoped hostile consumer. Z4D continues only an already valid player target; it
+does not add cross-floor perception. Editor GUI, audio/custom-mod, and exact
+real headless plus two-client acceptance remain manual work.
 
 WORK COMPLETED
 ==============
@@ -514,13 +531,11 @@ RUNTIME TESTS STILL REQUIRING THE USER
 EXACT NEXT TASK
 ===============
 
-Run the exact "REAL MULTIPLAYER ACCEPTANCE" procedure in
-"Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt" with one
-headless server and two real graphical clients. Preserve the server/client logs,
-save files, S.A.M. fingerprints, persistent IDs, Party ID, Mini Mimic owner,
-MapInstances, playable floors, authored layers, and local Z before and after the
-dedicated-server restart. Fix only demonstrated integration bugs. Do not begin
-Z4 until the remaining acceptance decision is explicit.
+Z4D hostile cross-floor navigation is complete. Stop before all Z5/Z6 work and
+await explicit scope. Do not turn Z4D's retained-target pursuit into omniscient
+cross-floor perception or a parallel pathfinder. The exact "REAL MULTIPLAYER
+ACCEPTANCE" procedure remains open and must not be reported as manually
+verified.
 
 FINAL VERIFICATION
 ==================

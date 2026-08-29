@@ -6488,37 +6488,41 @@ void broadcastAutomatiaPlayerFloorPlacement(const int playerIndex)
     }
 }
 
-void syncAutomatiaFollowerSpatialAttachments(Entity& follower)
+}
+
+void syncAutomatiaNonPlayerEntitySpatialAttachments(Entity& entity)
 {
-	const SpatialSpawnContext followerSpatialContext =
-		follower.spatialSpawnContext();
+	const SpatialSpawnContext spatialContext = entity.spatialSpawnContext();
+	std::unordered_set<Entity*> synchronized;
 	auto syncAttachment = [&](Entity* attachment)
 	{
-		if (!attachment || attachment == &follower)
+		if (!attachment || attachment == &entity
+			|| !synchronized.insert(attachment).second)
 		{
 			return;
 		}
-		if (attachment->playableFloor != follower.playableFloor)
+		if (attachment->playableFloor != entity.playableFloor
+			|| attachment->structuralMapLayer()
+				!= entity.structuralMapLayer())
 		{
-			attachment->setPlayableFloor(follower.playableFloor);
+			attachment->removeLightField();
 		}
-		attachment->applySpatialSpawnContext(followerSpatialContext);
+		attachment->applySpatialSpawnContext(spatialContext);
 		attachment->bNeedsRenderPositionInit = true;
 	};
 
-	for (Entity* bodypart : follower.bodyparts)
+	for (Entity* bodypart : entity.bodyparts)
 	{
 		syncAttachment(bodypart);
 	}
 
-	// Monster name tags and other passive visual children are not necessarily
-	// stored in bodyparts. Keep every NOUPDATE child in the same structural
-	// context; active projectiles deliberately remain on their original floor.
+	// Name tags and other passive visual children are not necessarily present
+	// in bodyparts. Active projectiles deliberately remain on their source floor.
 	for (node_t* node = map.entities ? map.entities->first : nullptr;
 		node; node = node->next)
 	{
 		Entity* attachment = static_cast<Entity*>(node->element);
-		if (attachment && attachment->parent == follower.getUID()
+		if (attachment && attachment->parent == entity.getUID()
 			&& attachment->flags[NOUPDATE])
 		{
 			syncAttachment(attachment);
@@ -6526,101 +6530,53 @@ void syncAutomatiaFollowerSpatialAttachments(Entity& follower)
 	}
 }
 
-void transitionAutomatiaPlayerFollowersToPlayableFloor(
-	const int playerIndex,
-	const Entity& playerEntity)
+bool transitionAutomatiaNonPlayerEntityToPlayableFloor(
+	Entity& entity,
+	const PlayableFloorId playableFloor,
+	const real_t x,
+	const real_t y,
+	const real_t z)
 {
-	// Clients receive the authoritative entity updates below. They must not
-	// independently move or duplicate followers while processing PZTR.
-	if (multiplayer == CLIENT || playerIndex < 0 || playerIndex >= MAXPLAYERS
-		|| !stats[playerIndex] || !map.playableFloors.hasFloor(playerEntity.playableFloor))
+	MapInstance* activeInstance = worldState.activeInstance();
+	if (multiplayer == CLIENT
+		|| entity.behavior == &actPlayer
+		|| entity.playableFloor == playableFloor
+		|| !activeInstance
+		|| activeInstance->loadedMap != &map
+		|| !entity.mynode
+		|| entity.mynode->list != map.entities
+		|| !playableFloorPlacementFootprintIsSafe(
+			playableFloor, entity, x, y))
 	{
-		return;
+		return false;
 	}
 
-	static constexpr real_t followerOffsets[][2] = {
-		{ 12.0, 0.0 }, { -12.0, 0.0 }, { 0.0, 12.0 }, { 0.0, -12.0 },
-		{ 10.0, 10.0 }, { -10.0, 10.0 }, { 10.0, -10.0 }, { -10.0, -10.0 }
-	};
-	std::size_t followerOrdinal = 0;
-	for (node_t* node = stats[playerIndex]->FOLLOWERS.first;
-		node; node = node->next)
+	const real_t previousX = entity.x;
+	const real_t previousY = entity.y;
+	if (!entity.transitionToPlayableFloor(playableFloor, x, y, z))
 	{
-		if (!node->element)
-		{
-			continue;
-		}
-		Entity* follower = uidToEntity(*static_cast<Uint32*>(node->element));
-		if (!follower || follower->behavior != &actMonster
-			|| follower->monsterAllyIndex != playerIndex)
-		{
-			continue;
-		}
-
-		const real_t previousFollowerX = follower->x;
-		const real_t previousFollowerY = follower->y;
-		const real_t previousOffsetX = std::clamp(
-			follower->x - playerEntity.x, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
-		const real_t previousOffsetY = std::clamp(
-			follower->y - playerEntity.y, static_cast<real_t>(-12.0), static_cast<real_t>(12.0));
-		std::array<std::pair<real_t, real_t>, 9> candidates{};
-		candidates[0] = { playerEntity.x + previousOffsetX, playerEntity.y + previousOffsetY };
-		for (std::size_t candidate = 0; candidate < 8; ++candidate)
-		{
-			const std::size_t offsetIndex =
-				(followerOrdinal + candidate) % std::size(followerOffsets);
-			candidates[candidate + 1] = {
-				playerEntity.x + followerOffsets[offsetIndex][0],
-				playerEntity.y + followerOffsets[offsetIndex][1]
-			};
-		}
-
-		real_t destinationX = playerEntity.x;
-		real_t destinationY = playerEntity.y;
-		for (const auto& [candidateX, candidateY] : candidates)
-		{
-			if (playableFloorPlacementFootprintIsSafe(
-					playerEntity.playableFloor, *follower, candidateX, candidateY))
-			{
-				destinationX = candidateX;
-				destinationY = candidateY;
-				break;
-			}
-		}
-
-		if (!follower->transitionToPlayableFloor(
-				playerEntity.playableFloor,
-				destinationX,
-				destinationY,
-				follower->z))
-		{
-			printlog(
-				"[Playable Z] Could not move follower UID %u with player %d to floor %d.",
-				follower->getUID(), playerIndex,
-				static_cast<int>(playerEntity.playableFloor));
-			continue;
-		}
-		follower->monsterTarget = 0;
-		follower->monsterState = MONSTER_STATE_WAIT;
-		syncAutomatiaFollowerSpatialAttachments(*follower);
-		translateAutomatiaWorldAttachments(
-			*follower, destinationX - previousFollowerX,
-			destinationY - previousFollowerY);
-
-		if (multiplayer == SERVER)
-		{
-			for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
-			{
-				if (!client_disconnected[recipient]
-					&& serverPlayerCanReceiveActiveMapUpdates(recipient))
-				{
-					sendEntityUDP(follower, recipient, true);
-				}
-			}
-		}
-		++followerOrdinal;
+		return false;
 	}
-}
+	syncAutomatiaNonPlayerEntitySpatialAttachments(entity);
+	translateAutomatiaWorldAttachments(
+		entity, entity.x - previousX, entity.y - previousY);
+	activeInstance->dirty = true;
+
+	if (multiplayer == SERVER)
+	{
+		for (int recipient = 1; recipient < MAXPLAYERS; ++recipient)
+		{
+			if (!client_disconnected[recipient]
+				&& serverPlayerCanReceiveActiveMapUpdates(recipient))
+			{
+				// The ordinary ENTU already carries playableFloor and
+				// spatialRevision. Send it to every same-MapInstance client so
+				// source-floor peers also retire their old spatial membership.
+				sendEntityUDPToActiveMap(&entity, recipient, true);
+			}
+		}
+	}
+	return true;
 }
 
 bool applyAutomatiaPlayableFloorPlacement(
@@ -6721,7 +6677,6 @@ bool applyAutomatiaPlayableFloorPlacement(
     {
 		translateAutomatiaWorldAttachments(
 			entity, entity.x - previousX, entity.y - previousY);
-        transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity);
     }
 
     if (floorChanged && localPlayer)
@@ -6873,58 +6828,19 @@ bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(
          * the transition deterministic while letting a ladder sit against the
          * block that becomes the next floor.
          */
-        static constexpr Sint32 stairExitDX[8] = { 1, 1, 0, -1, -1, -1, 0, 1 };
-        static constexpr Sint32 stairExitDY[8] = { 0, 1, 1, 1, 0, -1, -1, -1 };
         const int stairRotation = std::clamp(
             static_cast<int>(sourceEndpoint->verticalLayerTransitionRotation),
             0,
             7);
-        const int candidateRotations[8] = {
-            stairRotation,
-            (stairRotation + 4) & 7,
-            (stairRotation + 2) & 7,
-            (stairRotation + 6) & 7,
-            (stairRotation + 1) & 7,
-            (stairRotation + 7) & 7,
-            (stairRotation + 3) & 7,
-            (stairRotation + 5) & 7
-        };
-
         const Sint32 stairTileX = static_cast<Sint32>(sourceEndpoint->x / 16.0);
         const Sint32 stairTileY = static_cast<Sint32>(sourceEndpoint->y / 16.0);
         real_t destinationX = sourceEndpoint->x;
         real_t destinationY = sourceEndpoint->y;
-        bool foundDestination = false;
-        for (const int candidateRotation : candidateRotations)
-        {
-            const Sint32 candidateTileX =
-                stairTileX + stairExitDX[candidateRotation];
-            const Sint32 candidateTileY =
-                stairTileY + stairExitDY[candidateRotation];
-            const real_t candidateX =
-                static_cast<real_t>(candidateTileX * 16 + 8);
-            const real_t candidateY =
-                static_cast<real_t>(candidateTileY * 16 + 8);
-            if (playableFloorPlacementTileIsSafe(
-                    destinationFloor, candidateX, candidateY))
-            {
-                destinationX = candidateX;
-                destinationY = candidateY;
-                foundDestination = true;
-                break;
-            }
-        }
-
-        if (!foundDestination
-            && playableFloorPlacementTileIsSafe(
-                destinationFloor, sourceEndpoint->x, sourceEndpoint->y))
-        {
-            destinationX = sourceEndpoint->x;
-            destinationY = sourceEndpoint->y;
-            foundDestination = true;
-        }
-
-        if (!foundDestination)
+        int destinationTileX = stairTileX;
+        int destinationTileY = stairTileY;
+        if (!resolveVerticalLayerStairDestination(
+                map, *sourceEndpoint, destinationFloor,
+                destinationTileX, destinationTileY))
         {
             printlog(
                 "[Playable Z] Layer stair destination blocked: floor=%d stairTile=(%d,%d) facing=%d; no safe adjacent landing tile; authored floor/wall layers=(%d,%d).",
@@ -6935,6 +6851,12 @@ bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(
                 destinationFloorRaw + FLOORLAYER,
                 destinationFloorRaw + OBSTACLELAYER);
             return false;
+        }
+        if (destinationTileX != stairTileX
+            || destinationTileY != stairTileY)
+        {
+            destinationX = static_cast<real_t>(destinationTileX * 16 + 8);
+            destinationY = static_cast<real_t>(destinationTileY * 16 + 8);
         }
 
         if (!applyAutomatiaPlayableFloorPlacement(

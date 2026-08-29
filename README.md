@@ -53,10 +53,13 @@ mapLayerWorldZ(N)= -16 * N
 Status snapshot: the current local-Z/structural-layer implementation, legacy
 ceiling-model compatibility, upper/lower rendered-stack visibility, structural
 lighting, lower-floor landing, HUD/camera attachments, ELYR/PZLV persistence,
-and deterministic regressions compile in `build`. The latest automated run
-passed all 11 CTest targets and the Stage 4D/Z3 executable
-characterization. Graphical acceptance items are listed below and are not
-claimed by those deterministic tests.
+and deterministic regressions compile in `build`. Z4A adds a MapInstance-local
+vertical transition graph derived from existing ZLDR/ZTRN metadata; dropped
+items crossing an authored-floor boundary now continue onto the next lower
+playable floor while retaining local Z and identity. The latest automated run
+passed all 13 CTest targets and the Stage 4D/Z3 executable characterization.
+Graphical acceptance items are listed below and are not claimed by those
+deterministic tests.
 
 Layer-authored floors form one vertically stacked rendered world. Geometry,
 sprites, flames, and visual children on both higher and lower floors remain
@@ -493,8 +496,8 @@ Initial spell costs use the reduced value with a minimum cost of one MP for a no
 
 ## Known limitations and testing priorities
 
-The automated baseline currently passes `cmake --build build -j6`, all 11 CTest
-targets, the Stage 4D/Z3 characterization, and `git diff --check`. It includes
+The current Z4D baseline passes `cmake --build build-super-posix -j6`, all 13
+CTest targets, the Stage 4D/Z4D characterization, and `git diff --check`. It includes
 characterization for Mini Mimic authoring, Room Groups, S.A.M. room generation,
 Text Source scripts, party/backend/chat/UI behavior, and Playable-Z. The
 following areas still require manual or broader platform acceptance:
@@ -526,9 +529,21 @@ following areas still require manual or broader platform acceptance:
 - Steam client Offline Mode entitlement behavior with each owned/unowned DLC
   combination; automated tests do not emulate Steam's client-side cache
 
-The tree has a green automated stabilization baseline, but it is not yet fully
-accepted for Z4: complete the documented one-headless plus two-real-graphical-
-client save/restart/reconnect run first. Z4 AI has not begun.
+The tree has a green automated stabilization baseline. The owner subsequently
+accepted beginning Z4 despite the still-open real-client acceptance work. Z4A
+is complete: it provides the map-local vertical transition graph,
+reconstruction/query coverage, and lower-floor dropped-item integration. Z4B
+is also complete as a generic query-only route planner that combines ordinary
+floor-local A* paths with explicit Z4A edges. Z4C is complete for normal
+player-owned followers: the server sends them along those local paths, applies
+real same-MapInstance stair transitions, and then resumes ordinary following.
+Z4D is complete for ordinary hostile player targets: a hostile that already
+legitimately targeted a player can retain pursuit after the player changes
+floors, but only through a valid same-MapInstance Z4A/B route. Cross-floor
+acquisition, attacks, collision and equal-X/Y adjacency remain forbidden;
+passive, dialogue, stationary and recruited NPC roles retain their existing
+behavior. Real graphical multiplayer acceptance remains part of the manual
+list above.
 
 ## Maintained project documentation
 

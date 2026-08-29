@@ -788,6 +788,8 @@ bool testZ33LayerAuthoringCorrectionContracts()
     const std::string entityHeader = readFile(sourcePath("src/entity.hpp"));
     const std::string playableZHeader = readFile(sourcePath("src/playable_z.hpp"));
     const std::string playableZMap = readFile(sourcePath("src/playable_z_map.cpp"));
+	const std::string verticalNavigationMap =
+		readFile(sourcePath("src/vertical_navigation_map.cpp"));
     const std::string editorHeader = readFile(sourcePath("src/editor.hpp"));
     const std::string editor = readFile(sourcePath("src/editor.cpp"));
     const std::string buttons = readFile(sourcePath("src/buttons.cpp"));
@@ -894,7 +896,11 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(files, "\"ZTRN\""));
     EXPECT(contains(game, "sourceEndpoint->verticalLayerTransitionDelta != 0"));
     EXPECT(contains(game, "map.ensurePlayableFloorGeometry(destinationFloor, false)"));
-    EXPECT(contains(game, "stairExitDX[8] = { 1, 1, 0, -1, -1, -1, 0, 1 }"));
+	EXPECT(contains(game, "resolveVerticalLayerStairDestination("));
+	EXPECT(contains(verticalNavigationMap,
+		"stairExitDX[8] = {1, 1, 0, -1, -1, -1, 0, 1}"));
+	EXPECT(contains(verticalNavigationMap,
+		"rebuildVerticalNavigationGraphFromMap("));
     EXPECT(contains(game, "verticalLayerTransitionRotation"));
     EXPECT(contains(game, "no safe adjacent landing tile"));
     EXPECT(contains(game, "net_packet->len = 43"));
@@ -1238,6 +1244,12 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	const std::string drawSource = readFile(sourcePath("src/draw.cpp"));
 	const std::string playerAim = readFile(sourcePath("src/player.cpp"));
 	const std::string handMagic = readFile(sourcePath("src/magic/act_HandMagic.cpp"));
+	const std::string monster = readFile(sourcePath("src/actmonster.cpp"));
+	const std::string entitySource = readFile(sourcePath("src/entity.cpp"));
+	const std::string followerVertical = readFile(
+		sourcePath("src/follower_vertical_navigation.cpp"));
+	const std::string hostileVertical = readFile(
+		sourcePath("src/hostile_vertical_navigation.cpp"));
 	EXPECT(!game.empty());
 	EXPECT(!gameUi.empty());
 	EXPECT(!interfaceSource.empty());
@@ -1250,20 +1262,81 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	EXPECT(!drawSource.empty());
 	EXPECT(!playerAim.empty());
 	EXPECT(!handMagic.empty());
+	EXPECT(!monster.empty());
+	EXPECT(!entitySource.empty());
+	EXPECT(!followerVertical.empty());
+	EXPECT(!hostileVertical.empty());
 
-	// Same-MapInstance playable-floor movement is authoritative on the server,
-	// puts followers on the leader's floor, and scopes passive visual children.
+	// Z4C no longer instant-teleports followers as part of the player's PZTR.
+	// Followers consume Z4B routes and then use a generic authoritative
+	// non-player transaction with ordinary ENTU replication.
 	const std::string followerFloorTransition = section(
 		game,
-		"void transitionAutomatiaPlayerFollowersToPlayableFloor(",
+		"bool transitionAutomatiaNonPlayerEntityToPlayableFloor(",
 		"bool applyAutomatiaPlayableFloorPlacement(");
 	EXPECT(contains(followerFloorTransition, "multiplayer == CLIENT"));
-	EXPECT(contains(followerFloorTransition, "follower->monsterAllyIndex != playerIndex"));
-	EXPECT(contains(followerFloorTransition, "follower->transitionToPlayableFloor("));
-	EXPECT(contains(followerFloorTransition, "playerEntity.playableFloor"));
-	EXPECT(contains(followerFloorTransition, "syncAutomatiaFollowerSpatialAttachments(*follower)"));
-	EXPECT(contains(followerFloorTransition, "sendEntityUDP(follower, recipient, true)"));
-	EXPECT(contains(game, "transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity)"));
+	EXPECT(contains(followerFloorTransition, "entity.behavior == &actPlayer"));
+	EXPECT(contains(followerFloorTransition, "entity.transitionToPlayableFloor("));
+	EXPECT(contains(followerFloorTransition,
+		"syncAutomatiaNonPlayerEntitySpatialAttachments(entity)"));
+	EXPECT(contains(followerFloorTransition,
+		"sendEntityUDPToActiveMap(&entity, recipient, true)"));
+	EXPECT(!contains(game,
+		"transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity)"));
+	EXPECT(contains(followerVertical, "generateCrossFloorPath("));
+	EXPECT(contains(followerVertical, "GENERATE_PATH_ALLY_FOLLOW"));
+	EXPECT(contains(followerVertical, "follower.monsterSetPathToLocation("));
+	EXPECT(contains(followerVertical,
+		"transitionAutomatiaNonPlayerEntityToPlayableFloor("));
+	EXPECT(contains(followerVertical,
+		"worldState.playerSharesActiveInstance(ownerPlayer)"));
+	EXPECT(contains(monster,
+		"updateAutomatiaFollowerVerticalNavigation("));
+	EXPECT(contains(monster,
+		"uidToEntity(my->monsterTarget) == nullptr\n"
+		"\t\t\t\t&& !my->followerVerticalNavigationActive"));
+
+	// Z4D is a second generic consumer of the Z4A/B/C core. It continues only
+	// an already legitimate player target, parks the legacy attack target while
+	// floors differ, and rejects divergent MapInstances, stationary authored
+	// NPCs, passive factions, client authority, and unreachable routes.
+	EXPECT(contains(hostileVertical, "generateCrossFloorPath("));
+	EXPECT(contains(hostileVertical,
+		"GENERATE_PATH_TO_HUNT_MONSTER_TARGET"));
+	EXPECT(contains(hostileVertical, "monster.monsterSetPathToLocation("));
+	EXPECT(contains(hostileVertical,
+		"transitionAutomatiaNonPlayerEntityToPlayableFloor("));
+	EXPECT(contains(hostileVertical,
+		"worldState.playerSharesActiveInstance(player)"));
+	EXPECT(contains(hostileVertical, "monster.checkEnemy(&target)"));
+	EXPECT(contains(hostileVertical, "STAT_FLAG_NPC"));
+	EXPECT(contains(hostileVertical, "customDialogueID"));
+	EXPECT(contains(hostileVertical, "monster.monsterAllyIndex < 0"));
+	EXPECT(contains(hostileVertical, "multiplayer == CLIENT"));
+	EXPECT(!contains(hostileVertical, "MINIMIMIC"));
+	EXPECT(!contains(hostileVertical, "SAM_FRAMEWORK"));
+	EXPECT(contains(monster,
+		"updateAutomatiaHostileVerticalNavigation(*my, myReflex)"));
+	EXPECT(contains(monster,
+		"entity->playableFloor != my->playableFloor"));
+	EXPECT(contains(monster,
+		"!my->hostileVerticalNavigationActive"));
+	EXPECT(contains(monster,
+		"worldState.playerSharesActiveInstance(c)"));
+	const std::string targetAcquisition = section(
+		entitySource,
+		"void Entity::monsterAcquireAttackTarget(",
+		"bool Entity::monsterReleaseAttackTarget(");
+	EXPECT(contains(targetAcquisition,
+		"target.playableFloor != playableFloor"));
+	EXPECT(contains(targetAcquisition,
+		"worldState.playerSharesActiveInstance(player)"));
+	const std::string monsterAttack = section(
+		monster,
+		"void Entity::handleMonsterAttack(",
+		"bool Entity::handleMonsterSpecialAttack(");
+	EXPECT(contains(monsterAttack,
+		"target->playableFloor != playableFloor"));
 	EXPECT(contains(game, "void translateAutomatiaWorldAttachments("));
 	EXPECT(contains(game, "entity, entity.x - previousX, entity.y - previousY"));
 

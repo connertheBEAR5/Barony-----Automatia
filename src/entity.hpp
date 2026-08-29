@@ -116,6 +116,13 @@ public:
 	PlayableFloorId playableFloor = DEFAULT_PLAYABLE_FLOOR;
 	// Monotonic routing/barrier generation for floor transitions and stale-packet rejection.
 	std::uint64_t spatialRevision = 0;
+	// Runtime-only Z4C marker. Player-owned monsters set this while consuming a
+	// cross-floor route so ordinary hostile target scans do not replace it.
+	bool followerVerticalNavigationActive = false;
+	// Runtime-only Z4D state. The normal combat target is parked while a hostile
+	// walks between floors so legacy horizontal attack checks cannot consume it.
+	bool hostileVerticalNavigationActive = false;
+	Uint32 hostileVerticalNavigationTarget = 0;
 
 	/*
 	 * Stage Z3 authored same-map floor transition endpoint. The optional PZLV

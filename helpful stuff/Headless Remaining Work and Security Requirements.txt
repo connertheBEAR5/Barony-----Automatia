@@ -71,7 +71,7 @@ CURRENT VALIDATION SNAPSHOT (2026-08-28)
 ----------------------------------------
 The primary configured Steamworks-enabled 15-player build is `build`; use
 `cmake --build build -j6` on the current host. The latest source validation
-passed that build, all 11 CTest targets, the Stage 4D/Z3 Playable-Z
+passed that build, all 13 CTest targets, the Stage 4D/Z3 Playable-Z
 characterization, and the diff check. The Linux single-map headless cycle,
 contained divergent two-client party/SAMF/save/restart run, and contained
 direct-LAN new-player late-join probe are runtime evidence already recorded.

@@ -136,6 +136,7 @@ void refreshRuntimeReferences(MapInstance& instance)
         instance.width = 0;
         instance.height = 0;
         instance.playableFloors.assign(1, DEFAULT_PLAYABLE_FLOOR);
+        instance.verticalNavigation.clear(instance.key());
         return;
     }
 
@@ -145,6 +146,8 @@ void refreshRuntimeReferences(MapInstance& instance)
     instance.worldUI = instance.loadedMap->worldUI;
     instance.width = instance.loadedMap->width;
     instance.height = instance.loadedMap->height;
+    (void)rebuildVerticalNavigationGraphFromMap(
+        instance.verticalNavigation, instance.key(), *instance.loadedMap);
     instance.playableFloors.clear();
     instance.playableFloors.reserve(instance.loadedMap->playableFloors.floors.size());
     for (const PlayableFloorData& floor : instance.loadedMap->playableFloors.floors)
@@ -1287,6 +1290,28 @@ bool WorldState::markRuntimeInitialized(map_t& loadedMap)
         }
     }
     return true;
+}
+
+bool WorldState::rebuildVerticalNavigation(map_t& loadedMap)
+{
+    MapInstance* instance = instanceFor(loadedMap);
+    if (!instance || instance->loadedMap != &loadedMap)
+    {
+        return false;
+    }
+    const bool rebuilt = rebuildVerticalNavigationGraphFromMap(
+        instance->verticalNavigation, instance->key(), loadedMap);
+    instance->playableFloors.clear();
+    instance->playableFloors.reserve(loadedMap.playableFloors.floors.size());
+    for (const PlayableFloorData& floor : loadedMap.playableFloors.floors)
+    {
+        instance->playableFloors.push_back(floor.id);
+    }
+    if (instance->playableFloors.empty())
+    {
+        instance->playableFloors.push_back(DEFAULT_PLAYABLE_FLOOR);
+    }
+    return rebuilt;
 }
 
 void WorldState::refreshActiveContext()

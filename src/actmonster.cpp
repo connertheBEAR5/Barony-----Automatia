@@ -22,6 +22,9 @@
 #include "magic/magic.hpp"
 #include "net.hpp"
 #include "paths.hpp"
+#include "follower_vertical_navigation.hpp"
+#include "hostile_vertical_navigation.hpp"
+#include "world_state.hpp"
 #include "collision.hpp"
 #include "player.hpp"
 #include "colors.hpp"
@@ -9898,6 +9901,66 @@ void actMonster(Entity* my)
 
 		int linetraceTargetEnemyFlags = LINETRACE_ATK_CHECK_FRIENDLYFIRE;
 
+		/*
+		 * Z4C is a coordinator around the existing follower HUNT path. While the
+		 * durable owner is on another playable floor, periodically assign the
+		 * first Z4B stair segment; intervening ticks continue through the normal
+		 * HUNT movement below. Same-floor AI is left completely unchanged.
+		 */
+		if (my->monsterAllyIndex >= 0
+			&& my->monsterAllyIndex < MAXPLAYERS
+			&& my->monsterAllyState == ALLY_STATE_DEFAULT
+			&& !myStats->getEffectActive(EFF_FEAR)
+			&& !myStats->getEffectActive(EFF_DISORIENTED)
+			&& !myStats->getEffectActive(EFF_ROOTED)
+			&& !isIllusionTaunt
+			&& !monsterIsImmobileTurret(my, myStats))
+		{
+			const int refreshInterval = std::max(
+				1,
+				monsterAllyFormations.getFollowerChaseLeaderInterval(
+					*my, *myStats));
+			const bool refreshRoute =
+				my->getUID() % TICKS_PER_SECOND
+					== ticks % refreshInterval;
+			const AutomatiaFollowerVerticalNavigationStatus verticalStatus =
+				updateAutomatiaFollowerVerticalNavigation(
+					*my, refreshRoute);
+			switch (verticalStatus)
+			{
+				case AutomatiaFollowerVerticalNavigationStatus::NotPlayerFollower:
+				case AutomatiaFollowerVerticalNavigationStatus::SameFloor:
+				case AutomatiaFollowerVerticalNavigationStatus::PathInProgress:
+					break;
+				default:
+					return;
+			}
+		}
+		else
+		{
+			my->followerVerticalNavigationActive = false;
+		}
+
+		/*
+		 * Z4D continues an already legitimate hostile player target after that
+		 * player changes floors. The coordinator parks monsterTarget while floors
+		 * differ, assigns only the next ordinary HUNT segment, and consumes the
+		 * same authoritative non-player transition used by Z4C.
+		 */
+		const AutomatiaHostileVerticalNavigationStatus hostileVerticalStatus =
+			updateAutomatiaHostileVerticalNavigation(*my, myReflex);
+		switch (hostileVerticalStatus)
+		{
+			case AutomatiaHostileVerticalNavigationStatus::NotHostile:
+			case AutomatiaHostileVerticalNavigationStatus::NoTarget:
+			case AutomatiaHostileVerticalNavigationStatus::SameFloor:
+			case AutomatiaHostileVerticalNavigationStatus::ResumedSameFloor:
+			case AutomatiaHostileVerticalNavigationStatus::PathInProgress:
+				break;
+			default:
+				return;
+		}
+
 		//Begin state machine
 		if ( my->monsterState == MONSTER_STATE_WAIT ) //Begin wait state
 		{
@@ -9979,7 +10042,13 @@ void actMonster(Entity* my)
 				for ( node2 = map.creatures->first; node2 != nullptr; node2 = node2->next ) //So my concern is that this never explicitly checks for actMonster or actPlayer, instead it relies on there being stats. Now, only monsters and players have stats, so that's not a problem, except...actPlayerLimb can still return a stat from getStat()! D: Meh, if you can find the player's hand, you can find the actual player too, so it shouldn't be an issue.
 				{
 					entity = (Entity*)node2->element;
-					if ( entity == my || entity->flags[PASSABLE] || entity->isInertMimic() )
+					if ( entity == my
+						|| entity->playableFloor != my->playableFloor
+						|| (entity->behavior == &actPlayer
+							&& worldState.activeInstance()
+							&& !worldState.playerSharesActiveInstance(entity->skill[2]))
+						|| entity->flags[PASSABLE]
+						|| entity->isInertMimic() )
 					{
 						continue;
 					}
@@ -10201,7 +10270,12 @@ void actMonster(Entity* my)
 					int c, playerToChase = -1;
 					for (c = 0; c < MAXPLAYERS; c++)
 					{
-						if (players[c] && players[c]->entity && my->checkEnemy(players[c]->entity))
+						if (players[c]
+							&& players[c]->entity
+							&& (!worldState.activeInstance()
+								|| worldState.playerSharesActiveInstance(c))
+							&& players[c]->entity->playableFloor == my->playableFloor
+							&& my->checkEnemy(players[c]->entity))
 						{
 							list_t* playerPath = generatePath((int)floor(my->x / 16), (int)floor(my->y / 16), 
 								(int)floor(players[c]->entity->x / 16), (int)floor(players[c]->entity->y / 16), my, players[c]->entity,
@@ -11811,12 +11885,21 @@ timeToGoAgain:
 				}
 			}
 
-			if ( myReflex && (myStats->type != LICH || my->monsterSpecialTimer <= 0) )
+			if ( myReflex
+				&& !my->followerVerticalNavigationActive
+				&& !my->hostileVerticalNavigationActive
+				&& (myStats->type != LICH || my->monsterSpecialTimer <= 0) )
 			{
 				for ( node2 = map.creatures->first; node2 != nullptr; node2 = node2->next ) //Stats only exist on a creature, so don't iterate all map.entities.
 				{
 					entity = (Entity*)node2->element;
-					if ( entity == my || entity->flags[PASSABLE] || entity->isInertMimic() )
+					if ( entity == my
+						|| entity->playableFloor != my->playableFloor
+						|| (entity->behavior == &actPlayer
+							&& worldState.activeInstance()
+							&& !worldState.playerSharesActiveInstance(entity->skill[2]))
+						|| entity->flags[PASSABLE]
+						|| entity->isInertMimic() )
 					{
 						continue;
 					}
@@ -12039,11 +12122,13 @@ timeToGoAgain:
 			}
 
 			// minotaurs and liches chase players relentlessly.
-			if ( myStats->type == MINOTAUR 
+			if ( !my->followerVerticalNavigationActive
+				&& !my->hostileVerticalNavigationActive
+				&& (myStats->type == MINOTAUR
 				|| (myStats->type == LICH && my->monsterSpecialTimer <= 0)
 				|| ((myStats->type == LICH_FIRE || myStats->type == LICH_ICE) && my->monsterSpecialTimer <= 0 )
 				|| (myStats->type == CREATURE_IMP && strstr(map.name, "Boss") && !my->monsterAllyGetPlayerLeader())
-				|| (myStats->type == AUTOMATON && strstr(myStats->name, "corrupted automaton")) )
+				|| (myStats->type == AUTOMATON && strstr(myStats->name, "corrupted automaton")) ))
 			{
 				bool shouldHuntPlayer = false;
 				Entity* playerOrNot = uidToEntity(my->monsterTarget);
@@ -12064,7 +12149,11 @@ timeToGoAgain:
 					int playerToChase = -1;
 					for ( int c = 0; c < MAXPLAYERS; c++)
 					{
-						if (players[c] && players[c]->entity)
+						if (players[c]
+							&& players[c]->entity
+							&& (!worldState.activeInstance()
+								|| worldState.playerSharesActiveInstance(c))
+							&& players[c]->entity->playableFloor == my->playableFloor)
 						{
 							list_t* playerPath = generatePath((int)floor(my->x / 16), (int)floor(my->y / 16),
 								(int)floor(players[c]->entity->x / 16), (int)floor(players[c]->entity->y / 16), my, players[c]->entity,
@@ -12142,6 +12231,8 @@ timeToGoAgain:
 
 			// follow the leader :)
 			if ( uidToEntity(my->monsterTarget) == nullptr
+				&& !my->followerVerticalNavigationActive
+				&& !my->hostileVerticalNavigationActive
 				&& myStats->leader_uid != 0 
 				&& my->monsterAllyState == ALLY_STATE_DEFAULT 
 				&& !monsterIsImmobileTurret(my, myStats)
@@ -14978,6 +15069,13 @@ void Entity::handleMonsterAttack(Stat* myStats, Entity* target, double dist)
 {
 	Stat* hitstats = nullptr;
 	int charge = 1;
+	if (!target || target->playableFloor != playableFloor)
+	{
+		// Z4D never permits melee, ranged windups, or spell selection to consume
+		// a target on another gameplay floor. The route coordinator must first
+		// bring the actor through a real transition.
+		return;
+	}
 
 	if (myStats->type == MINOTAUR) {
 	    if (checkFriend(target)) {

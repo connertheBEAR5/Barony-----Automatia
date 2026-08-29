@@ -423,6 +423,67 @@ bool jewelItemRecruit(Entity* parent, Entity* entity, int itemStatus, const char
 	return false;
 }
 
+bool transitionAutomatiaFallingItemToLowerPlayableFloor(
+	Entity& itemEntity,
+	const real_t groundHeight)
+{
+	if ( multiplayer == CLIENT
+		|| itemEntity.playableFloor <= DEFAULT_PLAYABLE_FLOOR
+		|| !map.playableFloorUsesAuthoredLayerStack(itemEntity.playableFloor)
+		|| !std::isfinite(static_cast<double>(itemEntity.z))
+		|| !std::isfinite(static_cast<double>(groundHeight)) )
+	{
+		return false;
+	}
+
+	const real_t floorStep = -mapLayerWorldZ(1);
+	if ( floorStep <= 0.0 || itemEntity.z < groundHeight + floorStep )
+	{
+		return false;
+	}
+
+	const PlayableFloorId sourceFloor = itemEntity.playableFloor;
+	const PlayableFloorId destinationFloor =
+		static_cast<PlayableFloorId>(sourceFloor - 1);
+	if ( !map.ensurePlayableFloorGeometry(destinationFloor, false) )
+	{
+		return false;
+	}
+
+	itemEntity.removeLightField();
+	if ( !itemEntity.setPlayableFloor(destinationFloor) )
+	{
+		return false;
+	}
+	itemEntity.authoredMapLayer = static_cast<Sint16>(std::clamp<int>(
+		static_cast<int>(destinationFloor), 0, MAPLAYERS - 1));
+	itemEntity.z -= floorStep;
+	itemEntity.new_z = itemEntity.z;
+	itemEntity.bNeedsRenderPositionInit = true;
+	itemEntity.itemNotMoving = 0;
+	itemEntity.itemNotMovingClient = 0;
+	itemEntity.flags[UPDATENEEDED] = true;
+
+	if ( multiplayer == SERVER )
+	{
+		for ( int recipient = 1; recipient < MAXPLAYERS; ++recipient )
+		{
+			if ( !client_disconnected[recipient] )
+			{
+				sendEntityUDP(&itemEntity, recipient, true);
+			}
+		}
+	}
+
+	printlog(
+		"[Playable Z] Item UID %u crossed an authored floor boundary: floor %d -> %d, local z=%.2f.",
+		itemEntity.getUID(),
+		static_cast<int>(sourceFloor),
+		static_cast<int>(destinationFloor),
+		itemEntity.z);
+	return true;
+}
+
 void actItem(Entity* my)
 {
 	Item* item;
@@ -1251,6 +1312,19 @@ void actItem(Entity* my)
 				my->z += 0.03;
 			}
 		}
+	}
+
+	/*
+	 * Upper authored floors are real vertical space. Once a falling item's local
+	 * Z crosses a complete structural step, move gameplay/structural membership
+	 * down one floor and retain the residual local Z. Empty intermediate floors
+	 * are crossed one boundary at a time. Floor Z0 keeps the legacy pit/lava
+	 * behavior below the authored stack.
+	 */
+	while ( !onground && !levitating
+		&& transitionAutomatiaFallingItemToLowerPlayableFloor(
+			*my, static_cast<real_t>(groundheight)) )
+	{
 	}
 
 	// falling out of the map (or burning in a pit of lava)

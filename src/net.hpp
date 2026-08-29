@@ -39,6 +39,10 @@ bool messageLocalPlayers(Uint32 type, char const * const message, ...);
 bool messagePlayerColor(int player, Uint32 type, Uint32 color, char const * const message, ...);
 bool messageLocalPlayersColor(Uint32 color, Uint32 type, char const * const message, ...);
 void sendEntityUDP(Entity* entity, int c, bool guarantee);
+// Uses the existing ENTU layout but bypasses only playable-floor visibility.
+// Reserved for authoritative same-MapInstance floor changes so clients on the
+// source floor can apply the new floor/revision and retire the old actor scope.
+void sendEntityUDPToActiveMap(Entity* entity, int c, bool guarantee);
 void sendEntityTCP(Entity* entity, int c);
 void sendMapSeedTCP(int c);
 void sendMapTCP(int c);

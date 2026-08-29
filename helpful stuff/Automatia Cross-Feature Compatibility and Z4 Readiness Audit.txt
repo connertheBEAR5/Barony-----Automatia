@@ -5,6 +5,19 @@ Working tree: /home/conner/Barony-----Automatia
 Date: 2026-08-27
 Scope: stabilization before Z4 AI; Z4 was not started.
 
+POST-AUDIT STATUS - 2026-08-29
+------------------------------
+This remains the authoritative record of the pre-Z4 stabilization evidence and
+the still-unrun real-client procedure. The owner subsequently accepted that
+documented manual risk and authorized Z4A and Z4B. Both are now complete through
+the generic query-only cross-floor route seam. Z4C subsequently connected normal
+player-owned followers to that seam and authoritative same-map transitions.
+Z4D now lets a normal hostile continue an existing valid player target across
+floors through the same route/transition core, with floor and MapInstance gates
+on acquisition and attacks. The original conclusion below remains historically
+accurate for this audit's 2026-08-27 scope, and the real-client procedure remains
+unrun.
+
 
 1. EVIDENCE RULES
 =================

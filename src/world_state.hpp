@@ -11,6 +11,7 @@
 #include "party_manager.hpp"
 #include "world_instance.hpp"
 #include "playable_z.hpp"
+#include "vertical_navigation.hpp"
 
 #include <cstdint>
 #include <string>
@@ -34,6 +35,7 @@ struct MapInstance
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::vector<PlayableFloorId> playableFloors{DEFAULT_PLAYABLE_FLOOR};
+    VerticalNavigationGraph verticalNavigation;
     std::int32_t dungeonLevel = 0;
     std::uint32_t mapSeed = 0;
     std::uint32_t nextEntityUid = 1;
@@ -127,6 +129,7 @@ public:
     bool playerSharesInstance(int playerIndex, const map_t& loadedMap) const;
     bool playerSharesActiveInstance(int playerIndex) const;
     bool markRuntimeInitialized(map_t& loadedMap);
+    bool rebuildVerticalNavigation(map_t& loadedMap);
     void refreshActiveContext();
     std::size_t instanceCount() const;
     std::vector<std::string> occupiedLoadedInstanceKeys() const;

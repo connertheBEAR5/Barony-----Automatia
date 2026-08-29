@@ -720,7 +720,7 @@ void restoreAutomatiaPersistentMinimapForLocalPlayer();
 
 // Stage Z3 same-map playable-floor transition transaction. The endpoint is an
 // authored entity carrying PZLV ZTRN metadata. This moves only the selected
-// player; follower/pathfinding traversal remains Stage Z4.
+// player; Z4C followers consume the resulting graph route independently.
 bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(
     int playerIndex,
     Entity* sourceEndpoint
@@ -741,6 +741,23 @@ bool applyAutomatiaPlayableFloorPlacement(
     bool requirePassable = true
 );
 
+// Keeps bodyparts and passive visual children in a non-player actor's spatial
+// context. This is used on both the authority and clients after an ENTU floor
+// revision is applied.
+void syncAutomatiaNonPlayerEntitySpatialAttachments(Entity& entity);
+
+// Generic authoritative same-MapInstance floor transaction for a non-player
+// actor. It preserves local model Z, identity and monster/follower state while
+// updating structural context, spatial indexing, attachments, lights,
+// persistence dirtiness and ordinary ENTU replication.
+bool transitionAutomatiaNonPlayerEntityToPlayableFloor(
+    Entity& entity,
+    PlayableFloorId playableFloor,
+    real_t x,
+    real_t y,
+    real_t z
+);
+
 // Drops a non-levitating player through a missing authored floor to the nearest
 // lower valid playable floor, preserving X/Y where the lower-floor footprint is
 // clear and otherwise moving inward within that landing tile. Returns the number
@@ -748,6 +765,14 @@ bool applyAutomatiaPlayableFloorPlacement(
 bool fallAutomatiaPlayerToLowerPlayableFloor(
     int playerIndex,
     int& floorsFallen
+);
+
+// Server/single-player boundary transfer for a dropped item falling through an
+// authored Playable-Z stack. The item keeps residual local Z and is not treated
+// as lost until it falls below floor Z0.
+bool transitionAutomatiaFallingItemToLowerPlayableFloor(
+    Entity& itemEntity,
+    real_t groundHeight
 );
 
 bool loadAutomatiaPersistentWorldSave(

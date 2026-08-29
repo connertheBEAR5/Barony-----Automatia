@@ -488,7 +488,45 @@ static ConsoleVariable<int> cvar_pathlimit("/pathlimit", 200);
 static ConsoleVariable<bool> cvar_pathing_debug("/pathing_debug", false);
 static ConsoleVariable<bool> cvar_pathing_collider_npc("/pathing_collider_npc", true);
 int lastGeneratePathTries = 0;
-list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target, GeneratePathTypes pathingType, bool lavaIsPassable)
+static list_t* generatePathOnPlayableFloorInternal(
+	int x1, int y1, int x2, int y2,
+	const PlayableFloorId playableFloor,
+	Entity* my, Entity* target,
+	GeneratePathTypes pathingType,
+	bool lavaIsPassable,
+	const bool notifyMonsterPathState);
+
+list_t* generatePath(
+	int x1, int y1, int x2, int y2,
+	Entity* my, Entity* target,
+	GeneratePathTypes pathingType,
+	bool lavaIsPassable)
+{
+	return generatePathOnPlayableFloorInternal(
+		x1, y1, x2, y2,
+		my ? my->playableFloor : DEFAULT_PLAYABLE_FLOOR,
+		my, target, pathingType, lavaIsPassable, true);
+}
+
+list_t* generatePathOnPlayableFloor(
+	int x1, int y1, int x2, int y2,
+	const PlayableFloorId playableFloor,
+	Entity* my, Entity* target,
+	GeneratePathTypes pathingType,
+	bool lavaIsPassable)
+{
+	return generatePathOnPlayableFloorInternal(
+		x1, y1, x2, y2, playableFloor,
+		my, target, pathingType, lavaIsPassable, false);
+}
+
+static list_t* generatePathOnPlayableFloorInternal(
+	int x1, int y1, int x2, int y2,
+	const PlayableFloorId playableFloor,
+	Entity* my, Entity* target,
+	GeneratePathTypes pathingType,
+	bool lavaIsPassable,
+	const bool notifyMonsterPathState)
 {
 	if ( *cvar_pathing_debug )
 	{
@@ -509,6 +547,11 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 			ms = std::chrono::duration_cast<std::chrono::microseconds>(now - pathtime);
 			DebugStats.gui2 = DebugStats.gui2 + ms;
 		}
+		lastGeneratePathTries = 0;
+		return NULL;
+	}
+	if ( !map.playableFloors.hasFloor(playableFloor) )
+	{
 		lastGeneratePathTries = 0;
 		return NULL;
 	}
@@ -543,7 +586,6 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 
 	int* pathMap = (int*) calloc(map.width * map.height, sizeof(int));
 	int pathMapType = GateGraph::GATE_GRAPH_GROUNDED;
-	const PlayableFloorId playableFloor = my->playableFloor;
 	const bool usePlayableFloorPathMap = playableFloor != DEFAULT_PLAYABLE_FLOOR;
 	std::vector<int> playableFloorGroundedPathMap;
 	std::vector<int> playableFloorFlyingPathMap;
@@ -584,7 +626,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 				DebugStats.gui2 = DebugStats.gui2 + ms;
 			}
 			lastGeneratePathTries = 0;
-			if ( my->behavior == &actMonster
+			if ( notifyMonsterPathState && my->behavior == &actMonster
 				&& (pathingType == GENERATE_PATH_ALLY_FOLLOW
 					|| pathingType == GENERATE_PATH_ALLY_FOLLOW2) )
 			{
@@ -608,7 +650,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 						DebugStats.gui2 = DebugStats.gui2 + ms;
 					}
 					lastGeneratePathTries = 0;
-					if ( my->behavior == &actMonster
+					if ( notifyMonsterPathState && my->behavior == &actMonster
 						&& (pathingType == GENERATE_PATH_ALLY_FOLLOW
 							|| pathingType == GENERATE_PATH_ALLY_FOLLOW2) )
 					{
@@ -902,7 +944,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
 				messagePlayer(0, MESSAGE_DEBUG, "PASS (%d): path tries: %d", (int)pathingType, tries);
 			}
 			lastGeneratePathTries = tries;
-			if ( my->behavior == &actMonster ) {
+			if ( notifyMonsterPathState && my->behavior == &actMonster ) {
 				monsterAllyFormations.updateOnPathSucceed(my->getUID(), my);
 			}
 			return path;
@@ -1007,7 +1049,7 @@ list_t* generatePath(int x1, int y1, int x2, int y2, Entity* my, Entity* target,
             (int)pathingType, my->sprite, my->getUID(), tries, x1, y1, x2, y2, ms);
 	}
 	lastGeneratePathTries = tries;
-	if (my->behavior == &actMonster) {
+	if (notifyMonsterPathState && my->behavior == &actMonster) {
 		if (pathingType == GENERATE_PATH_ALLY_FOLLOW ||
             pathingType == GENERATE_PATH_ALLY_FOLLOW2) {
             monsterAllyFormations.updateOnPathFail(my->getUID(), my);

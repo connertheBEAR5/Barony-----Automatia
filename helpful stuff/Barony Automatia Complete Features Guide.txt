@@ -12,20 +12,26 @@ limitations, multiplayer notes, and current status.
 
 It does not explain the internal C++ implementation.
 
-CURRENT BASELINE - 2026-08-28
+CURRENT BASELINE - 2026-08-29
 -----------------------------
 
 This baseline supersedes older status sentences later in this chronological
-guide where they differ. The current configured build is `build`; use:
+guide where they differ. The current Z4D validation build is
+`build-super-posix`; use:
 
-    cmake --build build -j6
+    cmake --build build-super-posix -j6
 
-The game/editor build, all 11 registered CTest tests, the Stage 4D/Z3
+The game/editor build, all 13 registered CTest tests, the Stage 4D/Z4D
 characterization, and the source diff check pass. Contained headless/direct-LAN
 process tests also cover divergent MapInstances, party persistence, SAMF, save,
 restart, and a new-player late join. The exact one-headless plus two-real-
-graphical-client acceptance has not been run, so the tree is not yet fully
-accepted for Z4. Z4 AI has not begun.
+graphical-client acceptance has not been run. The owner explicitly accepted
+beginning Z4 with that manual risk still documented. Z4A and the query-only Z4B
+route planner are complete. Z4C now connects normal player-owned followers to
+those routes and real same-map stair transitions. Z4D lets normal hostiles
+continue an existing legitimate player target through valid same-MapInstance
+stairs without enabling cross-floor perception or attacks. Graphical
+multiplayer acceptance remains manual.
 
 Current integrated feature set includes Playable-Z, Divergent Paths and
 MapInstances, schema-v3 persistent world state, headless and 15-player
@@ -1133,7 +1139,7 @@ Phase 7 - Editor roadmap
 
 Phase 8 - Release readiness
     Status: Automated stabilization gate passes; real-client acceptance pending.
-    The current Linux Steamworks/FMOD compile gate, 11 CTest tests, Stage4D,
+    The current Linux Steamworks/FMOD compile gate, 13 CTest tests, Stage4D,
     Room Group/S.A.M. characterizations, contained divergent two-client party
     save/restart, and contained late-join probe pass. Windows, graphical/editor
     runtime, the exact headless plus two-real-client scenario, token-matched
@@ -1353,18 +1359,155 @@ complete manual cross-feature scenario remain acceptance work.
 
 Current automated commands:
 
-    cmake --build build -j6
-    ctest --test-dir build --output-on-failure
-    ./build/barony --automatia-stage4d-z3-transition-characterization
+    cmake --build build-super-posix -j6
+    ctest --test-dir build-super-posix --output-on-failure
+    ./build-super-posix/barony --automatia-stage4d-z3-transition-characterization
     git diff --check
 
-CTest currently registers 11 targets: foundation, S.A.M. 2.1 contract, Text
-Source, Mini Mimic, Room Group, S.A.M. room generation, party backend, party UI,
-party chat, Playable-Z characterization, and Playable-Z runtime characterization.
+CTest currently registers 13 targets: foundation, S.A.M. 2.1 contract, Text
+Source, Mini Mimic, Room Group, vertical navigation, cross-floor path routing,
+S.A.M. room generation, party backend, party UI, party chat, Playable-Z
+characterization, and Playable-Z runtime characterization.
 
-The remaining release/Z4 gate is the exact one-headless plus two-real-graphical-
-client run in "Automatia Cross-Feature Compatibility and Z4 Readiness Audit.txt".
+The remaining real-multiplayer acceptance gate is the exact one-headless plus
+two-real-graphical-client run in "Automatia Cross-Feature Compatibility and Z4
+Readiness Audit.txt".
 It covers divergent MapInstances/floors, custom S.A.M. content, persistence,
 Mini Mimic dialogue/recruitment and durable ownership, Room Groups, ambience,
 late join, save, dedicated restart, reconnect, and restoration. Do not claim
 that scenario, editor visuals, or audible ambience as verified until run.
+
+
+======================================================================
+43. Z4A VERTICAL NAVIGATION FOUNDATION
+======================================================================
+
+Status: Implemented and automated-characterized; Z4B supplies queries, while
+Z4C followers and Z4D hostiles consume those routes.
+
+Each MapInstance owns a derived vertical transition graph. A graph node location
+is a playable floor plus tile X/Y, and its directed edges come from the existing
+ZLDR authored stair or legacy paired ZTRN metadata. Equal coordinates on two
+floors do not create an edge. Graph queries require the owning MapInstance key,
+so identical maps or coordinates in divergent instances remain isolated.
+
+The graph is reconstructed when a loaded map is bound/refreshed instead of
+being serialized as duplicate transition data. Invalid deltas, missing or
+duplicate persistent IDs, missing targets, blocked landings, invalid floors,
+and out-of-bounds endpoints are rejected. Existing one-floor Z0 maps retain an
+empty graph and their prior behavior.
+
+Dropped items in the derived authored-layer stack now cross downward one
+structural boundary at a time. For example, an item falling from floor 2 moves
+through floor 1 before floor 0, preserving its entity identity, runtime item
+metadata, residual local Entity::z, and spatial revision. Falling below Z0
+continues to use the legacy pit/lava loss behavior.
+
+Z4A itself does not alter pursuit or ordinary per-floor 2D path domains. Z4B
+supplies the MapInstance-local query layer described below; Z4C and Z4D are its
+separately scoped behavior consumers.
+
+
+======================================================================
+44. Z4B CROSS-FLOOR PATH QUERIES
+======================================================================
+
+Status: Implemented and automated-characterized; Z4C consumes it for followers
+and Z4D consumes it for hostile pursuit.
+
+The generic Z4B query composes Barony's existing A* pathfinder with the Z4A
+graph. A returned route contains ordinary floor-local path steps and explicit
+vertical-transition steps in order. Multi-floor routes may contain several
+such pairs. Same-floor requests call the ordinary local path directly and do
+not scan other floors.
+
+The query is valid only for the currently active loaded MapInstance and requires
+matching source/destination instance identity. Equal X/Y on different floors is
+not adjacency. Missing transitions, blocked local approaches, disconnected
+floors, malformed/blocked Z4A stairs, and divergent MapInstances return
+unreachable.
+
+The explicit-floor A* adapter suppresses monster/follower path success/failure
+callbacks, and the route query does not assign Entity::path, initiate pursuit,
+or move an entity. S.A.M. entities can use the same generic API; no separate
+S.A.M. pathfinder or identity system exists.
+
+Z4C uses this query for followers and Z4D uses it for hostiles as described
+below. The query itself still has no targeting or movement side effects.
+
+
+======================================================================
+45. Z4C FOLLOWER VERTICAL NAVIGATION
+======================================================================
+
+Status: Implemented and automated-characterized. Real graphical multiplayer
+acceptance remains manual.
+
+When a normal player-owned monster detects that its durable owner is on another
+playable floor in the same active MapInstance, it asks Z4B for a route. It walks
+the first floor-local segment through the existing follower HUNT path, reaches
+the authored ZLDR/ZTRN transition, performs an authoritative floor transition,
+then reconstructs the remaining route. Multi-floor routes repeat that sequence.
+Once follower and owner share a floor, ordinary Barony following resumes.
+
+The transition is generic rather than Mini-Mimic- or S.A.M.-specific. It keeps
+the actor's persistent/runtime identity, durable owner, monster state and local
+Entity::z while updating playableFloor, the authored structural layer where
+required, spatial revision, TileEntityList membership, bodyparts/passive visual
+children, lights and MapInstance persistence dirtiness. The existing ENTU
+layout already carries playableFloor and spatialRevision, so Z4C did not add or
+change a packet field. Same-MapInstance clients receive that ordinary entity
+update even when they are viewing the source floor.
+
+Followers no longer ride a player's PZTR/falling transaction as an immediate
+teleport. Blocked approaches, missing transitions, disconnected floors,
+different MapInstances and disconnected owners pause without crossing. A
+reconnected durable owner resumes the same follower representation; route
+cursors are reconstructed rather than persisted. Compatible S.A.M. followers
+benefit when they use the normal monster/follower APIs, with no parallel
+pathfinder, owner system or S.A.M.-specific persistence.
+
+Automated characterization covers one-floor unchanged behavior, a blocked
+approach, two authored stair transitions, a Mini Mimic recruit, preserved owner
+and persistent identity, same-X/Y disconnected floors, MapInstance isolation,
+disconnect/reconnect representation and headless execution. It does not replace
+the documented one-headless plus two-real-client acceptance run. Hostile AI is
+the separate Z4D consumer below; it is not folded into follower ownership logic.
+
+
+======================================================================
+46. Z4D HOSTILE VERTICAL NAVIGATION
+======================================================================
+
+Status: Implemented and automated-characterized. Real graphical multiplayer
+acceptance remains manual.
+
+When a normal hostile has already acquired a legitimate player target and that
+player moves to another playable floor, the server asks Z4B for the next route
+segment. A valid route must remain inside the active MapInstance and use real
+Z4A stairs. The monster walks the ordinary HUNT path to the stair, crosses via
+the same generic authoritative non-player transaction used by Z4C, and resumes
+ordinary combat targeting only after reaching the player's floor. Multi-floor
+routes repeat one explicit transition at a time.
+
+Z4D does not add omniscient cross-floor perception. Raw acquisition remains
+floor-local, equal X/Y on different floors is neither range nor adjacency, and
+the normal attack entry point rejects a target on another floor. Missing or
+blocked stairs, disconnected floors, stale targets and divergent MapInstances
+stop the pursuit. Clients cannot initiate the transition.
+
+Authored stationary NPCs, custom-dialogue NPCs, traders, passive Mini Mimics,
+inert mimics and immobile turrets do not start this behavior. Recruited Mini
+Mimics and other player followers continue to use Z4C. A hostile authored Mini
+Mimic and a compatible S.A.M. monster receive Z4D through normal monster APIs;
+there is no Mini-Mimic- or S.A.M.-specific stair pathfinder, packet, identity or
+persistence path. S.A.M. metadata remains attached while the generic actor
+transition updates MapInstance, playableFloor, authoredMapLayer and local Z
+context.
+
+Automated characterization covers same-floor hostile behavior, an unreachable
+upper target, one- and two-stair pursuit, same-X/Y isolation, attack isolation,
+a hostile and passive Mini Mimic, stationary dialogue NPC, recruited Mini
+Mimic, a S.A.M.-compatible normal monster, MapInstance rejection, client
+authority rejection and headless execution. It does not replace a real
+dedicated-server plus graphical-client observation of movement and replication.
