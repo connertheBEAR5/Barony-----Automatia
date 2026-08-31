@@ -1,1127 +1,645 @@
-BARONY CUSTOM DIALOGUE AND QUEST EDITOR GUIDE
-=============================================
+BARONY AUTOMATIA CUSTOM DIALOGUE + QUEST EDITOR GUIDE
+=====================================================
 
-This is the single maintained guide for the custom dialogue/quest
-system. Future packages update this file instead of adding a new
-documentation file for every code change.
-
-Current integration status (2026-08-28): the quest journal UI is implemented;
-Automatia companion saves serialize quest/dialogue state; and dedicated
-per-character saves export/import player-scoped story state. The live dialogue
-runtime still executes only player ownership. Authored party/world scope values
-are retained by the editor but load safely as player scope until those ownership
-models are implemented. Authored Mini Mimics can keep dialogue and
-recruitability enabled together; `recruit_npc` uses the generic persistent
-follower-owner path. Broad real-client multiplayer/reconnect acceptance remains
-open even though deterministic and contained process tests pass.
+This is the maintained guide for the remastered Zed dialogue and quest editor.
+It describes the current visual editor and runtime contract. Historical button
+roadmaps have been removed so new authors do not have to reconstruct the UI's
+implementation history.
 
 
-1. FILE LOCATION AND DIALOGUE IDS
-=================================
+1. THE TWO IDENTITIES
+=====================
 
-Dialogue JSON files are stored in:
+Dialogue resources live at:
 
     dialogue/<dialogue_file_id>.json
 
-The Custom Dialogue ID entered on an NPC sprite chooses the filename
-directly.
-
-Example:
+An NPC's Custom Dialogue ID selects that filename without the .json suffix.
 
     NPC Custom Dialogue ID: village_guard
-    Loaded file: dialogue/village_guard.json
-
-The game does not scan every JSON file looking for a quest ID.
+    Resource:               dialogue/village_guard.json
 
 Dialogue/File ID and Quest ID are separate:
 
     Dialogue/File ID
-        Controls the JSON filename and the NPC's Custom Dialogue ID.
+        Selects the resource. Renaming the file changes this identity.
 
-    Quest ID
-        Controls persistent quest progress, journal identity,
-        conditions, objectives, completion, and failure state.
+    Quest ID (root quest_id)
+        Selects persistent quest progress, journal state, conditions,
+        objectives, completion, failure, and quest variables.
 
-Example:
+    Example
+        Dialogue/File ID: village_guard
+        Quest ID:         convince_the_guard
 
-    Dialogue/File ID: village_guard
-    JSON filename:    village_guard.json
-    Quest ID:         convince_the_guard
+Renaming village_guard.json does not rename convince_the_guard. The editor
+keeps this separation visible and relinks quest references only when the author
+directly edits quest_id.
+
+Dialogue schema version 1 also retains the original one-line form:
+
+    {"version": 1, "text": "Hello, traveler."}
+
+Conversation presents this as a Legacy One-Line Dialogue with an editable NPC
+text field. CONVERT TO EDITABLE NODE GRAPH preserves the line as node 0 and
+unlocks responses, conditions, actions, and graph preview. Undo restores the
+legacy form until the document is saved.
 
 
-2. OPENING THE EDITOR
+2. OPENING AND LAYOUT
 =====================
 
-Open an NPC's sprite properties and use the custom-dialogue EDIT button.
+Open an NPC's sprite properties and use the custom-dialogue EDIT control. The
+remastered window uses stable application-style regions drawn with Zed/Barony's
+existing panels, fonts, buttons, colors, and input system:
 
-The editor has four separate columns:
+    Top navigation
+        Files | Conversation | Quest | Tutorials | JSON | Preview | Validation
 
-    JSON Files:
-        The far-left file list. Keeping it separate prevents filenames
-        from overlapping buttons.
+    Left file rail
+        Searchable dialogue resources, quest metadata, saved/unsaved state,
+        and validation badges.
 
-    Toolbox:
-        Vertical paired controls immediately to the right of the file
-        list.
+    Main workspace
+        The active page: conversation flow, quest builder, tutorial recipe,
+        JSON, preview, or diagnostics.
 
-    Decision Tree:
-        Dialogue nodes, choices, and next-node links.
+    Inspector
+        Semantic controls for the selected node, response, condition, action,
+        objective, giver, or item.
 
-    Quest / Node Details:
-        Quest metadata, selected node details, conditions, and actions.
+    Status area
+        Current file, dirty state, validation counts, and contextual messages.
 
-
-3. VERTICAL TOOLBOX
-===================
-
-File controls:
-
-    NEW
-        Creates a new valid dialogue JSON file.
-
-    SAVE
-        Writes the current in-memory JSON document.
-
-    RELOAD
-        Discards the current in-memory copy and reloads the selected
-        JSON file.
-
-    RENAME
-        Renames the selected JSON file when Dialogue/File ID is the
-        active editable field.
-
-        It:
-        - normalizes the new filename,
-        - refuses blank names,
-        - refuses overwriting another JSON,
-        - keeps the renamed file selected,
-        - updates the selected NPC's Custom Dialogue ID,
-        - does not change quest_id.
+Long labels are clipped or wrapped inside their panels. Lists have independent
+scrolling where applicable. No separate web browser or GUI framework is used.
 
 
-Node and choice controls:
+3. FILE HOME AND NEW DIALOGUE WIZARD
+====================================
 
-    +NODE / -NODE
-        Add or safely remove dialogue nodes.
+The file rail searches filename/Dialogue ID, Quest ID, and quest title. Each
+entry reports OK, warning count, or error count.
 
-        A node cannot be removed when:
-        - it is the start node,
-        - it is the only remaining node,
-        - another node links to it,
-        - a choice links to it.
+File actions:
 
-    +CHOICE / -CHOICE
-        Add or remove choices on the selected node.
+    New
+        Opens the four-step wizard.
 
-    NEXT>
-        Cycles the selected choice's destination through existing
-        nodes.
+    Rename
+        Changes the dialogue filename only. It refuses blank IDs, unsafe IDs,
+        and collisions. It does not silently rename quest_id.
 
-    ONCE
-        Toggles whether the selected choice can only be used once.
+    Duplicate
+        Loads the source through the shared document model and atomically saves
+        an independent copy with a unique filename.
 
+    Delete
+        Requires confirmation and never targets a directory or wildcard.
 
-Objective controls:
+    Reload
+        Reloads the selected file after the dirty-state prompt.
 
-    +OBJECT / -OBJECT
-        Add or remove quest objectives.
+    Save
+        Validates and atomically replaces the selected file. The old file is
+        not truncated before the replacement is ready.
 
-    OPTIONAL
-        Toggles the selected objective between required and optional.
+New Dialogue wizard:
 
-    OBJ MARK
-        Toggles a static minimap marker for the selected objective.
+    Step 1 - Identity
+        Dialogue/File ID and a live dialogue/<id>.json preview.
 
+    Step 2 - Conversation
+        First NPC line, first response, and a starter template.
 
-Field controls:
+    Step 3 - Quest
+        Optional quest, Quest ID, title, summary, repeatable state, and giver
+        source (none, cursor tile, or selected persistent NPC).
 
-    CAT< / CAT>
-        Change field category.
+    Step 4 - Finish
+        Collision check, validation result, and atomic Create & Open.
 
-    FIELD< / FIELD>
-        Move backward or forward inside the current field category.
+Starter templates:
 
-    EDIT
-        Copies the selected field into the text-input buffer.
+    Empty Conversation
+    Greeting / One Choice
+    Two-Choice Branch
+    Quest Giver
+    Recruitable NPC
 
-    APPLY
-        Writes the edited value to JSON, saves, and reloads the preview.
-
-
-Field categories:
-
-    File/Quest
-        Dialogue/File ID
-        Quest ID
-        Quest Title
-        Quest Summary
-
-    Text
-        Node Text
-        Choice ID
-        Choice Text
-
-    Objective
-        Objective ID
-        Objective Text
-        Objective Stage
-        Objective Target
-
-    Condition
-        Condition Reference
-        Condition Number
-
-    Action
-        Action Number
-
-    Marker
-        Marker X
-        Marker Y
+The wizard refuses an existing filename and never overwrites a resource.
 
 
-Condition and action selectors:
+4. MAKE AN NPC SAY HELLO
+=======================
 
-    COND TYPE
-        Cycles supported choice-condition presets.
+    1. Choose New.
+    2. Enter a Dialogue/File ID.
+    3. Choose Greeting / One Choice.
+    4. Enter the NPC line and player response.
+    5. Create & Open.
+    6. Validate, Preview, then Save.
+    7. Put the Dialogue/File ID on the NPC sprite.
 
-    ACTION
-        Cycles supported choice-action presets.
-
-    COMPARE
-        Cycles:
-            equals
-            not_equals
-            at_least
-            at_most
-
-    SCOPE
-        Cycles:
-            player
-            party
-            world
-
-        Current runtime limitation:
-        Only player scope is currently accepted by the game runtime.
-
-    COND ITEM
-        Cycles valid current requirement-item aliases:
-            torch
-            tool_torch
-
-    REWARD
-        Cycles:
-            Off
-            healing_potion
-            torch
-            Off
-
-    REMOVE ITEM
-        Toggles removal of one torch.
-
-    REMOVE GOLD
-        Toggles removal of 100 gold.
-        Use Action Number to change the amount.
-
-
-Other controls:
-
-    RECRUIT
-        Toggles action.recruit_npc on the selected choice.
-
-    REPEAT
-        Toggles quest.repeatable.
-
-    GIVER MARKER
-        Cycles:
-            Off
-            Static tile
-            Follow selected NPC
-            Off
-
-
-4. BASIC JSON FORMAT
-====================
-
-A minimal dialogue/quest file:
+A minimal resource is:
 
 {
   "version": 1,
-  "quest_id": "convince_guard",
-  "quest": {
-    "title": "Convince the Guard",
-    "summary": "Earn the guard's trust.",
-    "scope": "player",
-    "repeatable": false,
-    "objectives": []
-  },
   "start_node": 0,
   "nodes": [
     {
       "id": 0,
-      "text": "Why should I follow you?",
+      "text": "Hello, traveler.",
       "next": 0,
-      "choices": []
+      "choices": [
+        {"id": "hello", "text": "Hello.", "next": 0}
+      ]
     }
   ]
 }
 
 
-5. QUEST ORIGIN AND GIVER MARKERS
-================================
+5. CONVERSATION WORKSPACE
+=========================
 
-Static quest-giver marker:
+The Conversation page presents nodes as readable flow cards. A node shows its
+numeric ID, START marker, NPC text, automatic destination, redirect summary,
+one-time node-action summary, and response destinations.
 
-"origin": {
-  "label": "Village Guard",
-  "map": "village.lmp",
-  "x": 12,
-  "y": 8
-}
+Node operations:
 
-Dynamic marker following an NPC:
+    Add, duplicate, select, edit, and delete
+    Set as start node
+    Edit numeric ID and NPC text
+    Select automatic next destination directly
+    Add/remove a redirect condition
+    Add/remove a one-time node action
 
-"origin": {
-  "label": "Village Guard",
-  "map": "village.lmp",
-  "track_npc": true,
-  "npc_persistent_id": 125
-}
+Safe deletion blocks removal when the node is:
 
-Dynamic behavior:
+    the start node,
+    the last node,
+    another node's next destination,
+    a response destination,
+    a redirect true/false destination, or
+    referenced by node_seen.
 
-- The marker follows the live NPC's current tile.
-- It only appears while the NPC is on the active origin map.
-- It disappears when the NPC is dead or removed.
-- It disappears after that NPC becomes a follower.
+Duplicating a node creates fresh node/choice/action IDs and repairs copied
+self-links to point at the duplicate.
 
+Response operations:
 
-6. OBJECTIVES
-=============
+    Add, duplicate, select, edit, delete, move up, and move down
+    Edit globally unique stable response ID
+    Edit response text
+    Choose destination directly
+    Toggle once-only behavior
+    Add one condition or an AND list of conditions
+    Stack multiple independent action fields
 
-Example objective:
-
-{
-  "id": "find_key",
-  "text": "Find the old key.",
-  "completed_text": "The key was recovered.",
-  "stage": 0,
-  "optional": false,
-  "progress_variable": "keys_found",
-  "target": 1,
-  "map_marker": {
-    "map": "village.lmp",
-    "x": 22,
-    "y": 14
-  }
-}
-
-Required fields:
-
-    id
-    text
-
-Optional fields:
-
-    completed_text
-    stage
-    optional
-    progress_variable
-    target
-    map_marker
+Adding or editing one action does not erase unrelated action fields.
 
 
-7. DIALOGUE NODES AND CHOICES
-=============================
-
-Node:
-
-{
-  "id": 0,
-  "text": "Can you help me?",
-  "next": 0,
-  "choices": []
-}
-
-Choice:
-
-{
-  "id": "accept",
-  "text": "Yes, I will help.",
-  "next": 1,
-  "once": true
-}
-
-
-8. CHOICE CONDITIONS
+6. CONDITION BUILDER
 ====================
 
-Has item:
+Select a response and use Add Condition. A response may use singular
+"condition" or a "conditions" array. Every entry in the array must pass
+(logical AND). The visual builder preserves either valid representation.
 
-"condition": {
-  "type": "has_item",
-  "item": "torch",
-  "count": 1
-}
+Choice condition families:
 
-Has gold:
+    has_item
+        Vanilla item or S.A.M. stable_id plus positive count.
 
-"condition": {
-  "type": "has_gold",
-  "amount": 100
-}
+    has_gold
+        Non-negative gold amount.
 
-Quest completed:
+    quest_started
+    quest_accepted
+    quest_completed
+    quest_failed
+        Referenced quest ID.
 
-"condition": {
-  "type": "quest_completed",
-  "quest": "prove_yourself"
-}
+    quest_stage
+        Quest ID, integer stage, and comparison.
 
-Quest stage:
+    objective_completed
+    objective_incomplete
+        Quest ID and objective ID.
 
-"condition": {
-  "type": "quest_stage",
-  "quest": "prove_yourself",
-  "stage": 2,
-  "comparison": "at_least"
-}
+    world_flag
+    npc_flag
+        Normalized ID and required Boolean value.
 
-Objective state:
+    world_variable
+    npc_variable
+        Normalized ID, integer value, and comparison.
 
-"condition": {
-  "type": "objective_completed",
-  "quest": "prove_yourself",
-  "objective": "kill_monster"
-}
-
-NPC flag:
-
-"condition": {
-  "type": "npc_flag",
-  "id": "recruited",
-  "value": false
-}
-
-Supported comparisons:
+Comparisons:
 
     equals
     not_equals
     at_least
     at_most
 
+There is no quest_variable condition in the current runtime. Quest variables
+can be changed by actions but are not an authorable condition family.
 
-9. CHOICE ACTIONS
+Node redirect conditions use:
+
+    has_item, has_gold,
+    quest_started, quest_accepted, quest_completed, quest_failed, quest_stage,
+    node_seen,
+    world_flag, npc_flag, world_variable, npc_variable
+
+A node redirect additionally requires direct true_node and false_node
+destinations. has_item and has_gold redirects may optionally consume the item
+or gold. Node quest_stage supports equals, at_least, and at_most; the current
+runtime does not accept not_equals for node redirects.
+
+
+7. ACTION BUILDER
 =================
 
-Accept a quest:
-
-"action": {
-  "quest_accept": true
-}
-
-Complete a quest:
-
-"action": {
-  "quest_complete": true
-}
-
-Change quest stage:
-
-"action": {
-  "quest_stage": 2
-}
-
-Reward gold:
-
-"action": {
-  "reward_gold": 100
-}
-
-Remove gold:
-
-"action": {
-  "remove_gold": 100
-}
-
-Reward an item:
-
-"action": {
-  "reward_item": {
-    "item": "healing_potion",
-    "count": 1
-  }
-}
-
-Remove an item:
-
-"action": {
-  "remove_item": {
-    "item": "torch",
-    "count": 1
-  }
-}
-
-Recruit the NPC:
-
-"action": {
-  "recruit_npc": true
-}
-
-After successful recruitment, the runtime sets the NPC flag:
-
-    recruited = true
-
-
-10. CURRENT ITEM LIMITATIONS
-============================
-
-The current runtime recognizes these authored item names:
-
-Requirement/removal:
-
-    torch
-    tool_torch
-
-Rewards:
-
-    healing_potion
-    potion_healing
-    torch
-    tool_torch
-
-The editor intentionally does not generate unsupported item names.
-
-
-11. HISTORICAL EDITOR ROADMAP (NOW IMPLEMENTED BELOW)
-=====================================================
-
-The following was the earlier roadmap. Parts 12B and 13 plus the follow-up
-sections later in this guide document the implemented controls; do not read
-this historical list as current missing work:
-
-- quest start, fail, and reset actions,
-- objective complete and clear actions,
-- arbitrary reward/remove item counts,
-- world/NPC/quest flags and variables,
-- remote power actions,
-- NPC movement actions,
-- node-level conditions,
-- direct true/false branch selection,
-- direct destination-node selection,
-- duplication and reordering,
-- delete/duplicate file controls,
-- validation panel,
-- unsaved-change warning,
-- confirmation prompts,
-- scrolling details panel,
-- improved visual graph layout.
-
-
-
-Dynamic column sizing
----------------------
-The editor measures current filenames and quest metadata when drawing
-the window:
-
-- JSON Files grows for the longest filename.
-- Toolbox keeps enough width for paired controls.
-- Quest / Node Details grows for longer metadata.
-- Decision Tree receives the remaining width.
-
-Columns have minimum and maximum sizes so the complete editor stays
-inside the subwindow. Text that is still too long is shortened with
-"..." rather than overflowing into another column.
-
-
-
-Multiline readability
----------------------
-The dialogue editor uses more of the available screen and wraps long
-text instead of only clipping it.
-
-- Quest summaries are displayed across multiple lines.
-- Selected node text is shown in full in the details panel.
-- Selected choice text is shown across multiple lines.
-- Decision-tree node and choice labels wrap to several lines.
-- Extremely long text remains safely contained inside its panel.
-
-The full JSON value is preserved when editing even when only part of it
-fits inside the small toolbox input bar. The right-side details panel is
-the readable multiline preview.
-
-
-PART 12B DIRECT CHOICE AND FILE TOOLS
-====================================
-EDIT CHOICE
-    Select a choice in the decision tree and click EDIT CHOICE. The
-    editor immediately switches to Choice Text and starts text input.
-    Type the new text and click APPLY.
-
-VALIDATE
-    Checks the JSON root, version, start node, node IDs, node text,
-    choice fields, and destination links. The first exact problem is
-    displayed in the editor status line.
-
-DUP FILE
-    Creates a unique copy of the selected dialogue JSON and selects it.
-
-DEL FILE
-    Deletes the selected dialogue JSON. Press DEL FILE twice within four
-    seconds to confirm.
-
-
-
-PART 13: GUIDED ACTION BUILDER
-==============================
-
-The old ACTION cycle has been replaced by understandable action groups.
-
-1. Select a choice in the Decision Tree.
-2. Use ACTION < or ACTION > to select a group.
-3. Click the plainly named action you want.
-4. Use the existing editable fields for IDs or numbers that need to be
-   changed from their starter values.
-5. Press VALIDATE.
-
-Action groups
--------------
-
-Quest:
-    START QUEST
-    ACCEPT QUEST
-    COMPLETE
-    FAIL QUEST
-    RESET QUEST
-    SET STAGE
-
-Rewards:
-    GIVE GOLD
-    GIVE ITEM
-
-Costs:
-    TAKE GOLD
-    TAKE ITEM
-
-Objectives:
-    FINISH OBJ
-    CLEAR OBJ
-
-Flags:
-    WORLD FLAG
-    NPC FLAG
-
-Variables:
-    SET WORLD
-    ADD WORLD
-    SET NPC
-    ADD NPC
-    SET QUEST
-    ADD QUEST
-
-NPC:
-    RECRUIT NPC
-    EMPTY ACTION
-
-CLEAR ACTION removes the whole action object from the selected choice.
-
-Starter values
---------------
-
-GIVE GOLD:
-    reward_gold = 100
-
-GIVE ITEM:
-    healing_potion, count 1
-
-TAKE GOLD:
-    remove_gold = 100
-
-TAKE ITEM:
-    torch, count 1
-
-SET STAGE:
-    quest_stage = 1
-
-FINISH OBJ / CLEAR OBJ:
-    Uses the currently selected objective ID when available.
-    Otherwise it starts with objective_1.
-
-Flags:
-    Start with story_flag or npc_flag set to true.
-
-Variables:
-    Start with a clearly named placeholder and value/amount 1.
-
-These are starter values, not hidden permanent values. Edit the numeric
-or ID fields after creating the action.
-
-EXAMPLE JSON FILES
-==================
-
-The folder:
-
-    helpful stuff/dialogue examples/
-
-contains small working examples. Copy an example into your project's
-dialogue folder, rename it, and set an NPC's Custom Dialogue ID to the
-filename without .json.
-
-Examples are intentionally limited to fields understood by the current
-runtime. The runtime currently accepts quest state actions, item/gold
-rewards and costs, objective actions, world/NPC/quest variables, flags,
-and recruitment.
-
-
-PART 14: UNIVERSAL ITEM AND STATUS REWARDS
-==========================================
-
-Any item
---------
-The Rewards and Costs groups now show ITEM < and ITEM >.
-
-The editor displays:
-    Item ID
-    identified in-game item name
-
-GIVE ITEM creates a reward using the selected item.
-TAKE ITEM creates a cost using the selected item.
-
-The JSON stores the numeric ItemType as a string:
+Select a response and choose Add Action, then an intent-based category. Each
+action has plainly named controls. Multiple fields coexist in one action
+object.
+
+Choice action fields:
+
+    Quest
+        quest_start       Start the current root quest.
+        quest_accept      Accept the current root quest.
+        quest_stage       Set its integer stage.
+        quest_complete    Complete it.
+        quest_fail        Fail it.
+        quest_reset       Reset it; requires repeatable player scope.
+
+    Rewards and costs
+        reward_gold       Give a non-negative amount.
+        remove_gold       Take a non-negative amount.
+        reward_item       Give an item reference and count.
+        remove_item       Take an item reference and count.
+        status_effect     Effect ID, seconds, strength, and enabled state.
+
+    Objectives
+        objective_complete
+        objective_clear
+
+    Mechanisms and NPC
+        set_power         Tile X/Y and powered Boolean.
+        recruit_npc       Uses the generic follower path.
+
+    Flags
+        set_world_flag
+        set_npc_flag
+
+    Variables
+        set_quest_variable
+        add_quest_variable
+        set_world_variable
+        add_world_variable
+        set_npc_variable
+        add_npc_variable
+
+One-time node actions support exactly:
+
+    id
+    quest_accept
+    quest_complete
+    quest_stage
+    reward_gold
+    reward_item
+    set_world_flag
+    set_world_variable
+    add_world_variable
+    set_npc_flag
+    set_npc_variable
+
+The node action ID is required and globally unique within the document. It is
+the persistent once-only key. Choice-only actions are not offered on nodes.
+
+
+8. ITEMS AND S.A.M. 2.1
+=======================
+
+The item picker searches vanilla items and the existing editor tooling catalog
+at ~/.barony/sam_item_catalog.json. Vanilla selections store their numeric
+ItemType as a string. Legacy aliases remain supported:
+
+    torch / tool_torch
+    healing_potion / potion_healing
+
+Do not store a custom runtime numeric item ID. S.A.M. numbers are session-local.
+Custom items use a namespaced persistent registry ID:
 
     "reward_item": {
-        "item": "42",
-        "count": 1
+      "stable_id": "my_mod:crystal",
+      "count": 1
     }
 
-Numeric strings from 0 through NUMITEMS - 1 are accepted. Existing
-friendly aliases such as torch and healing_potion remain compatible.
+Custom catalog selections store stable_id, never the catalog's last runtime
+number. The catalog is an editor hint; the live runtime registry remains
+authoritative. The runtime resolves stable_id through that existing generic
+S.A.M. registry.
+It does not create a dialogue-specific registry and does not clamp a custom ID
+into the vanilla range. When stable_id is present it is authoritative; if it
+cannot be resolved, the runtime never falls back to an unrelated "item" value.
 
-Status effects
---------------
-Choose the Status action group.
+Unavailable stable items remain preserved in JSON and produce validation
+warnings. An unavailable item condition is false, an unavailable choice reward
+is rejected before costs/state changes, and an unavailable one-time node reward
+defers the complete node action without setting its once flag.
 
-Controls:
-    EFFECT < / EFFECT >
-    TIME - / TIME +
-    POWER - / POWER +
-    APPLY STATUS / CLEAR STATUS
 
-TIME is measured in seconds.
-POWER is the effect strength from 1 through 255.
+9. QUEST BUILDER
+================
 
-Generated JSON:
+The Quest page has Overview, Objectives, and Quest Giver sections.
 
-    "status_effect": {
-        "effect": 5,
-        "duration_seconds": 30,
-        "strength": 1,
-        "enabled": true
+Overview fields:
+
+    root quest_id
+    title
+    summary
+    objective              General journal objective text
+    completed_text
+    failed_text
+    scope
+    repeatable
+
+The visual scope selector exposes player, party, and world because those values
+are valid stored metadata. The current live dialogue runtime still executes
+quest ownership as player scope. Choosing party/world shows a warning and
+safely falls back to player behavior; it does not promise shared ownership.
+
+Objectives are ordered and support:
+
+    id                     Unique normalized ID
+    text                   Active text
+    completed_text
+    stage
+    optional
+    progress_variable
+    target                 Positive integer
+    defeat_id              Positive authored defeat ID
+    map_marker             Map, non-negative X, non-negative Y
+
+Objectives can be added, duplicated, deleted, and reordered. Renaming an
+objective relinks current-document conditions and actions. Deletion is blocked
+while a response condition/action still references the objective.
+
+
+10. QUEST GIVER
+===============
+
+Static origin:
+
+    "origin": {
+      "label": "Village Guard",
+      "map": "village.lmp",
+      "x": 12,
+      "y": 8
     }
 
-CLEAR STATUS writes enabled false and removes the selected effect from
-the player.
-
-Important:
-Some Barony effects are internal mechanics rather than ordinary player
-buffs or debuffs. The system permits all valid effect IDs, but map
-authors should test unusual IDs before shipping a map.
-
-
-PART 14 COMPILE-FIX NOTE
-========================
-The universal item selector currently displays the selected numeric item
-ID rather than reading ItemGeneric's private internal item-name field.
-
-This does not reduce runtime item support. GIVE ITEM and TAKE ITEM still
-accept every valid ItemType from 0 through NUMITEMS - 1.
-
-A later UI improvement should resolve names through a confirmed public
-ItemGeneric accessor or a separate editor-safe item-name table.
-
-
-PART 15: QUEST-GIVER BINDING AND ITEM NAMES
-===========================================
-
-Quest giver binding
--------------------
-
-Custom Dialogue ID only tells an NPC which JSON file to open. It does
-not automatically assign that NPC as the quest giver.
-
-To assign the quest giver:
-
-1. Place the NPC.
-2. Save the map so the NPC receives a persistent ID.
-3. Select the NPC again.
-4. Open the Dialogue and Quest Editor.
-5. Open the quest JSON.
-6. Click USE SELECTED NPC.
-
-The editor copies the selected NPC's persistent ID and current map into
-the quest origin. It also enables track_npc and removes static x/y
-coordinates.
-
-CLEAR GIVER removes the dynamic NPC assignment.
-
-The toolbox displays:
-
-    Quest giver ID: 1842
-
-A value of zero means no dynamic quest giver is assigned.
-
-Item-name display
------------------
-
-The universal item selector now displays both:
-
-    Selected item ID: 42
-    Item: identified item name
-
-The name comes from ItemGeneric::getIdentifiedName(), which is the
-public accessor used elsewhere in Barony.
-
-The JSON still stores the numeric item ID so every ItemType remains
-supported.
-
-
-Viewing actions already applied
--------------------------------
-
-Select a choice in the Decision Tree.
-
-The right-side details panel now shows:
-
-    Applied actions:
-    - Start quest
-    - Give item: iron sword x1
-    - Complete objective: bring_supplies
-    - Set world flag: gate_open
-
-The summary reads every supported field from the selected choice's
-action object. Numeric item IDs are converted back to identified item
-names.
-
-When an action uses unsupported custom JSON fields, the summary shows:
-
-    Custom action fields
-
-
-PART 16: GUIDED UI STATUS AND AMOUNT CONTROLS
-=============================================
-
-Gold amounts
-------------
-
-The Rewards and Costs action groups now show:
-
-    GOLD -10
-    GOLD +10
-    Gold amount: 100
-
-Set the amount first, then click GIVE GOLD or TAKE GOLD. The amount is
-written directly into reward_gold or remove_gold.
-
-Item quantities
----------------
-
-The item selector now shows:
-
-    Selected item ID: 31
-    Item: identified item name
-    QTY -
-    QTY +
-    Item quantity: 1
-
-Set the item and quantity before clicking GIVE ITEM or TAKE ITEM.
-
-Named effects
--------------
-
-The Status group now displays:
-
-    Effect 22: Health Regeneration
-    Duration: 30s
-    Strength: 1
-
-Effect IDs 0 through 134 have readable names taken from the current
-Barony effect constants. IDs 135 through 159 are displayed as Reserved /
-unnamed.
-
-Choice colors
--------------
-
-The Decision Tree now explains authored behavior beneath each choice:
-
-    Green:
-        Requirements and conditions
-
-    Blue:
-        Objective complete/clear actions
-
-    Red:
-        Actions and rewards
-
-Example:
-
-    -> I brought the torch. [next 2]
-       Requires: Requires torch x1
-       Objective: Completes bring_torch
-       Action: Take item
-
-Condition selection
--------------------
-
-NEXT CONDITION cycles through the supported condition templates. The
-current condition is shown immediately below the button.
-
-The details panel lists the available condition families and shows the
-selected choice's exact requirement. Use the existing Condition
-Reference and Condition Number editable fields to change IDs, item
-references, stages, amounts, or variable values.
-
-This is intentionally guided: the editor shows what is selected, what
-will be written, and what is already attached to each choice.
-
-
-PART 17: BUTTON TOOLTIPS AND SAFE STATIC MARKERS
-================================================
-
-Hover over any dialogue-editor button. The bottom status line now shows
-what that exact control changes. Normal success and error messages still
-take priority.
-
-GIVER MARKER no longer writes tile 0,0 when nothing is selected. In that
-case the marker is turned off and the editor reports the reason.
-
-Quest-completed checks already exist. Use NEXT CONDITION until Quest
-Completed is selected, then set Condition Reference to the other quest's
-quest_id.
-
-
-PART 18: COMBINED GUIDED AUTHORING UPDATE
-========================================
-
-This package combines several planned stages.
-
-Static giver markers
---------------------
-
-USE CURSOR TILE writes the current editor cursor tile directly into the
-quest origin. The toolbox then displays:
-
-    Static giver tile 24, 17
-
-An invalid/outside cursor turns the marker off rather than writing 0,0.
-
-Dynamic giver markers
----------------------
-
-USE SELECTED NPC copies the selected NPC's persistent ID. The toolbox
-then displays:
-
-    Giver follows NPC ID 1842
-
-Condition browser
------------------
-
-COND < and COND > browse all guided condition templates:
-
-    None
-    Has item
-    Has gold
-    Quest started
-    Quest accepted
-    Quest completed
-    Quest failed
-    Quest stage
-    Objective completed
-    Objective incomplete
-    World flag
-    NPC flag
-    World variable
-    NPC variable
-
-CLEAR CONDITION removes only the selected choice requirement. CLEAR
-ACTION remains separate.
-
-Quest-completed checks
-----------------------
-
-Select Quest Completed with COND < or COND >. Then use the Condition
-category's reference field to enter the other quest's quest_id.
-
-The initial templates use the currently selected item, item quantity,
-gold amount, quest ID, and objective where applicable.
-
-Restart Game
-------------
-
-GameUI.cpp includes the confirmed stale quest-journal frame-pointer fix.
-The journal and tracker are re-associated with the newly created UI tree
-after Restart Game.
-
-
-PART 19: GUIDED CONDITION VALUE SELECTORS
-=========================================
-
-Has Item requirements
----------------------
-
-After selecting Has Item with COND < or COND >, the toolbox displays:
-
-    REQ ITEM <
-    REQ ITEM >
-    Required item ID: 42
-    Item: iron sword
-    REQ QTY -
-    REQ QTY +
-    Required quantity: 1
-
-Changing the item or quantity immediately updates the selected choice's
-condition. The user does not need to type the item ID into JSON.
-
-Quest-state requirements
-------------------------
-
-For Quest Started, Quest Accepted, Quest Completed, Quest Failed, and
-Quest Stage, the toolbox displays:
-
-    QUEST <
-    QUEST >
-    Quest ID: village_help
-    Title: Help the Village
-
-The editor scans every valid JSON file in ./dialogue, collects unique
-quest_id values, and lets the author browse them by title.
-
-Changing the selected quest immediately updates the condition's quest
-reference. This works for checking whether any other authored quest is
-started, accepted, completed, failed, or at a particular stage.
-
-
-PART 20: GUIDED CONDITION PARAMETERS
-====================================
-
-Has Gold
---------
-
-Use GOLD REQ -10 and GOLD REQ +10 to adjust the required amount. TYPE
-EXACT AMOUNT opens the guided number field for a precise value.
-
-Quest Stage
------------
-
-Choose the required quest with QUEST < and QUEST >. Then use STAGE - and
-STAGE + to set the required stage.
-
-Objective Complete / Incomplete
--------------------------------
-
-Use OBJECTIVE < and OBJECTIVE > to browse the current quest's objectives.
-The editor displays both objective ID and objective text.
-
-World and NPC flags
--------------------
-
-EDIT FLAG NAME opens a guided text field for the persistent flag ID.
-TOGGLE REQUIRED VALUE switches between requiring true and false.
-
-World and NPC variables
------------------------
-
-EDIT VARIABLE NAME opens the guided variable-ID field. VALUE - and VALUE
-+ adjust the required number. COMPARE cycles equals, not-equals,
-at-least, and at-most. TYPE EXACT VALUE accepts a precise integer.
-
-These controls update the selected condition immediately and keep the
-green requirement summaries synchronized.
-
-
-PART 21: GUIDED AUTHORING MEGAPACK
-==================================
-
-This is a consolidated structural-authoring update rather than a small
-single-control release.
-
-Node duplication
-----------------
-
-DUPLICATE NODE deep-copies the selected node. The copy receives a new
-numeric node ID. Self-links inside the copied node are redirected to the
-new node, and copied choices receive fresh IDs.
-
-Choice duplication and ordering
--------------------------------
-
-DUPLICATE CHOICE copies the selected response, including its condition,
-actions, next target, and once-only setting. A unique choice ID is
-generated automatically.
-
-CHOICE UP and CHOICE DOWN change the response order shown to players.
-
-Objective duplication and ordering
-----------------------------------
-
-DUPLICATE OBJECTIVE copies the selected objective and assigns a unique
-objective ID.
-
-OBJECTIVE UP and OBJECTIVE DOWN control journal display order.
-
-Objective markers
------------------
-
-OBJ MARK now uses the current editor cursor tile. An invalid cursor does
-not create a marker and never writes coordinates 0,0.
-
-Expanded validation
--------------------
-
-VALIDATE now additionally rejects:
-
-    Duplicate choice IDs
-    Empty choice text
-    Non-object choice conditions
-    Non-object choice actions
-    Duplicate objective IDs
-    Empty objective IDs
-    Empty objective text
-    Non-array objective collections
-    Invalid objective marker values
-
-All earlier guided condition controls, quest selectors, item selectors,
-tooltips, summaries, giver markers, and the Restart Game journal fix are
-included.
-
-
-CURRENT MINI MIMIC AND MULTIPLAYER CONTRACT (2026-08-29)
-========================================================
-
-The Zed Mini Mimic property panel independently stores disposition,
-recruitability, custom-dialogue enabled state, dialogue resource, and optional
-display name. Enabling dialogue does not disable recruitment, and recruiting an
-NPC does not erase its authored dialogue configuration. Dialogue choices remain
-host-authoritative and per-player quest state remains private to the interacting
-character. The generic persistent follower system owns recruitment, networking,
-HUD restoration, durable owner identity, inventory/equipment, and reconnect.
-
-Appearance is another independent authored field. `Baby` is zero/default for
-old maps and keeps the dedicated Mini shell with generated mouth-interior voxels;
-its inward surfaces are relined and its cavity includes regular-Mimic teeth.
-`Scaled Mimic` uses the complete regular Mimic trunk/lid fitted to the Mini
-footprint. Both use the calm idle. Toggling appearance does not change the
-dialogue-enabled flag, resource path, recruitability, owner, or per-player quest
-state. The editor places Appearance on its own row between the Mini NPC controls
-and Dialogue Resource so the controls and text do not overlap.
-
-MapInstance and playableFloor scope interaction; authoredMapLayer and local Z
-remain physical/presentation coordinates. A dialogue or Mini Mimic copied in a
-multi-layer Room Group retains those fields and generic persistent metadata.
-S.A.M. equipment uses stable item IDs through the shared item/persistence layer;
-there is no dialogue-specific or Mini Mimic-specific S.A.M. format.
-
-Automated parser/editor characterization and the full 13-test suite pass in
-`build-super-posix`. The real two-client dialogue-plus-recruit, per-player quest
-visibility, upper-floor
-interaction, save/restart, reconnect, and matching remote appearance scenario
-remains part of the manual cross-feature acceptance; it is not claimed by
-editor compilation.
+Tracked origin:
+
+    "origin": {
+      "label": "Village Guard",
+      "map": "village.lmp",
+      "track_npc": true,
+      "npc_persistent_id": 125
+    }
+
+Use Cursor Tile captures a valid editor tile. Use Selected NPC requires a
+positive persistent ID, normally assigned after saving the map. Clear Giver
+removes the origin. The editor never silently creates a marker at 0,0 when no
+valid cursor or NPC is available.
+
+A tracked marker appears only while its NPC is available in the relevant map
+context and no longer acts as an ordinary giver marker after recruitment.
+
+
+11. PREVIEW / TEST
+==================
+
+Preview runs an in-memory sandbox. It uses the shared condition/action model
+and never mutates game state, persistent story data, an NPC, or the file.
+
+Sandbox inputs include gold, items, flags, variables, quest states, seen nodes,
+and used response IDs. The preview shows:
+
+    current NPC line,
+    visible responses,
+    semantic AND-condition summaries,
+    response action summaries,
+    current simulated gold/items/flags/quest state, and
+    actions that require a real game world.
+
+Reset restores the initial sandbox state. Status effects, mechanism power, and
+NPC recruitment are reported as unavailable simulation actions and still need
+manual game testing. Preview is not proof of network, audio, journal rendering,
+or world presentation.
+
+
+12. JSON AND VALIDATION
+=======================
+
+The JSON page always reflects the same in-memory document as Visual Mode.
+Advanced editing parses into a temporary document first. Apply replaces the
+model only after parsing succeeds; Cancel returns without changing it. A parse
+failure never overwrites the last good document or the on-disk file.
+
+The model retains the full RapidJSON DOM. Editing one known field preserves
+other valid fields and unknown extension objects/arrays/scalars. Unknown fields
+are shown as informational diagnostics and remain accessible in Advanced JSON.
+
+Validation has Error, Warning, and Info severities plus structured file/quest/
+node/response/condition/action/objective locations. Selecting a diagnostic
+navigates to the relevant editor object when possible.
+
+Examples of errors:
+
+    invalid schema/version or root
+    duplicate node, response, objective, or node-action ID
+    broken start/next/branch destination
+    unreachable node
+    missing objective reference
+    invalid item/effect/count/comparison/range
+    quest action without quest_id
+    invalid repeatable reset
+
+Examples of warnings/info:
+
+    normalized identifiers
+    unavailable S.A.M. stable item
+    party/world scope falling back to player
+    preserved unknown extension fields
+
+Documents are capped at 64 KiB to match the current runtime resource limit.
+
+
+13. TUTORIAL LIBRARY
+====================
+
+The Tutorials page is searchable by title/category/difficulty. Every recipe has
+a goal, concepts, steps, expected result, multiplayer/persistence notes, common
+mistake, verified example JSON, and a manual-game-test marker where appropriate.
+
+The 34 built-in recipes are:
+
+     1. Your First Conversation
+     2. A Linear Conversation
+     3. A Two-Choice Branch
+     4. Once-Only Response
+     5. Require an Item
+     6. Give an Item
+     7. Take an Item
+     8. Require Gold
+     9. Give and Take Gold
+    10. Start and Accept a Quest
+    11. Change Quest Stage
+    12. Complete a Quest
+    13. Fail a Quest
+    14. Reset a Repeatable Quest
+    15. Complete and Clear Objectives
+    16. Objective Map Marker
+    17. Static Quest Giver Marker
+    18. Follow the Selected NPC
+    19. Check Another Quest
+    20. World Flag
+    21. NPC Flag
+    22. World Variable
+    23. NPC Variable
+    24. Quest Variables
+    25. Comparison Operators and AND
+    26. Status Effect
+    27. Power a Mechanism Tile
+    28. Recruit an NPC
+    29. Dialogue and Recruitable Mini Mimic
+    30. Player-Scoped Multiplayer Quests
+    31. S.A.M. Stable Item Reference
+    32. Node Redirect Condition
+    33. Remember a Seen Node
+    34. One-Time Node Action
+
+The automated dialogue regression parses and validates every recipe. Recipes
+marked for manual testing are honest about behavior that a document test cannot
+observe.
+
+
+14. MULTIPLAYER, PERSISTENCE, AND SPATIAL CONTEXT
+=================================================
+
+Dialogue consequences remain host-authoritative. A remote client sends only
+the selected response index and NPC UID. The host checks its pending dialogue,
+NPC identity, response bounds, conditions, one-time quest state, reward/item
+availability, and costs before applying supported consequences. The host then
+syncs existing story state. Clients do not authoritatively grant rewards or
+change quests.
+
+The remaster reuses the existing persistent story backend for:
+
+    player quest state, stages, objectives, and quest variables;
+    world flags and variables;
+    per-player NPC flags, variables, current nodes, seen nodes, and used choices;
+    one-time node action flags; and
+    companion/character save import and export.
+
+NPC story keys retain the active MapInstance identity. Interaction and follower
+systems retain the entity's playableFloor and MapInstance boundaries. The
+dialogue remaster does not reinterpret authoredMapLayer or local model Z and
+does not add a second spatial/identity system. Upper-floor and multi-instance
+gameplay still require the graphical checks below.
+
+
+15. MINI MIMIC
+==============
+
+Mini Mimic disposition, recruitability, Custom Dialogue enabled state,
+Dialogue Resource, display name, and Baby/Scaled Mimic appearance remain
+independent authored properties. Dialogue takes interaction priority while the
+NPC is not yet a follower. recruit_npc uses the shared follower system and does
+not erase customDialogueID or create a Mini-Mimic-specific quest/network/save
+path. Generic inventory and S.A.M. stable-item seams remain authoritative.
+
+
+16. TROUBLESHOOTING
+===================
+
+File is not listed
+    Confirm it is dialogue/<id>.json, valid JSON, and no larger than 64 KiB.
+
+NPC opens the wrong text
+    The sprite's Custom Dialogue ID must match the filename, not quest_id.
+
+Response is missing
+    Open Preview/Validation and inspect its conditions, once-only used state,
+    referenced quest/objective IDs, item count, and gold amount.
+
+Quest action reports an error
+    Add a non-empty root quest_id and Quest metadata. quest_reset additionally
+    requires repeatable player scope.
+
+Stable custom item is unavailable
+    Confirm the namespaced ID exists in the active S.A.M. catalog. Never replace
+    it with a session runtime number.
+
+Tracked giver has no marker
+    Save the map to assign a positive persistent NPC ID, select the NPC, bind it,
+    and confirm the origin map/context.
+
+Advanced JSON will not apply
+    Correct the parse error. The previous good document is intentionally kept.
+
+
+17. GRAPHICAL AND REAL-GAME ACCEPTANCE (NOT AUTOMATED)
+======================================================
+
+These remain unchecked until a person observes them in the actual editor/game.
+
+Editor:
+
+    [ ] Window layout at common and low editor resolutions
+    [ ] No text, buttons, panels, or hitboxes overlap
+    [ ] Mouse selection and editing
+    [ ] Keyboard navigation and text entry
+    [ ] Controller focus is usable and never trapped
+    [ ] Independent scrolling works
+    [ ] Filename/Dialogue ID/Quest ID/title search works
+    [ ] Wizard and all five starter templates work
+    [ ] Rename leaves quest_id unchanged
+    [ ] Duplicate creates an independent file
+    [ ] Delete confirms and targets the selected file only
+    [ ] Dirty prompts cover switch/reload/rename/delete/close
+    [ ] Conversation navigation and direct destinations are readable
+    [ ] Node/response/condition/action inspectors are understandable
+    [ ] Multiple actions survive adding/removing another action
+    [ ] Quest, objective, marker, and giver editing work
+    [ ] Tutorial Library is readable and searchable
+    [ ] Preview resets without persistent side effects
+    [ ] JSON Apply/Cancel and parse-error recovery work
+    [ ] Validation navigation reaches the intended object
+
+Game:
+
+    [ ] Basic, linear, and branching conversation
+    [ ] Once-only response
+    [ ] Item/gold conditions and reward/cost transfer
+    [ ] Quest accept/stage/complete/fail/reset and journal text
+    [ ] Objective complete/clear and map markers
+    [ ] Flags and variables
+    [ ] Status effect
+    [ ] Mechanism power action on the intended playable floor
+    [ ] Recruit an ordinary NPC
+    [ ] Mini Mimic dialogue plus recruitment with both appearances
+    [ ] Upper-floor NPC interaction remains floor-local
+    [ ] Sibling MapInstances do not share NPC-local dialogue state
+    [ ] Two real clients keep private player quest progress
+    [ ] Dedicated server remains authoritative
+    [ ] Save, restart, and reconnect restore story/follower state
+    [ ] Available and unavailable S.A.M. stable-item cases
+
+Compilation, document tests, and source-contract characterization do not mark
+these graphical, real-client, audio, or presentation checks complete.

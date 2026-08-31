@@ -4,6 +4,24 @@ project(barony)
 include(CTest)
 
 if(BUILD_TESTING)
+	add_executable(
+		custom_dialogue_document_tests
+		tests/custom_dialogue_document_tests.cpp
+		src/custom_dialogue_document.cpp
+	)
+	target_include_directories(
+		custom_dialogue_document_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		custom_dialogue_document_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(custom_dialogue_document_tests PRIVATE cxx_std_17)
+	add_test(NAME custom_dialogue_document COMMAND custom_dialogue_document_tests)
+
     add_executable(
         automatia_foundation_tests
         tests/automatia_foundation_tests.cpp

@@ -272,6 +272,10 @@ Sint32 editorResolveSAMItemStableIDToEditorValue(
     const char* stableID, Sint32 fallbackEditorValue);
 bool editorSAMItemPropertyValueIsValid(
     Sint32 propertyValue, Sint32 previousEditorValue, const char* stableID);
+bool editorSAMItemStableIDIsAvailable(const char* stableID);
+int editorSAMItemCatalogCount();
+const char* editorSAMItemCatalogStableIDAt(int index);
+const char* editorSAMItemCatalogNameAt(int index);
 void buttonMonsterEffectsOpen(button_t* my);
 void buttonMonsterEffectsDone(button_t* my);
 void buttonMonsterEffectsAdd(button_t* my);

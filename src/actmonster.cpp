@@ -32,6 +32,10 @@
 #include "mod_tools.hpp"
 #include "ui/MainMenu.hpp"
 #include "menu.hpp"
+#include "custom_dialogue_document.hpp"
+#ifdef SAM_FRAMEWORK_ENABLED
+#include "sam/sam_item_registry_foundation.hpp"
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
@@ -83,8 +87,10 @@ struct CustomDialogueChoice
 	Sint32 removeGold = 0;
 
 	std::string removeItem;
+	std::string removeItemStableID;
 	Sint32 removeItemCount = 0;
 	std::string rewardItem;
+	std::string rewardItemStableID;
 	Sint32 rewardItemCount = 0;
 
 	Sint32 statusEffectID = -1;
@@ -133,6 +139,7 @@ struct CustomDialogueChoice
 	std::string conditionType;
 
 	std::string conditionItem;
+	std::string conditionItemStableID;
 	Sint32 conditionItemCount = 1;
 
 	std::string conditionQuestID;
@@ -187,6 +194,7 @@ struct CustomDialogueNode
     std::string conditionType;
 
     std::string conditionItem;
+    std::string conditionItemStableID;
     Sint32 conditionItemCount = 1;
     bool consumeConditionItem = false;
 
@@ -221,6 +229,7 @@ struct CustomDialogueNode
     Sint32 rewardGold = 0;
 
     std::string rewardItem;
+    std::string rewardItemStableID;
     Sint32 rewardItemCount = 0;
 
     /*
@@ -399,17 +408,36 @@ static std::string normalizeCustomDialogueID(
     return result;
 }
 
-/*
- * Resolve creator-friendly item names used by Stage 5 dialogue JSON.
- *
- * More names can be added here in later stages without changing the
- * authored dialogue graph format.
- */
+/* Resolve legacy aliases, vanilla ItemType strings, or persistent S.A.M IDs. */
 static bool resolveCustomDialogueItemType(
     const std::string& rawItemName,
+    const std::string& stableItemID,
     ItemType& itemType
 )
 {
+    /*
+     * S.A.M runtime numbers are assigned per session. Dialogue files retain
+     * the stable namespaced ID and resolve it only against the live catalog.
+     * An unresolved stable ID never falls back to an unrelated vanilla item.
+     */
+    if ( !stableItemID.empty() )
+    {
+        if ( !automatia::dialogue::isSafeStableItemID(stableItemID) )
+        {
+            return false;
+        }
+#ifdef SAM_FRAMEWORK_ENABLED
+        const int runtimeID =
+            SAMItemRegistryFoundation::runtimeIdForStableId(stableItemID);
+        if ( SAMItemRegistryFoundation::isRegisteredRuntimeItemId(runtimeID) )
+        {
+            itemType = static_cast<ItemType>(runtimeID);
+            return true;
+        }
+#endif
+        return false;
+    }
+
     const std::string itemName =
         normalizeCustomDialogueID(rawItemName);
 
@@ -460,20 +488,98 @@ static bool resolveCustomDialogueItemType(
     return false;
 }
 
-
-/*
- * Resolve creator-friendly reward item names.
- *
- * This table is intentionally small during Stage 8. It can be expanded
- * without changing the JSON format.
- */
-static bool resolveCustomDialogueRewardItemType(
+static bool resolveCustomDialogueItemType(
     const std::string& rawItemName,
     ItemType& itemType
 )
 {
     return resolveCustomDialogueItemType(
         rawItemName,
+        std::string{},
+        itemType
+    );
+}
+
+static bool parseCustomDialogueItemReference(
+    const rapidjson::Value& reference,
+    std::string& rawItemName,
+    std::string& stableItemID,
+    Sint32& count
+)
+{
+    if ( !reference.IsObject() )
+    {
+        return false;
+    }
+
+    rawItemName.clear();
+    stableItemID.clear();
+    if ( reference.HasMember("item") )
+    {
+        if ( !reference["item"].IsString() )
+        {
+            return false;
+        }
+        rawItemName = reference["item"].GetString();
+    }
+    if ( reference.HasMember("stable_id") )
+    {
+        if ( !reference["stable_id"].IsString()
+            || !automatia::dialogue::isSafeStableItemID(
+                reference["stable_id"].GetString()) )
+        {
+            return false;
+        }
+        stableItemID = reference["stable_id"].GetString();
+    }
+    if ( rawItemName.empty() && stableItemID.empty() )
+    {
+        return false;
+    }
+
+    count = 1;
+    if ( reference.HasMember("count") )
+    {
+        if ( !reference["count"].IsInt()
+            || reference["count"].GetInt() <= 0 )
+        {
+            return false;
+        }
+        count = reference["count"].GetInt();
+    }
+
+    /* A stable reference may become available after the mod catalog is loaded.
+     * Validate legacy vanilla/alias references immediately. */
+    if ( stableItemID.empty() )
+    {
+        ItemType ignored = TOOL_TORCH;
+        if ( !resolveCustomDialogueItemType(rawItemName, ignored) )
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static const std::string& customDialogueItemReferenceLabel(
+    const std::string& rawItemName,
+    const std::string& stableItemID
+)
+{
+    return stableItemID.empty() ? rawItemName : stableItemID;
+}
+
+
+/* Rewards use the same identity resolver as conditions and costs. */
+static bool resolveCustomDialogueRewardItemType(
+    const std::string& rawItemName,
+    const std::string& stableItemID,
+    ItemType& itemType
+)
+{
+    return resolveCustomDialogueItemType(
+        rawItemName,
+        stableItemID,
         itemType
     );
 }
@@ -627,6 +733,7 @@ static bool evaluateCustomDialogueChoiceCondition(
 
 		if ( !resolveCustomDialogueItemType(
 				choice.conditionItem,
+				choice.conditionItemStableID,
 				itemType
 			) )
 		{
@@ -808,16 +915,11 @@ static bool parseCustomDialogueChoiceConditionValue(
     choice.conditionType = normalizeCustomDialogueID(condition["type"].GetString());
     if ( choice.conditionType == "has_item" )
     {
-        if ( !condition.HasMember("item") || !condition["item"].IsString() ) return false;
-        choice.conditionItem = condition["item"].GetString();
-        choice.conditionItemCount = 1;
-        if ( condition.HasMember("count") )
-        {
-            if ( !condition["count"].IsInt() || condition["count"].GetInt() <= 0 ) return false;
-            choice.conditionItemCount = condition["count"].GetInt();
-        }
-        ItemType itemType = TOOL_TORCH;
-        if ( !resolveCustomDialogueItemType(choice.conditionItem, itemType) ) return false;
+        if ( !parseCustomDialogueItemReference(
+                condition,
+                choice.conditionItem,
+                choice.conditionItemStableID,
+                choice.conditionItemCount) ) return false;
     }
     else if ( choice.conditionType == "has_gold" )
     {
@@ -1631,15 +1733,13 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 
             if ( node.conditionType == "has_item" )
             {
-                if ( !condition.HasMember("item")
-                    || !condition["item"].IsString()
-                    || !condition.HasMember("true_node")
+                if ( !condition.HasMember("true_node")
                     || !condition["true_node"].IsInt()
                     || !condition.HasMember("false_node")
                     || !condition["false_node"].IsInt() )
                 {
                     printlog(
-                        "[Custom Dialogue] '%s' node %d has_item condition requires string 'item' and integer true/false nodes.",
+                        "[Custom Dialogue] '%s' node %d has_item condition requires an item/stable_id reference and integer true/false nodes.",
                         realPath.c_str(),
                         node.id
                     );
@@ -1647,45 +1747,20 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                     return definition;
                 }
 
-                node.conditionItem =
-                    condition["item"].GetString();
-
-                ItemType resolvedItemType =
-                    TOOL_TORCH;
-
-                if ( !resolveCustomDialogueItemType(
+                if ( !parseCustomDialogueItemReference(
+                        condition,
                         node.conditionItem,
-                        resolvedItemType
+                        node.conditionItemStableID,
+                        node.conditionItemCount
                     ) )
                 {
                     printlog(
-                        "[Custom Dialogue] '%s' node %d references unsupported condition item '%s'.",
+                        "[Custom Dialogue] '%s' node %d has an invalid item/stable_id condition reference.",
                         realPath.c_str(),
-                        node.id,
-                        node.conditionItem.c_str()
+                        node.id
                     );
 
                     return definition;
-                }
-
-                node.conditionItemCount = 1;
-
-                if ( condition.HasMember("count") )
-                {
-                    if ( !condition["count"].IsInt()
-                        || condition["count"].GetInt() <= 0 )
-                    {
-                        printlog(
-                            "[Custom Dialogue] '%s' node %d condition count must be a positive integer.",
-                            realPath.c_str(),
-                            node.id
-                        );
-
-                        return definition;
-                    }
-
-                    node.conditionItemCount =
-                        condition["count"].GetInt();
                 }
 
                 if ( condition.HasMember("consume") )
@@ -2192,6 +2267,7 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                         {
                             choice.conditionType = parsedCondition.conditionType;
                             choice.conditionItem = parsedCondition.conditionItem;
+                            choice.conditionItemStableID = parsedCondition.conditionItemStableID;
                             choice.conditionItemCount = parsedCondition.conditionItemCount;
                             choice.conditionQuestID = parsedCondition.conditionQuestID;
                             choice.conditionQuestStage = parsedCondition.conditionQuestStage;
@@ -2305,51 +2381,17 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						const rapidjson::Value& rewardItem =
 							choiceAction["reward_item"];
 
-						if ( !rewardItem.IsObject()
-							|| !rewardItem.HasMember("item")
-							|| !rewardItem["item"].IsString() )
+						if ( !parseCustomDialogueItemReference(
+								rewardItem,
+								choice.rewardItem,
+								choice.rewardItemStableID,
+								choice.rewardItemCount) )
 						{
 							printlog(
-								"[Custom Dialogue] '%s' node %d choice '%s' reward_item requires string 'item'.",
+								"[Custom Dialogue] '%s' node %d choice '%s' reward_item requires a valid item or stable_id reference.",
 								realPath.c_str(),
 								node.id,
 								choice.id.c_str()
-							);
-
-							return definition;
-						}
-
-						choice.rewardItem =
-							rewardItem["item"].GetString();
-
-						choice.rewardItemCount = 1;
-
-						if ( rewardItem.HasMember("count") )
-						{
-							if ( !rewardItem["count"].IsInt()
-								|| rewardItem["count"].GetInt() <= 0 )
-							{
-								return definition;
-							}
-
-							choice.rewardItemCount =
-								rewardItem["count"].GetInt();
-						}
-
-						ItemType rewardItemType =
-							POTION_HEALING;
-
-						if ( !resolveCustomDialogueRewardItemType(
-								choice.rewardItem,
-								rewardItemType
-							) )
-						{
-							printlog(
-								"[Custom Dialogue] '%s' node %d choice '%s' uses unsupported reward item '%s'.",
-								realPath.c_str(),
-								node.id,
-								choice.id.c_str(),
-								choice.rewardItem.c_str()
 							);
 
 							return definition;
@@ -2431,37 +2473,11 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
 						const rapidjson::Value& removeItem =
 							choiceAction["remove_item"];
 
-						if ( !removeItem.IsObject()
-							|| !removeItem.HasMember("item")
-							|| !removeItem["item"].IsString() )
-						{
-							return definition;
-						}
-
-						choice.removeItem =
-							removeItem["item"].GetString();
-
-						choice.removeItemCount = 1;
-
-						if ( removeItem.HasMember("count") )
-						{
-							if ( !removeItem["count"].IsInt()
-								|| removeItem["count"].GetInt() <= 0 )
-							{
-								return definition;
-							}
-
-							choice.removeItemCount =
-								removeItem["count"].GetInt();
-						}
-
-						ItemType itemType =
-							TOOL_TORCH;
-
-						if ( !resolveCustomDialogueItemType(
+						if ( !parseCustomDialogueItemReference(
+								removeItem,
 								choice.removeItem,
-								itemType
-							) )
+								choice.removeItemStableID,
+								choice.removeItemCount) )
 						{
 							return definition;
 						}
@@ -2829,12 +2845,14 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 const rapidjson::Value& rewardItem =
                     action["reward_item"];
 
-                if ( !rewardItem.IsObject()
-                    || !rewardItem.HasMember("item")
-                    || !rewardItem["item"].IsString() )
+                if ( !parseCustomDialogueItemReference(
+                        rewardItem,
+                        node.rewardItem,
+                        node.rewardItemStableID,
+                        node.rewardItemCount) )
                 {
                     printlog(
-                        "[Custom Dialogue] '%s' node %d action 'reward_item' requires a string 'item'.",
+                        "[Custom Dialogue] '%s' node %d action 'reward_item' requires a valid item or stable_id reference.",
                         realPath.c_str(),
                         node.id
                     );
@@ -2842,46 +2860,6 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                     return definition;
                 }
 
-                node.rewardItem =
-                    rewardItem["item"].GetString();
-
-                node.rewardItemCount = 1;
-
-                if ( rewardItem.HasMember("count") )
-                {
-                    if ( !rewardItem["count"].IsInt()
-                        || rewardItem["count"].GetInt() <= 0 )
-                    {
-                        printlog(
-                            "[Custom Dialogue] '%s' node %d reward item count must be a positive integer.",
-                            realPath.c_str(),
-                            node.id
-                        );
-
-                        return definition;
-                    }
-
-                    node.rewardItemCount =
-                        rewardItem["count"].GetInt();
-                }
-
-                ItemType rewardItemType =
-                    POTION_HEALING;
-
-                if ( !resolveCustomDialogueRewardItemType(
-                        node.rewardItem,
-                        rewardItemType
-                    ) )
-                {
-                    printlog(
-                        "[Custom Dialogue] '%s' node %d references unsupported reward item '%s'.",
-                        realPath.c_str(),
-                        node.id,
-                        node.rewardItem.c_str()
-                    );
-
-                    return definition;
-                }
             }
 
             if ( action.HasMember("set_world_flag") )
@@ -17166,6 +17144,7 @@ bool handleCustomMonsterDialogue(
 
             if ( !resolveCustomDialogueItemType(
                     conditionNode.conditionItem,
+                    conditionNode.conditionItemStableID,
                     conditionItemType
                 ) )
             {
@@ -17173,38 +17152,36 @@ bool handleCustomMonsterDialogue(
                     "[Custom Dialogue] Dialogue '%s' node %d could not resolve item '%s' at runtime.",
                     definition->dialogueID.c_str(),
                     conditionNode.id,
-                    conditionNode.conditionItem.c_str()
+                    customDialogueItemReferenceLabel(
+                        conditionNode.conditionItem,
+                        conditionNode.conditionItemStableID).c_str()
                 );
-
-                return true;
             }
-
-            Item* matchingItem =
-                findCustomDialoguePlayerItem(
-                    monsterclicked,
-                    conditionItemType,
-                    conditionNode.conditionItemCount
-                );
-
-            conditionResult =
-                matchingItem != nullptr;
-
-            if ( conditionResult
-                && conditionNode.consumeConditionItem )
+            else
             {
-                if ( !consumeCustomDialoguePlayerItem(
+                Item* matchingItem =
+                    findCustomDialoguePlayerItem(
                         monsterclicked,
-                        matchingItem,
+                        conditionItemType,
                         conditionNode.conditionItemCount
-                    ) )
+                    );
+
+                conditionResult = matchingItem != nullptr;
+
+                if ( conditionResult
+                    && conditionNode.consumeConditionItem
+                    && !consumeCustomDialoguePlayerItem(
+                        monsterclicked, matchingItem,
+                        conditionNode.conditionItemCount) )
                 {
                     printlog(
                         "[Custom Dialogue] Failed to consume %d '%s' item(s) from player %d.",
                         conditionNode.conditionItemCount,
-                        conditionNode.conditionItem.c_str(),
+                        customDialogueItemReferenceLabel(
+                            conditionNode.conditionItem,
+                            conditionNode.conditionItemStableID).c_str(),
                         monsterclicked
                     );
-
                     conditionResult = false;
                 }
             }
@@ -17592,6 +17569,25 @@ bool handleCustomMonsterDialogue(
                 actionFlag
             ) )
         {
+            ItemType authoredRewardType = POTION_HEALING;
+            const bool rewardAvailable =
+                (node.rewardItem.empty() && node.rewardItemStableID.empty())
+                || resolveCustomDialogueRewardItemType(
+                    node.rewardItem,
+                    node.rewardItemStableID,
+                    authoredRewardType);
+            if ( !rewardAvailable )
+            {
+                printlog(
+                    "[Custom Dialogue] Deferred node action '%s': reward item '%s' is unavailable.",
+                    node.actionID.c_str(),
+                    customDialogueItemReferenceLabel(
+                        node.rewardItem,
+                        node.rewardItemStableID).c_str()
+                );
+            }
+            else
+            {
             if ( node.questAccept )
             {
                 persistentStorySetQuestAccepted(
@@ -17723,7 +17719,7 @@ bool handleCustomMonsterDialogue(
                 }
             }
 
-            if ( !node.rewardItem.empty()
+            if ( (!node.rewardItem.empty() || !node.rewardItemStableID.empty())
                 && node.rewardItemCount > 0 )
             {
                 ItemType rewardItemType =
@@ -17731,6 +17727,7 @@ bool handleCustomMonsterDialogue(
 
                 if ( resolveCustomDialogueRewardItemType(
                         node.rewardItem,
+                        node.rewardItemStableID,
                         rewardItemType
                     ) )
                 {
@@ -17794,7 +17791,9 @@ bool handleCustomMonsterDialogue(
 
                             printlog(
                                 "[Custom Dialogue] Failed to give reward item '%s' x%d to player %d.",
-                                node.rewardItem.c_str(),
+                                customDialogueItemReferenceLabel(
+                                    node.rewardItem,
+                                    node.rewardItemStableID).c_str(),
                                 node.rewardItemCount,
                                 monsterclicked
                             );
@@ -17817,7 +17816,9 @@ bool handleCustomMonsterDialogue(
                 node.id,
                 definition->questID.c_str(),
                 node.rewardGold,
-                node.rewardItem.c_str(),
+                customDialogueItemReferenceLabel(
+                    node.rewardItem,
+                    node.rewardItemStableID).c_str(),
                 node.rewardItemCount,
                 node.setWorldFlagID.c_str(),
                 node.setWorldVariableID.c_str(),
@@ -17825,6 +17826,7 @@ bool handleCustomMonsterDialogue(
                 node.setNPCFlagID.c_str(),
                 node.setNPCVariableID.c_str()
             );
+            }
         }
     }
 
@@ -18015,6 +18017,27 @@ bool handleCustomMonsterDialogueChoice(
 		return false;
 	}
 
+	if ( (!choice.rewardItem.empty() || !choice.rewardItemStableID.empty())
+		&& choice.rewardItemCount > 0 )
+	{
+		ItemType rewardType = POTION_HEALING;
+		if ( !resolveCustomDialogueRewardItemType(
+				choice.rewardItem,
+				choice.rewardItemStableID,
+				rewardType) )
+		{
+			printlog(
+				"[Custom Dialogue] Host rejected choice '%s' because reward item '%s' is unavailable.",
+				choice.id.c_str(),
+				customDialogueItemReferenceLabel(
+					choice.rewardItem,
+					choice.rewardItemStableID).c_str()
+			);
+			pending = PendingCustomDialogueChoiceState{};
+			return false;
+		}
+	}
+
 	if ( choice.removeGold > 0
 		&& (
 			!stats[player]
@@ -18030,7 +18053,7 @@ bool handleCustomMonsterDialogueChoice(
 
 	Item* removeItemPointer = nullptr;
 
-	if ( !choice.removeItem.empty()
+	if ( (!choice.removeItem.empty() || !choice.removeItemStableID.empty())
 		&& choice.removeItemCount > 0 )
 	{
 		ItemType itemType =
@@ -18038,6 +18061,7 @@ bool handleCustomMonsterDialogueChoice(
 
 		if ( !resolveCustomDialogueItemType(
 				choice.removeItem,
+				choice.removeItemStableID,
 				itemType
 			) )
 		{
@@ -18532,7 +18556,7 @@ bool handleCustomMonsterDialogueChoice(
 		}
 	}
 
-	if ( !choice.rewardItem.empty()
+	if ( (!choice.rewardItem.empty() || !choice.rewardItemStableID.empty())
 		&& choice.rewardItemCount > 0 )
 	{
 		ItemType rewardItemType =
@@ -18540,6 +18564,7 @@ bool handleCustomMonsterDialogueChoice(
 
 		if ( resolveCustomDialogueRewardItemType(
 				choice.rewardItem,
+				choice.rewardItemStableID,
 				rewardItemType
 			) )
 		{
@@ -18714,9 +18739,13 @@ bool handleCustomMonsterDialogueChoice(
 		choice.nextNode,
 		choice.rewardGold,
 		choice.removeGold,
-		choice.rewardItem.c_str(),
+		customDialogueItemReferenceLabel(
+			choice.rewardItem,
+			choice.rewardItemStableID).c_str(),
 		choice.rewardItemCount,
-		choice.removeItem.c_str(),
+		customDialogueItemReferenceLabel(
+			choice.removeItem,
+			choice.removeItemStableID).c_str(),
 		choice.removeItemCount
 	);
 

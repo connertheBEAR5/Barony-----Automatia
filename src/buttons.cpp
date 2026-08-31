@@ -188,6 +188,7 @@ struct SAMItemCatalog
     Sint32 runtimeLimit = 0;
     std::unordered_map<std::string, SAMCatalogItem> byStableID;
     std::unordered_map<Sint32, std::string> stableIDByRuntimeID;
+    std::vector<std::string> orderedStableIDs;
 };
 
 static SAMItemCatalog samItemCatalog;
@@ -281,9 +282,17 @@ static bool loadSAMItemCatalog()
         if ( value.HasMember("category") && value["category"].IsString() ) item.category = value["category"].GetString();
         if ( value.HasMember("slot") && value["slot"].IsString() ) item.slot = value["slot"].GetString();
 
+        if ( loadedCatalog.byStableID.find(item.stableID)
+            == loadedCatalog.byStableID.end() )
+        {
+            loadedCatalog.orderedStableIDs.push_back(item.stableID);
+        }
         loadedCatalog.stableIDByRuntimeID[item.runtimeID] = item.stableID;
         loadedCatalog.byStableID[item.stableID] = item;
     }
+
+    std::sort(loadedCatalog.orderedStableIDs.begin(),
+        loadedCatalog.orderedStableIDs.end());
 
     loadedCatalog.loaded = true;
     samItemCatalog = std::move(loadedCatalog);
@@ -461,6 +470,37 @@ bool editorSAMItemPropertyValueIsValid(const Sint32 propertyValue,
 		return true;
 	}
 	return findSAMCatalogItemByRuntimeID(propertyValue) != nullptr;
+}
+
+bool editorSAMItemStableIDIsAvailable(const char* stableID)
+{
+	return findSAMCatalogItemByStableID(stableID ? stableID : "") != nullptr;
+}
+
+int editorSAMItemCatalogCount()
+{
+	ensureSAMItemCatalogLoaded();
+	return static_cast<int>(samItemCatalog.orderedStableIDs.size());
+}
+
+const char* editorSAMItemCatalogStableIDAt(const int index)
+{
+	static const char* empty = "";
+	ensureSAMItemCatalogLoaded();
+	if ( index < 0
+		|| index >= static_cast<int>(samItemCatalog.orderedStableIDs.size()) )
+	{
+		return empty;
+	}
+	return samItemCatalog.orderedStableIDs[index].c_str();
+}
+
+const char* editorSAMItemCatalogNameAt(const int index)
+{
+	static const char* empty = "";
+	const char* stableID = editorSAMItemCatalogStableIDAt(index);
+	const SAMCatalogItem* item = findSAMCatalogItemByStableID(stableID);
+	return item ? item->name.c_str() : empty;
 }
 
 static Sint32 commitEditorItemPropertyValue(const Sint32 propertyValue,

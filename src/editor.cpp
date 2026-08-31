@@ -21,9 +21,11 @@
 #include "init.hpp"
 #include "mod_tools.hpp"
 #include "text_source_script_tester.hpp"
+#include "custom_dialogue_document.hpp"
 #include <sys/stat.h>
 #include <cmath>
 #include <fstream>
+#include <sstream>
 #include <cctype>
 #include "json.hpp"
 #include <rapidjson/prettywriter.h>
@@ -524,17 +526,29 @@ struct QuestDialogueEditorPreview
 	std::string error;
 };
 
+struct QuestDialogueEditorFileSummary
+{
+	std::string dialogueID;
+	std::string questID;
+	std::string title;
+	int errors = 0;
+	int warnings = 0;
+};
+
 static std::string questEditorNormalizeID(const std::string& value);
 static std::string questEditorCurrentMapFilename();
 
 static std::vector<std::string> questDialogueEditorFiles;
+static std::vector<QuestDialogueEditorFileSummary> questDialogueEditorFileSummaries;
 static int questDialogueEditorSelectedFile = -1;
 static int questDialogueEditorSelectedNode = -1;
 static int questDialogueEditorSelectedChoice = -1;
 static int questDialogueEditorSelectedObjective = -1;
 static int questDialogueEditorFileScroll = 0;
 static QuestDialogueEditorPreview questDialogueEditorPreview;
-static rapidjson::Document questDialogueEditorDocument;
+static automatia::dialogue::Document questDialogueEditorModel;
+static rapidjson::Document& questDialogueEditorDocument =
+	questDialogueEditorModel.json();
 static std::string questDialogueEditorMessage;
 static Uint32 questDialogueEditorMessageUntil = 0;
 
@@ -544,23 +558,45 @@ enum QuestDialogueEditableField
 	QUEST_DIALOGUE_FIELD_QUEST_ID,
 	QUEST_DIALOGUE_FIELD_QUEST_TITLE,
 	QUEST_DIALOGUE_FIELD_QUEST_SUMMARY,
+	QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE,
+	QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT,
+	QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT,
+	QUEST_DIALOGUE_FIELD_LEGACY_TEXT,
+	QUEST_DIALOGUE_FIELD_NODE_ID,
 	QUEST_DIALOGUE_FIELD_NODE_TEXT,
+	QUEST_DIALOGUE_FIELD_NODE_NEXT,
 	QUEST_DIALOGUE_FIELD_CHOICE_ID,
 	QUEST_DIALOGUE_FIELD_CHOICE_TEXT,
+	QUEST_DIALOGUE_FIELD_CHOICE_NEXT,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_ID,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT,
+	QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT,
+	QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE,
 	QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
 	QUEST_DIALOGUE_FIELD_CONDITION_QUEST,
 	QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+	QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID,
+	QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE,
+	QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE,
 	QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
 	QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+	QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER,
+	QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER,
+	QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID,
+	QUEST_DIALOGUE_FIELD_NODE_ACTION_ID,
 	QUEST_DIALOGUE_FIELD_POWER_X,
 	QUEST_DIALOGUE_FIELD_POWER_Y,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET,
 	QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID,
+	QUEST_DIALOGUE_FIELD_MARKER_MAP,
 	QUEST_DIALOGUE_FIELD_MARKER_X,
 	QUEST_DIALOGUE_FIELD_MARKER_Y,
+	QUEST_DIALOGUE_FIELD_ORIGIN_LABEL,
+	QUEST_DIALOGUE_FIELD_ORIGIN_MAP,
+	QUEST_DIALOGUE_FIELD_ORIGIN_X,
+	QUEST_DIALOGUE_FIELD_ORIGIN_Y,
+	QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID,
 	QUEST_DIALOGUE_FIELD_NUM_FIELDS
 };
 
@@ -583,14 +619,15 @@ static QuestDialogueFieldCategory
 	questDialogueEditorFieldCategory =
 		QUEST_DIALOGUE_CATEGORY_FILE_QUEST;
 
-static char questDialogueEditorEditBuffer[512] = "";
+static char questDialogueEditorEditBuffer[
+	automatia::dialogue::MaximumDocumentBytes + 1] = "";
 static bool questDialogueEditorEditingField = false;
 static QuestDialogueEditableField questDialogueEditorLockedEditableField =
     QUEST_DIALOGUE_FIELD_QUEST_TITLE;
 static QuestDialogueFieldCategory questDialogueEditorLockedFieldCategory =
     QUEST_DIALOGUE_CATEGORY_FILE_QUEST;
-static bool questDialogueEditorDeleteFileConfirm = false;
-static Uint32 questDialogueEditorDeleteFileConfirmUntil = 0;
+static bool questDialogueEditorRuleOwnerNode = false;
+static bool questDialogueEditorLockedRuleOwnerNode = false;
 
 enum QuestDialogueInspectorSelection
 {
@@ -645,9 +682,140 @@ static int questDialogueEditorSelectedEffectID = 0;
 static int questDialogueEditorEffectDurationSeconds = 30;
 static int questDialogueEditorEffectStrength = 1;
 
+enum QuestDialogueWorkspaceMode
+{
+	QUEST_DIALOGUE_WORKSPACE_FILES = 0,
+	QUEST_DIALOGUE_WORKSPACE_CONVERSATION,
+	QUEST_DIALOGUE_WORKSPACE_QUEST,
+	QUEST_DIALOGUE_WORKSPACE_TUTORIALS,
+	QUEST_DIALOGUE_WORKSPACE_JSON,
+	QUEST_DIALOGUE_WORKSPACE_PREVIEW,
+	QUEST_DIALOGUE_WORKSPACE_VALIDATION,
+	QUEST_DIALOGUE_WORKSPACE_COUNT
+};
+
+enum QuestDialoguePendingTransition
+{
+	QUEST_DIALOGUE_PENDING_NONE = 0,
+	QUEST_DIALOGUE_PENDING_CLOSE,
+	QUEST_DIALOGUE_PENDING_SWITCH_FILE,
+	QUEST_DIALOGUE_PENDING_RELOAD,
+	QUEST_DIALOGUE_PENDING_OPEN_WIZARD,
+	QUEST_DIALOGUE_PENDING_DUPLICATE_FILE,
+	QUEST_DIALOGUE_PENDING_APPLY_TUTORIAL,
+	QUEST_DIALOGUE_PENDING_DELETE_FILE
+};
+
+static QuestDialogueWorkspaceMode questDialogueEditorWorkspace =
+	QUEST_DIALOGUE_WORKSPACE_CONVERSATION;
+static QuestDialoguePendingTransition questDialogueEditorPendingTransition =
+	QUEST_DIALOGUE_PENDING_NONE;
+static int questDialogueEditorPendingFile = -1;
+static int questDialogueEditorPendingTutorial = -1;
+static bool questDialogueEditorUnsavedPrompt = false;
+static bool questDialogueEditorDeletePrompt = false;
+static std::vector<automatia::dialogue::Issue> questDialogueEditorValidationIssues;
+static int questDialogueEditorValidationScroll = 0;
+static int questDialogueEditorTutorialSelection = 0;
+static int questDialogueEditorTutorialScroll = 0;
+static int questDialogueEditorTutorialDifficulty = 0;
+static int questDialogueEditorTutorialCategory = 0;
+static char questDialogueEditorFileSearch[128] = "";
+static char questDialogueEditorTutorialSearch[128] = "";
+static bool questDialogueEditorFileSearchEditing = false;
+static bool questDialogueEditorTutorialSearchEditing = false;
+static char questDialogueEditorJSONBuffer[
+	automatia::dialogue::MaximumDocumentBytes + 1] = "";
+static bool questDialogueEditorJSONEditing = false;
+static int questDialogueEditorJSONScroll = 0;
+static automatia::dialogue::PreviewSession questDialogueEditorSandbox;
+static automatia::dialogue::PreviewState questDialogueEditorSandboxInitialState;
+static bool questDialogueEditorSandboxActive = false;
+static int questDialogueEditorSandboxGold = 0;
+static char questDialogueEditorSandboxItem[128] = "torch";
+static int questDialogueEditorSandboxItemCount = 0;
+static bool questDialogueEditorSandboxItemEditing = false;
+enum QuestDialogueSandboxSeedKind
+{
+	QUEST_DIALOGUE_SANDBOX_WORLD_FLAG = 0,
+	QUEST_DIALOGUE_SANDBOX_NPC_FLAG,
+	QUEST_DIALOGUE_SANDBOX_WORLD_VARIABLE,
+	QUEST_DIALOGUE_SANDBOX_NPC_VARIABLE,
+	QUEST_DIALOGUE_SANDBOX_QUEST_STARTED,
+	QUEST_DIALOGUE_SANDBOX_QUEST_ACCEPTED,
+	QUEST_DIALOGUE_SANDBOX_QUEST_COMPLETED,
+	QUEST_DIALOGUE_SANDBOX_QUEST_FAILED,
+	QUEST_DIALOGUE_SANDBOX_QUEST_STAGE,
+	QUEST_DIALOGUE_SANDBOX_OBJECTIVE_COMPLETED,
+	QUEST_DIALOGUE_SANDBOX_NODE_SEEN,
+	QUEST_DIALOGUE_SANDBOX_CHOICE_USED,
+	QUEST_DIALOGUE_SANDBOX_SEED_COUNT
+};
+static QuestDialogueSandboxSeedKind questDialogueEditorSandboxSeedKind =
+	QUEST_DIALOGUE_SANDBOX_WORLD_FLAG;
+static char questDialogueEditorSandboxSeedKey[128] = "story_flag";
+static char questDialogueEditorSandboxSeedSubkey[128] = "objective_1";
+static bool questDialogueEditorSandboxSeedKeyEditing = false;
+static bool questDialogueEditorSandboxSeedSubkeyEditing = false;
+static int questDialogueEditorSandboxSeedValue = 1;
+static bool questDialogueEditorSandboxSeedBoolean = true;
+static automatia::dialogue::PreviewState questDialogueEditorSandboxConfiguredState;
+static int questDialogueEditorConversationInspector = 0;
+static int questDialogueEditorConversationNodeScroll = 0;
+static int questDialogueEditorConversationChoiceScroll = 0;
+static int questDialogueEditorConditionCatalogIndex = 0;
+static int questDialogueEditorActionCatalogIndex = 0;
+static int questDialogueEditorQuestPanel = 0;
+static int questDialogueEditorObjectiveScroll = 0;
+static char questDialogueEditorItemSearch[128] = "";
+static bool questDialogueEditorItemSearchEditing = false;
+static int questDialogueEditorItemSearchScroll = 0;
+
+static bool questDialogueEditorWizardOpen = false;
+static int questDialogueEditorWizardTemplate = 1;
+static int questDialogueEditorWizardField = 0;
+static int questDialogueEditorWizardStep = 0;
+static bool questDialogueEditorWizardUseQuest = false;
+static bool questDialogueEditorWizardRepeatable = false;
+static int questDialogueEditorWizardOrigin = 0; // 0 none, 1 cursor, 2 selected NPC
+static char questDialogueEditorWizardDialogueID[128] = "new_dialogue";
+static char questDialogueEditorWizardQuestID[128] = "";
+static char questDialogueEditorWizardNPCText[256] = "Hello, traveler.";
+static char questDialogueEditorWizardChoiceText[256] = "Hello.";
+static char questDialogueEditorWizardQuestTitle[128] = "New Quest";
+static char questDialogueEditorWizardQuestSummary[256] = "";
+
+static void questDialogueEditorRequestTransition(
+	QuestDialoguePendingTransition transition,
+	int argument = -1);
+static void questDialogueEditorEndTransientTextInput();
+
+static automatia::dialogue::ValidationOptions questDialogueEditorValidationOptions()
+{
+	automatia::dialogue::ValidationOptions options;
+	options.vanillaItemCount = NUMITEMS;
+	options.effectCount = NUMEFFECTS;
+	options.stableItemAvailable = [](const std::string& stableID)
+	{
+		return editorSAMItemStableIDIsAvailable(stableID.c_str());
+	};
+	return options;
+}
+
+static void questDialogueEditorRefreshValidation()
+{
+	questDialogueEditorValidationIssues =
+		automatia::dialogue::validate(questDialogueEditorDocument,
+			questDialogueEditorValidationOptions());
+	questDialogueEditorValidationScroll = std::max(0,
+		std::min(questDialogueEditorValidationScroll,
+			std::max(0, static_cast<int>(questDialogueEditorValidationIssues.size()) - 1)));
+}
+
 static void questDialogueEditorRefreshFiles()
 {
 	questDialogueEditorFiles.clear();
+	questDialogueEditorFileSummaries.clear();
 
 	DIR* directory = opendir("./dialogue");
 	if ( !directory )
@@ -672,6 +840,35 @@ static void questDialogueEditorRefreshFiles()
 		questDialogueEditorFiles.begin(),
 		questDialogueEditorFiles.end()
 	);
+	for ( const std::string& filename : questDialogueEditorFiles )
+	{
+		QuestDialogueEditorFileSummary summary;
+		summary.dialogueID = filename.size() > 5
+			? filename.substr(0, filename.size() - 5) : filename;
+		automatia::dialogue::Document fileDocument;
+		std::string error;
+		if ( !fileDocument.loadFile("./dialogue/" + filename, error) )
+		{
+			summary.errors = 1;
+		}
+		else
+		{
+			const rapidjson::Value& root = fileDocument.json();
+			if ( root.HasMember("quest_id") && root["quest_id"].IsString() )
+				summary.questID = root["quest_id"].GetString();
+			if ( root.HasMember("quest") && root["quest"].IsObject()
+				&& root["quest"].HasMember("title")
+				&& root["quest"]["title"].IsString() )
+				summary.title = root["quest"]["title"].GetString();
+			const auto issues = automatia::dialogue::validate(fileDocument.json(),
+				questDialogueEditorValidationOptions());
+			summary.errors = automatia::dialogue::countIssues(
+				issues, automatia::dialogue::Severity::Error);
+			summary.warnings = automatia::dialogue::countIssues(
+				issues, automatia::dialogue::Severity::Warning);
+		}
+		questDialogueEditorFileSummaries.push_back(std::move(summary));
+	}
 
 	if ( questDialogueEditorSelectedFile
 		>= static_cast<int>(questDialogueEditorFiles.size()) )
@@ -700,9 +897,13 @@ static int questDialogueEditorCountObjectMembers(
 }
 
 static void questDialogueEditorLoadPreview(
-	const std::string& filenameToLoad
+	const std::string& filenameToLoad,
+	const bool loadFromDisk = true
 )
 {
+	const int previousNode = questDialogueEditorSelectedNode;
+	const int previousChoice = questDialogueEditorSelectedChoice;
+	const int previousObjective = questDialogueEditorSelectedObjective;
 	questDialogueEditorPreview =
 		QuestDialogueEditorPreview();
 
@@ -712,33 +913,22 @@ static void questDialogueEditorLoadPreview(
 	const std::string path =
 		"./dialogue/" + filenameToLoad;
 
-	std::ifstream input(
-		path.c_str(),
-		std::ios::in | std::ios::binary
-	);
-
-	if ( !input.is_open() )
+	if ( loadFromDisk )
 	{
-		questDialogueEditorPreview.error =
-			"Could not open " + path;
-		return;
+		std::string loadError;
+		if ( !questDialogueEditorModel.loadFile(path, loadError) )
+		{
+			questDialogueEditorPreview.error = loadError;
+			return;
+		}
 	}
-
-	std::string jsonText(
-		(std::istreambuf_iterator<char>(input)),
-		std::istreambuf_iterator<char>()
-	);
-
-	questDialogueEditorDocument.SetObject();
-	questDialogueEditorDocument.Parse(jsonText.c_str());
 	rapidjson::Document& document =
 		questDialogueEditorDocument;
 
-	if ( document.HasParseError()
-		|| !document.IsObject() )
+	if ( !document.IsObject() )
 	{
 		questDialogueEditorPreview.error =
-			"JSON parse error.";
+			"Dialogue root is not a JSON object.";
 		return;
 	}
 
@@ -918,6 +1108,17 @@ static void questDialogueEditorLoadPreview(
 							);
 					}
 
+					if ( choice.HasMember("conditions")
+						&& choice["conditions"].IsArray() )
+					{
+						for ( const auto& condition :
+							choice["conditions"].GetArray() )
+						{
+							node.conditionCount +=
+								questDialogueEditorCountObjectMembers(condition);
+						}
+					}
+
 					if ( choice.HasMember("action") )
 					{
 						node.actionCount +=
@@ -941,15 +1142,34 @@ static void questDialogueEditorLoadPreview(
 		}
 	}
 
-	questDialogueEditorSelectedNode =
-		questDialogueEditorPreview.nodes.empty()
-			? -1
-			: 0;
-	questDialogueEditorSelectedChoice = -1;
-	questDialogueEditorSelectedObjective =
-		questDialogueEditorPreview.objectiveCount > 0
-			? 0
-			: -1;
+	if ( loadFromDisk )
+	{
+		questDialogueEditorSelectedNode =
+			questDialogueEditorPreview.nodes.empty() ? -1 : 0;
+		questDialogueEditorSelectedChoice = -1;
+		questDialogueEditorSelectedObjective =
+			questDialogueEditorPreview.objectiveCount > 0 ? 0 : -1;
+	}
+	else
+	{
+		questDialogueEditorSelectedNode = questDialogueEditorPreview.nodes.empty()
+			? -1 : std::max(0, std::min(previousNode,
+				static_cast<int>(questDialogueEditorPreview.nodes.size()) - 1));
+		questDialogueEditorSelectedChoice = previousChoice;
+		if ( questDialogueEditorSelectedNode >= 0 )
+		{
+			const int choiceCount = static_cast<int>(
+				questDialogueEditorPreview.nodes[questDialogueEditorSelectedNode].choices.size());
+			questDialogueEditorSelectedChoice = choiceCount == 0 ? -1
+				: std::max(-1, std::min(previousChoice, choiceCount - 1));
+		}
+		questDialogueEditorSelectedObjective =
+			questDialogueEditorPreview.objectiveCount == 0 ? -1
+			: std::max(0, std::min(previousObjective,
+				questDialogueEditorPreview.objectiveCount - 1));
+	}
+	questDialogueEditorRefreshValidation();
+	questDialogueEditorSandboxActive = false;
 }
 
 
@@ -962,83 +1182,98 @@ static void questDialogueEditorSetMessage(
 		ticks + TICKS_PER_SECOND * 4;
 }
 
-static void questDialogueEditorRepairObjectiveConditionQuestIDs()
+static void questDialogueEditorRelinkQuestID(
+	const std::string& oldID,
+	const std::string& newID
+)
 {
-    if ( !questDialogueEditorDocument.IsObject()
-        || !questDialogueEditorDocument.HasMember("nodes")
-        || !questDialogueEditorDocument["nodes"].IsArray() )
-    {
-        return;
-    }
+	if ( oldID.empty() || oldID == newID
+		|| !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray() ) return;
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	auto relink = [&](rapidjson::Value& condition)
+	{
+		if ( condition.IsObject() && condition.HasMember("quest")
+			&& condition["quest"].IsString()
+			&& questEditorNormalizeID(oldID)
+				== questEditorNormalizeID(condition["quest"].GetString()) )
+		{
+			condition["quest"].SetString(newID.c_str(), allocator);
+		}
+	};
+	for ( rapidjson::Value& node : questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( !node.IsObject() ) continue;
+		if ( node.HasMember("condition") ) relink(node["condition"]);
+		if ( !node.HasMember("choices") || !node["choices"].IsArray() ) continue;
+		for ( rapidjson::Value& choice : node["choices"].GetArray() )
+		{
+			if ( !choice.IsObject() ) continue;
+			if ( choice.HasMember("condition") ) relink(choice["condition"]);
+			if ( choice.HasMember("conditions") && choice["conditions"].IsArray() )
+				for ( rapidjson::Value& condition : choice["conditions"].GetArray() )
+					relink(condition);
+		}
+	}
+}
 
-    std::string questID = "quest_id";
-    if ( questDialogueEditorDocument.HasMember("quest_id")
-        && questDialogueEditorDocument["quest_id"].IsString()
-        && questDialogueEditorDocument["quest_id"].GetStringLength() > 0 )
-    {
-        questID = questDialogueEditorDocument["quest_id"].GetString();
-    }
-
-    auto& allocator = questDialogueEditorDocument.GetAllocator();
-    rapidjson::Value& nodes = questDialogueEditorDocument["nodes"];
-
-    for ( rapidjson::SizeType nodeIndex = 0;
-        nodeIndex < nodes.Size();
-        ++nodeIndex )
-    {
-        rapidjson::Value& node = nodes[nodeIndex];
-        if ( !node.IsObject()
-            || !node.HasMember("choices")
-            || !node["choices"].IsArray() )
-        {
-            continue;
-        }
-
-        rapidjson::Value& choices = node["choices"];
-        for ( rapidjson::SizeType choiceIndex = 0;
-            choiceIndex < choices.Size();
-            ++choiceIndex )
-        {
-            rapidjson::Value& choice = choices[choiceIndex];
-            if ( !choice.IsObject()
-                || !choice.HasMember("condition")
-                || !choice["condition"].IsObject() )
-            {
-                continue;
-            }
-
-            rapidjson::Value& condition = choice["condition"];
-            if ( !condition.HasMember("type")
-                || !condition["type"].IsString() )
-            {
-                continue;
-            }
-
-            const std::string type = condition["type"].GetString();
-            if ( type != "objective_completed"
-                && type != "objective_incomplete" )
-            {
-                continue;
-            }
-
-            if ( condition.HasMember("quest") )
-            {
-                if ( !condition["quest"].IsString()
-                    || condition["quest"].GetStringLength() == 0 )
-                {
-                    rapidjson::Value replacement;
-                    replacement.SetString(questID.c_str(), allocator);
-                    condition["quest"] = replacement;
-                }
-            }
-            else
-            {
-                rapidjson::Value questValue;
-                questValue.SetString(questID.c_str(), allocator);
-                condition.AddMember("quest", questValue, allocator);
-            }
-        }
-    }
+static void questDialogueEditorRelinkObjectiveID(
+	const std::string& oldID,
+	const std::string& newID
+)
+{
+	if ( oldID.empty() || oldID == newID
+		|| !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray() ) return;
+	const std::string questID = questDialogueEditorDocument.HasMember("quest_id")
+		&& questDialogueEditorDocument["quest_id"].IsString()
+		? questDialogueEditorDocument["quest_id"].GetString() : std::string{};
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	auto relinkCondition = [&](rapidjson::Value& condition)
+	{
+		if ( !condition.IsObject() || !condition.HasMember("type")
+			|| !condition["type"].IsString()
+			|| !condition.HasMember("objective")
+			|| !condition["objective"].IsString()
+			|| questEditorNormalizeID(oldID)
+				!= questEditorNormalizeID(condition["objective"].GetString()) ) return;
+		const std::string type = questEditorNormalizeID(
+			condition["type"].GetString());
+		if ( type != "objective_completed" && type != "objective_incomplete" ) return;
+		if ( condition.HasMember("quest") && condition["quest"].IsString()
+			&& !questID.empty()
+			&& questEditorNormalizeID(questID)
+				!= questEditorNormalizeID(condition["quest"].GetString()) ) return;
+		condition["objective"].SetString(newID.c_str(), allocator);
+	};
+	for ( rapidjson::Value& node : questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( !node.IsObject() || !node.HasMember("choices")
+			|| !node["choices"].IsArray() ) continue;
+		for ( rapidjson::Value& choice : node["choices"].GetArray() )
+		{
+			if ( !choice.IsObject() ) continue;
+			if ( choice.HasMember("condition") ) relinkCondition(choice["condition"]);
+			if ( choice.HasMember("conditions") && choice["conditions"].IsArray() )
+				for ( rapidjson::Value& condition : choice["conditions"].GetArray() )
+					relinkCondition(condition);
+			if ( choice.HasMember("action") && choice["action"].IsObject() )
+			{
+				for ( const char* field : { "objective_complete", "objective_clear" } )
+				{
+					if ( choice["action"].HasMember(field)
+						&& choice["action"][field].IsString()
+						&& questEditorNormalizeID(oldID)
+							== questEditorNormalizeID(choice["action"][field].GetString()) )
+					{
+						choice["action"][field].SetString(newID.c_str(), allocator);
+					}
+				}
+			}
+		}
+	}
 }
 
 static bool questDialogueEditorSaveDocument()
@@ -1056,14 +1291,42 @@ static bool questDialogueEditorSaveDocument()
 		return false;
 	}
 
-	questDialogueEditorRepairObjectiveConditionQuestIDs();
+	questDialogueEditorModel.recordExternalEdit("Dialogue editor change");
+	questDialogueEditorLoadPreview(
+		questDialogueEditorFiles[questDialogueEditorSelectedFile],
+		false
+	);
+	questDialogueEditorSandboxActive = false;
+	questDialogueEditorSetMessage("Unsaved changes.");
+	return true;
+}
 
-	rapidjson::StringBuffer buffer;
-	rapidjson::PrettyWriter<
-		rapidjson::StringBuffer
-	> writer(buffer);
+static bool questDialogueEditorWriteDocument()
+{
+	if ( questDialogueEditorSelectedFile < 0
+		|| questDialogueEditorSelectedFile
+			>= static_cast<int>(questDialogueEditorFiles.size())
+		|| !questDialogueEditorDocument.IsObject() )
+	{
+		questDialogueEditorSetMessage("No valid dialogue file is selected.");
+		return false;
+	}
 
-	questDialogueEditorDocument.Accept(writer);
+	const std::vector<automatia::dialogue::Issue> issues =
+		automatia::dialogue::validate(
+			questDialogueEditorDocument,
+			questDialogueEditorValidationOptions()
+		);
+	for ( const auto& issue : issues )
+	{
+		if ( issue.severity == automatia::dialogue::Severity::Error )
+		{
+			questDialogueEditorSetMessage(
+				"Save blocked: " + issue.location.path + " - " + issue.message
+			);
+			return false;
+		}
+	}
 
 	const std::string path =
 		"./dialogue/"
@@ -1071,21 +1334,12 @@ static bool questDialogueEditorSaveDocument()
 			questDialogueEditorSelectedFile
 		];
 
-	std::ofstream output(
-		path.c_str(),
-		std::ios::out | std::ios::trunc
-	);
-
-	if ( !output.is_open() )
+	std::string saveError;
+	if ( !questDialogueEditorModel.saveAtomic(path, saveError) )
 	{
-		questDialogueEditorSetMessage(
-			"Could not save " + path
-		);
+		questDialogueEditorSetMessage(saveError);
 		return false;
 	}
-
-	output << buffer.GetString() << "\n";
-	output.close();
 
 	questDialogueEditorSetMessage(
 		"Saved "
@@ -1097,8 +1351,10 @@ static bool questDialogueEditorSaveDocument()
 	questDialogueEditorLoadPreview(
 		questDialogueEditorFiles[
 			questDialogueEditorSelectedFile
-		]
+		],
+		false
 	);
+	questDialogueEditorRefreshFiles();
 
 	return true;
 }
@@ -1161,86 +1417,7 @@ static int questDialogueEditorNodeIDAt(
 
 static bool questDialogueEditorCreateNewFile()
 {
-	mkdir("./dialogue", 0755);
-
-	int suffix = 1;
-	std::string filename;
-
-	do
-	{
-		filename =
-			"new_dialogue_"
-			+ std::to_string(suffix)
-			+ ".json";
-		++suffix;
-	}
-	while ( access(
-		("./dialogue/" + filename).c_str(),
-		F_OK
-	) == 0 );
-
-	std::ofstream output(
-		("./dialogue/" + filename).c_str(),
-		std::ios::out | std::ios::trunc
-	);
-
-	if ( !output.is_open() )
-	{
-		questDialogueEditorSetMessage(
-			"Could not create a dialogue file."
-		);
-		return false;
-	}
-
-	const std::string dialogueID =
-		filename.substr(0, filename.size() - 5);
-
-	output
-		<< "{\n"
-		<< "  \"version\": 1,\n"
-		<< "  \"quest_id\": \""
-		<< dialogueID
-		<< "\",\n"
-		<< "  \"quest\": {\n"
-		<< "    \"title\": \"New Quest\",\n"
-		<< "    \"summary\": \"Describe the quest.\",\n"
-		<< "    \"scope\": \"player\",\n"
-		<< "    \"repeatable\": false,\n"
-		<< "    \"objectives\": []\n"
-		<< "  },\n"
-		<< "  \"start_node\": 0,\n"
-		<< "  \"nodes\": [\n"
-		<< "    {\n"
-		<< "      \"id\": 0,\n"
-		<< "      \"text\": \"New dialogue node.\",\n"
-		<< "      \"next\": 0,\n"
-		<< "      \"choices\": []\n"
-		<< "    }\n"
-		<< "  ]\n"
-		<< "}\n";
-
-	output.close();
-
-	questDialogueEditorRefreshFiles();
-
-	for ( int index = 0;
-		index < static_cast<int>(
-			questDialogueEditorFiles.size()
-		);
-		++index )
-	{
-		if ( questDialogueEditorFiles[index]
-			== filename )
-		{
-			questDialogueEditorSelectedFile = index;
-			break;
-		}
-	}
-
-	questDialogueEditorLoadPreview(filename);
-	questDialogueEditorSetMessage(
-		"Created " + filename
-	);
+	questDialogueEditorRequestTransition(QUEST_DIALOGUE_PENDING_OPEN_WIZARD);
 	return true;
 }
 
@@ -1376,6 +1553,37 @@ static bool questDialogueEditorDeleteNode()
 			return false;
 		}
 
+		if ( node.HasMember("condition")
+			&& node["condition"].IsObject() )
+		{
+			const rapidjson::Value& condition = node["condition"];
+			for ( const char* branch : { "true_node", "false_node" } )
+			{
+				if ( condition.HasMember(branch)
+					&& condition[branch].IsInt()
+					&& condition[branch].GetInt() == deletedID )
+				{
+					questDialogueEditorSetMessage(
+						"A node condition still branches to this node."
+					);
+					return false;
+				}
+			}
+			if ( condition.HasMember("type")
+				&& condition["type"].IsString()
+				&& questEditorNormalizeID(condition["type"].GetString()) == "node_seen"
+				&& condition.HasMember("node")
+				&& condition["node"].IsString()
+				&& questEditorNormalizeID(condition["node"].GetString())
+					== "node_" + std::to_string(deletedID) )
+			{
+				questDialogueEditorSetMessage(
+					"A node-seen condition still references this node."
+				);
+				return false;
+			}
+		}
+
 		if ( node.HasMember("choices")
 			&& node["choices"].IsArray() )
 		{
@@ -1431,6 +1639,51 @@ static bool questDialogueEditorDeleteNode()
 	return questDialogueEditorSaveDocument();
 }
 
+static bool questDialogueEditorChoiceIDExistsGlobal(
+	const std::string& candidate,
+	const rapidjson::Value* ignoredChoice = nullptr
+)
+{
+	if ( !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray() )
+	{
+		return false;
+	}
+	const std::string normalizedCandidate = questEditorNormalizeID(candidate);
+	for ( const rapidjson::Value& node :
+		questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( !node.IsObject() || !node.HasMember("choices")
+			|| !node["choices"].IsArray() ) continue;
+		for ( const rapidjson::Value& choice : node["choices"].GetArray() )
+		{
+			if ( &choice != ignoredChoice && choice.IsObject() && choice.HasMember("id")
+				&& choice["id"].IsString()
+				&& questEditorNormalizeID(choice["id"].GetString())
+					== normalizedCandidate )
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static std::string questDialogueEditorUniqueChoiceID(
+	const std::string& requestedBase
+)
+{
+	const std::string base = requestedBase.empty() ? "choice" : requestedBase;
+	std::string candidate = base;
+	int suffix = 2;
+	while ( questDialogueEditorChoiceIDExistsGlobal(candidate) )
+	{
+		candidate = base + "_" + std::to_string(suffix++);
+	}
+	return candidate;
+}
+
 static bool questDialogueEditorAddChoice()
 {
 	rapidjson::Value* node =
@@ -1464,9 +1717,6 @@ static bool questDialogueEditorAddChoice()
 		return false;
 	}
 
-	const int choiceNumber =
-		static_cast<int>(choices.Size()) + 1;
-
 	const int currentNodeID =
 		node->HasMember("id")
 		&& (*node)["id"].IsInt()
@@ -1477,9 +1727,13 @@ static bool questDialogueEditorAddChoice()
 		rapidjson::kObjectType
 	);
 
-	const std::string choiceID =
-		"choice_"
-		+ std::to_string(choiceNumber);
+	int choiceNumber = 1;
+	std::string choiceID;
+	do
+	{
+		choiceID = "choice_" + std::to_string(choiceNumber++);
+	}
+	while ( questDialogueEditorChoiceIDExistsGlobal(choiceID) );
 
 	rapidjson::Value idValue;
 	idValue.SetString(
@@ -1511,58 +1765,6 @@ static bool questDialogueEditorAddChoice()
 	return questDialogueEditorSaveDocument();
 }
 
-
-static std::string questDialogueEditorUniqueChoiceID(
-	const rapidjson::Value& choices,
-	const std::string& base
-)
-{
-	std::string candidate =
-		base.empty()
-			? "choice_copy"
-			: base + "_copy";
-
-	int suffix = 2;
-
-	auto exists =
-		[
-			&choices
-		](
-			const std::string& id
-		)
-		{
-			if ( !choices.IsArray() )
-			{
-				return false;
-			}
-
-			for ( const rapidjson::Value& choice :
-				choices.GetArray() )
-			{
-				if ( choice.IsObject()
-					&& choice.HasMember("id")
-					&& choice["id"].IsString()
-					&& id == choice["id"].GetString() )
-				{
-					return true;
-				}
-			}
-
-			return false;
-		};
-
-	while ( exists(candidate) )
-	{
-		candidate =
-			(base.empty()
-				? "choice_copy"
-				: base + "_copy")
-			+ "_"
-			+ std::to_string(suffix++);
-	}
-
-	return candidate;
-}
 
 static bool questDialogueEditorDuplicateSelectedChoice()
 {
@@ -1613,8 +1815,7 @@ static bool questDialogueEditorDuplicateSelectedChoice()
 
 	const std::string copiedID =
 		questDialogueEditorUniqueChoiceID(
-			choices,
-			originalID
+			(originalID.empty() ? "choice" : originalID) + "_copy"
 		);
 
 	if ( duplicate.HasMember("id") )
@@ -1803,6 +2004,57 @@ static bool questDialogueEditorDuplicateSelectedNode()
 		duplicate["next"].SetInt(nextID);
 	}
 
+	if ( duplicate.HasMember("condition") && duplicate["condition"].IsObject()
+		&& original.HasMember("id") && original["id"].IsInt() )
+	{
+		for ( const char* branch : { "true_node", "false_node" } )
+		{
+			if ( duplicate["condition"].HasMember(branch)
+				&& duplicate["condition"][branch].IsInt()
+				&& duplicate["condition"][branch].GetInt() == original["id"].GetInt() )
+			{
+				duplicate["condition"][branch].SetInt(nextID);
+			}
+		}
+	}
+
+	if ( duplicate.HasMember("action") && duplicate["action"].IsObject() )
+	{
+		const std::string actionBase = "node_" + std::to_string(nextID) + "_once";
+		std::string actionID = actionBase;
+		int suffix = 2;
+		auto actionIDExists = [&](const std::string& candidate)
+		{
+			for ( const rapidjson::Value& node : nodes.GetArray() )
+			{
+				if ( node.IsObject() && node.HasMember("action")
+					&& node["action"].IsObject()
+					&& node["action"].HasMember("id")
+					&& node["action"]["id"].IsString()
+					&& questEditorNormalizeID(node["action"]["id"].GetString())
+						== questEditorNormalizeID(candidate) )
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+		while ( actionIDExists(actionID) )
+		{
+			actionID = actionBase + "_" + std::to_string(suffix++);
+		}
+		if ( duplicate["action"].HasMember("id") )
+		{
+			duplicate["action"]["id"].SetString(actionID.c_str(), allocator);
+		}
+		else
+		{
+			rapidjson::Value id;
+			id.SetString(actionID.c_str(), allocator);
+			duplicate["action"].AddMember("id", id, allocator);
+		}
+	}
+
 	if ( duplicate.HasMember("choices")
 		&& duplicate["choices"].IsArray() )
 	{
@@ -1816,11 +2068,11 @@ static bool questDialogueEditorDuplicateSelectedNode()
 				continue;
 			}
 
-			const std::string choiceID =
+			const std::string choiceID = questDialogueEditorUniqueChoiceID(
 				"node_"
-				+ std::to_string(nextID)
-				+ "_choice_"
-				+ std::to_string(copiedChoice++);
+					+ std::to_string(nextID)
+					+ "_choice_"
+					+ std::to_string(copiedChoice++));
 
 			if ( choice.HasMember("id") )
 			{
@@ -2592,16 +2844,25 @@ static bool questDialogueEditorAddObjective()
 		return false;
 	}
 
-	const int number =
-		static_cast<int>(objectives.Size()) + 1;
+	int number = static_cast<int>(objectives.Size()) + 1;
+	std::string id;
+	for ( ;; ++number )
+	{
+		id = "objective_" + std::to_string(number);
+		const bool exists = std::any_of(objectives.Begin(), objectives.End(),
+			[&id](const rapidjson::Value& existing)
+			{
+				return existing.IsObject() && existing.HasMember("id")
+					&& existing["id"].IsString()
+					&& questEditorNormalizeID(existing["id"].GetString())
+						== questEditorNormalizeID(id);
+			});
+		if ( !exists ) break;
+	}
 
 	rapidjson::Value objective(
 		rapidjson::kObjectType
 	);
-
-	const std::string id =
-		"objective_"
-		+ std::to_string(number);
 
 	rapidjson::Value idValue;
 	idValue.SetString(
@@ -2673,7 +2934,8 @@ static std::string questDialogueEditorUniqueObjectiveID(
 				if ( objective.IsObject()
 					&& objective.HasMember("id")
 					&& objective["id"].IsString()
-					&& id == objective["id"].GetString() )
+					&& questEditorNormalizeID(id)
+						== questEditorNormalizeID(objective["id"].GetString()) )
 				{
 					return true;
 				}
@@ -2877,6 +3139,87 @@ static bool questDialogueEditorDeleteObjective()
 
 	rapidjson::Value& objectives =
 		(*quest)["objectives"];
+	const rapidjson::Value& selected = objectives[
+		static_cast<rapidjson::SizeType>(questDialogueEditorSelectedObjective)];
+	const std::string objectiveID = selected.IsObject()
+		&& selected.HasMember("id") && selected["id"].IsString()
+		? selected["id"].GetString() : std::string{};
+	const std::string questID = questDialogueEditorDocument.HasMember("quest_id")
+		&& questDialogueEditorDocument["quest_id"].IsString()
+		? questDialogueEditorDocument["quest_id"].GetString() : std::string{};
+
+	auto conditionReferencesObjective =
+		[&](const rapidjson::Value& condition)
+		{
+			if ( !condition.IsObject() || !condition.HasMember("type")
+				|| !condition["type"].IsString()
+				|| !condition.HasMember("objective")
+				|| !condition["objective"].IsString()
+				|| questEditorNormalizeID(objectiveID)
+					!= questEditorNormalizeID(condition["objective"].GetString()) ) return false;
+			const std::string type = questEditorNormalizeID(
+				condition["type"].GetString());
+			if ( type != "objective_completed" && type != "objective_incomplete" )
+				return false;
+			return questID.empty() || !condition.HasMember("quest")
+				|| !condition["quest"].IsString()
+				|| questEditorNormalizeID(questID)
+					== questEditorNormalizeID(condition["quest"].GetString());
+		};
+
+	if ( !objectiveID.empty() && questDialogueEditorDocument.HasMember("nodes")
+		&& questDialogueEditorDocument["nodes"].IsArray() )
+	{
+		for ( const rapidjson::Value& node :
+			questDialogueEditorDocument["nodes"].GetArray() )
+		{
+			if ( !node.IsObject() || !node.HasMember("choices")
+				|| !node["choices"].IsArray() ) continue;
+			for ( const rapidjson::Value& choice : node["choices"].GetArray() )
+			{
+				if ( !choice.IsObject() ) continue;
+				if ( choice.HasMember("condition")
+					&& conditionReferencesObjective(choice["condition"]) )
+				{
+					questDialogueEditorSetMessage(
+						"A choice condition still references this objective."
+					);
+					return false;
+				}
+				if ( choice.HasMember("conditions")
+					&& choice["conditions"].IsArray() )
+				{
+					for ( const rapidjson::Value& condition :
+						choice["conditions"].GetArray() )
+					{
+						if ( conditionReferencesObjective(condition) )
+						{
+							questDialogueEditorSetMessage(
+								"A choice condition still references this objective."
+							);
+							return false;
+						}
+					}
+				}
+				if ( choice.HasMember("action") && choice["action"].IsObject() )
+				{
+					const rapidjson::Value& action = choice["action"];
+					for ( const char* field : { "objective_complete", "objective_clear" } )
+					{
+						if ( action.HasMember(field) && action[field].IsString()
+							&& questEditorNormalizeID(objectiveID)
+								== questEditorNormalizeID(action[field].GetString()) )
+						{
+							questDialogueEditorSetMessage(
+								"A choice action still references this objective."
+							);
+							return false;
+						}
+					}
+				}
+			}
+		}
+	}
 
 	objectives.Erase(
 		objectives.Begin()
@@ -3026,34 +3369,37 @@ static rapidjson::Value* questDialogueEditorSelectedConditionValue()
         return nullptr;
     }
 
-    if ( choice->HasMember("conditions")
-        && (*choice)["conditions"].IsArray() )
-    {
-        rapidjson::Value& conditions = (*choice)["conditions"];
-        if ( conditions.Empty() )
-        {
-            return nullptr;
-        }
-        questDialogueEditorSelectedConditionIndex = std::max(
-            0,
-            std::min(
-                questDialogueEditorSelectedConditionIndex,
-                static_cast<int>(conditions.Size()) - 1
-            )
-        );
-        return &conditions[static_cast<rapidjson::SizeType>(
-            questDialogueEditorSelectedConditionIndex
-        )];
-    }
-
-    if ( choice->HasMember("condition")
-        && (*choice)["condition"].IsObject() )
-    {
-        questDialogueEditorSelectedConditionIndex = 0;
+    const bool singular = choice->HasMember("condition")
+        && (*choice)["condition"].IsObject();
+    const int arrayCount = choice->HasMember("conditions")
+        && (*choice)["conditions"].IsArray()
+        ? static_cast<int>((*choice)["conditions"].Size()) : 0;
+    const int total = (singular ? 1 : 0) + arrayCount;
+    if ( total == 0 ) return nullptr;
+    questDialogueEditorSelectedConditionIndex = std::max(0,
+        std::min(questDialogueEditorSelectedConditionIndex, total - 1));
+    if ( singular && questDialogueEditorSelectedConditionIndex == 0 )
         return &(*choice)["condition"];
-    }
+    const int arrayIndex = questDialogueEditorSelectedConditionIndex
+        - (singular ? 1 : 0);
+    return &(*choice)["conditions"][static_cast<rapidjson::SizeType>(arrayIndex)];
 
     return nullptr;
+}
+
+static rapidjson::Value* questDialogueEditorSelectedRuleCondition()
+{
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( node && node->IsObject() && node->HasMember("condition")
+			&& (*node)["condition"].IsObject() )
+		{
+			return &(*node)["condition"];
+		}
+		return nullptr;
+	}
+	return questDialogueEditorSelectedConditionValue();
 }
 
 static rapidjson::Value& questDialogueEditorEnsureConditionArray(
@@ -3084,15 +3430,20 @@ static rapidjson::Value& questDialogueEditorEnsureConditionArray(
 static void questDialogueEditorCycleSelectedCondition(const int direction)
 {
     rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
-    if ( !choice || !choice->IsObject()
-        || !choice->HasMember("conditions")
-        || !(*choice)["conditions"].IsArray()
-        || (*choice)["conditions"].Empty() )
+    if ( !choice || !choice->IsObject() )
     {
         questDialogueEditorSelectedConditionIndex = 0;
         return;
     }
-    const int count = static_cast<int>((*choice)["conditions"].Size());
+    const int count = (choice->HasMember("condition")
+        && (*choice)["condition"].IsObject() ? 1 : 0)
+        + (choice->HasMember("conditions") && (*choice)["conditions"].IsArray()
+            ? static_cast<int>((*choice)["conditions"].Size()) : 0);
+    if ( count <= 0 )
+    {
+        questDialogueEditorSelectedConditionIndex = 0;
+        return;
+    }
     questDialogueEditorSelectedConditionIndex =
         (questDialogueEditorSelectedConditionIndex + direction + count) % count;
 }
@@ -3106,7 +3457,7 @@ static std::string questDialogueEditorChoiceConditionName()
     {
         return "None";
     }
-    return (*condition)["type"].GetString();
+    return questEditorNormalizeID((*condition)["type"].GetString());
 }
 
 static std::vector<std::string> questDialogueEditorChoiceActionMembers()
@@ -3126,6 +3477,63 @@ static std::vector<std::string> questDialogueEditorChoiceActionMembers()
         members.emplace_back(member->name.GetString());
     }
     return members;
+}
+
+static rapidjson::Value* questDialogueEditorSelectedRuleAction()
+{
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( node && node->IsObject() && node->HasMember("action")
+			&& (*node)["action"].IsObject() )
+		{
+			return &(*node)["action"];
+		}
+		return nullptr;
+	}
+
+	rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+	if ( choice && choice->IsObject() && choice->HasMember("action")
+		&& (*choice)["action"].IsObject() )
+	{
+		return &(*choice)["action"];
+	}
+	return nullptr;
+}
+
+static std::vector<std::string> questDialogueEditorRuleActionMembers()
+{
+	std::vector<std::string> members;
+	rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+	if ( !action )
+	{
+		return members;
+	}
+	for ( auto member = action->MemberBegin(); member != action->MemberEnd(); ++member )
+	{
+		if ( questDialogueEditorRuleOwnerNode
+			&& std::string(member->name.GetString()) == "id" )
+		{
+			continue;
+		}
+		members.emplace_back(member->name.GetString());
+	}
+	return members;
+}
+
+static std::string questDialogueEditorSelectedRuleActionMember()
+{
+	const std::vector<std::string> members =
+		questDialogueEditorRuleActionMembers();
+	if ( members.empty() )
+	{
+		questDialogueEditorSelectedActionIndex = 0;
+		return {};
+	}
+	questDialogueEditorSelectedActionIndex = std::max(0,
+		std::min(questDialogueEditorSelectedActionIndex,
+			static_cast<int>(members.size()) - 1));
+	return members[questDialogueEditorSelectedActionIndex];
 }
 
 static std::string questDialogueEditorActionDisplayName(const std::string& member)
@@ -3232,8 +3640,8 @@ static bool questDialogueEditorSetChoiceCondition(
 		&& (*choice)["condition"].HasMember("type")
 		&& (*choice)["condition"]["type"].IsString() )
 	{
-		current =
-			(*choice)["condition"]["type"].GetString();
+		current = questEditorNormalizeID(
+			(*choice)["condition"]["type"].GetString());
 	}
 
 	int index = 0;
@@ -3583,30 +3991,32 @@ static bool questDialogueEditorClearChoiceCondition()
         return false;
     }
 
-    if ( choice->HasMember("conditions")
+    const bool singular = choice->HasMember("condition")
+        && (*choice)["condition"].IsObject();
+    if ( singular && questDialogueEditorSelectedConditionIndex == 0 )
+    {
+        choice->RemoveMember("condition");
+        questDialogueEditorSelectedConditionIndex = 0;
+    }
+    else if ( choice->HasMember("conditions")
         && (*choice)["conditions"].IsArray()
         && !(*choice)["conditions"].Empty() )
     {
         rapidjson::Value& conditions = (*choice)["conditions"];
-        questDialogueEditorSelectedConditionIndex = std::max(
-            0,
-            std::min(questDialogueEditorSelectedConditionIndex,
-                static_cast<int>(conditions.Size()) - 1)
-        );
+        const int arrayIndex = std::max(0, std::min(
+            questDialogueEditorSelectedConditionIndex - (singular ? 1 : 0),
+            static_cast<int>(conditions.Size()) - 1));
         conditions.Erase(conditions.Begin()
-            + questDialogueEditorSelectedConditionIndex);
+            + arrayIndex);
         if ( conditions.Empty() )
         {
             choice->RemoveMember("conditions");
-            questDialogueEditorSelectedConditionIndex = 0;
         }
-        else
-        {
-            questDialogueEditorSelectedConditionIndex = std::min(
-                questDialogueEditorSelectedConditionIndex,
-                static_cast<int>(conditions.Size()) - 1
-            );
-        }
+        const int remaining = (singular ? 1 : 0)
+            + (choice->HasMember("conditions") && (*choice)["conditions"].IsArray()
+                ? static_cast<int>((*choice)["conditions"].Size()) : 0);
+        questDialogueEditorSelectedConditionIndex = std::max(0,
+            std::min(questDialogueEditorSelectedConditionIndex, remaining - 1));
     }
     else
     {
@@ -3748,8 +4158,26 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_QUEST_SUMMARY:
 			return "Quest Summary";
 
+		case QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE:
+			return "General Objective";
+
+		case QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT:
+			return "Quest Completion Text";
+
+		case QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT:
+			return "Quest Failure Text";
+
+		case QUEST_DIALOGUE_FIELD_LEGACY_TEXT:
+			return "Legacy Dialogue Text";
+
+		case QUEST_DIALOGUE_FIELD_NODE_ID:
+			return "Node ID";
+
 		case QUEST_DIALOGUE_FIELD_NODE_TEXT:
 			return "Node Text";
+
+		case QUEST_DIALOGUE_FIELD_NODE_NEXT:
+			return "Node Automatic Next";
 
 		case QUEST_DIALOGUE_FIELD_CHOICE_ID:
 			return "Choice ID";
@@ -3757,11 +4185,20 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_CHOICE_TEXT:
 			return "Choice Text";
 
+		case QUEST_DIALOGUE_FIELD_CHOICE_NEXT:
+			return "Choice Destination";
+
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_ID:
 			return "Objective ID";
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT:
 			return "Objective Text";
+
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT:
+			return "Objective Completed Text";
+
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE:
+			return "Objective Progress Variable";
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE:
 			return "Condition Reference";
@@ -3772,11 +4209,32 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
 			return "Condition Number";
 
+		case QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID:
+			return "Condition S.A.M. Stable ID";
+
+		case QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE:
+			return "Condition True Destination";
+
+		case QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE:
+			return "Condition False Destination";
+
 		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
 			return "Action Reference";
 
 		case QUEST_DIALOGUE_FIELD_ACTION_NUMBER:
 			return "Action Number";
+
+		case QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER:
+			return "Action Secondary Number";
+
+		case QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER:
+			return "Action Tertiary Number";
+
+		case QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID:
+			return "Action S.A.M. Stable ID";
+
+		case QUEST_DIALOGUE_FIELD_NODE_ACTION_ID:
+			return "One-time Node Action ID";
 
 		case QUEST_DIALOGUE_FIELD_POWER_X:
 			return "Power Tile X";
@@ -3793,11 +4251,29 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID:
 			return "Objective Defeat ID";
 
+		case QUEST_DIALOGUE_FIELD_MARKER_MAP:
+			return "Marker Map";
+
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 			return "Marker X";
 
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
 			return "Marker Y";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_LABEL:
+			return "Giver Label";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_MAP:
+			return "Giver Map";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_X:
+			return "Giver Tile X";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
+			return "Giver Tile Y";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
+			return "Giver Persistent NPC ID";
 
 		default:
 			return "Unknown";
@@ -3908,15 +4384,34 @@ static std::string questDialogueEditorReadEditableField()
 
 		case QUEST_DIALOGUE_FIELD_QUEST_TITLE:
 		case QUEST_DIALOGUE_FIELD_QUEST_SUMMARY:
+		case QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE:
+		case QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT:
+		case QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT:
 			if ( questDialogueEditorDocument.IsObject()
 				&& questDialogueEditorDocument.HasMember("quest")
 				&& questDialogueEditorDocument["quest"].IsObject() )
 			{
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_QUEST_TITLE
-							? "title"
-							: "summary";
+				const char* member = "title";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_SUMMARY )
+				{
+					member = "summary";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE )
+				{
+					member = "objective";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT )
+				{
+					member = "completed_text";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT )
+				{
+					member = "failed_text";
+				}
 
 				if ( questDialogueEditorDocument["quest"].HasMember(
 						member
@@ -3932,34 +4427,62 @@ static std::string questDialogueEditorReadEditableField()
 			}
 			break;
 
+		case QUEST_DIALOGUE_FIELD_LEGACY_TEXT:
+			if ( questDialogueEditorDocument.IsObject()
+				&& questDialogueEditorDocument.HasMember("text")
+				&& questDialogueEditorDocument["text"].IsString() )
+			{
+				return questDialogueEditorDocument["text"].GetString();
+			}
+			break;
+
+		case QUEST_DIALOGUE_FIELD_NODE_ID:
 		case QUEST_DIALOGUE_FIELD_NODE_TEXT:
+		case QUEST_DIALOGUE_FIELD_NODE_NEXT:
 		{
 			rapidjson::Value* node =
 				questDialogueEditorSelectedNodeValue();
 
-			if ( node
-				&& node->IsObject()
-				&& node->HasMember("text")
-				&& (*node)["text"].IsString() )
+			if ( node && node->IsObject() )
 			{
-				return (*node)["text"].GetString();
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_NODE_TEXT
+					&& node->HasMember("text")
+					&& (*node)["text"].IsString() )
+				{
+					return (*node)["text"].GetString();
+				}
+				const char* member = questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_NODE_ID ? "id" : "next";
+				if ( node->HasMember(member) && (*node)[member].IsInt() )
+				{
+					return std::to_string((*node)[member].GetInt());
+				}
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_CHOICE_ID:
 		case QUEST_DIALOGUE_FIELD_CHOICE_TEXT:
+		case QUEST_DIALOGUE_FIELD_CHOICE_NEXT:
 		{
 			rapidjson::Value* choice =
 				questDialogueEditorSelectedChoiceValueForEdit();
 
 			if ( choice && choice->IsObject() )
 			{
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_CHOICE_ID
-							? "id"
-							: "text";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CHOICE_NEXT )
+				{
+					if ( choice->HasMember("next")
+						&& (*choice)["next"].IsInt() )
+					{
+						return std::to_string((*choice)["next"].GetInt());
+					}
+					break;
+				}
+				const char* member = questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CHOICE_ID ? "id" : "text";
 
 				if ( choice->HasMember(member)
 					&& (*choice)[member].IsString() )
@@ -3972,17 +4495,30 @@ static std::string questDialogueEditorReadEditableField()
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_ID:
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE:
 		{
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
 
 			if ( objective && objective->IsObject() )
 			{
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_OBJECTIVE_ID
-							? "id"
-							: "text";
+				const char* member = "id";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT )
+				{
+					member = "text";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT )
+				{
+					member = "completed_text";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE )
+				{
+					member = "progress_variable";
+				}
 
 				if ( objective->HasMember(member)
 					&& (*objective)[member].IsString() )
@@ -3994,32 +4530,39 @@ static std::string questDialogueEditorReadEditableField()
 		}
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE:
+		case QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject() )
+			if ( condition )
 			{
-				rapidjson::Value& condition =
-					(*choice)["condition"];
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID )
+				{
+					if ( condition->HasMember("stable_id")
+						&& (*condition)["stable_id"].IsString() )
+					{
+						return (*condition)["stable_id"].GetString();
+					}
+					break;
+				}
 
 				const char* candidates[] =
 				{
 					"item",
 					"quest",
 					"id",
-					"objective"
+					"objective",
+					"node"
 				};
 
 				for ( const char* candidate : candidates )
 				{
-					if ( condition.HasMember(candidate)
-						&& condition[candidate].IsString() )
+					if ( condition->HasMember(candidate)
+						&& (*condition)[candidate].IsString() )
 					{
-						return condition[candidate].GetString();
+						return (*condition)[candidate].GetString();
 					}
 				}
 			}
@@ -4028,33 +4571,41 @@ static std::string questDialogueEditorReadEditableField()
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_QUEST:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject()
-				&& (*choice)["condition"].HasMember("quest")
-				&& (*choice)["condition"]["quest"].IsString() )
+			if ( condition && condition->HasMember("quest")
+				&& (*condition)["quest"].IsString() )
 			{
-				return (*choice)["condition"]["quest"].GetString();
+				return (*condition)["quest"].GetString();
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
+		case QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE:
+		case QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject() )
+			if ( condition )
 			{
-				rapidjson::Value& condition =
-					(*choice)["condition"];
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE
+					|| questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE )
+				{
+					const char* member = questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE
+							? "true_node" : "false_node";
+					if ( condition->HasMember(member)
+						&& (*condition)[member].IsInt() )
+					{
+						return std::to_string((*condition)[member].GetInt());
+					}
+					break;
+				}
 
 				const char* candidates[] =
 				{
@@ -4066,11 +4617,11 @@ static std::string questDialogueEditorReadEditableField()
 
 				for ( const char* candidate : candidates )
 				{
-					if ( condition.HasMember(candidate)
-						&& condition[candidate].IsInt() )
+					if ( condition->HasMember(candidate)
+						&& (*condition)[candidate].IsInt() )
 					{
 						return std::to_string(
-							condition[candidate].GetInt()
+							(*condition)[candidate].GetInt()
 						);
 					}
 				}
@@ -4079,53 +4630,53 @@ static std::string questDialogueEditorReadEditableField()
 		}
 
 		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
+		case QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID:
+		case QUEST_DIALOGUE_FIELD_NODE_ACTION_ID:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* action =
+				questDialogueEditorSelectedRuleAction();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject() )
+			if ( action )
 			{
-				rapidjson::Value& action = (*choice)["action"];
-				const char* stringMembers[] =
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_NODE_ACTION_ID )
 				{
-					"objective_complete",
-					"objective_clear"
-				};
-				for ( const char* member : stringMembers )
-				{
-					if ( action.HasMember(member)
-						&& action[member].IsString() )
+					if ( action->HasMember("id") && (*action)["id"].IsString() )
 					{
-						return action[member].GetString();
+						return (*action)["id"].GetString();
 					}
+					break;
 				}
 
-				const char* objectMembers[] =
+				const std::string member =
+					questDialogueEditorSelectedRuleActionMember();
+				if ( member.empty() || !action->HasMember(member.c_str()) )
 				{
-					"reward_item", "remove_item",
-					"set_world_flag", "set_npc_flag",
-					"set_world_variable", "add_world_variable",
-					"set_npc_variable", "add_npc_variable",
-					"set_quest_variable", "add_quest_variable"
-				};
-				for ( const char* member : objectMembers )
+					break;
+				}
+				rapidjson::Value& selected = (*action)[member.c_str()];
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID )
 				{
-					if ( !action.HasMember(member)
-						|| !action[member].IsObject() )
+					if ( selected.IsObject() && selected.HasMember("stable_id")
+						&& selected["stable_id"].IsString() )
 					{
-						continue;
+						return selected["stable_id"].GetString();
 					}
-					rapidjson::Value& object = action[member];
-					const char* key =
-						(std::string(member) == "reward_item"
-							|| std::string(member) == "remove_item")
+					break;
+				}
+				if ( selected.IsString() )
+				{
+					return selected.GetString();
+				}
+				if ( selected.IsObject() )
+				{
+					const char* key = member == "reward_item"
+						|| member == "remove_item"
 							? "item" : "id";
-					if ( object.HasMember(key) && object[key].IsString() )
+					if ( selected.HasMember(key) && selected[key].IsString() )
 					{
-						return object[key].GetString();
+						return selected[key].GetString();
 					}
 				}
 			}
@@ -4133,33 +4684,57 @@ static std::string questDialogueEditorReadEditableField()
 		}
 
 		case QUEST_DIALOGUE_FIELD_ACTION_NUMBER:
+		case QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER:
+		case QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* action =
+				questDialogueEditorSelectedRuleAction();
+			const std::string member =
+				questDialogueEditorSelectedRuleActionMember();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject() )
+			if ( action && !member.empty() && action->HasMember(member.c_str()) )
 			{
-				rapidjson::Value& action =
-					(*choice)["action"];
-
-				const char* candidates[] =
+				rapidjson::Value& selected = (*action)[member.c_str()];
+				if ( selected.IsInt()
+					&& questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_ACTION_NUMBER )
 				{
-					"reward_gold",
-					"remove_gold",
-					"quest_stage"
-				};
-
-				for ( const char* candidate : candidates )
+					return std::to_string(selected.GetInt());
+				}
+				if ( selected.IsObject() )
 				{
-					if ( action.HasMember(candidate)
-						&& action[candidate].IsInt() )
+					const char* key = nullptr;
+					if ( questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER )
 					{
-						return std::to_string(
-							action[candidate].GetInt()
-						);
+						key = member == "status_effect" ? "duration_seconds" : nullptr;
+					}
+					else if ( questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER )
+					{
+						key = member == "status_effect" ? "strength" : nullptr;
+					}
+					else if ( member == "reward_item" || member == "remove_item" )
+					{
+						key = "count";
+					}
+					else if ( member == "status_effect" )
+					{
+						key = "effect";
+					}
+					else if ( member.rfind("set_", 0) == 0
+						&& member.find("variable") != std::string::npos )
+					{
+						key = "value";
+					}
+					else if ( member.rfind("add_", 0) == 0
+						&& member.find("variable") != std::string::npos )
+					{
+						key = "amount";
+					}
+					if ( key && selected.HasMember(key) && selected[key].IsInt() )
+					{
+						return std::to_string(selected[key].GetInt());
 					}
 				}
 			}
@@ -4200,6 +4775,11 @@ static std::string questDialogueEditorReadEditableField()
 				{
 					return "1";
 				}
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID )
+				{
+					return "";
+				}
 				return "0";
 			}
 			break;
@@ -4208,18 +4788,14 @@ static std::string questDialogueEditorReadEditableField()
 		case QUEST_DIALOGUE_FIELD_POWER_X:
 		case QUEST_DIALOGUE_FIELD_POWER_Y:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* action =
+				questDialogueEditorSelectedRuleAction();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject()
-				&& (*choice)["action"].HasMember("set_power")
-				&& (*choice)["action"]["set_power"].IsObject() )
+			if ( action && action->HasMember("set_power")
+				&& (*action)["set_power"].IsObject() )
 			{
 				rapidjson::Value& powerAction =
-					(*choice)["action"]["set_power"];
+					(*action)["set_power"];
 				const char* member =
 					questDialogueEditorEditableField
 						== QUEST_DIALOGUE_FIELD_POWER_X
@@ -4237,6 +4813,7 @@ static std::string questDialogueEditorReadEditableField()
 			break;
 		}
 
+		case QUEST_DIALOGUE_FIELD_MARKER_MAP:
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
 		{
@@ -4250,6 +4827,15 @@ static std::string questDialogueEditorReadEditableField()
 			{
 				rapidjson::Value& marker =
 					(*objective)["map_marker"];
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_MARKER_MAP )
+				{
+					if ( marker.HasMember("map") && marker["map"].IsString() )
+					{
+						return marker["map"].GetString();
+					}
+					break;
+				}
 
 				const char* member =
 					questDialogueEditorEditableField
@@ -4264,6 +4850,45 @@ static std::string questDialogueEditorReadEditableField()
 						marker[member].GetInt()
 					);
 				}
+			}
+			break;
+		}
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_LABEL:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_MAP:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_X:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
+		{
+			rapidjson::Value* quest = questDialogueEditorQuestValue();
+			if ( !quest || !quest->HasMember("origin")
+				|| !(*quest)["origin"].IsObject() )
+			{
+				break;
+			}
+			rapidjson::Value& origin = (*quest)["origin"];
+			const char* member = "label";
+			if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_MAP )
+			{
+				member = "map";
+			}
+			else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_X )
+			{
+				member = "x";
+			}
+			else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y )
+			{
+				member = "y";
+			}
+			else if ( questDialogueEditorEditableField
+				== QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID )
+			{
+				member = "npc_persistent_id";
+			}
+			if ( origin.HasMember(member) )
+			{
+				if ( origin[member].IsString() ) return origin[member].GetString();
+				if ( origin[member].IsInt() ) return std::to_string(origin[member].GetInt());
 			}
 			break;
 		}
@@ -4373,6 +4998,16 @@ static bool questDialogueEditorWriteIntegerMember(
 	return true;
 }
 
+static rapidjson::Value& questDialogueEditorSetObjectMember(
+	rapidjson::Value& parent,
+	const char* name
+);
+static void questDialogueEditorSetBoolMember(
+	rapidjson::Value& object,
+	const char* name,
+	bool value
+);
+
 static bool questDialogueEditorParseInteger(
 	const std::string& value,
 	int& result
@@ -4406,9 +5041,68 @@ static bool questDialogueEditorApplyEditableField()
 
 	if ( value.empty() )
 	{
-		questDialogueEditorSetMessage(
-			"Field text cannot be empty."
-		);
+		rapidjson::Value* owner = nullptr;
+		const char* optionalMember = nullptr;
+		if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_SUMMARY
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT )
+		{
+			owner = questDialogueEditorQuestValue();
+			optionalMember = questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_SUMMARY
+				? "summary" : (questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE
+					? "objective" : (questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT ? "completed_text" : "failed_text"));
+		}
+		else if ( questDialogueEditorEditableField
+			== QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT
+			|| questDialogueEditorEditableField
+				== QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE )
+		{
+			owner = questDialogueEditorSelectedObjectiveValueForEdit();
+			optionalMember = questDialogueEditorEditableField
+				== QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT
+					? "completed_text" : "progress_variable";
+		}
+		else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID )
+		{
+			owner = questDialogueEditorSelectedObjectiveValueForEdit();
+			optionalMember = questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE
+				? "stage" : (questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET
+					? "target" : "defeat_id");
+		}
+		else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_LABEL
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_MAP )
+		{
+			rapidjson::Value* quest = questDialogueEditorQuestValue();
+			if ( quest && quest->HasMember("origin") && (*quest)["origin"].IsObject() )
+				owner = &(*quest)["origin"];
+			optionalMember = questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_LABEL
+				? "label" : "map";
+		}
+		else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_X
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y
+			|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID )
+		{
+			rapidjson::Value* quest = questDialogueEditorQuestValue();
+			if ( quest && quest->HasMember("origin") && (*quest)["origin"].IsObject() )
+				owner = &(*quest)["origin"];
+			optionalMember = questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_X
+				? "x" : (questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y
+					? "y" : "npc_persistent_id");
+		}
+		if ( owner && optionalMember )
+		{
+			owner->RemoveMember(optionalMember);
+			questDialogueEditorEditingField = false;
+			SDL_StopTextInput();
+			if ( inputstr == questDialogueEditorEditBuffer ) inputstr = nullptr;
+			questDialogueEditorSetMessage("Optional field cleared.");
+			return questDialogueEditorSaveDocument();
+		}
+		questDialogueEditorSetMessage("This required field cannot be empty.");
 		return false;
 	}
 
@@ -4423,113 +5117,268 @@ static bool questDialogueEditorApplyEditableField()
 			return false;
 
 		case QUEST_DIALOGUE_FIELD_QUEST_ID:
-			success =
-				questDialogueEditorWriteStringMember(
-					questDialogueEditorDocument,
-					"quest_id",
-					questEditorNormalizeID(value)
-				);
+		{
+			const std::string normalized = questEditorNormalizeID(value);
+			if ( normalized.empty() )
+			{
+				questDialogueEditorSetMessage("Quest ID must contain letters or numbers.");
+				return false;
+			}
+			const std::string oldID = questDialogueEditorDocument.HasMember("quest_id")
+				&& questDialogueEditorDocument["quest_id"].IsString()
+				? questDialogueEditorDocument["quest_id"].GetString() : std::string{};
+			success = questDialogueEditorWriteStringMember(
+				questDialogueEditorDocument, "quest_id", normalized);
+			if ( success ) questDialogueEditorRelinkQuestID(oldID, normalized);
 			break;
+		}
 
 		case QUEST_DIALOGUE_FIELD_QUEST_TITLE:
 		case QUEST_DIALOGUE_FIELD_QUEST_SUMMARY:
+		case QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE:
+		case QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT:
+		case QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT:
 			if ( questDialogueEditorDocument.HasMember("quest")
 				&& questDialogueEditorDocument["quest"].IsObject() )
 			{
+				const char* member = "title";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_SUMMARY ) member = "summary";
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE ) member = "objective";
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT ) member = "completed_text";
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT ) member = "failed_text";
 				success =
 					questDialogueEditorWriteStringMember(
 						questDialogueEditorDocument["quest"],
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_QUEST_TITLE
-								? "title"
-								: "summary",
+						member,
 						value
 					);
 			}
 			break;
 
+		case QUEST_DIALOGUE_FIELD_LEGACY_TEXT:
+			if ( questDialogueEditorDocument.IsObject()
+				&& questDialogueEditorDocument.HasMember("text")
+				&& questDialogueEditorDocument["text"].IsString() )
+			{
+				success = questDialogueEditorWriteStringMember(
+					questDialogueEditorDocument, "text", value);
+			}
+			break;
+
+		case QUEST_DIALOGUE_FIELD_NODE_ID:
 		case QUEST_DIALOGUE_FIELD_NODE_TEXT:
+		case QUEST_DIALOGUE_FIELD_NODE_NEXT:
 		{
 			rapidjson::Value* node =
 				questDialogueEditorSelectedNodeValue();
 
 			if ( node )
 			{
-				success =
-					questDialogueEditorWriteStringMember(
-						*node,
-						"text",
-						value
-					);
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_NODE_TEXT )
+				{
+					success = questDialogueEditorWriteStringMember(*node, "text", value);
+				}
+				else
+				{
+					int number = 0;
+					if ( !questDialogueEditorParseInteger(value, number) )
+					{
+						questDialogueEditorSetMessage("Node destination/ID must be an integer.");
+						return false;
+					}
+					if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_NODE_ID )
+					{
+						const int oldID = node->HasMember("id") && (*node)["id"].IsInt()
+							? (*node)["id"].GetInt() : number;
+						rapidjson::Value& nodes = questDialogueEditorDocument["nodes"];
+						for ( const rapidjson::Value& other : nodes.GetArray() )
+						{
+							if ( &other != node && other.IsObject() && other.HasMember("id")
+								&& other["id"].IsInt() && other["id"].GetInt() == number )
+							{
+								questDialogueEditorSetMessage("That node ID already exists.");
+								return false;
+							}
+						}
+						(*node)["id"].SetInt(number);
+						if ( questDialogueEditorDocument.HasMember("start_node")
+							&& questDialogueEditorDocument["start_node"].IsInt()
+							&& questDialogueEditorDocument["start_node"].GetInt() == oldID )
+							questDialogueEditorDocument["start_node"].SetInt(number);
+						for ( rapidjson::Value& other : nodes.GetArray() )
+						{
+							if ( !other.IsObject() ) continue;
+							if ( other.HasMember("next") && other["next"].IsInt()
+								&& other["next"].GetInt() == oldID ) other["next"].SetInt(number);
+							if ( other.HasMember("condition") && other["condition"].IsObject() )
+							{
+								rapidjson::Value& condition = other["condition"];
+								for ( const char* branch : { "true_node", "false_node" } )
+									if ( condition.HasMember(branch) && condition[branch].IsInt()
+										&& condition[branch].GetInt() == oldID ) condition[branch].SetInt(number);
+								const std::string oldSeen = "node_" + std::to_string(oldID);
+								if ( condition.HasMember("node") && condition["node"].IsString()
+								&& questEditorNormalizeID(oldSeen)
+									== questEditorNormalizeID(condition["node"].GetString()) )
+									condition["node"].SetString(("node_" + std::to_string(number)).c_str(),
+										questDialogueEditorDocument.GetAllocator());
+							}
+							if ( &other == node && other.HasMember("action")
+								&& other["action"].IsObject()
+								&& other["action"].HasMember("id")
+								&& other["action"]["id"].IsString()
+								&& std::string(other["action"]["id"].GetString())
+									== "node_" + std::to_string(oldID) + "_once" )
+							{
+								other["action"]["id"].SetString(
+									("node_" + std::to_string(number) + "_once").c_str(),
+									questDialogueEditorDocument.GetAllocator());
+							}
+							if ( other.HasMember("choices") && other["choices"].IsArray() )
+								for ( rapidjson::Value& linkedChoice : other["choices"].GetArray() )
+									if ( linkedChoice.IsObject() && linkedChoice.HasMember("next")
+										&& linkedChoice["next"].IsInt()
+										&& linkedChoice["next"].GetInt() == oldID ) linkedChoice["next"].SetInt(number);
+						}
+						success = true;
+					}
+					else success = questDialogueEditorWriteIntegerMember(*node, "next", number);
+				}
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_CHOICE_ID:
 		case QUEST_DIALOGUE_FIELD_CHOICE_TEXT:
+		case QUEST_DIALOGUE_FIELD_CHOICE_NEXT:
 		{
 			rapidjson::Value* choice =
 				questDialogueEditorSelectedChoiceValueForEdit();
 
 			if ( choice )
 			{
-				success =
-					questDialogueEditorWriteStringMember(
-						*choice,
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_CHOICE_ID
-								? "id"
-								: "text",
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_CHOICE_ID
-								? questEditorNormalizeID(value)
-								: value
-					);
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CHOICE_NEXT )
+				{
+					int number = 0;
+					if ( !questDialogueEditorParseInteger(value, number) )
+					{
+						questDialogueEditorSetMessage("Choice destination must be an integer.");
+						return false;
+					}
+					success = questDialogueEditorWriteIntegerMember(*choice, "next", number);
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CHOICE_ID )
+				{
+					const std::string normalized = questEditorNormalizeID(value);
+					if ( normalized.empty() )
+					{
+						questDialogueEditorSetMessage("Choice ID must contain letters or numbers.");
+						return false;
+					}
+					if ( questDialogueEditorChoiceIDExistsGlobal(normalized, choice) )
+					{
+						questDialogueEditorSetMessage("That stable choice ID already exists.");
+						return false;
+					}
+					success = questDialogueEditorWriteStringMember(*choice, "id", normalized);
+				}
+				else success = questDialogueEditorWriteStringMember(*choice, "text", value);
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_ID:
 		case QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT:
+		case QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE:
 		{
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
 
 			if ( objective )
 			{
-				success =
-					questDialogueEditorWriteStringMember(
-						*objective,
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_OBJECTIVE_ID
-								? "id"
-								: "text",
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_OBJECTIVE_ID
-								? questEditorNormalizeID(value)
-								: value
-					);
+				const char* member = "id";
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT ) member = "text";
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT ) member = "completed_text";
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE ) member = "progress_variable";
+					const bool normalize = questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_OBJECTIVE_ID
+						|| questDialogueEditorEditableField
+							== QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE;
+					const std::string authoredValue = normalize
+						? questEditorNormalizeID(value) : value;
+					if ( normalize && authoredValue.empty() )
+					{
+						questDialogueEditorSetMessage(
+							"Objective IDs and progress variables must contain letters or numbers.");
+						return false;
+					}
+					if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_OBJECTIVE_ID )
+					{
+						const std::string oldID = objective->HasMember("id")
+							&& (*objective)["id"].IsString()
+							? (*objective)["id"].GetString() : std::string{};
+						rapidjson::Value* quest = questDialogueEditorQuestValue();
+						if ( quest && quest->HasMember("objectives")
+							&& (*quest)["objectives"].IsArray() )
+						{
+							for ( const rapidjson::Value& other : (*quest)["objectives"].GetArray() )
+							{
+								if ( &other != objective && other.IsObject()
+									&& other.HasMember("id") && other["id"].IsString()
+									&& questEditorNormalizeID(other["id"].GetString()) == authoredValue )
+								{
+									questDialogueEditorSetMessage("That objective ID already exists.");
+									return false;
+								}
+							}
+						}
+						success = questDialogueEditorWriteStringMember(*objective, member, authoredValue);
+						if ( success ) questDialogueEditorRelinkObjectiveID(oldID, authoredValue);
+					}
+					else success = questDialogueEditorWriteStringMember(
+						*objective, member, authoredValue);
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE:
+		case QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject()
-				&& (*choice)["condition"].HasMember("type")
-				&& (*choice)["condition"]["type"].IsString() )
+			if ( condition && condition->HasMember("type")
+				&& (*condition)["type"].IsString() )
 			{
-				rapidjson::Value& condition =
-					(*choice)["condition"];
+				const std::string type = questEditorNormalizeID(
+					(*condition)["type"].GetString());
 
-				const std::string type =
-					condition["type"].GetString();
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID )
+				{
+					if ( type != "has_item" ) break;
+					if ( !automatia::dialogue::isSafeStableItemID(value) )
+					{
+						questDialogueEditorSetMessage(
+							"S.A.M. stable ID must be a safe namespaced ID such as mod:item.");
+						return false;
+					}
+					success = questDialogueEditorWriteStringMember(
+						*condition, "stable_id", value);
+					if ( success ) condition->RemoveMember("item");
+					break;
+				}
 
 				const char* member = nullptr;
 
@@ -4557,15 +5406,23 @@ static bool questDialogueEditorApplyEditableField()
 				{
 					member = "id";
 				}
+				else if ( type == "node_seen" )
+				{
+					member = "node";
+				}
 
 				if ( member )
 				{
 					success =
 						questDialogueEditorWriteStringMember(
-							condition,
+							*condition,
 							member,
 							questEditorNormalizeID(value)
 						);
+					if ( success && type == "has_item" )
+					{
+						condition->RemoveMember("stable_id");
+					}
 				}
 			}
 			break;
@@ -4573,15 +5430,12 @@ static bool questDialogueEditorApplyEditableField()
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_QUEST:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject() )
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
+			if ( condition )
 			{
 				success = questDialogueEditorWriteStringMember(
-					(*choice)["condition"],
+					*condition,
 					"quest",
 					questEditorNormalizeID(value)
 				);
@@ -4590,6 +5444,8 @@ static bool questDialogueEditorApplyEditableField()
 		}
 
 		case QUEST_DIALOGUE_FIELD_CONDITION_NUMBER:
+		case QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE:
+		case QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE:
 		{
 			int number = 0;
 			if ( !questDialogueEditorParseInteger(
@@ -4603,25 +5459,28 @@ static bool questDialogueEditorApplyEditableField()
 				return false;
 			}
 
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
+			rapidjson::Value* condition =
+				questDialogueEditorSelectedRuleCondition();
 
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("condition")
-				&& (*choice)["condition"].IsObject()
-				&& (*choice)["condition"].HasMember("type")
-				&& (*choice)["condition"]["type"].IsString() )
+			if ( condition && condition->HasMember("type")
+				&& (*condition)["type"].IsString() )
 			{
-				rapidjson::Value& condition =
-					(*choice)["condition"];
-
-				const std::string type =
-					condition["type"].GetString();
+				const std::string type = questEditorNormalizeID(
+					(*condition)["type"].GetString());
 
 				const char* member = nullptr;
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE )
+				{
+					member = "true_node";
+				}
+				else if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE )
+				{
+					member = "false_node";
+				}
 
-				if ( type == "has_item" )
+				else if ( type == "has_item" )
 				{
 					member = "count";
 					number = std::max(1, number);
@@ -4645,7 +5504,7 @@ static bool questDialogueEditorApplyEditableField()
 				{
 					success =
 						questDialogueEditorWriteIntegerMember(
-							condition,
+							*condition,
 							member,
 							number
 						);
@@ -4655,53 +5514,78 @@ static bool questDialogueEditorApplyEditableField()
 		}
 
 		case QUEST_DIALOGUE_FIELD_ACTION_REFERENCE:
+		case QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID:
+		case QUEST_DIALOGUE_FIELD_NODE_ACTION_ID:
 		{
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject() )
+			rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+			if ( !action ) break;
+			if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_NODE_ACTION_ID )
 			{
-				rapidjson::Value& action = (*choice)["action"];
 				const std::string normalized = questEditorNormalizeID(value);
-				if ( action.HasMember("objective_complete") )
+				if ( normalized.empty() )
 				{
-					success = questDialogueEditorWriteStringMember(action, "objective_complete", normalized);
+					questDialogueEditorSetMessage(
+						"One-time action ID must contain letters or numbers.");
+					return false;
 				}
-				else if ( action.HasMember("objective_clear") )
+				if ( questDialogueEditorDocument.HasMember("nodes")
+					&& questDialogueEditorDocument["nodes"].IsArray() )
 				{
-					success = questDialogueEditorWriteStringMember(action, "objective_clear", normalized);
-				}
-				else
-				{
-					const char* objectMembers[] =
+					for ( const rapidjson::Value& node :
+						questDialogueEditorDocument["nodes"].GetArray() )
 					{
-						"reward_item", "remove_item",
-						"set_world_flag", "set_npc_flag",
-						"set_world_variable", "add_world_variable",
-						"set_npc_variable", "add_npc_variable",
-						"set_quest_variable", "add_quest_variable"
-					};
-					for ( const char* member : objectMembers )
-					{
-						if ( !action.HasMember(member) || !action[member].IsObject() )
+						if ( !node.IsObject() || !node.HasMember("action")
+							|| !node["action"].IsObject()
+							|| &node["action"] == action
+							|| !node["action"].HasMember("id")
+							|| !node["action"]["id"].IsString() ) continue;
+						if ( questEditorNormalizeID(node["action"]["id"].GetString())
+							== normalized )
 						{
-							continue;
+							questDialogueEditorSetMessage(
+								"That one-time node action ID already exists.");
+							return false;
 						}
-						const bool itemObject =
-							std::string(member) == "reward_item"
-							|| std::string(member) == "remove_item";
-						success = questDialogueEditorWriteStringMember(
-							action[member], itemObject ? "item" : "id", normalized);
-						break;
 					}
 				}
+				success = questDialogueEditorWriteStringMember(*action, "id", normalized);
+				break;
+			}
+			const std::string member = questDialogueEditorSelectedRuleActionMember();
+			if ( member.empty() || !action->HasMember(member.c_str()) ) break;
+			rapidjson::Value& selected = (*action)[member.c_str()];
+			if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID )
+			{
+				if ( (member != "reward_item" && member != "remove_item")
+					|| !selected.IsObject() ) break;
+				if ( !automatia::dialogue::isSafeStableItemID(value) )
+				{
+					questDialogueEditorSetMessage(
+						"S.A.M. stable ID must be a safe namespaced ID such as mod:item.");
+					return false;
+				}
+				success = questDialogueEditorWriteStringMember(selected, "stable_id", value);
+				if ( success ) selected.RemoveMember("item");
+				break;
+			}
+			const std::string normalized = questEditorNormalizeID(value);
+			if ( selected.IsString() )
+			{
+				success = questDialogueEditorWriteStringMember(*action, member.c_str(), normalized);
+			}
+			else if ( selected.IsObject() )
+			{
+				const bool item = member == "reward_item" || member == "remove_item";
+				success = questDialogueEditorWriteStringMember(
+					selected, item ? "item" : "id", normalized);
+				if ( success && item ) selected.RemoveMember("stable_id");
 			}
 			break;
 		}
 
 		case QUEST_DIALOGUE_FIELD_ACTION_NUMBER:
+		case QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER:
+		case QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER:
 		{
 			int number = 0;
 			if ( !questDialogueEditorParseInteger(
@@ -4715,42 +5599,42 @@ static bool questDialogueEditorApplyEditableField()
 				return false;
 			}
 
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
-
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject() )
+			rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+			const std::string member = questDialogueEditorSelectedRuleActionMember();
+			if ( action && !member.empty() && action->HasMember(member.c_str()) )
 			{
-				rapidjson::Value& action =
-					(*choice)["action"];
-
-				const char* member = nullptr;
-
-				if ( action.HasMember("reward_gold") )
+				rapidjson::Value& selected = (*action)[member.c_str()];
+				if ( selected.IsInt()
+					&& questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ACTION_NUMBER )
 				{
-					member = "reward_gold";
-					number = std::max(0, number);
+					if ( member == "reward_gold" || member == "remove_gold" )
+						number = std::max(0, number);
+					selected.SetInt(number);
+					success = true;
 				}
-				else if ( action.HasMember("remove_gold") )
+				else if ( selected.IsObject() )
 				{
-					member = "remove_gold";
-					number = std::max(0, number);
-				}
-				else if ( action.HasMember("quest_stage") )
-				{
-					member = "quest_stage";
-				}
-
-				if ( member )
-				{
-					success =
-						questDialogueEditorWriteIntegerMember(
-							action,
-							member,
-							number
-						);
+					const char* key = nullptr;
+					if ( questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER )
+						key = member == "status_effect" ? "duration_seconds" : nullptr;
+					else if ( questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER )
+						key = member == "status_effect" ? "strength" : nullptr;
+					else if ( member == "reward_item" || member == "remove_item" ) key = "count";
+					else if ( member == "status_effect" ) key = "effect";
+					else if ( member.rfind("set_", 0) == 0
+						&& member.find("variable") != std::string::npos ) key = "value";
+					else if ( member.rfind("add_", 0) == 0
+						&& member.find("variable") != std::string::npos ) key = "amount";
+					if ( key )
+					{
+						if ( std::string(key) == "count" ) number = std::max(1, number);
+						else if ( std::string(key) == "effect" ) number = std::max(0, number);
+						else if ( std::string(key) == "duration_seconds" ) number = std::max(0, number);
+						else if ( std::string(key) == "strength" ) number = std::max(1, std::min(255, number));
+						success = questDialogueEditorWriteIntegerMember(selected, key, number);
+					}
 				}
 			}
 			break;
@@ -4787,7 +5671,11 @@ static bool questDialogueEditorApplyEditableField()
 					== QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID )
 				{
 					member = "defeat_id";
-					number = std::max(0, number);
+					if ( number <= 0 )
+					{
+						questDialogueEditorSetMessage("Defeat entity ID must be positive.");
+						return false;
+					}
 				}
 
 				if ( questDialogueEditorEditableField
@@ -4821,21 +5709,14 @@ static bool questDialogueEditorApplyEditableField()
 				return false;
 			}
 
-			number = std::max(0, number);
+			rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
 
-			rapidjson::Value* choice =
-				questDialogueEditorSelectedChoiceValueForEdit();
-
-			if ( choice
-				&& choice->IsObject()
-				&& choice->HasMember("action")
-				&& (*choice)["action"].IsObject()
-				&& (*choice)["action"].HasMember("set_power")
-				&& (*choice)["action"]["set_power"].IsObject() )
+			if ( action && action->HasMember("set_power")
+				&& (*action)["set_power"].IsObject() )
 			{
 				success =
 					questDialogueEditorWriteIntegerMember(
-						(*choice)["action"]["set_power"],
+						(*action)["set_power"],
 						questDialogueEditorEditableField
 							== QUEST_DIALOGUE_FIELD_POWER_X
 								? "x"
@@ -4846,23 +5727,10 @@ static bool questDialogueEditorApplyEditableField()
 			break;
 		}
 
+		case QUEST_DIALOGUE_FIELD_MARKER_MAP:
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
 		{
-			int number = 0;
-			if ( !questDialogueEditorParseInteger(
-					value,
-					number
-				) )
-			{
-				questDialogueEditorSetMessage(
-					"Marker coordinate must be an integer."
-				);
-				return false;
-			}
-
-			number = std::max(0, number);
-
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
 
@@ -4871,15 +5739,78 @@ static bool questDialogueEditorApplyEditableField()
 				&& objective->HasMember("map_marker")
 				&& (*objective)["map_marker"].IsObject() )
 			{
-				success =
-					questDialogueEditorWriteIntegerMember(
+				if ( questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_MARKER_MAP )
+				{
+					success = questDialogueEditorWriteStringMember(
+						(*objective)["map_marker"], "map", value);
+				}
+				else
+				{
+					int number = 0;
+					if ( !questDialogueEditorParseInteger(value, number) )
+					{
+						questDialogueEditorSetMessage("Marker coordinate must be an integer.");
+						return false;
+					}
+					number = std::max(0, number);
+					success = questDialogueEditorWriteIntegerMember(
 						(*objective)["map_marker"],
-						questDialogueEditorEditableField
-							== QUEST_DIALOGUE_FIELD_MARKER_X
-								? "x"
-								: "y",
-						number
-					);
+						questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_MARKER_X
+							? "x" : "y", number);
+				}
+			}
+			break;
+		}
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_LABEL:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_MAP:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_X:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
+		{
+			rapidjson::Value* quest = questDialogueEditorQuestValue();
+			if ( !quest ) break;
+			rapidjson::Value& origin = questDialogueEditorSetObjectMember(*quest, "origin");
+			if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_LABEL
+				|| questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_MAP )
+			{
+				success = questDialogueEditorWriteStringMember(origin,
+					questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_LABEL
+						? "label" : "map", value);
+			}
+			else
+			{
+				int number = 0;
+				if ( !questDialogueEditorParseInteger(value, number) )
+				{
+					questDialogueEditorSetMessage("Giver coordinate/ID must be an integer.");
+					return false;
+				}
+				if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID
+					&& number <= 0 )
+				{
+					questDialogueEditorSetMessage("Persistent NPC ID must be positive.");
+					return false;
+				}
+				number = std::max(0, number);
+				const char* member = questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_ORIGIN_X ? "x"
+					: (questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y
+						? "y" : "npc_persistent_id");
+				success = questDialogueEditorWriteIntegerMember(origin, member, number);
+				if ( success && questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID )
+				{
+					questDialogueEditorSetBoolMember(origin, "track_npc", true);
+					origin.RemoveMember("x");
+					origin.RemoveMember("y");
+				}
+				else if ( success )
+				{
+					questDialogueEditorSetBoolMember(origin, "track_npc", false);
+					origin.RemoveMember("npc_persistent_id");
+				}
 			}
 			break;
 		}
@@ -4898,6 +5829,7 @@ static bool questDialogueEditorApplyEditableField()
 
 	questDialogueEditorEditingField = false;
 	SDL_StopTextInput();
+	if ( inputstr == questDialogueEditorEditBuffer ) inputstr = nullptr;
 
 	return questDialogueEditorSaveDocument();
 }
@@ -4914,6 +5846,14 @@ static bool questDialogueEditorRenameSelectedFile()
 		questDialogueEditorSetMessage(
 			"No dialogue file is selected."
 		);
+		return false;
+	}
+
+	if ( questDialogueEditorModel.dirty()
+		&& !questDialogueEditorWriteDocument() )
+	{
+		questDialogueEditorSetMessage(
+			"Save the valid document before renaming its file.");
 		return false;
 	}
 
@@ -4943,6 +5883,9 @@ static bool questDialogueEditorRenameSelectedFile()
 		questDialogueEditorFiles[
 			questDialogueEditorSelectedFile
 		];
+	const std::string oldDialogueID = oldFilename.size() > 5
+		? oldFilename.substr(0, oldFilename.size() - 5)
+		: oldFilename;
 
 	const std::string newFilename =
 		normalized + ".json";
@@ -4984,6 +5927,8 @@ static bool questDialogueEditorRenameSelectedFile()
 	 * The NPC property window stores its currently edited dialogue ID in
 	 * spriteProperties[26]. Keep that pending value synchronized.
 	 */
+	if ( std::string(spriteProperties[26]) == oldDialogueID )
+	{
 	strncpy(
 		spriteProperties[26],
 		normalized.c_str(),
@@ -4992,6 +5937,8 @@ static bool questDialogueEditorRenameSelectedFile()
 	spriteProperties[26][
 		sizeof(spriteProperties[26]) - 1
 	] = '\0';
+
+	}
 
 	/*
 	 * Also update the selected live NPC immediately when it has stats.
@@ -5003,7 +5950,8 @@ static bool questDialogueEditorRenameSelectedFile()
 		Stat* selectedStats =
 			selectedEntity[0]->getStats();
 
-		if ( selectedStats )
+		if ( selectedStats
+			&& std::string(selectedStats->customDialogueID) == oldDialogueID )
 		{
 			strncpy(
 				selectedStats->customDialogueID,
@@ -5061,6 +6009,7 @@ static bool questDialogueEditorRenameSelectedFile()
 
 	questDialogueEditorEditingField = false;
 	SDL_StopTextInput();
+	if ( inputstr == questDialogueEditorEditBuffer ) inputstr = nullptr;
 
 	questDialogueEditorSetMessage(
 		"Renamed file to " + newFilename
@@ -5071,10 +6020,13 @@ static bool questDialogueEditorRenameSelectedFile()
 
 static void questDialogueEditorBeginEditingField()
 {
+	questDialogueEditorEndTransientTextInput();
     questDialogueEditorLockedEditableField =
         questDialogueEditorEditableField;
     questDialogueEditorLockedFieldCategory =
         questDialogueEditorFieldCategory;
+	questDialogueEditorLockedRuleOwnerNode =
+		questDialogueEditorRuleOwnerNode;
 
 	const std::string currentValue =
 		questDialogueEditorReadEditableField();
@@ -5133,18 +6085,32 @@ questDialogueEditorCategoryFields()
 				QUEST_DIALOGUE_FIELD_FILE_ID,
 				QUEST_DIALOGUE_FIELD_QUEST_ID,
 				QUEST_DIALOGUE_FIELD_QUEST_TITLE,
-				QUEST_DIALOGUE_FIELD_QUEST_SUMMARY
+				QUEST_DIALOGUE_FIELD_QUEST_SUMMARY,
+				QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE,
+				QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT,
+				QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT,
+				QUEST_DIALOGUE_FIELD_ORIGIN_LABEL,
+				QUEST_DIALOGUE_FIELD_ORIGIN_MAP,
+				QUEST_DIALOGUE_FIELD_ORIGIN_X,
+				QUEST_DIALOGUE_FIELD_ORIGIN_Y,
+				QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID
 			};
 		case QUEST_DIALOGUE_CATEGORY_TEXT:
 			return {
+				QUEST_DIALOGUE_FIELD_LEGACY_TEXT,
+				QUEST_DIALOGUE_FIELD_NODE_ID,
 				QUEST_DIALOGUE_FIELD_NODE_TEXT,
+				QUEST_DIALOGUE_FIELD_NODE_NEXT,
 				QUEST_DIALOGUE_FIELD_CHOICE_ID,
-				QUEST_DIALOGUE_FIELD_CHOICE_TEXT
+				QUEST_DIALOGUE_FIELD_CHOICE_TEXT,
+				QUEST_DIALOGUE_FIELD_CHOICE_NEXT
 			};
 		case QUEST_DIALOGUE_CATEGORY_OBJECTIVE:
 			return {
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_ID,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT,
+				QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT,
+				QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET,
 				QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID
@@ -5153,17 +6119,25 @@ questDialogueEditorCategoryFields()
 			return {
 				QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
 				QUEST_DIALOGUE_FIELD_CONDITION_QUEST,
-				QUEST_DIALOGUE_FIELD_CONDITION_NUMBER
+				QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+				QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID,
+				QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE,
+				QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE
 			};
 		case QUEST_DIALOGUE_CATEGORY_ACTION:
 			return {
 				QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
 				QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+				QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER,
+				QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER,
+				QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID,
+				QUEST_DIALOGUE_FIELD_NODE_ACTION_ID,
 				QUEST_DIALOGUE_FIELD_POWER_X,
 				QUEST_DIALOGUE_FIELD_POWER_Y
 			};
 		case QUEST_DIALOGUE_CATEGORY_MARKER:
 			return {
+				QUEST_DIALOGUE_FIELD_MARKER_MAP,
 				QUEST_DIALOGUE_FIELD_MARKER_X,
 				QUEST_DIALOGUE_FIELD_MARKER_Y
 			};
@@ -5258,18 +6232,19 @@ static bool questDialogueEditorCycleScopeDirect()
 	if ( quest->HasMember("scope")
 		&& (*quest)["scope"].IsString() )
 	{
-		scope = (*quest)["scope"].GetString();
+		scope = questEditorNormalizeID((*quest)["scope"].GetString());
 	}
 
-	// Only per-player quest ownership is currently supported by the
-	// runtime dialogue loader. Keep the editor from authoring scopes
-	// that would make the dialogue file unloadable.
-	scope = "player";
+	scope = scope == "player" ? "party"
+		: (scope == "party" ? "world" : "player");
 
 	questDialogueEditorWriteStringMember(
 		*quest, "scope", scope
 	);
-	questDialogueEditorSetMessage("Scope: player");
+	questDialogueEditorSetMessage(scope == "player"
+		? "Scope: player."
+		: "Scope stored as " + scope
+			+ "; current runtime clearly falls back to per-player ownership.");
 	return questDialogueEditorSaveDocument();
 }
 
@@ -5333,7 +6308,7 @@ static bool questDialogueEditorCycleConditionItemDirect()
 
 	if ( !condition.HasMember("type")
 		|| !condition["type"].IsString()
-		|| std::string(condition["type"].GetString())
+		|| questEditorNormalizeID(condition["type"].GetString())
 			!= "has_item" )
 	{
 		questDialogueEditorSetMessage(
@@ -5773,6 +6748,390 @@ static rapidjson::Value& questDialogueEditorSetObjectMember(
 	}
 
 	return parent[name];
+}
+
+static rapidjson::Value questDialogueEditorDefaultCondition(
+	const std::string& type,
+	const bool nodeCondition
+)
+{
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	rapidjson::Value condition(rapidjson::kObjectType);
+	questDialogueEditorSetStringMember(condition, "type", type);
+	const std::string questID = questDialogueEditorPreview.questID.empty()
+		? "quest_id" : questDialogueEditorPreview.questID;
+	const int nodeID = questDialogueEditorNodeIDAt(
+		std::max(0, questDialogueEditorSelectedNode));
+
+	if ( type == "has_item" )
+	{
+		questDialogueEditorSetStringMember(condition, "item",
+			std::to_string(questDialogueEditorSelectedItemID));
+		questDialogueEditorSetIntMember(condition, "count",
+			std::max(1, questDialogueEditorSelectedItemCount));
+		if ( nodeCondition ) questDialogueEditorSetBoolMember(condition, "consume", false);
+	}
+	else if ( type == "has_gold" )
+	{
+		questDialogueEditorSetIntMember(condition, "amount",
+			std::max(0, questDialogueEditorGoldAmount));
+		if ( nodeCondition ) questDialogueEditorSetBoolMember(condition, "consume", false);
+	}
+	else if ( type == "quest_started" || type == "quest_accepted"
+		|| type == "quest_completed" || type == "quest_failed"
+		|| type == "quest_stage" )
+	{
+		questDialogueEditorSetStringMember(condition, "quest", questID);
+		if ( type == "quest_stage" )
+		{
+			questDialogueEditorSetIntMember(condition, "stage", 1);
+			questDialogueEditorSetStringMember(condition, "comparison", "equals");
+		}
+	}
+	else if ( type == "objective_completed" || type == "objective_incomplete" )
+	{
+		questDialogueEditorSetStringMember(condition, "quest", questID);
+		questDialogueEditorSetStringMember(condition, "objective",
+			questDialogueEditorDefaultObjectiveID());
+	}
+	else if ( type == "node_seen" )
+	{
+		questDialogueEditorSetStringMember(condition, "node",
+			"node_" + std::to_string(nodeID));
+	}
+	else if ( type == "world_flag" || type == "npc_flag" )
+	{
+		questDialogueEditorSetStringMember(condition, "id",
+			type == "world_flag" ? "story_flag" : "npc_flag");
+		questDialogueEditorSetBoolMember(condition, "value", true);
+	}
+	else if ( type == "world_variable" || type == "npc_variable" )
+	{
+		questDialogueEditorSetStringMember(condition, "id",
+			type == "world_variable" ? "world_value" : "npc_value");
+		questDialogueEditorSetIntMember(condition, "value", 1);
+		questDialogueEditorSetStringMember(condition, "comparison", "equals");
+	}
+
+	if ( nodeCondition )
+	{
+		condition.AddMember("true_node", nodeID, allocator);
+		condition.AddMember("false_node", nodeID, allocator);
+	}
+	return condition;
+}
+
+static bool questDialogueEditorReplaceRuleCondition(
+	const std::string& type
+)
+{
+	const auto& supported = questDialogueEditorRuleOwnerNode
+		? automatia::dialogue::nodeConditionTypes()
+		: automatia::dialogue::choiceConditionTypes();
+	if ( std::find(supported.begin(), supported.end(), type) == supported.end() )
+	{
+		questDialogueEditorSetMessage("That condition is not supported here.");
+		return false;
+	}
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	rapidjson::Value replacement = questDialogueEditorDefaultCondition(
+		type, questDialogueEditorRuleOwnerNode);
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( !node ) return false;
+		if ( node->HasMember("condition") ) (*node)["condition"] = std::move(replacement);
+		else node->AddMember("condition", replacement, allocator);
+	}
+	else
+	{
+		rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+		if ( !choice ) return false;
+		const bool singular = choice->HasMember("condition")
+			&& (*choice)["condition"].IsObject();
+		if ( singular && questDialogueEditorSelectedConditionIndex == 0 )
+		{
+			(*choice)["condition"] = std::move(replacement);
+		}
+		else if ( choice->HasMember("conditions") && (*choice)["conditions"].IsArray()
+			&& !(*choice)["conditions"].Empty() )
+		{
+			rapidjson::Value& conditions = (*choice)["conditions"];
+			const int arrayIndex = std::max(0, std::min(
+				questDialogueEditorSelectedConditionIndex - (singular ? 1 : 0),
+				static_cast<int>(conditions.Size()) - 1));
+			conditions[static_cast<rapidjson::SizeType>(
+				arrayIndex)] = std::move(replacement);
+		}
+		else
+		{
+			rapidjson::Value conditions(rapidjson::kArrayType);
+			conditions.PushBack(replacement, allocator);
+			choice->AddMember("conditions", conditions, allocator);
+			questDialogueEditorSelectedConditionIndex = 0;
+		}
+	}
+	questDialogueEditorSetMessage("Condition: " + type);
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorAddChoiceCondition(
+	const std::string& type
+)
+{
+	if ( !automatia::dialogue::isChoiceConditionType(type) ) return false;
+	rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+	if ( !choice )
+	{
+		questDialogueEditorSetMessage("Select a choice first.");
+		return false;
+	}
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	rapidjson::Value& conditions = questDialogueEditorEnsureConditionArray(*choice);
+	conditions.PushBack(questDialogueEditorDefaultCondition(type, false), allocator);
+	questDialogueEditorSelectedConditionIndex = static_cast<int>(conditions.Size()) - 1;
+	questDialogueEditorSetMessage("Added requirement: " + type);
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorRemoveRuleCondition()
+{
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( !node || !node->HasMember("condition") ) return false;
+		node->RemoveMember("condition");
+		questDialogueEditorSetMessage("Node redirect condition removed.");
+		return questDialogueEditorSaveDocument();
+	}
+	return questDialogueEditorClearChoiceCondition();
+}
+
+static bool questDialogueEditorCycleRuleConditionType(const int direction)
+{
+	const auto& supported = questDialogueEditorRuleOwnerNode
+		? automatia::dialogue::nodeConditionTypes()
+		: automatia::dialogue::choiceConditionTypes();
+	if ( supported.empty() ) return false;
+	std::string current;
+	if ( rapidjson::Value* condition = questDialogueEditorSelectedRuleCondition() )
+	{
+		if ( condition->HasMember("type") && (*condition)["type"].IsString() )
+			current = questEditorNormalizeID((*condition)["type"].GetString());
+	}
+	int index = 0;
+	const auto found = std::find(supported.begin(), supported.end(), current);
+	if ( found != supported.end() ) index = static_cast<int>(found - supported.begin());
+	else if ( direction < 0 ) index = static_cast<int>(supported.size()) - 1;
+	else index = -1;
+	index = (index + direction + static_cast<int>(supported.size()))
+		% static_cast<int>(supported.size());
+	return questDialogueEditorReplaceRuleCondition(supported[index]);
+}
+
+static bool questDialogueEditorCycleRuleComparison()
+{
+	rapidjson::Value* condition = questDialogueEditorSelectedRuleCondition();
+	if ( !condition ) return false;
+	const std::string type = condition->HasMember("type")
+		&& (*condition)["type"].IsString()
+		? questEditorNormalizeID((*condition)["type"].GetString()) : "";
+	const bool nodeStage = questDialogueEditorRuleOwnerNode && type == "quest_stage";
+	static const char* all[] = { "equals", "not_equals", "at_least", "at_most" };
+	const int count = nodeStage ? 3 : 4;
+	std::string current = condition->HasMember("comparison")
+		&& (*condition)["comparison"].IsString()
+		? questEditorNormalizeID((*condition)["comparison"].GetString()) : "equals";
+	int index = 0;
+	for ( int i = 0; i < count; ++i ) if ( current == all[nodeStage && i > 0 ? i + 1 : i] ) index = i;
+	index = (index + 1) % count;
+	const char* next = all[nodeStage && index > 0 ? index + 1 : index];
+	questDialogueEditorSetStringMember(*condition, "comparison", next);
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorToggleRuleConditionBoolean(const char* member)
+{
+	rapidjson::Value* condition = questDialogueEditorSelectedRuleCondition();
+	if ( !condition || !member ) return false;
+	const bool current = condition->HasMember(member) && (*condition)[member].IsBool()
+		? (*condition)[member].GetBool() : false;
+	questDialogueEditorSetBoolMember(*condition, member, !current);
+	return questDialogueEditorSaveDocument();
+}
+
+static rapidjson::Value* questDialogueEditorEnsureRuleAction()
+{
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( !node ) return nullptr;
+		if ( !node->HasMember("action") )
+		{
+			rapidjson::Value action(rapidjson::kObjectType);
+			const int id = node->HasMember("id") && (*node)["id"].IsInt()
+				? (*node)["id"].GetInt() : questDialogueEditorSelectedNode;
+			questDialogueEditorSetStringMember(action, "id",
+				"node_" + std::to_string(id) + "_once");
+			node->AddMember("action", action, allocator);
+		}
+		else if ( !(*node)["action"].IsObject() ) (*node)["action"].SetObject();
+		rapidjson::Value& action = (*node)["action"];
+		if ( !action.HasMember("id") )
+		{
+			const int id = node->HasMember("id") && (*node)["id"].IsInt()
+				? (*node)["id"].GetInt() : questDialogueEditorSelectedNode;
+			questDialogueEditorSetStringMember(action, "id",
+				"node_" + std::to_string(id) + "_once");
+		}
+		return &action;
+	}
+	return questDialogueEditorEnsureChoiceAction();
+}
+
+static bool questDialogueEditorAddRuleActionField(const std::string& field)
+{
+	if ( questDialogueEditorRuleOwnerNode
+		? !automatia::dialogue::isNodeActionField(field) || field == "id"
+		: !automatia::dialogue::isChoiceActionField(field) )
+	{
+		questDialogueEditorSetMessage("That action is not supported here.");
+		return false;
+	}
+	rapidjson::Value* action = questDialogueEditorEnsureRuleAction();
+	if ( !action ) return false;
+	if ( !action->HasMember(field.c_str()) )
+	{
+		auto& allocator = questDialogueEditorDocument.GetAllocator();
+		if ( field == "quest_start" || field == "quest_accept"
+			|| field == "quest_complete" || field == "quest_fail"
+			|| field == "quest_reset" || field == "recruit_npc" )
+		{
+			questDialogueEditorSetBoolMember(*action, field.c_str(), true);
+		}
+		else if ( field == "quest_stage" )
+			questDialogueEditorSetIntMember(*action, field.c_str(), 1);
+		else if ( field == "reward_gold" || field == "remove_gold" )
+			questDialogueEditorSetIntMember(*action, field.c_str(), 100);
+		else if ( field == "reward_item" || field == "remove_item" )
+		{
+			rapidjson::Value item(rapidjson::kObjectType);
+			questDialogueEditorSetStringMember(item, "item",
+				std::to_string(questDialogueEditorSelectedItemID));
+			questDialogueEditorSetIntMember(item, "count",
+				std::max(1, questDialogueEditorSelectedItemCount));
+			action->AddMember(rapidjson::Value(field.c_str(), allocator), item, allocator);
+		}
+		else if ( field == "objective_complete" || field == "objective_clear" )
+		{
+			rapidjson::Value reference;
+			const std::string id = questDialogueEditorDefaultObjectiveID();
+			reference.SetString(id.c_str(), allocator);
+			action->AddMember(rapidjson::Value(field.c_str(), allocator), reference, allocator);
+		}
+		else if ( field == "set_power" )
+		{
+			rapidjson::Value power(rapidjson::kObjectType);
+			questDialogueEditorSetIntMember(power, "x", std::max(0, drawx));
+			questDialogueEditorSetIntMember(power, "y", std::max(0, drawy));
+			questDialogueEditorSetBoolMember(power, "powered", true);
+			action->AddMember(rapidjson::Value(field.c_str(), allocator), power, allocator);
+		}
+		else if ( field == "status_effect" )
+		{
+			rapidjson::Value status(rapidjson::kObjectType);
+			questDialogueEditorSetIntMember(status, "effect", questDialogueEditorSelectedEffectID);
+			questDialogueEditorSetIntMember(status, "duration_seconds",
+				questDialogueEditorEffectDurationSeconds);
+			questDialogueEditorSetIntMember(status, "strength",
+				questDialogueEditorEffectStrength);
+			questDialogueEditorSetBoolMember(status, "enabled", true);
+			action->AddMember(rapidjson::Value(field.c_str(), allocator), status, allocator);
+		}
+		else
+		{
+			rapidjson::Value object(rapidjson::kObjectType);
+			const bool additive = field.rfind("add_", 0) == 0;
+			if ( field.find("flag") != std::string::npos )
+			{
+				questDialogueEditorSetStringMember(object, "id",
+					field.find("npc") != std::string::npos ? "npc_flag" : "story_flag");
+				questDialogueEditorSetBoolMember(object, "value", true);
+			}
+			else
+			{
+				questDialogueEditorSetStringMember(object, "id",
+					field.find("npc") != std::string::npos ? "npc_value"
+					: (field.find("quest") != std::string::npos ? "quest_value" : "world_value"));
+				questDialogueEditorSetIntMember(object, additive ? "amount" : "value", 1);
+			}
+			action->AddMember(rapidjson::Value(field.c_str(), allocator), object, allocator);
+		}
+	}
+	const auto members = questDialogueEditorRuleActionMembers();
+	const auto found = std::find(members.begin(), members.end(), field);
+	if ( found != members.end() )
+		questDialogueEditorSelectedActionIndex = static_cast<int>(found - members.begin());
+	questDialogueEditorSetMessage("Action selected: " + field);
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorRemoveSelectedRuleAction()
+{
+	rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+	const std::string member = questDialogueEditorSelectedRuleActionMember();
+	if ( !action || member.empty() ) return false;
+	action->RemoveMember(member.c_str());
+	questDialogueEditorSelectedActionIndex = std::max(0,
+		questDialogueEditorSelectedActionIndex - 1);
+	if ( questDialogueEditorRuleOwnerNode && action->MemberCount() == 1
+		&& action->HasMember("id") )
+	{
+		rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+		if ( node ) node->RemoveMember("action");
+	}
+	else if ( !questDialogueEditorRuleOwnerNode && action->ObjectEmpty() )
+	{
+		rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+		if ( choice ) choice->RemoveMember("action");
+	}
+	questDialogueEditorSetMessage("Selected action removed.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorToggleSelectedRuleActionBoolean()
+{
+	rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+	const std::string member = questDialogueEditorSelectedRuleActionMember();
+	if ( !action || member.empty() || !action->HasMember(member.c_str()) ) return false;
+	rapidjson::Value& selected = (*action)[member.c_str()];
+	if ( selected.IsBool() ) selected.SetBool(!selected.GetBool());
+	else if ( selected.IsObject() )
+	{
+		const char* key = member == "set_power" ? "powered"
+			: (member == "status_effect" ? "enabled"
+				: (member.find("flag") != std::string::npos ? "value" : nullptr));
+		if ( !key ) return false;
+		const bool current = selected.HasMember(key) && selected[key].IsBool()
+			? selected[key].GetBool() : false;
+		questDialogueEditorSetBoolMember(selected, key, !current);
+	}
+	else return false;
+	return questDialogueEditorSaveDocument();
+}
+
+static void questDialogueEditorCycleSelectedRuleAction(const int direction)
+{
+	const auto members = questDialogueEditorRuleActionMembers();
+	if ( members.empty() )
+	{
+		questDialogueEditorSelectedActionIndex = 0;
+		return;
+	}
+	questDialogueEditorSelectedActionIndex =
+		(questDialogueEditorSelectedActionIndex + direction
+			+ static_cast<int>(members.size())) % static_cast<int>(members.size());
 }
 
 static void questDialogueEditorApplyGuidedAction(
@@ -6230,7 +7589,7 @@ static std::string questDialogueEditorSelectedConditionType()
 		return "none";
 	}
 
-	return (*condition)["type"].GetString();
+	return questEditorNormalizeID((*condition)["type"].GetString());
 }
 
 static bool questDialogueEditorConditionUsesQuestReference()
@@ -7006,8 +8365,8 @@ static std::string questDialogueEditorConditionSummary(
 		return "Invalid condition";
 	}
 
-	const std::string type =
-		condition["type"].GetString();
+	const std::string type = questEditorNormalizeID(
+		condition["type"].GetString());
 
 	auto stringMember =
 		[
@@ -7447,7 +8806,7 @@ static void questDialogueEditorEditChoiceTextDirect()
 	questDialogueEditorBeginEditingField();
 }
 
-static bool questDialogueEditorDuplicateSelectedFile()
+static bool questDialogueEditorDuplicateSelectedFileNow()
 {
 	if ( questDialogueEditorSelectedFile < 0
 		|| questDialogueEditorSelectedFile
@@ -7490,26 +8849,15 @@ static bool questDialogueEditorDuplicateSelectedFile()
 		F_OK
 	) == 0 );
 
-	std::ifstream input(
-		("./dialogue/" + sourceName).c_str(),
-		std::ios::binary
-	);
-	std::ofstream output(
-		("./dialogue/" + destinationName).c_str(),
-		std::ios::binary | std::ios::trunc
-	);
-
-	if ( !input.is_open() || !output.is_open() )
+	automatia::dialogue::Document duplicate;
+	std::string error;
+	if ( !duplicate.loadFile("./dialogue/" + sourceName, error)
+		|| !duplicate.saveAtomic("./dialogue/" + destinationName, error) )
 	{
-		questDialogueEditorSetMessage(
-			"Could not duplicate the file."
-		);
+		questDialogueEditorSetMessage(error.empty()
+			? "Could not duplicate the file." : error);
 		return false;
 	}
-
-	output << input.rdbuf();
-	input.close();
-	output.close();
 
 	questDialogueEditorRefreshFiles();
 
@@ -7534,7 +8882,22 @@ static bool questDialogueEditorDuplicateSelectedFile()
 	return true;
 }
 
-static bool questDialogueEditorDeleteSelectedFile()
+static bool questDialogueEditorDuplicateSelectedFile()
+{
+	if ( questDialogueEditorSelectedFile < 0
+		|| questDialogueEditorSelectedFile
+			>= static_cast<int>(questDialogueEditorFiles.size()) )
+	{
+		questDialogueEditorSetMessage("Select a file first.");
+		return false;
+	}
+	questDialogueEditorRequestTransition(
+		QUEST_DIALOGUE_PENDING_DUPLICATE_FILE,
+		questDialogueEditorSelectedFile);
+	return true;
+}
+
+static bool questDialogueEditorDeleteSelectedFileNow()
 {
 	if ( questDialogueEditorSelectedFile < 0
 		|| questDialogueEditorSelectedFile
@@ -7547,21 +8910,6 @@ static bool questDialogueEditorDeleteSelectedFile()
 		);
 		return false;
 	}
-
-	if ( !questDialogueEditorDeleteFileConfirm
-		|| ticks > questDialogueEditorDeleteFileConfirmUntil )
-	{
-		questDialogueEditorDeleteFileConfirm = true;
-		questDialogueEditorDeleteFileConfirmUntil =
-			ticks + TICKS_PER_SECOND * 4;
-
-		questDialogueEditorSetMessage(
-			"Press DEL FILE again to confirm."
-		);
-		return false;
-	}
-
-	questDialogueEditorDeleteFileConfirm = false;
 
 	const std::string filename =
 		questDialogueEditorFiles[
@@ -7583,7 +8931,7 @@ static bool questDialogueEditorDeleteSelectedFile()
 	if ( questDialogueEditorFiles.empty() )
 	{
 		questDialogueEditorSelectedFile = -1;
-		questDialogueEditorDocument.SetObject();
+		questDialogueEditorModel.reset();
 		questDialogueEditorPreview =
 			QuestDialogueEditorPreview();
 	}
@@ -7610,10 +8958,38 @@ static bool questDialogueEditorDeleteSelectedFile()
 	return true;
 }
 
+static bool questDialogueEditorDeleteSelectedFile()
+{
+	if ( questDialogueEditorSelectedFile < 0
+		|| questDialogueEditorSelectedFile
+			>= static_cast<int>(questDialogueEditorFiles.size()) )
+	{
+		questDialogueEditorSetMessage("Select a file first.");
+		return false;
+	}
+	questDialogueEditorRequestTransition(
+		QUEST_DIALOGUE_PENDING_DELETE_FILE,
+		questDialogueEditorSelectedFile
+	);
+	return true;
+}
+
 static bool questDialogueEditorValidateDocument(
 	std::string& error
 )
 {
+	questDialogueEditorRefreshValidation();
+	for ( const auto& issue : questDialogueEditorValidationIssues )
+	{
+		if ( issue.severity == automatia::dialogue::Severity::Error )
+		{
+			error = issue.location.path + " - " + issue.message;
+			return false;
+		}
+	}
+	error.clear();
+	return true;
+#if 0
 	if ( !questDialogueEditorDocument.IsObject() )
 	{
 		error = "Root must be a JSON object.";
@@ -7804,6 +9180,7 @@ static bool questDialogueEditorValidateDocument(
 
 	error.clear();
 	return true;
+#endif
 }
 
 
@@ -8280,17 +9657,7 @@ static bool questDialogueEditorClearQuestGiver()
 		return false;
 	}
 
-	rapidjson::Value& origin =
-		(*quest)["origin"];
-
-	origin.RemoveMember("track_npc");
-	origin.RemoveMember("npc_persistent_id");
-
-	if ( !origin.HasMember("x")
-		&& !origin.HasMember("y") )
-	{
-		quest->RemoveMember("origin");
-	}
+	quest->RemoveMember("origin");
 
 	if ( !questDialogueEditorSaveDocument() )
 	{
@@ -8329,6 +9696,163 @@ static int questDialogueEditorQuestGiverPersistentID()
 	}
 
 	return 0;
+}
+
+static void questDialogueEditorOpenWizardNow()
+{
+	questDialogueEditorWizardOpen = true;
+	questDialogueEditorWizardField = 0;
+	questDialogueEditorWizardStep = 0;
+	questDialogueEditorWizardUseQuest = questDialogueEditorWizardTemplate == 3;
+	questDialogueEditorWizardRepeatable = false;
+	questDialogueEditorWizardOrigin = 0;
+	std::snprintf(questDialogueEditorWizardDialogueID,
+		sizeof(questDialogueEditorWizardDialogueID), "new_dialogue");
+	questDialogueEditorWizardQuestID[0] = '\0';
+	std::snprintf(questDialogueEditorWizardNPCText,
+		sizeof(questDialogueEditorWizardNPCText), "Hello, traveler.");
+	std::snprintf(questDialogueEditorWizardChoiceText,
+		sizeof(questDialogueEditorWizardChoiceText), "Hello.");
+	std::snprintf(questDialogueEditorWizardQuestTitle,
+		sizeof(questDialogueEditorWizardQuestTitle), "New Quest");
+	questDialogueEditorWizardQuestSummary[0] = '\0';
+	inputstr = questDialogueEditorWizardDialogueID;
+	inputlen = static_cast<int>(sizeof(questDialogueEditorWizardDialogueID) - 1);
+	cursorflash = ticks;
+	SDL_StartTextInput();
+}
+
+static void questDialogueEditorPerformTransition(
+	const QuestDialoguePendingTransition transition,
+	const int argument
+)
+{
+	questDialogueEditorEndTransientTextInput();
+	switch ( transition )
+	{
+		case QUEST_DIALOGUE_PENDING_CLOSE:
+			questDialogueEditorJSONEditing = false;
+			questDialogueEditorWizardOpen = false;
+			SDL_StopTextInput();
+			inputstr = nullptr;
+			buttonCloseSubwindow(nullptr);
+			break;
+		case QUEST_DIALOGUE_PENDING_SWITCH_FILE:
+			if ( argument >= 0
+				&& argument < static_cast<int>(questDialogueEditorFiles.size()) )
+			{
+				questDialogueEditorSelectedFile = argument;
+				questDialogueEditorLoadPreview(questDialogueEditorFiles[argument]);
+			}
+			break;
+		case QUEST_DIALOGUE_PENDING_RELOAD:
+			if ( questDialogueEditorSelectedFile >= 0
+				&& questDialogueEditorSelectedFile
+					< static_cast<int>(questDialogueEditorFiles.size()) )
+			{
+				questDialogueEditorLoadPreview(
+					questDialogueEditorFiles[questDialogueEditorSelectedFile]);
+				questDialogueEditorSetMessage("Reloaded selected file.");
+			}
+			break;
+		case QUEST_DIALOGUE_PENDING_OPEN_WIZARD:
+			questDialogueEditorOpenWizardNow();
+			break;
+		case QUEST_DIALOGUE_PENDING_DUPLICATE_FILE:
+			questDialogueEditorDuplicateSelectedFileNow();
+			break;
+		case QUEST_DIALOGUE_PENDING_APPLY_TUTORIAL:
+		{
+			const auto& tutorials = automatia::dialogue::tutorialRecipes();
+			if ( argument >= 0 && argument < static_cast<int>(tutorials.size()) )
+			{
+				std::string error;
+				if ( questDialogueEditorModel.replaceWithEdit(
+						tutorials[argument].exampleJson,
+						"Apply tutorial: " + tutorials[argument].title,
+						error) )
+				{
+					const std::string filename = questDialogueEditorSelectedFile >= 0
+						&& questDialogueEditorSelectedFile
+							< static_cast<int>(questDialogueEditorFiles.size())
+						? questDialogueEditorFiles[questDialogueEditorSelectedFile]
+						: std::string("tutorial.json");
+					questDialogueEditorLoadPreview(filename, false);
+					questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_CONVERSATION;
+					questDialogueEditorSetMessage(
+						"Tutorial applied in memory. Review, validate, then save.");
+				}
+				else questDialogueEditorSetMessage(error);
+			}
+			break;
+		}
+		case QUEST_DIALOGUE_PENDING_DELETE_FILE:
+			questDialogueEditorDeletePrompt = true;
+			break;
+		default:
+			break;
+	}
+}
+
+static void questDialogueEditorRequestTransition(
+	const QuestDialoguePendingTransition transition,
+	const int argument
+)
+{
+	if ( questDialogueEditorJSONEditing )
+	{
+		questDialogueEditorSetMessage(
+			"Apply or cancel Advanced JSON before leaving this file.");
+		return;
+	}
+	if ( questDialogueEditorEditingField )
+	{
+		questDialogueEditorSetMessage(
+			"Apply the active field edit before leaving this file.");
+		return;
+	}
+	if ( questDialogueEditorModel.dirty() )
+	{
+		questDialogueEditorPendingTransition = transition;
+		questDialogueEditorPendingFile = argument;
+		questDialogueEditorPendingTutorial = argument;
+		questDialogueEditorUnsavedPrompt = true;
+		return;
+	}
+	questDialogueEditorPerformTransition(transition, argument);
+}
+
+static void buttonQuestDialogueEditorClose(button_t*)
+{
+	questDialogueEditorRequestTransition(QUEST_DIALOGUE_PENDING_CLOSE);
+}
+
+static void questDialogueEditorUndo()
+{
+	if ( !questDialogueEditorModel.undo() )
+	{
+		questDialogueEditorSetMessage("Nothing to undo.");
+		return;
+	}
+	const std::string filename = questDialogueEditorSelectedFile >= 0
+		&& questDialogueEditorSelectedFile < static_cast<int>(questDialogueEditorFiles.size())
+		? questDialogueEditorFiles[questDialogueEditorSelectedFile] : std::string{};
+	questDialogueEditorLoadPreview(filename, false);
+	questDialogueEditorSetMessage("Undo complete.");
+}
+
+static void questDialogueEditorRedo()
+{
+	if ( !questDialogueEditorModel.redo() )
+	{
+		questDialogueEditorSetMessage("Nothing to redo.");
+		return;
+	}
+	const std::string filename = questDialogueEditorSelectedFile >= 0
+		&& questDialogueEditorSelectedFile < static_cast<int>(questDialogueEditorFiles.size())
+		? questDialogueEditorFiles[questDialogueEditorSelectedFile] : std::string{};
+	questDialogueEditorLoadPreview(filename, false);
+	questDialogueEditorSetMessage("Redo complete.");
 }
 
 void openQuestDialogueEditor()
@@ -8391,13 +9915,21 @@ void openQuestDialogueEditor()
 
 	questDialogueEditorRefreshFiles();
 
-	if ( questDialogueEditorSelectedFile < 0
-		&& !questDialogueEditorFiles.empty() )
+	if ( !questDialogueEditorFiles.empty() )
 	{
-		questDialogueEditorSelectedFile = 0;
+		questDialogueEditorSelectedFile = std::max(0,
+			std::min(questDialogueEditorSelectedFile,
+				static_cast<int>(questDialogueEditorFiles.size()) - 1));
 		questDialogueEditorLoadPreview(
-			questDialogueEditorFiles[0]
+			questDialogueEditorFiles[questDialogueEditorSelectedFile]
 		);
+	}
+	else
+	{
+		questDialogueEditorSelectedFile = -1;
+		questDialogueEditorModel.reset();
+		questDialogueEditorPreview = QuestDialogueEditorPreview{};
+		questDialogueEditorRefreshValidation();
 	}
 
 	button_t* closeButton = newButton();
@@ -8406,7 +9938,7 @@ void openQuestDialogueEditor()
 	closeButton->y = suby2 - 24;
 	closeButton->sizex = 56;
 	closeButton->sizey = 16;
-	closeButton->action = &buttonCloseSubwindow;
+	closeButton->action = &buttonQuestDialogueEditorClose;
 	closeButton->visible = 1;
 	closeButton->focused = 1;
 
@@ -8416,7 +9948,7 @@ void openQuestDialogueEditor()
 	closeX->y = suby1;
 	closeX->sizex = 16;
 	closeX->sizey = 16;
-	closeX->action = &buttonCloseSubwindow;
+	closeX->action = &buttonQuestDialogueEditorClose;
 	closeX->visible = 1;
 	closeX->focused = 1;
 }
@@ -8554,7 +10086,7 @@ static std::string questDialogueEditorButtonTooltip(
 		+ " to change the currently selected dialogue or quest element.";
 }
 
-static void drawQuestDialogueEditor()
+static void drawQuestDialogueEditorWorkspace()
 {
     if ( questDialogueEditorEditingField )
     {
@@ -8562,11 +10094,13 @@ static void drawQuestDialogueEditor()
             questDialogueEditorLockedEditableField;
         questDialogueEditorFieldCategory =
             questDialogueEditorLockedFieldCategory;
+		questDialogueEditorRuleOwnerNode =
+			questDialogueEditorLockedRuleOwnerNode;
     }
 
 	const int contentX1 = subx1 + 8;
 	const int contentX2 = subx2 - 8;
-	const int panelY1 = suby1 + 24;
+	const int panelY1 = suby1 + 46;
 	const int panelY2 = suby2 - 34;
 	const int panelGap = 6;
 	const int characterWidth = 8;
@@ -9064,7 +10598,7 @@ static void drawQuestDialogueEditor()
 		},
 		[]()
 		{
-			questDialogueEditorSaveDocument();
+			questDialogueEditorWriteDocument();
 		}
 	);
 	toolboxY += toolboxRowHeight;
@@ -9075,21 +10609,9 @@ static void drawQuestDialogueEditor()
 		"RENAME",
 		[]()
 		{
-			if ( questDialogueEditorSelectedFile >= 0
-				&& questDialogueEditorSelectedFile
-					< static_cast<int>(
-						questDialogueEditorFiles.size()
-					) )
-			{
-				questDialogueEditorLoadPreview(
-					questDialogueEditorFiles[
-						questDialogueEditorSelectedFile
-					]
-				);
-				questDialogueEditorSetMessage(
-					"Reloaded selected file."
-				);
-			}
+			questDialogueEditorRequestTransition(
+				QUEST_DIALOGUE_PENDING_RELOAD,
+				questDialogueEditorSelectedFile);
 		},
 		[]()
 		{
@@ -10476,10 +11998,9 @@ static void drawQuestDialogueEditor()
 			&& omousey < y + 14 )
 		{
 			mousestatus[SDL_BUTTON_LEFT] = 0;
-			questDialogueEditorSelectedFile = index;
-			questDialogueEditorLoadPreview(
-				questDialogueEditorFiles[index]
-			);
+				questDialogueEditorRequestTransition(
+					QUEST_DIALOGUE_PENDING_SWITCH_FILE,
+					index);
 		}
 	}
 
@@ -11783,6 +13304,3209 @@ static void drawQuestDialogueEditor()
 			"Hover over any button for a guided explanation."
 		);
 	}
+	}
+
+static bool questDialogueEditorImmediateButton(
+	const int x, const int y, const int width, const char* label,
+	const bool selected = false
+)
+{
+	const int height = 18;
+	if ( selected ) drawDepressed(x, y, x + width, y + height);
+	else drawWindowFancy(x, y, x + width, y + height);
+	printTextFormatted(font8x8_bmp, x + 5, y + 5, "%s", label);
+	const bool hovered = omousex >= x && omousex < x + width
+		&& omousey >= y && omousey < y + height;
+	if ( hovered && mousestatus[SDL_BUTTON_LEFT] )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		const bool editControl = !strcmp(label, "APPLY")
+			|| !strcmp(label, "CANCEL")
+			|| !strcmp(label, "APPLY RENAME")
+			|| !strcmp(label, "CANCEL RENAME");
+		if ( questDialogueEditorEditingField && !editControl )
+		{
+			questDialogueEditorSetMessage(
+				"Apply or cancel the active field before using another control.");
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
+
+static std::string questDialogueEditorClipText(
+	const std::string& text, const int pixelWidth
+)
+{
+	const int characters = std::max(0, pixelWidth / 8);
+	if ( static_cast<int>(text.size()) <= characters ) return text;
+	if ( characters <= 3 ) return text.substr(0, characters);
+	return text.substr(0, characters - 3) + "...";
+}
+
+static std::string questDialogueEditorLower(std::string value)
+{
+	std::transform(value.begin(), value.end(), value.begin(),
+		[](const unsigned char character)
+			{ return static_cast<char>(std::tolower(character)); });
+	return value;
+}
+
+static bool questDialogueEditorMatches(
+	const std::string& value, const char* filter
+)
+{
+	if ( !filter || !filter[0] ) return true;
+	return questDialogueEditorLower(value).find(
+		questDialogueEditorLower(filter)) != std::string::npos;
+}
+
+static void questDialogueEditorEndTransientTextInput()
+{
+	const bool ownsInput = inputstr == questDialogueEditorFileSearch
+		|| inputstr == questDialogueEditorTutorialSearch
+		|| inputstr == questDialogueEditorItemSearch
+		|| inputstr == questDialogueEditorSandboxItem
+		|| inputstr == questDialogueEditorSandboxSeedKey
+		|| inputstr == questDialogueEditorSandboxSeedSubkey
+		|| inputstr == questDialogueEditorEditBuffer;
+	questDialogueEditorFileSearchEditing = false;
+	questDialogueEditorTutorialSearchEditing = false;
+	questDialogueEditorItemSearchEditing = false;
+	questDialogueEditorSandboxItemEditing = false;
+	questDialogueEditorSandboxSeedKeyEditing = false;
+	questDialogueEditorSandboxSeedSubkeyEditing = false;
+	questDialogueEditorEditingField = false;
+	if ( ownsInput )
+	{
+		SDL_StopTextInput();
+		inputstr = nullptr;
+	}
+}
+
+static int questDialogueEditorDrawFileRail(
+	const int left, const int top, const int bottom
+)
+{
+	const int width = 226;
+	const int right = left + width;
+	drawDepressed(left, top, right, bottom);
+	printText(font8x8_bmp, left + 7, top + 7, "DIALOGUE FILES");
+	const int searchY = top + 23;
+	drawDepressed(left + 6, searchY, right - 6, searchY + 19);
+	printTextFormattedColor(font8x8_bmp, left + 10, searchY + 6,
+		questDialogueEditorFileSearch[0] ? makeColorRGB(255, 255, 255)
+			: makeColorRGB(144, 144, 144),
+		"%.24s", questDialogueEditorFileSearch[0]
+			? questDialogueEditorFileSearch : "Search files...");
+	if ( mousestatus[SDL_BUTTON_LEFT]
+		&& omousex >= left + 6 && omousex < right - 6
+		&& omousey >= searchY && omousey < searchY + 19 )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorFileSearchEditing = true;
+		inputstr = questDialogueEditorFileSearch;
+		inputlen = static_cast<int>(sizeof(questDialogueEditorFileSearch) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+
+	std::vector<int> matches;
+	for ( int index = 0; index < static_cast<int>(questDialogueEditorFiles.size()); ++index )
+	{
+		std::string searchable = questDialogueEditorFiles[index];
+		if ( index < static_cast<int>(questDialogueEditorFileSummaries.size()) )
+		{
+			const auto& summary = questDialogueEditorFileSummaries[index];
+			searchable += " " + summary.dialogueID + " " + summary.questID
+				+ " " + summary.title;
+		}
+		if ( index == questDialogueEditorSelectedFile )
+			searchable += " " + questDialogueEditorPreview.questID
+				+ " " + questDialogueEditorPreview.title;
+		if ( questDialogueEditorMatches(searchable, questDialogueEditorFileSearch) )
+			matches.push_back(index);
+	}
+	const int listTop = searchY + 27;
+	const int listBottom = bottom - 30;
+	const int rowHeight = 32;
+	const int visible = std::max(1, (listBottom - listTop) / rowHeight);
+	const int maximumScroll = std::max(0, static_cast<int>(matches.size()) - visible);
+	if ( omousex >= left && omousex < right
+		&& omousey >= listTop && omousey < listBottom && scroll != 0 )
+	{
+		questDialogueEditorFileScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorFileScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorFileScroll = std::max(0,
+		std::min(maximumScroll, questDialogueEditorFileScroll));
+	for ( int row = 0; row < visible; ++row )
+	{
+		const int filteredIndex = questDialogueEditorFileScroll + row;
+		if ( filteredIndex >= static_cast<int>(matches.size()) ) break;
+		const int index = matches[filteredIndex];
+		const int y = listTop + row * rowHeight;
+		if ( index == questDialogueEditorSelectedFile )
+			drawDepressed(left + 5, y, right - 5, y + rowHeight - 2);
+		const std::string marker = index == questDialogueEditorSelectedFile
+			&& questDialogueEditorModel.dirty() ? "* " : "  ";
+		printTextFormatted(font8x8_bmp, left + 8, y + 5, "%s%s",
+			marker.c_str(), questDialogueEditorClipText(
+				questDialogueEditorFiles[index], width - 74).c_str());
+		int errors = 0;
+		int warnings = 0;
+		std::string detail;
+		if ( index < static_cast<int>(questDialogueEditorFileSummaries.size()) )
+		{
+			const auto& summary = questDialogueEditorFileSummaries[index];
+			errors = summary.errors;
+			warnings = summary.warnings;
+			detail = summary.questID.empty() ? "Conversation only"
+				: "Quest: " + summary.questID;
+			if ( !summary.title.empty() ) detail += " - " + summary.title;
+		}
+		if ( index == questDialogueEditorSelectedFile )
+		{
+			errors = automatia::dialogue::countIssues(
+				questDialogueEditorValidationIssues,
+				automatia::dialogue::Severity::Error);
+			warnings = automatia::dialogue::countIssues(
+				questDialogueEditorValidationIssues,
+				automatia::dialogue::Severity::Warning);
+			detail = questDialogueEditorPreview.questID.empty() ? "Conversation only"
+				: "Quest: " + questDialogueEditorPreview.questID;
+			if ( !questDialogueEditorPreview.title.empty() )
+				detail += " - " + questDialogueEditorPreview.title;
+		}
+		const std::string status = errors > 0 ? "E" + std::to_string(errors)
+			: (warnings > 0 ? "W" + std::to_string(warnings) : "OK");
+		printTextFormattedColor(font8x8_bmp, right - 37, y + 5,
+			errors > 0 ? makeColorRGB(255, 110, 100)
+				: (warnings > 0 ? makeColorRGB(255, 210, 96)
+					: makeColorRGB(128, 255, 160)), "%s", status.c_str());
+		printTextFormattedColor(font8x8_bmp, left + 12, y + 18,
+			makeColorRGB(155, 175, 195), "%s",
+			questDialogueEditorClipText(detail, width - 26).c_str());
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= left + 5 && omousex < right - 5
+			&& omousey >= y && omousey < y + rowHeight - 2 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			if ( index != questDialogueEditorSelectedFile )
+				questDialogueEditorRequestTransition(
+					QUEST_DIALOGUE_PENDING_SWITCH_FILE, index);
+		}
+	}
+	printTextFormattedColor(font8x8_bmp, left + 8, bottom - 20,
+		makeColorRGB(160, 180, 200), "%d file%s%s",
+		static_cast<int>(matches.size()), matches.size() == 1 ? "" : "s",
+		questDialogueEditorModel.dirty() ? "  |  UNSAVED" : "");
+	return right + 8;
+}
+
+static const char* questDialogueEditorWizardTemplateID()
+{
+	static const char* ids[] = {
+		"empty_conversation", "one_choice_conversation", "two_choice_branch",
+		"quest_giver", "recruitable_npc"
+	};
+	return ids[std::max(0, std::min(questDialogueEditorWizardTemplate, 4))];
+}
+
+static const char* questDialogueEditorWizardTemplateName()
+{
+	static const char* names[] = {
+		"Empty Conversation", "One-Choice Conversation", "Two-Choice Branch",
+		"Quest Giver", "Recruitable NPC"
+	};
+	return names[std::max(0, std::min(questDialogueEditorWizardTemplate, 4))];
+}
+
+static void questDialogueEditorFocusWizardField(const int field)
+{
+	questDialogueEditorEndTransientTextInput();
+	questDialogueEditorWizardField = field;
+	char* buffers[] = {
+		questDialogueEditorWizardDialogueID,
+		questDialogueEditorWizardQuestID,
+		questDialogueEditorWizardNPCText,
+		questDialogueEditorWizardChoiceText,
+		questDialogueEditorWizardQuestTitle,
+		questDialogueEditorWizardQuestSummary
+	};
+	const int lengths[] = {
+		static_cast<int>(sizeof(questDialogueEditorWizardDialogueID) - 1),
+		static_cast<int>(sizeof(questDialogueEditorWizardQuestID) - 1),
+		static_cast<int>(sizeof(questDialogueEditorWizardNPCText) - 1),
+		static_cast<int>(sizeof(questDialogueEditorWizardChoiceText) - 1),
+		static_cast<int>(sizeof(questDialogueEditorWizardQuestTitle) - 1),
+		static_cast<int>(sizeof(questDialogueEditorWizardQuestSummary) - 1)
+	};
+	questDialogueEditorWizardField = std::max(0, std::min(field, 5));
+	inputstr = buffers[questDialogueEditorWizardField];
+	inputlen = lengths[questDialogueEditorWizardField];
+	cursorflash = ticks;
+	SDL_StartTextInput();
+}
+
+static bool questDialogueEditorCreateWizardFile()
+{
+	const std::string dialogueID = questEditorNormalizeID(
+		questDialogueEditorWizardDialogueID);
+	if ( dialogueID.empty() )
+	{
+		questDialogueEditorSetMessage("Dialogue/File ID cannot be empty.");
+		return false;
+	}
+	mkdir("./dialogue", 0755);
+	const std::string filename = dialogueID + ".json";
+	const std::string path = "./dialogue/" + filename;
+	if ( access(path.c_str(), F_OK) == 0 )
+	{
+		questDialogueEditorSetMessage("That dialogue file already exists.");
+		return false;
+	}
+	const bool useQuest = questDialogueEditorWizardUseQuest
+		|| questDialogueEditorWizardTemplate == 3;
+	const std::string questID = useQuest ? questEditorNormalizeID(
+		questDialogueEditorWizardQuestID) : std::string{};
+	if ( useQuest && questID.empty() )
+	{
+		questDialogueEditorSetMessage("A quest-enabled dialogue needs a Quest ID.");
+		return false;
+	}
+	automatia::dialogue::Document created;
+	std::string error;
+	if ( !created.parse(automatia::dialogue::createStarterDocument(
+			questDialogueEditorWizardTemplateID(), dialogueID, questID,
+			questDialogueEditorWizardNPCText,
+			questDialogueEditorWizardChoiceText,
+			questDialogueEditorWizardQuestTitle,
+			questDialogueEditorWizardQuestSummary), error) )
+	{
+		questDialogueEditorSetMessage(error);
+		return false;
+	}
+	if ( useQuest && created.json().HasMember("quest")
+		&& created.json()["quest"].IsObject() )
+	{
+		rapidjson::Value& quest = created.json()["quest"];
+		auto& allocator = created.json().GetAllocator();
+		if ( quest.HasMember("repeatable") )
+			quest["repeatable"].SetBool(questDialogueEditorWizardRepeatable);
+		else quest.AddMember("repeatable", questDialogueEditorWizardRepeatable, allocator);
+		if ( questDialogueEditorWizardOrigin != 0 )
+		{
+			rapidjson::Value origin(rapidjson::kObjectType);
+			rapidjson::Value label;
+			label.SetString("Quest Giver", allocator);
+			origin.AddMember("label", label, allocator);
+			rapidjson::Value mapName;
+			const std::string currentMap = questEditorCurrentMapFilename();
+			mapName.SetString(currentMap.c_str(), allocator);
+			origin.AddMember("map", mapName, allocator);
+			if ( questDialogueEditorWizardOrigin == 1 )
+			{
+				if ( drawx < 0 || drawy < 0 || drawx >= static_cast<int>(map.width)
+					|| drawy >= static_cast<int>(map.height) )
+				{
+					questDialogueEditorSetMessage("The editor cursor is outside the map.");
+					return false;
+				}
+				origin.AddMember("x", drawx, allocator);
+				origin.AddMember("y", drawy, allocator);
+			}
+			else
+			{
+				if ( !selectedEntity[0] || selectedEntity[0]->persistentID <= 0 )
+				{
+					questDialogueEditorSetMessage(
+						"Select a persistent NPC before choosing Follow Selected NPC.");
+					return false;
+				}
+				origin.AddMember("track_npc", true, allocator);
+				origin.AddMember("npc_persistent_id",
+					selectedEntity[0]->persistentID, allocator);
+			}
+			quest.AddMember("origin", origin, allocator);
+		}
+	}
+	const auto issues = automatia::dialogue::validate(created.json(),
+		questDialogueEditorValidationOptions());
+	if ( automatia::dialogue::hasErrors(issues) )
+	{
+		const auto first = std::find_if(issues.begin(), issues.end(),
+			[](const automatia::dialogue::Issue& issue)
+				{ return issue.severity == automatia::dialogue::Severity::Error; });
+		questDialogueEditorSetMessage(first == issues.end()
+			? "Wizard validation failed."
+			: "Wizard: " + first->location.path + " - " + first->message);
+		return false;
+	}
+	if ( !created.saveAtomic(path, error) )
+	{
+		questDialogueEditorSetMessage(error);
+		return false;
+	}
+	questDialogueEditorWizardOpen = false;
+	SDL_StopTextInput();
+	inputstr = nullptr;
+	questDialogueEditorRefreshFiles();
+	for ( int index = 0; index < static_cast<int>(questDialogueEditorFiles.size()); ++index )
+	{
+		if ( questDialogueEditorFiles[index] == filename )
+		{
+			questDialogueEditorSelectedFile = index;
+			break;
+		}
+	}
+	questDialogueEditorLoadPreview(filename);
+	questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_CONVERSATION;
+	questDialogueEditorSetMessage("Created " + filename + " from "
+		+ questDialogueEditorWizardTemplateName() + ".");
+	return true;
+}
+
+static void questDialogueEditorEditField(
+	const QuestDialogueEditableField field,
+	const QuestDialogueFieldCategory category
+)
+{
+	questDialogueEditorEditableField = field;
+	questDialogueEditorFieldCategory = category;
+	questDialogueEditorBeginEditingField();
+}
+
+static bool questDialogueEditorCycleNodeReference(
+	rapidjson::Value* object,
+	const char* member,
+	const int direction
+)
+{
+	if ( !object || !object->IsObject() || !member
+		|| !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray()
+		|| questDialogueEditorDocument["nodes"].Empty() )
+	{
+		return false;
+	}
+	rapidjson::Value& nodes = questDialogueEditorDocument["nodes"];
+	const int current = object->HasMember(member) && (*object)[member].IsInt()
+		? (*object)[member].GetInt() : questDialogueEditorNodeIDAt(0);
+	int index = 0;
+	for ( rapidjson::SizeType i = 0; i < nodes.Size(); ++i )
+	{
+		if ( nodes[i].IsObject() && nodes[i].HasMember("id")
+			&& nodes[i]["id"].IsInt() && nodes[i]["id"].GetInt() == current )
+		{
+			index = static_cast<int>(i);
+			break;
+		}
+	}
+	index = (index + direction + static_cast<int>(nodes.Size()))
+		% static_cast<int>(nodes.Size());
+	questDialogueEditorWriteIntegerMember(*object, member,
+		questDialogueEditorNodeIDAt(index));
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorSetSelectedStartNode()
+{
+	rapidjson::Value* node = questDialogueEditorSelectedNodeValue();
+	if ( !node || !node->HasMember("id") || !(*node)["id"].IsInt() ) return false;
+	questDialogueEditorWriteIntegerMember(questDialogueEditorDocument,
+		"start_node", (*node)["id"].GetInt());
+	questDialogueEditorSetMessage("Selected node is now the conversation start.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorConvertLegacyToGraph()
+{
+	if ( !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("text")
+		|| !questDialogueEditorDocument["text"].IsString()
+		|| questDialogueEditorDocument.HasMember("nodes") )
+	{
+		questDialogueEditorSetMessage(
+			"The selected file is not a legacy one-line dialogue.");
+		return false;
+	}
+
+	const std::string text = questDialogueEditorDocument["text"].GetString();
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	rapidjson::Value nodes(rapidjson::kArrayType);
+	rapidjson::Value node(rapidjson::kObjectType);
+	node.AddMember("id", 0, allocator);
+	rapidjson::Value nodeText;
+	nodeText.SetString(text.c_str(), static_cast<rapidjson::SizeType>(text.size()),
+		allocator);
+	node.AddMember("text", nodeText, allocator);
+	node.AddMember("next", 0, allocator);
+	rapidjson::Value choices(rapidjson::kArrayType);
+	node.AddMember("choices", choices, allocator);
+	nodes.PushBack(node, allocator);
+	questDialogueEditorDocument.AddMember("start_node", 0, allocator);
+	questDialogueEditorDocument.AddMember("nodes", nodes, allocator);
+	questDialogueEditorDocument.RemoveMember("text");
+	questDialogueEditorSelectedNode = 0;
+	questDialogueEditorSelectedChoice = -1;
+	questDialogueEditorConversationInspector = 0;
+	const bool changed = questDialogueEditorSaveDocument();
+	if ( changed )
+	{
+		questDialogueEditorSetMessage(
+			"Converted legacy text to an equivalent one-node graph; the change is unsaved.");
+	}
+	return changed;
+}
+
+static void questDialogueEditorJumpToNodeID(const int nodeID)
+{
+	if ( !questDialogueEditorDocument.HasMember("nodes")
+		|| !questDialogueEditorDocument["nodes"].IsArray() ) return;
+	for ( rapidjson::SizeType index = 0;
+		index < questDialogueEditorDocument["nodes"].Size(); ++index )
+	{
+		const rapidjson::Value& node = questDialogueEditorDocument["nodes"][index];
+		if ( node.IsObject() && node.HasMember("id") && node["id"].IsInt()
+			&& node["id"].GetInt() == nodeID )
+		{
+			questDialogueEditorSelectedNode = static_cast<int>(index);
+			questDialogueEditorSelectedChoice = -1;
+			questDialogueEditorConversationInspector = 0;
+			questDialogueEditorSetMessage("Jumped to node " + std::to_string(nodeID) + ".");
+			return;
+		}
+	}
+	questDialogueEditorSetMessage("That destination node does not exist.");
+}
+
+static void questDialogueEditorFindSelectedNodeReferences()
+{
+	rapidjson::Value* selected = questDialogueEditorSelectedNodeValue();
+	if ( !selected || !selected->HasMember("id") || !(*selected)["id"].IsInt() ) return;
+	const int target = (*selected)["id"].GetInt();
+	int references = 0;
+	if ( questDialogueEditorDocument.HasMember("start_node")
+		&& questDialogueEditorDocument["start_node"].IsInt()
+		&& questDialogueEditorDocument["start_node"].GetInt() == target ) ++references;
+	for ( const rapidjson::Value& node : questDialogueEditorDocument["nodes"].GetArray() )
+	{
+		if ( !node.IsObject() ) continue;
+		if ( node.HasMember("next") && node["next"].IsInt()
+			&& node["next"].GetInt() == target ) ++references;
+		if ( node.HasMember("condition") && node["condition"].IsObject() )
+			for ( const char* branch : { "true_node", "false_node" } )
+				if ( node["condition"].HasMember(branch)
+					&& node["condition"][branch].IsInt()
+					&& node["condition"][branch].GetInt() == target ) ++references;
+		if ( node.HasMember("choices") && node["choices"].IsArray() )
+			for ( const rapidjson::Value& choice : node["choices"].GetArray() )
+				if ( choice.IsObject() && choice.HasMember("next")
+					&& choice["next"].IsInt() && choice["next"].GetInt() == target ) ++references;
+	}
+	questDialogueEditorSetMessage("Node " + std::to_string(target) + " has "
+		+ std::to_string(references) + " incoming/start reference"
+		+ (references == 1 ? "." : "s."));
+}
+
+static int questDialogueEditorChoiceConditionCount(const rapidjson::Value& choice)
+{
+	if ( !choice.IsObject() ) return 0;
+	int count = choice.HasMember("condition") && choice["condition"].IsObject() ? 1 : 0;
+	if ( choice.HasMember("conditions") && choice["conditions"].IsArray() )
+		count += static_cast<int>(choice["conditions"].Size());
+	return count;
+}
+
+static bool questDialogueEditorDrawEditableRow(
+	const int left,
+	const int right,
+	int& y,
+	const char* label,
+	const QuestDialogueEditableField field,
+	const QuestDialogueFieldCategory category,
+	const bool nodeRule = false
+)
+{
+	const bool active = questDialogueEditorEditingField
+		&& questDialogueEditorLockedEditableField == field
+		&& questDialogueEditorLockedRuleOwnerNode == nodeRule;
+	const QuestDialogueEditableField savedField = questDialogueEditorEditableField;
+	const QuestDialogueFieldCategory savedCategory = questDialogueEditorFieldCategory;
+	const bool savedOwner = questDialogueEditorRuleOwnerNode;
+	questDialogueEditorEditableField = field;
+	questDialogueEditorFieldCategory = category;
+	questDialogueEditorRuleOwnerNode = nodeRule;
+	const std::string value = active ? questDialogueEditorEditBuffer
+		: questDialogueEditorReadEditableField();
+	questDialogueEditorEditableField = savedField;
+	questDialogueEditorFieldCategory = savedCategory;
+	questDialogueEditorRuleOwnerNode = savedOwner;
+
+	printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %s%s", label,
+		questDialogueEditorClipText(value.empty() ? "(not set)" : value,
+			right - left - 142).c_str(), active ? "_" : "");
+	bool applied = false;
+	if ( questDialogueEditorImmediateButton(active ? right - 118 : right - 72,
+		y, active ? 54 : 72, active ? "APPLY" : "EDIT") )
+	{
+		questDialogueEditorEditableField = field;
+		questDialogueEditorFieldCategory = category;
+		questDialogueEditorRuleOwnerNode = nodeRule;
+		if ( active ) applied = questDialogueEditorApplyEditableField();
+		else questDialogueEditorBeginEditingField();
+	}
+	if ( active && questDialogueEditorImmediateButton(right - 58, y, 58, "CANCEL") )
+	{
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSetMessage("Field edit canceled; document was unchanged.");
+	}
+	y += 23;
+	return applied;
+}
+
+static bool questDialogueEditorSelectVanillaItem(
+	const int itemID,
+	const bool conditionTarget
+)
+{
+	if ( itemID < 0 || itemID >= NUMITEMS ) return false;
+	rapidjson::Value* reference = nullptr;
+	if ( conditionTarget )
+	{
+		reference = questDialogueEditorSelectedRuleCondition();
+		if ( !reference || !reference->HasMember("type")
+			|| !(*reference)["type"].IsString()
+			|| questEditorNormalizeID((*reference)["type"].GetString())
+				!= "has_item" ) return false;
+	}
+	else
+	{
+		rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+		const std::string member = questDialogueEditorSelectedRuleActionMember();
+		if ( !action || (member != "reward_item" && member != "remove_item")
+			|| !action->HasMember(member.c_str())
+			|| !(*action)[member.c_str()].IsObject() ) return false;
+		reference = &(*action)[member.c_str()];
+	}
+	questDialogueEditorWriteStringMember(*reference, "item", std::to_string(itemID));
+	reference->RemoveMember("stable_id");
+	questDialogueEditorItemSearchEditing = false;
+	if ( inputstr == questDialogueEditorItemSearch )
+	{
+		SDL_StopTextInput();
+		inputstr = nullptr;
+	}
+	questDialogueEditorSelectedItemID = itemID;
+	questDialogueEditorSetMessage(std::string("Vanilla item: ")
+		+ items[itemID].getIdentifiedName() + " [" + std::to_string(itemID) + "]");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorSelectStableItem(
+	const std::string& stableID,
+	const bool conditionTarget
+)
+{
+	if ( stableID.empty() || !editorSAMItemStableIDIsAvailable(stableID.c_str()) )
+		return false;
+	rapidjson::Value* reference = nullptr;
+	if ( conditionTarget )
+	{
+		reference = questDialogueEditorSelectedRuleCondition();
+		if ( !reference || !reference->HasMember("type")
+			|| !(*reference)["type"].IsString()
+			|| questEditorNormalizeID((*reference)["type"].GetString())
+				!= "has_item" ) return false;
+	}
+	else
+	{
+		rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+		const std::string member = questDialogueEditorSelectedRuleActionMember();
+		if ( !action || (member != "reward_item" && member != "remove_item")
+			|| !action->HasMember(member.c_str())
+			|| !(*action)[member.c_str()].IsObject() ) return false;
+		reference = &(*action)[member.c_str()];
+	}
+	questDialogueEditorWriteStringMember(*reference, "stable_id", stableID);
+	reference->RemoveMember("item");
+	questDialogueEditorItemSearchEditing = false;
+	if ( inputstr == questDialogueEditorItemSearch )
+	{
+		SDL_StopTextInput();
+		inputstr = nullptr;
+	}
+	questDialogueEditorSetMessage("S.A.M. stable item: " + stableID);
+	return questDialogueEditorSaveDocument();
+}
+
+static void questDialogueEditorDrawItemPicker(
+	const int left,
+	const int right,
+	int& y,
+	const bool conditionTarget
+)
+{
+	printText(font8x8_bmp, left, y + 5, "Search item catalog");
+	drawDepressed(left + 142, y, right - 34, y + 19);
+	printTextFormattedColor(font8x8_bmp, left + 148, y + 6,
+		questDialogueEditorItemSearch[0] ? makeColorRGB(255, 255, 255)
+			: makeColorRGB(145, 145, 145), "%.22s%s",
+		questDialogueEditorItemSearch[0] ? questDialogueEditorItemSearch : "name or numeric ID",
+		questDialogueEditorItemSearchEditing ? "_" : "");
+	if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= left + 142
+		&& omousex < right - 34 && omousey >= y && omousey < y + 19 )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorItemSearchEditing = true;
+		inputstr = questDialogueEditorItemSearch;
+		inputlen = static_cast<int>(sizeof(questDialogueEditorItemSearch) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+	if ( questDialogueEditorImmediateButton(right - 28, y, 28, "X") )
+	{
+		questDialogueEditorItemSearch[0] = '\0';
+		questDialogueEditorItemSearchScroll = 0;
+	}
+	y += 23;
+	struct ItemMatch
+	{
+		int vanillaID = -1;
+		int stableIndex = -1;
+	};
+	std::vector<ItemMatch> matches;
+	for ( int itemID = 0; itemID < NUMITEMS; ++itemID )
+	{
+		const std::string searchable = std::string(items[itemID].getIdentifiedName())
+			+ " " + std::to_string(itemID);
+		if ( questDialogueEditorMatches(searchable, questDialogueEditorItemSearch) )
+			matches.push_back(ItemMatch{ itemID, -1 });
+	}
+	for ( int index = 0; index < editorSAMItemCatalogCount(); ++index )
+	{
+		const std::string stableID = editorSAMItemCatalogStableIDAt(index);
+		const std::string name = editorSAMItemCatalogNameAt(index);
+		if ( questDialogueEditorMatches(name + " " + stableID,
+			questDialogueEditorItemSearch) )
+		{
+			matches.push_back(ItemMatch{ -1, index });
+		}
+	}
+	const int visible = std::min(3, static_cast<int>(matches.size()));
+	const int maximumScroll = std::max(0, static_cast<int>(matches.size()) - visible);
+	if ( omousex >= left && omousex < right && omousey >= y
+		&& omousey < y + visible * 19 && scroll != 0 )
+	{
+		questDialogueEditorItemSearchScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorItemSearchScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorItemSearchScroll = std::max(0,
+		std::min(maximumScroll, questDialogueEditorItemSearchScroll));
+	for ( int row = 0; row < visible; ++row )
+	{
+		const ItemMatch& match = matches[questDialogueEditorItemSearchScroll + row];
+		const std::string stableID = match.stableIndex >= 0
+			? editorSAMItemCatalogStableIDAt(match.stableIndex) : std::string{};
+		const std::string label = questDialogueEditorClipText(match.vanillaID >= 0
+			? std::string(items[match.vanillaID].getIdentifiedName()) + "  [ID "
+				+ std::to_string(match.vanillaID) + "]"
+			: std::string(editorSAMItemCatalogNameAt(match.stableIndex))
+				+ "  [" + stableID + "]", right - left - 12);
+		if ( questDialogueEditorImmediateButton(left, y, right - left, label.c_str()) )
+		{
+			if ( match.vanillaID >= 0 )
+				questDialogueEditorSelectVanillaItem(match.vanillaID, conditionTarget);
+			else questDialogueEditorSelectStableItem(stableID, conditionTarget);
+		}
+		y += 20;
+	}
+	if ( matches.empty() )
+	{
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(255, 175, 96), "No vanilla or S.A.M. item matches.");
+		y += 18;
+	}
+}
+
+static const char* questDialogueEditorConditionGroupName()
+{
+	switch ( questDialogueEditorConditionGroup )
+	{
+		case QUEST_DIALOGUE_CONDITION_GROUP_ITEMS: return "Items / Gold";
+		case QUEST_DIALOGUE_CONDITION_GROUP_QUEST: return "Quest / History";
+		case QUEST_DIALOGUE_CONDITION_GROUP_OBJECTIVES: return "Objectives";
+		case QUEST_DIALOGUE_CONDITION_GROUP_FLAGS: return "Flags";
+		case QUEST_DIALOGUE_CONDITION_GROUP_VARIABLES: return "Variables";
+		default: return "Items / Gold";
+	}
+}
+
+static bool questDialogueEditorConditionInCurrentGroup(const std::string& type)
+{
+	switch ( questDialogueEditorConditionGroup )
+	{
+		case QUEST_DIALOGUE_CONDITION_GROUP_ITEMS:
+			return type == "has_item" || type == "has_gold";
+		case QUEST_DIALOGUE_CONDITION_GROUP_QUEST:
+			return type == "quest_started" || type == "quest_accepted"
+				|| type == "quest_completed" || type == "quest_failed"
+				|| type == "quest_stage" || type == "node_seen";
+		case QUEST_DIALOGUE_CONDITION_GROUP_OBJECTIVES:
+			return type == "objective_completed" || type == "objective_incomplete";
+		case QUEST_DIALOGUE_CONDITION_GROUP_FLAGS:
+			return type == "world_flag" || type == "npc_flag";
+		case QUEST_DIALOGUE_CONDITION_GROUP_VARIABLES:
+			return type == "world_variable" || type == "npc_variable";
+		default:
+			return false;
+	}
+}
+
+static std::vector<std::string> questDialogueEditorConditionCatalog()
+{
+	std::vector<std::string> catalog;
+	const auto& supported = questDialogueEditorRuleOwnerNode
+		? automatia::dialogue::nodeConditionTypes()
+		: automatia::dialogue::choiceConditionTypes();
+	for ( const std::string& type : supported )
+	{
+		if ( questDialogueEditorConditionInCurrentGroup(type) )
+			catalog.push_back(type);
+	}
+	return catalog;
+}
+
+static void questDialogueEditorCycleAvailableConditionGroup()
+{
+	for ( int attempt = 0; attempt < QUEST_DIALOGUE_CONDITION_GROUP_COUNT; ++attempt )
+	{
+		questDialogueEditorConditionGroup =
+			static_cast<QuestDialogueConditionGroup>(
+				(static_cast<int>(questDialogueEditorConditionGroup) + 1)
+				% QUEST_DIALOGUE_CONDITION_GROUP_COUNT);
+		if ( !questDialogueEditorConditionCatalog().empty() ) break;
+	}
+	questDialogueEditorConditionCatalogIndex = 0;
+}
+
+static bool questDialogueEditorActionInCurrentGroup(const std::string& field)
+{
+	switch ( questDialogueEditorActionGroup )
+	{
+		case QUEST_DIALOGUE_ACTION_GROUP_QUEST:
+			return field.rfind("quest_", 0) == 0;
+		case QUEST_DIALOGUE_ACTION_GROUP_REWARDS:
+			return field.rfind("reward_", 0) == 0;
+		case QUEST_DIALOGUE_ACTION_GROUP_COSTS:
+			return field.rfind("remove_", 0) == 0;
+		case QUEST_DIALOGUE_ACTION_GROUP_OBJECTIVES:
+			return field.rfind("objective_", 0) == 0;
+		case QUEST_DIALOGUE_ACTION_GROUP_FLAGS:
+			return field == "set_world_flag" || field == "set_npc_flag";
+		case QUEST_DIALOGUE_ACTION_GROUP_VARIABLES:
+			return field.find("_variable") != std::string::npos;
+		case QUEST_DIALOGUE_ACTION_GROUP_NPC:
+			return field == "recruit_npc";
+		case QUEST_DIALOGUE_ACTION_GROUP_MECHANISMS:
+			return field == "set_power";
+		case QUEST_DIALOGUE_ACTION_GROUP_STATUS:
+			return field == "status_effect";
+		default:
+			return false;
+	}
+}
+
+static std::vector<std::string> questDialogueEditorActionCatalog()
+{
+	std::vector<std::string> catalog;
+	for ( const std::string& field : questDialogueEditorRuleOwnerNode
+		? automatia::dialogue::nodeActionFields()
+		: automatia::dialogue::choiceActionFields() )
+	{
+		if ( field != "id" && questDialogueEditorActionInCurrentGroup(field) )
+			catalog.push_back(field);
+	}
+	return catalog;
+}
+
+static void questDialogueEditorCycleAvailableActionGroup()
+{
+	for ( int attempt = 0; attempt < QUEST_DIALOGUE_ACTION_GROUP_COUNT; ++attempt )
+	{
+		questDialogueEditorActionGroup = static_cast<QuestDialogueActionGroup>(
+			(static_cast<int>(questDialogueEditorActionGroup) + 1)
+			% QUEST_DIALOGUE_ACTION_GROUP_COUNT);
+		if ( !questDialogueEditorActionCatalog().empty() ) break;
+	}
+	questDialogueEditorActionCatalogIndex = 0;
+}
+
+static void questDialogueEditorDrawConditionInspector(
+	const int left,
+	const int right,
+	int& y,
+	const int bottom
+)
+{
+	if ( !questDialogueEditorRuleOwnerNode
+		&& !questDialogueEditorSelectedChoiceValue() )
+	{
+		printText(font8x8_bmp, left, y, "Select a choice to author its requirements.");
+		return;
+	}
+	if ( questDialogueEditorRuleOwnerNode && !questDialogueEditorSelectedNodeValue() )
+	{
+		printText(font8x8_bmp, left, y, "Select a node to author its redirect rule.");
+		return;
+	}
+
+	std::vector<std::string> types = questDialogueEditorConditionCatalog();
+	if ( types.empty() )
+	{
+		questDialogueEditorCycleAvailableConditionGroup();
+		types = questDialogueEditorConditionCatalog();
+	}
+	questDialogueEditorConditionCatalogIndex = std::max(0,
+		std::min(questDialogueEditorConditionCatalogIndex,
+			static_cast<int>(types.size()) - 1));
+	printTextFormattedColor(font8x8_bmp, left, y,
+		makeColorRGB(128, 210, 255), "%s",
+		questDialogueEditorRuleOwnerNode
+			? "NODE REDIRECT RULE (one condition)"
+			: "CHOICE REQUIREMENTS (all conditions are AND)");
+	y += 19;
+	if ( questDialogueEditorImmediateButton(left, y, 112,
+		questDialogueEditorConditionGroupName()) )
+	{
+		questDialogueEditorCycleAvailableConditionGroup();
+		types = questDialogueEditorConditionCatalog();
+	}
+	if ( questDialogueEditorImmediateButton(left + 118, y, 28, "<") )
+		questDialogueEditorConditionCatalogIndex =
+			(questDialogueEditorConditionCatalogIndex - 1
+				+ static_cast<int>(types.size())) % static_cast<int>(types.size());
+	drawDepressed(left + 152, y, right - 104, y + 18);
+	printTextFormatted(font8x8_bmp, left + 158, y + 5, "Add/set: %s",
+		types[questDialogueEditorConditionCatalogIndex].c_str());
+	if ( questDialogueEditorImmediateButton(right - 98, y, 28, ">") )
+		questDialogueEditorConditionCatalogIndex =
+			(questDialogueEditorConditionCatalogIndex + 1) % static_cast<int>(types.size());
+	if ( questDialogueEditorImmediateButton(right - 64, y, 64,
+		questDialogueEditorRuleOwnerNode ? "SET" : "ADD") )
+	{
+		if ( questDialogueEditorRuleOwnerNode )
+			questDialogueEditorReplaceRuleCondition(
+				types[questDialogueEditorConditionCatalogIndex]);
+		else questDialogueEditorAddChoiceCondition(
+			types[questDialogueEditorConditionCatalogIndex]);
+	}
+	y += 27;
+
+	rapidjson::Value* condition = questDialogueEditorSelectedRuleCondition();
+	if ( !condition )
+	{
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(180, 180, 180), "No condition. Choose a type above.");
+		return;
+	}
+	if ( !questDialogueEditorRuleOwnerNode )
+	{
+		const int count = questDialogueEditorChoiceConditionCount(
+			*questDialogueEditorSelectedChoiceValue());
+		printTextFormatted(font8x8_bmp, left, y + 5, "Requirement %d of %d",
+			count ? questDialogueEditorSelectedConditionIndex + 1 : 0, count);
+		if ( questDialogueEditorImmediateButton(right - 84, y, 38, "PREV") )
+			questDialogueEditorCycleSelectedCondition(-1);
+		if ( questDialogueEditorImmediateButton(right - 40, y, 40, "NEXT") )
+			questDialogueEditorCycleSelectedCondition(1);
+		y += 24;
+		condition = questDialogueEditorSelectedRuleCondition();
+	}
+
+	std::string type = condition && condition->HasMember("type")
+		&& (*condition)["type"].IsString()
+		? questEditorNormalizeID((*condition)["type"].GetString()) : "invalid";
+	if ( questDialogueEditorImmediateButton(left, y, 70, "TYPE <") )
+		questDialogueEditorCycleRuleConditionType(-1);
+	if ( questDialogueEditorImmediateButton(left + 76, y, 70, "TYPE >") )
+		questDialogueEditorCycleRuleConditionType(1);
+	printTextFormatted(font8x8_bmp, left + 154, y + 5, "%s", type.c_str());
+	y += 24;
+	condition = questDialogueEditorSelectedRuleCondition();
+	if ( !condition ) return;
+	type = condition->HasMember("type") && (*condition)["type"].IsString()
+		? questEditorNormalizeID((*condition)["type"].GetString()) : "invalid";
+	const std::string summary = automatia::dialogue::conditionSummary(*condition);
+	drawWindowFancy(left, y, right, y + 31);
+	printTextFormattedColor(font8x8_bmp, left + 7, y + 7,
+		makeColorRGB(128, 255, 160), "IF %s",
+		questDialogueEditorClipText(summary, right - left - 20).c_str());
+	y += 39;
+
+	if ( type == "has_item" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Vanilla item",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y, "S.A.M. stable_id",
+			QUEST_DIALOGUE_FIELD_CONDITION_STABLE_ID,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y, "Quantity",
+			QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawItemPicker(left, right, y, true);
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(255, 210, 96),
+			"Persistent custom identity uses stable_id; runtime numeric IDs are never stored.");
+		y += 18;
+	}
+	else if ( type == "has_gold" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Gold amount",
+			QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+	}
+	else if ( type == "quest_started" || type == "quest_accepted"
+		|| type == "quest_completed" || type == "quest_failed"
+		|| type == "quest_stage" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Quest ID",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		if ( type == "quest_stage" )
+		{
+			questDialogueEditorDrawEditableRow(left, right, y, "Stage",
+				QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+				QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+			const std::string comparison = condition->HasMember("comparison")
+				&& (*condition)["comparison"].IsString()
+				? (*condition)["comparison"].GetString() : "equals";
+			printTextFormatted(font8x8_bmp, left, y + 5,
+				"Comparison        %s", comparison.c_str());
+			if ( questDialogueEditorImmediateButton(right - 72, y, 72, "CHANGE") )
+				questDialogueEditorCycleRuleComparison();
+			y += 23;
+		}
+	}
+	else if ( type == "objective_completed" || type == "objective_incomplete" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Quest ID",
+			QUEST_DIALOGUE_FIELD_CONDITION_QUEST,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, false);
+		questDialogueEditorDrawEditableRow(left, right, y, "Objective ID",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, false);
+	}
+	else if ( type == "node_seen" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Seen-node key",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, true);
+		printText(font8x8_bmp, left, y, "Runtime keys are node_<numeric ID>, for example node_3.");
+		y += 18;
+	}
+	else if ( type == "world_flag" || type == "npc_flag" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Flag ID",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		const bool expected = condition->HasMember("value")
+			&& (*condition)["value"].IsBool() ? (*condition)["value"].GetBool() : true;
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Required value     %s", expected ? "true" : "false");
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleRuleConditionBoolean("value");
+		y += 23;
+	}
+	else if ( type == "world_variable" || type == "npc_variable" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Variable ID",
+			QUEST_DIALOGUE_FIELD_CONDITION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y, "Compared value",
+			QUEST_DIALOGUE_FIELD_CONDITION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_CONDITION, questDialogueEditorRuleOwnerNode);
+		const std::string comparison = condition->HasMember("comparison")
+			&& (*condition)["comparison"].IsString()
+			? (*condition)["comparison"].GetString() : "equals";
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Comparison        %s", comparison.c_str());
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "CHANGE") )
+			questDialogueEditorCycleRuleComparison();
+		y += 23;
+	}
+
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		for ( const auto field : {
+			QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE,
+			QUEST_DIALOGUE_FIELD_CONDITION_FALSE_NODE } )
+		{
+			const char* member = field == QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE
+				? "true_node" : "false_node";
+			const char* label = field == QUEST_DIALOGUE_FIELD_CONDITION_TRUE_NODE
+				? "If true -> node" : "If false -> node";
+			printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %d", label,
+				condition->HasMember(member) && (*condition)[member].IsInt()
+					? (*condition)[member].GetInt() : 0);
+			if ( questDialogueEditorImmediateButton(right - 110, y, 32, "<") )
+				questDialogueEditorCycleNodeReference(condition, member, -1);
+			if ( questDialogueEditorImmediateButton(right - 72, y, 32, ">") )
+				questDialogueEditorCycleNodeReference(condition, member, 1);
+			if ( questDialogueEditorImmediateButton(right - 34, y, 34, "EDIT") )
+			{
+				questDialogueEditorRuleOwnerNode = true;
+				questDialogueEditorEditField(field, QUEST_DIALOGUE_CATEGORY_CONDITION);
+			}
+			y += 23;
+		}
+		if ( type == "has_item" || type == "has_gold" )
+		{
+			const bool consume = condition->HasMember("consume")
+				&& (*condition)["consume"].IsBool() && (*condition)["consume"].GetBool();
+			printTextFormatted(font8x8_bmp, left, y + 5,
+				"Consume on true  %s", consume ? "yes" : "no");
+			if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+				questDialogueEditorToggleRuleConditionBoolean("consume");
+			y += 23;
+		}
+	}
+	if ( y + 22 < bottom && questDialogueEditorImmediateButton(
+		left, y, right - left, "REMOVE SELECTED CONDITION") )
+		questDialogueEditorRemoveRuleCondition();
+}
+
+static void questDialogueEditorDrawActionInspector(
+	const int left,
+	const int right,
+	int& y,
+	const int bottom
+)
+{
+	if ( !questDialogueEditorRuleOwnerNode
+		&& !questDialogueEditorSelectedChoiceValue() )
+	{
+		printText(font8x8_bmp, left, y, "Select a choice to author its action stack.");
+		return;
+	}
+	if ( questDialogueEditorRuleOwnerNode && !questDialogueEditorSelectedNodeValue() )
+	{
+		printText(font8x8_bmp, left, y, "Select a node to author its one-time action.");
+		return;
+	}
+
+	std::vector<std::string> catalog = questDialogueEditorActionCatalog();
+	if ( catalog.empty() )
+	{
+		questDialogueEditorCycleAvailableActionGroup();
+		catalog = questDialogueEditorActionCatalog();
+	}
+	questDialogueEditorActionCatalogIndex = std::max(0,
+		std::min(questDialogueEditorActionCatalogIndex,
+			static_cast<int>(catalog.size()) - 1));
+	printTextFormattedColor(font8x8_bmp, left, y,
+		makeColorRGB(128, 210, 255), "%s",
+		questDialogueEditorRuleOwnerNode
+			? "NODE ACTIONS (run once per action ID)"
+			: "CHOICE ACTIONS (all fields execute together)");
+	y += 19;
+	if ( questDialogueEditorImmediateButton(left, y, 112,
+		questDialogueEditorActionGroupName()) )
+	{
+		questDialogueEditorCycleAvailableActionGroup();
+		catalog = questDialogueEditorActionCatalog();
+	}
+	if ( questDialogueEditorImmediateButton(left + 118, y, 28, "<") )
+		questDialogueEditorActionCatalogIndex =
+			(questDialogueEditorActionCatalogIndex - 1
+				+ static_cast<int>(catalog.size())) % static_cast<int>(catalog.size());
+	drawDepressed(left + 152, y, right - 104, y + 18);
+	printTextFormatted(font8x8_bmp, left + 158, y + 5, "Add: %s",
+		questDialogueEditorActionDisplayName(
+			catalog[questDialogueEditorActionCatalogIndex]).c_str());
+	if ( questDialogueEditorImmediateButton(right - 98, y, 28, ">") )
+		questDialogueEditorActionCatalogIndex =
+			(questDialogueEditorActionCatalogIndex + 1) % static_cast<int>(catalog.size());
+	if ( questDialogueEditorImmediateButton(right - 64, y, 64, "ADD") )
+		questDialogueEditorAddRuleActionField(
+			catalog[questDialogueEditorActionCatalogIndex]);
+	y += 27;
+
+	rapidjson::Value* action = questDialogueEditorSelectedRuleAction();
+	if ( !action )
+	{
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(180, 180, 180), "No actions. Choose one above.");
+		return;
+	}
+	if ( questDialogueEditorRuleOwnerNode )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "One-time ID",
+			QUEST_DIALOGUE_FIELD_NODE_ACTION_ID,
+			QUEST_DIALOGUE_CATEGORY_ACTION, true);
+		printText(font8x8_bmp, left, y,
+			"This stable ID prevents a node reward/action from repeating.");
+		y += 18;
+	}
+
+	const auto members = questDialogueEditorRuleActionMembers();
+	if ( members.empty() )
+	{
+		printText(font8x8_bmp, left, y, "No executable action fields.");
+		return;
+	}
+	questDialogueEditorSelectedActionIndex = std::max(0,
+		std::min(questDialogueEditorSelectedActionIndex,
+			static_cast<int>(members.size()) - 1));
+	printTextFormatted(font8x8_bmp, left, y + 5, "Action %d of %d",
+		questDialogueEditorSelectedActionIndex + 1,
+		static_cast<int>(members.size()));
+	if ( questDialogueEditorImmediateButton(right - 84, y, 38, "PREV") )
+		questDialogueEditorCycleSelectedRuleAction(-1);
+	if ( questDialogueEditorImmediateButton(right - 40, y, 40, "NEXT") )
+		questDialogueEditorCycleSelectedRuleAction(1);
+	y += 24;
+	const std::string member = questDialogueEditorSelectedRuleActionMember();
+	const auto summaries = automatia::dialogue::actionSummaries(*action);
+	int summaryIndex = 0;
+	for ( auto iterator = action->MemberBegin(); iterator != action->MemberEnd();
+		++iterator, ++summaryIndex )
+	{
+		if ( member == iterator->name.GetString() ) break;
+	}
+	const std::string summary = summaryIndex >= 0
+		&& summaryIndex < static_cast<int>(summaries.size())
+		? summaries[summaryIndex] : questDialogueEditorActionDisplayName(member);
+	drawWindowFancy(left, y, right, y + 31);
+	printTextFormattedColor(font8x8_bmp, left + 7, y + 7,
+		makeColorRGB(255, 190, 110), "%s",
+		questDialogueEditorClipText(summary, right - left - 20).c_str());
+	y += 39;
+
+	if ( member == "quest_start" || member == "quest_accept"
+		|| member == "quest_complete" || member == "quest_fail"
+		|| member == "quest_reset" || member == "recruit_npc" )
+	{
+		const bool enabled = action->HasMember(member.c_str())
+			&& (*action)[member.c_str()].IsBool()
+			&& (*action)[member.c_str()].GetBool();
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Enabled           %s", enabled ? "true" : "false");
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleSelectedRuleActionBoolean();
+		y += 23;
+	}
+	else if ( member == "quest_stage" || member == "reward_gold"
+		|| member == "remove_gold" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y,
+			member == "quest_stage" ? "Quest stage" : "Gold amount",
+			QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+	}
+	else if ( member == "reward_item" || member == "remove_item" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Vanilla item",
+			QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y, "S.A.M. stable_id",
+			QUEST_DIALOGUE_FIELD_ACTION_STABLE_ID,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y, "Quantity",
+			QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawItemPicker(left, right, y, false);
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(255, 210, 96),
+			"Missing stable IDs remain authored; unavailable rewards are rejected atomically.");
+		y += 18;
+	}
+	else if ( member == "objective_complete" || member == "objective_clear" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Objective ID",
+			QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+	}
+	else if ( member == "set_world_flag" || member == "set_npc_flag" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Flag ID",
+			QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+		rapidjson::Value& selected = (*action)[member.c_str()];
+		const bool enabled = selected.IsObject() && selected.HasMember("value")
+			&& selected["value"].IsBool() && selected["value"].GetBool();
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Set value         %s", enabled ? "true" : "false");
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleSelectedRuleActionBoolean();
+		y += 23;
+	}
+	else if ( member.find("_variable") != std::string::npos )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Variable ID",
+			QUEST_DIALOGUE_FIELD_ACTION_REFERENCE,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+		questDialogueEditorDrawEditableRow(left, right, y,
+			member.rfind("add_", 0) == 0 ? "Add amount" : "Set value",
+			QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, questDialogueEditorRuleOwnerNode);
+	}
+	else if ( member == "set_power" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Tile X",
+			QUEST_DIALOGUE_FIELD_POWER_X,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+		questDialogueEditorDrawEditableRow(left, right, y, "Tile Y",
+			QUEST_DIALOGUE_FIELD_POWER_Y,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+		rapidjson::Value& selected = (*action)[member.c_str()];
+		const bool powered = selected.IsObject() && selected.HasMember("powered")
+			&& selected["powered"].IsBool() && selected["powered"].GetBool();
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Power state       %s", powered ? "powered" : "unpowered");
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleSelectedRuleActionBoolean();
+		y += 23;
+		if ( questDialogueEditorImmediateButton(left, y, right - left,
+			"USE EDITOR CURSOR TILE") )
+		{
+			questDialogueEditorSetIntMember(selected, "x", std::max(0, drawx));
+			questDialogueEditorSetIntMember(selected, "y", std::max(0, drawy));
+			questDialogueEditorSaveDocument();
+		}
+		y += 23;
+	}
+	else if ( member == "status_effect" )
+	{
+		questDialogueEditorDrawEditableRow(left, right, y, "Effect ID",
+			QUEST_DIALOGUE_FIELD_ACTION_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+		rapidjson::Value& selected = (*action)[member.c_str()];
+		int effectID = selected.IsObject() && selected.HasMember("effect")
+			&& selected["effect"].IsInt() ? selected["effect"].GetInt() : 0;
+		printTextFormatted(font8x8_bmp, left, y + 5, "Effect name       %s",
+			questDialogueEditorEffectName(effectID));
+		if ( questDialogueEditorImmediateButton(right - 72, y, 32, "<") )
+		{
+			effectID = (effectID - 1 + NUMEFFECTS) % NUMEFFECTS;
+			questDialogueEditorSetIntMember(selected, "effect", effectID);
+			questDialogueEditorSaveDocument();
+		}
+		if ( questDialogueEditorImmediateButton(right - 34, y, 34, ">") )
+		{
+			effectID = (effectID + 1) % NUMEFFECTS;
+			questDialogueEditorSetIntMember(selected, "effect", effectID);
+			questDialogueEditorSaveDocument();
+		}
+		y += 23;
+		questDialogueEditorDrawEditableRow(left, right, y, "Duration seconds",
+			QUEST_DIALOGUE_FIELD_ACTION_SECONDARY_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+		questDialogueEditorDrawEditableRow(left, right, y, "Strength 1-255",
+			QUEST_DIALOGUE_FIELD_ACTION_TERTIARY_NUMBER,
+			QUEST_DIALOGUE_CATEGORY_ACTION, false);
+		const bool enabled = selected.IsObject() && (!selected.HasMember("enabled")
+			|| (selected["enabled"].IsBool() && selected["enabled"].GetBool()));
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Operation         %s", enabled ? "apply" : "clear");
+		if ( questDialogueEditorImmediateButton(right - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleSelectedRuleActionBoolean();
+		y += 23;
+	}
+
+	if ( y + 22 < bottom && questDialogueEditorImmediateButton(
+		left, y, right - left, "REMOVE SELECTED ACTION") )
+		questDialogueEditorRemoveSelectedRuleAction();
+}
+
+static void questDialogueEditorDrawConversationPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	const int available = right - mainLeft;
+	const int graphRight = mainLeft + std::max(304, available * 45 / 100);
+	const int inspectorLeft = graphRight + 8;
+	drawDepressed(mainLeft, top, graphRight, bottom);
+	drawDepressed(inspectorLeft, top, right, bottom);
+
+	printTextFormattedColor(font8x8_bmp, mainLeft + 9, top + 8,
+		makeColorRGB(128, 210, 255), "CONVERSATION FLOW");
+	const bool legacy = questDialogueEditorDocument.IsObject()
+		&& questDialogueEditorDocument.HasMember("text")
+		&& questDialogueEditorDocument["text"].IsString()
+		&& !questDialogueEditorDocument.HasMember("nodes");
+	if ( legacy )
+	{
+		printTextFormattedColor(font8x8_bmp, mainLeft + 14, top + 40,
+			makeColorRGB(255, 230, 96), "LEGACY ONE-LINE DIALOGUE");
+		printText(font8x8_bmp, mainLeft + 14, top + 60,
+			"One terminal NPC line; no responses or automatic progression.");
+		int legacyY = top + 92;
+		questDialogueEditorDrawEditableRow(mainLeft + 14, graphRight - 14,
+			legacyY, "NPC text", QUEST_DIALOGUE_FIELD_LEGACY_TEXT,
+			QUEST_DIALOGUE_CATEGORY_TEXT);
+		if ( questDialogueEditorImmediateButton(mainLeft + 14, legacyY + 10,
+			graphRight - mainLeft - 28, "CONVERT TO EDITABLE NODE GRAPH") )
+		{
+			questDialogueEditorConvertLegacyToGraph();
+		}
+		printText(font8x8_bmp, inspectorLeft + 14, top + 42,
+			"Conversion preserves the line as node 0, then enables nodes,");
+		printText(font8x8_bmp, inspectorLeft + 14, top + 58,
+			"responses, conditions, and actions. Undo restores legacy format.");
+		return;
+	}
+	if ( questDialogueEditorImmediateButton(graphRight - 216, top + 4, 62, "+ NODE") )
+		questDialogueEditorAddNode();
+	if ( questDialogueEditorImmediateButton(graphRight - 148, top + 4, 64, "DUP NODE") )
+		questDialogueEditorDuplicateSelectedNode();
+	if ( questDialogueEditorImmediateButton(graphRight - 78, top + 4, 70, "DELETE") )
+		questDialogueEditorDeleteNode();
+
+	const int split = top + std::max(205, (bottom - top) * 48 / 100);
+	const int nodeListTop = top + 31;
+	const int nodeListBottom = split - 8;
+	const int nodeRowHeight = 42;
+	const int nodeVisible = std::max(1, (nodeListBottom - nodeListTop) / nodeRowHeight);
+	const int nodeCount = static_cast<int>(questDialogueEditorPreview.nodes.size());
+	const int nodeMaxScroll = std::max(0, nodeCount - nodeVisible);
+	if ( omousex >= mainLeft && omousex < graphRight
+		&& omousey >= nodeListTop && omousey < nodeListBottom && scroll != 0 )
+	{
+		questDialogueEditorConversationNodeScroll = std::max(0,
+			std::min(nodeMaxScroll, questDialogueEditorConversationNodeScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorConversationNodeScroll = std::max(0,
+		std::min(nodeMaxScroll, questDialogueEditorConversationNodeScroll));
+	const int startNode = questDialogueEditorDocument.IsObject()
+		&& questDialogueEditorDocument.HasMember("start_node")
+		&& questDialogueEditorDocument["start_node"].IsInt()
+		? questDialogueEditorDocument["start_node"].GetInt() : INT_MIN;
+	for ( int row = 0; row < nodeVisible; ++row )
+	{
+		const int index = questDialogueEditorConversationNodeScroll + row;
+		if ( index >= nodeCount ) break;
+		const int y = nodeListTop + row * nodeRowHeight;
+		const auto& previewNode = questDialogueEditorPreview.nodes[index];
+		if ( index == questDialogueEditorSelectedNode )
+			drawDepressed(mainLeft + 7, y, graphRight - 7, y + nodeRowHeight - 4);
+		else drawWindowFancy(mainLeft + 7, y, graphRight - 7, y + nodeRowHeight - 4);
+		printTextFormattedColor(font8x8_bmp, mainLeft + 14, y + 6,
+			previewNode.id == startNode ? makeColorRGB(128, 255, 160)
+				: makeColorRGB(255, 230, 96),
+			"%s NODE %d", previewNode.id == startNode ? "START" : "     ", previewNode.id);
+		printTextFormatted(font8x8_bmp, mainLeft + 14, y + 21, "%s",
+			questDialogueEditorClipText(previewNode.text, graphRight - mainLeft - 116).c_str());
+		printTextFormattedColor(font8x8_bmp, graphRight - 91, y + 21,
+			makeColorRGB(150, 185, 220), "%d choice%s",
+			static_cast<int>(previewNode.choices.size()),
+			previewNode.choices.size() == 1 ? "" : "s");
+		if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= mainLeft + 7
+			&& omousex < graphRight - 7 && omousey >= y
+			&& omousey < y + nodeRowHeight - 4 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorSelectedNode = index;
+			questDialogueEditorSelectedChoice = -1;
+			questDialogueEditorConversationInspector = 0;
+			questDialogueEditorRuleOwnerNode = true;
+		}
+	}
+
+	printTextFormattedColor(font8x8_bmp, mainLeft + 9, split,
+		makeColorRGB(128, 210, 255), "RESPONSES ON SELECTED NODE");
+	int buttonX = graphRight - 282;
+	if ( questDialogueEditorImmediateButton(buttonX, split - 4, 48, "+ ADD") )
+		questDialogueEditorAddChoice();
+	buttonX += 52;
+	if ( questDialogueEditorImmediateButton(buttonX, split - 4, 48, "DUP") )
+		questDialogueEditorDuplicateSelectedChoice();
+	buttonX += 52;
+	if ( questDialogueEditorImmediateButton(buttonX, split - 4, 48, "DEL") )
+		questDialogueEditorDeleteChoice();
+	buttonX += 52;
+	if ( questDialogueEditorImmediateButton(buttonX, split - 4, 48, "UP") )
+		questDialogueEditorMoveSelectedChoice(-1);
+	buttonX += 52;
+	if ( questDialogueEditorImmediateButton(buttonX, split - 4, 48, "DOWN") )
+		questDialogueEditorMoveSelectedChoice(1);
+
+	const int choiceListTop = split + 24;
+	const int choiceRowHeight = 40;
+	rapidjson::Value* selectedNode = questDialogueEditorSelectedNodeValue();
+	const int choiceCount = selectedNode && selectedNode->HasMember("choices")
+		&& (*selectedNode)["choices"].IsArray()
+		? static_cast<int>((*selectedNode)["choices"].Size()) : 0;
+	const int choiceVisible = std::max(1, (bottom - choiceListTop - 6) / choiceRowHeight);
+	const int choiceMaxScroll = std::max(0, choiceCount - choiceVisible);
+	if ( omousex >= mainLeft && omousex < graphRight
+		&& omousey >= choiceListTop && omousey < bottom && scroll != 0 )
+	{
+		questDialogueEditorConversationChoiceScroll = std::max(0,
+			std::min(choiceMaxScroll, questDialogueEditorConversationChoiceScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorConversationChoiceScroll = std::max(0,
+		std::min(choiceMaxScroll, questDialogueEditorConversationChoiceScroll));
+	for ( int row = 0; row < choiceVisible; ++row )
+	{
+		const int index = questDialogueEditorConversationChoiceScroll + row;
+		if ( index >= choiceCount ) break;
+		const int y = choiceListTop + row * choiceRowHeight;
+		const rapidjson::Value& choice = (*selectedNode)["choices"]
+			[static_cast<rapidjson::SizeType>(index)];
+		if ( index == questDialogueEditorSelectedChoice )
+			drawDepressed(mainLeft + 7, y, graphRight - 7, y + choiceRowHeight - 4);
+		else drawWindowFancy(mainLeft + 7, y, graphRight - 7, y + choiceRowHeight - 4);
+		const std::string id = choice.IsObject() && choice.HasMember("id")
+			&& choice["id"].IsString() ? choice["id"].GetString() : "(invalid)";
+		const std::string textValue = choice.IsObject() && choice.HasMember("text")
+			&& choice["text"].IsString() ? choice["text"].GetString() : "(invalid)";
+		const int destination = choice.IsObject() && choice.HasMember("next")
+			&& choice["next"].IsInt() ? choice["next"].GetInt() : -1;
+		printTextFormattedColor(font8x8_bmp, mainLeft + 14, y + 5,
+			makeColorRGB(255, 230, 96), "%s -> NODE %d", id.c_str(), destination);
+		printTextFormatted(font8x8_bmp, mainLeft + 14, y + 20, "%s",
+			questDialogueEditorClipText(textValue, graphRight - mainLeft - 138).c_str());
+		const int conditions = questDialogueEditorChoiceConditionCount(choice);
+		const int actions = choice.IsObject() && choice.HasMember("action")
+			&& choice["action"].IsObject() ? static_cast<int>(choice["action"].MemberCount()) : 0;
+		printTextFormattedColor(font8x8_bmp, graphRight - 120, y + 20,
+			makeColorRGB(150, 185, 220), "R%d / A%d", conditions, actions);
+		if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= mainLeft + 7
+			&& omousex < graphRight - 7 && omousey >= y
+			&& omousey < y + choiceRowHeight - 4 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorSelectedChoice = index;
+			questDialogueEditorConversationInspector = 1;
+			questDialogueEditorRuleOwnerNode = false;
+			questDialogueEditorSelectedConditionIndex = 0;
+			questDialogueEditorSelectedActionIndex = 0;
+		}
+	}
+
+	const char* inspectorTabs[] = { "NODE", "CHOICE", "REQUIREMENTS", "ACTIONS" };
+	const int widths[] = { 52, 60, 104, 64 };
+	int tabX = inspectorLeft + 8;
+	for ( int tab = 0; tab < 4; ++tab )
+	{
+		if ( questDialogueEditorImmediateButton(tabX, top + 5, widths[tab],
+			inspectorTabs[tab], questDialogueEditorConversationInspector == tab) )
+		{
+			questDialogueEditorConversationInspector = tab;
+			if ( tab == 0 ) questDialogueEditorRuleOwnerNode = true;
+			if ( tab == 1 ) questDialogueEditorRuleOwnerNode = false;
+		}
+		tabX += widths[tab] + 4;
+	}
+	int y = top + 34;
+	const int fieldLeft = inspectorLeft + 12;
+	const int fieldRight = right - 12;
+
+	if ( questDialogueEditorConversationInspector == 0 )
+	{
+		questDialogueEditorRuleOwnerNode = true;
+		if ( !selectedNode )
+		{
+			printText(font8x8_bmp, fieldLeft, y, "Select a node from the flow list.");
+			return;
+		}
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "Node ID",
+			QUEST_DIALOGUE_FIELD_NODE_ID, QUEST_DIALOGUE_CATEGORY_TEXT);
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "NPC text",
+			QUEST_DIALOGUE_FIELD_NODE_TEXT, QUEST_DIALOGUE_CATEGORY_TEXT);
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "Automatic next",
+			QUEST_DIALOGUE_FIELD_NODE_NEXT, QUEST_DIALOGUE_CATEGORY_TEXT);
+		if ( questDialogueEditorImmediateButton(fieldLeft, y, 72, "NEXT <") )
+			questDialogueEditorCycleNodeReference(selectedNode, "next", -1);
+		if ( questDialogueEditorImmediateButton(fieldLeft + 78, y, 72, "NEXT >") )
+			questDialogueEditorCycleNodeReference(selectedNode, "next", 1);
+		if ( questDialogueEditorImmediateButton(fieldLeft + 156, y, 92, "JUMP TO NEXT") )
+		{
+			const int destination = selectedNode->HasMember("next")
+				&& (*selectedNode)["next"].IsInt() ? (*selectedNode)["next"].GetInt() : -1;
+			questDialogueEditorJumpToNodeID(destination);
+		}
+		y += 25;
+		if ( questDialogueEditorImmediateButton(fieldLeft, y, 112, "SET AS START") )
+			questDialogueEditorSetSelectedStartNode();
+		if ( questDialogueEditorImmediateButton(fieldLeft + 120, y, 128, "FIND REFERENCES") )
+			questDialogueEditorFindSelectedNodeReferences();
+		y += 30;
+		const bool hasCondition = selectedNode->HasMember("condition")
+			&& (*selectedNode)["condition"].IsObject();
+		const bool hasAction = selectedNode->HasMember("action")
+			&& (*selectedNode)["action"].IsObject();
+		printTextFormatted(font8x8_bmp, fieldLeft, y,
+			"Redirect rule: %s | One-time action: %s",
+			hasCondition ? "configured" : "none", hasAction ? "configured" : "none");
+		y += 20;
+		if ( questDialogueEditorImmediateButton(fieldLeft, y, 146, "EDIT NODE RULE") )
+		{
+			questDialogueEditorRuleOwnerNode = true;
+			questDialogueEditorConversationInspector = 2;
+		}
+		if ( questDialogueEditorImmediateButton(fieldLeft + 154, y, 154,
+			"EDIT NODE ACTIONS") )
+		{
+			questDialogueEditorRuleOwnerNode = true;
+			questDialogueEditorConversationInspector = 3;
+		}
+	}
+	else if ( questDialogueEditorConversationInspector == 1 )
+	{
+		questDialogueEditorRuleOwnerNode = false;
+		rapidjson::Value* choice = questDialogueEditorSelectedChoiceValue();
+		if ( !choice )
+		{
+			printText(font8x8_bmp, fieldLeft, y, "Select a response from the flow list.");
+			return;
+		}
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "Choice ID",
+			QUEST_DIALOGUE_FIELD_CHOICE_ID, QUEST_DIALOGUE_CATEGORY_TEXT);
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "Player response",
+			QUEST_DIALOGUE_FIELD_CHOICE_TEXT, QUEST_DIALOGUE_CATEGORY_TEXT);
+		questDialogueEditorDrawEditableRow(fieldLeft, fieldRight, y, "Destination",
+			QUEST_DIALOGUE_FIELD_CHOICE_NEXT, QUEST_DIALOGUE_CATEGORY_TEXT);
+		if ( questDialogueEditorImmediateButton(fieldLeft, y, 62, "DEST <") )
+			questDialogueEditorCycleNodeReference(choice, "next", -1);
+		if ( questDialogueEditorImmediateButton(fieldLeft + 68, y, 62, "DEST >") )
+			questDialogueEditorCycleNodeReference(choice, "next", 1);
+		if ( questDialogueEditorImmediateButton(fieldLeft + 136, y, 92, "JUMP TO DEST") )
+		{
+			const int destination = choice->HasMember("next") && (*choice)["next"].IsInt()
+				? (*choice)["next"].GetInt() : -1;
+			questDialogueEditorJumpToNodeID(destination);
+		}
+		y += 25;
+		const bool once = choice->HasMember("once") && (*choice)["once"].IsBool()
+			&& (*choice)["once"].GetBool();
+		printTextFormatted(font8x8_bmp, fieldLeft, y + 5,
+			"Once-only response %s", once ? "YES" : "NO");
+		if ( questDialogueEditorImmediateButton(fieldRight - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleChoiceOnce();
+		y += 27;
+		if ( questDialogueEditorImmediateButton(fieldLeft, y, 146, "EDIT REQUIREMENTS") )
+		{
+			questDialogueEditorRuleOwnerNode = false;
+			questDialogueEditorConversationInspector = 2;
+		}
+		if ( questDialogueEditorImmediateButton(fieldLeft + 154, y, 146,
+			"EDIT ACTION STACK") )
+		{
+			questDialogueEditorRuleOwnerNode = false;
+			questDialogueEditorConversationInspector = 3;
+		}
+	}
+	else
+	{
+		if ( questDialogueEditorEditingField )
+			questDialogueEditorRuleOwnerNode = questDialogueEditorLockedRuleOwnerNode;
+		printText(font8x8_bmp, fieldLeft, y + 5, "Edit rules on:");
+		if ( questDialogueEditorImmediateButton(fieldLeft + 104, y, 80, "NODE",
+			questDialogueEditorRuleOwnerNode) ) questDialogueEditorRuleOwnerNode = true;
+		if ( questDialogueEditorImmediateButton(fieldLeft + 190, y, 84, "CHOICE",
+			!questDialogueEditorRuleOwnerNode) )
+		{
+			if ( questDialogueEditorSelectedChoiceValue() ) questDialogueEditorRuleOwnerNode = false;
+			else questDialogueEditorSetMessage("Select a choice first.");
+		}
+		y += 29;
+		if ( questDialogueEditorConversationInspector == 2 )
+			questDialogueEditorDrawConditionInspector(fieldLeft, fieldRight, y, bottom - 8);
+		else questDialogueEditorDrawActionInspector(fieldLeft, fieldRight, y, bottom - 8);
+	}
+}
+
+static void questDialogueEditorDrawFilesPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	drawDepressed(mainLeft, top, right, bottom);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 12, top + 10,
+		makeColorRGB(128, 210, 255), "FILES AND RESOURCE IDENTITY");
+	printText(font8x8_bmp, mainLeft + 12, top + 27,
+		"The filename selects the dialogue resource. quest_id is separate persistent story identity.");
+
+	int x = mainLeft + 12;
+	const int y = top + 52;
+	if ( questDialogueEditorImmediateButton(x, y, 92, "NEW..." ) )
+		questDialogueEditorCreateNewFile();
+	x += 100;
+	if ( questDialogueEditorImmediateButton(x, y, 92, "DUPLICATE") )
+		questDialogueEditorDuplicateSelectedFile();
+	x += 100;
+	if ( questDialogueEditorImmediateButton(x, y, 92, "RELOAD") )
+		questDialogueEditorRequestTransition(
+			QUEST_DIALOGUE_PENDING_RELOAD, questDialogueEditorSelectedFile);
+	x += 100;
+	if ( questDialogueEditorImmediateButton(x, y, 92, "DELETE...") )
+		questDialogueEditorDeleteSelectedFile();
+
+	const std::string filename = questDialogueEditorSelectedFile >= 0
+		&& questDialogueEditorSelectedFile < static_cast<int>(questDialogueEditorFiles.size())
+		? questDialogueEditorFiles[questDialogueEditorSelectedFile] : "(none)";
+	int detailY = top + 88;
+	printTextFormatted(font8x8_bmp, mainLeft + 16, detailY,
+		"Selected file: %s%s", filename.c_str(),
+		questDialogueEditorModel.dirty() ? "  * unsaved" : "");
+	detailY += 22;
+	printTextFormatted(font8x8_bmp, mainLeft + 16, detailY,
+		"Dialogue/File ID: %s", filename.size() > 5
+			? filename.substr(0, filename.size() - 5).c_str() : filename.c_str());
+	if ( questDialogueEditorImmediateButton(right - 126, detailY - 6, 110,
+		questDialogueEditorEditingField
+			&& questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_FILE_ID
+			? "APPLY RENAME" : "RENAME...") )
+	{
+		if ( questDialogueEditorEditingField
+			&& questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_FILE_ID )
+			questDialogueEditorRenameSelectedFile();
+		else questDialogueEditorEditField(
+			QUEST_DIALOGUE_FIELD_FILE_ID, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+	}
+	if ( questDialogueEditorEditingField
+		&& questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_FILE_ID
+		&& questDialogueEditorImmediateButton(right - 246, detailY - 6, 112,
+			"CANCEL RENAME") )
+	{
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSetMessage("Rename canceled; file was unchanged.");
+	}
+	detailY += 26;
+	if ( questDialogueEditorEditingField
+		&& questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_FILE_ID )
+	{
+		drawDepressed(mainLeft + 16, detailY, right - 16, detailY + 21);
+		printTextFormatted(font8x8_bmp, mainLeft + 21, detailY + 6,
+			"%s_", questDialogueEditorClipText(questDialogueEditorEditBuffer,
+				right - mainLeft - 52).c_str());
+		detailY += 34;
+	}
+	printTextFormatted(font8x8_bmp, mainLeft + 16, detailY,
+		"Quest ID: %s", questDialogueEditorPreview.questID.empty()
+			? "(no quest)" : questDialogueEditorPreview.questID.c_str());
+	detailY += 18;
+	printTextFormatted(font8x8_bmp, mainLeft + 16, detailY,
+		"Graph: %d node%s, %d objective%s, %d validation issue%s",
+		static_cast<int>(questDialogueEditorPreview.nodes.size()),
+		questDialogueEditorPreview.nodes.size() == 1 ? "" : "s",
+		questDialogueEditorPreview.objectiveCount,
+		questDialogueEditorPreview.objectiveCount == 1 ? "" : "s",
+		static_cast<int>(questDialogueEditorValidationIssues.size()),
+		questDialogueEditorValidationIssues.size() == 1 ? "" : "s");
+	detailY += 30;
+	printTextFormattedColor(font8x8_bmp, mainLeft + 16, detailY,
+		makeColorRGB(255, 230, 96), "SAFE FILE WORKFLOW");
+	detailY += 18;
+	const char* notes[] = {
+		"- Edits stay in memory until SAVE.",
+		"- SAVE validates, writes a sibling temporary file, then atomically replaces the JSON.",
+		"- Switch, reload, close, tutorial replace, and delete prompt on unsaved changes.",
+		"- Unknown extension fields and array order survive visual edits and saves.",
+		"- Renaming changes the selected NPC only when it was bound to the old file ID."
+	};
+	for ( const char* note : notes )
+	{
+		printText(font8x8_bmp, mainLeft + 20, detailY, note);
+		detailY += 17;
+	}
+}
+
+static bool questDialogueEditorAddQuestMetadata()
+{
+	if ( !questDialogueEditorDocument.IsObject() ) return false;
+	auto& allocator = questDialogueEditorDocument.GetAllocator();
+	if ( !questDialogueEditorDocument.HasMember("quest_id") )
+		questDialogueEditorSetStringMember(questDialogueEditorDocument,
+			"quest_id", "new_quest");
+	if ( !questDialogueEditorDocument.HasMember("quest") )
+	{
+		rapidjson::Value quest(rapidjson::kObjectType);
+		questDialogueEditorSetStringMember(quest, "title", "New Quest");
+		questDialogueEditorSetStringMember(quest, "summary", "");
+		questDialogueEditorSetStringMember(quest, "scope", "player");
+		questDialogueEditorSetBoolMember(quest, "repeatable", false);
+		rapidjson::Value objectives(rapidjson::kArrayType);
+		quest.AddMember("objectives", objectives, allocator);
+		questDialogueEditorDocument.AddMember("quest", quest, allocator);
+	}
+	questDialogueEditorSetMessage("Quest metadata added. Set a unique Quest ID next.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorClearObjectiveMarker()
+{
+	rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
+	if ( !objective || !objective->HasMember("map_marker") ) return false;
+	objective->RemoveMember("map_marker");
+	questDialogueEditorSetMessage("Objective marker cleared.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorSetObjectiveMarkerFromCursor()
+{
+	rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
+	if ( !objective ) return false;
+	if ( drawx < 0 || drawy < 0 || drawx >= static_cast<int>(map.width)
+		|| drawy >= static_cast<int>(map.height) )
+	{
+		questDialogueEditorSetMessage("Cursor is outside the map.");
+		return false;
+	}
+	rapidjson::Value& marker = questDialogueEditorSetObjectMember(
+		*objective, "map_marker");
+	questDialogueEditorSetStringMember(marker, "map",
+		questEditorCurrentMapFilename());
+	questDialogueEditorSetIntMember(marker, "x", drawx);
+	questDialogueEditorSetIntMember(marker, "y", drawy);
+	questDialogueEditorSetMessage("Objective marker moved to the editor cursor.");
+	return questDialogueEditorSaveDocument();
+}
+
+static void questDialogueEditorDrawQuestPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	drawDepressed(mainLeft, top, right, bottom);
+	const char* tabs[] = { "OVERVIEW", "OBJECTIVES", "QUEST GIVER" };
+	const int widths[] = { 82, 92, 96 };
+	int tabX = mainLeft + 10;
+	for ( int tab = 0; tab < 3; ++tab )
+	{
+		if ( questDialogueEditorImmediateButton(tabX, top + 5, widths[tab], tabs[tab],
+			questDialogueEditorQuestPanel == tab) ) questDialogueEditorQuestPanel = tab;
+		tabX += widths[tab] + 5;
+	}
+
+	rapidjson::Value* quest = questDialogueEditorQuestValue();
+	if ( !quest )
+	{
+		printTextFormattedColor(font8x8_bmp, mainLeft + 18, top + 48,
+			makeColorRGB(255, 210, 96), "THIS DIALOGUE HAS NO QUEST METADATA");
+		printText(font8x8_bmp, mainLeft + 18, top + 70,
+			"Conversation-only files are valid. Add quest metadata only when this dialogue owns a quest.");
+		if ( questDialogueEditorImmediateButton(mainLeft + 18, top + 96, 154,
+			"ADD QUEST METADATA") ) questDialogueEditorAddQuestMetadata();
+		return;
+	}
+
+	const int left = mainLeft + 16;
+	const int fieldRight = right - 16;
+	int y = top + 39;
+	if ( questDialogueEditorQuestPanel == 0 )
+	{
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(128, 210, 255), "QUEST JOURNAL OVERVIEW");
+		y += 21;
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Quest ID",
+			QUEST_DIALOGUE_FIELD_QUEST_ID, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Title",
+			QUEST_DIALOGUE_FIELD_QUEST_TITLE, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Summary",
+			QUEST_DIALOGUE_FIELD_QUEST_SUMMARY, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "General objective",
+			QUEST_DIALOGUE_FIELD_QUEST_OBJECTIVE, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Completion text",
+			QUEST_DIALOGUE_FIELD_QUEST_COMPLETED_TEXT, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Failure text",
+			QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		const std::string scope = quest->HasMember("scope") && (*quest)["scope"].IsString()
+			? questEditorNormalizeID((*quest)["scope"].GetString()) : "player";
+		printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %s", "Scope", scope.c_str());
+		if ( questDialogueEditorImmediateButton(fieldRight - 72, y, 72, "CHANGE") )
+			questDialogueEditorCycleScopeDirect();
+		y += 23;
+		const bool repeatable = quest->HasMember("repeatable")
+			&& (*quest)["repeatable"].IsBool() && (*quest)["repeatable"].GetBool();
+		printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %s",
+			"Repeatable", repeatable ? "yes" : "no");
+		if ( questDialogueEditorImmediateButton(fieldRight - 72, y, 72, "TOGGLE") )
+			questDialogueEditorToggleRepeatable();
+		y += 31;
+		printTextFormattedColor(font8x8_bmp, left, y,
+			scope == "player" ? makeColorRGB(128, 255, 160) : makeColorRGB(255, 210, 96),
+			scope == "player"
+				? "Player scope is host-authoritative and private per player."
+				: "Party/world is preserved in JSON, but the current runtime executes it as player scope.");
+		y += 20;
+		printText(font8x8_bmp, left, y,
+			"Quest state persists in Automatia story saves; this editor does not mutate live quest state.");
+	}
+	else if ( questDialogueEditorQuestPanel == 2 )
+	{
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(128, 210, 255), "QUEST GIVER / JOURNAL ORIGIN");
+		y += 21;
+		printTextFormattedColor(font8x8_bmp, left, y,
+			makeColorRGB(255, 230, 96), "%s",
+			questDialogueEditorGiverMarkerSummary().c_str());
+		y += 22;
+		if ( questDialogueEditorImmediateButton(left, y, 128, "USE CURSOR TILE") )
+			questDialogueEditorUseCursorTileAsQuestGiver();
+		if ( questDialogueEditorImmediateButton(left + 136, y, 144,
+			"FOLLOW SELECTED NPC") ) questDialogueEditorUseSelectedNPCAsQuestGiver();
+		if ( questDialogueEditorImmediateButton(left + 288, y, 96,
+			"CLEAR ORIGIN") ) questDialogueEditorClearQuestGiver();
+		y += 31;
+		if ( !quest->HasMember("origin") || !(*quest)["origin"].IsObject() )
+		{
+			printText(font8x8_bmp, left, y,
+				"No origin. Use the current cursor tile or a selected persistent NPC.");
+			return;
+		}
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Label",
+			QUEST_DIALOGUE_FIELD_ORIGIN_LABEL, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Map",
+			QUEST_DIALOGUE_FIELD_ORIGIN_MAP, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Static tile X",
+			QUEST_DIALOGUE_FIELD_ORIGIN_X, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Static tile Y",
+			QUEST_DIALOGUE_FIELD_ORIGIN_Y, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Persistent NPC ID",
+			QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		const rapidjson::Value& origin = (*quest)["origin"];
+		const bool tracking = origin.HasMember("track_npc")
+			&& origin["track_npc"].IsBool() && origin["track_npc"].GetBool();
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Track NPC         %s", tracking ? "yes" : "no (static marker)");
+		if ( questDialogueEditorImmediateButton(fieldRight - 128, y, 128,
+			"USE MODE BUTTONS") )
+			questDialogueEditorSetMessage(
+				"Use cursor tile for static mode or Follow Selected NPC for tracking mode.");
+		y += 28;
+		printText(font8x8_bmp, left, y,
+			"Persistent NPC IDs are map-scoped. Follow mode requires a saved, persistent map entity.");
+	}
+	else
+	{
+		const int listWidth = std::min(300,
+			std::max(292, (right - mainLeft) * 40 / 100));
+		const int listRight = mainLeft + listWidth;
+		drawDepressed(mainLeft + 8, y - 5, listRight, bottom - 8);
+		printTextFormattedColor(font8x8_bmp, mainLeft + 16, y + 3,
+			makeColorRGB(128, 210, 255), "OBJECTIVES (%d)",
+			questDialogueEditorPreview.objectiveCount);
+		if ( questDialogueEditorImmediateButton(mainLeft + 16, y + 20, 58, "+ ADD") )
+			questDialogueEditorAddObjective();
+		if ( questDialogueEditorImmediateButton(mainLeft + 80, y + 20, 58, "DUP") )
+			questDialogueEditorDuplicateSelectedObjective();
+		if ( questDialogueEditorImmediateButton(mainLeft + 144, y + 20, 52, "DEL") )
+			questDialogueEditorDeleteObjective();
+		if ( questDialogueEditorImmediateButton(mainLeft + 202, y + 20, 32, "UP") )
+			questDialogueEditorMoveSelectedObjective(-1);
+		if ( questDialogueEditorImmediateButton(mainLeft + 240, y + 20, 36, "DOWN") )
+			questDialogueEditorMoveSelectedObjective(1);
+		const int listTop = y + 47;
+		const int rowHeight = 42;
+		const int visible = std::max(1, (bottom - listTop - 12) / rowHeight);
+		const int count = quest->HasMember("objectives") && (*quest)["objectives"].IsArray()
+			? static_cast<int>((*quest)["objectives"].Size()) : 0;
+		const int maximumScroll = std::max(0, count - visible);
+		if ( omousex >= mainLeft + 8 && omousex < listRight
+			&& omousey >= listTop && omousey < bottom && scroll != 0 )
+		{
+			questDialogueEditorObjectiveScroll = std::max(0,
+				std::min(maximumScroll, questDialogueEditorObjectiveScroll + scroll));
+			scroll = 0;
+		}
+		questDialogueEditorObjectiveScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorObjectiveScroll));
+		if ( count > 0 )
+		{
+			rapidjson::Value& objectives = (*quest)["objectives"];
+			for ( int row = 0; row < visible; ++row )
+			{
+				const int index = questDialogueEditorObjectiveScroll + row;
+				if ( index >= count ) break;
+				const int rowY = listTop + row * rowHeight;
+				const rapidjson::Value& objective = objectives[
+					static_cast<rapidjson::SizeType>(index)];
+				if ( index == questDialogueEditorSelectedObjective )
+					drawDepressed(mainLeft + 14, rowY, listRight - 6, rowY + 37);
+				else drawWindowFancy(mainLeft + 14, rowY, listRight - 6, rowY + 37);
+				const std::string id = objective.IsObject() && objective.HasMember("id")
+					&& objective["id"].IsString() ? objective["id"].GetString() : "(invalid)";
+				const std::string textValue = objective.IsObject() && objective.HasMember("text")
+					&& objective["text"].IsString() ? objective["text"].GetString() : "(invalid)";
+				printTextFormatted(font8x8_bmp, mainLeft + 21, rowY + 5,
+					"%d. %s", index + 1, id.c_str());
+				printTextFormattedColor(font8x8_bmp, mainLeft + 21, rowY + 20,
+					makeColorRGB(180, 200, 220), "%s",
+					questDialogueEditorClipText(textValue, listWidth - 42).c_str());
+				if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= mainLeft + 14
+					&& omousex < listRight - 6 && omousey >= rowY
+					&& omousey < rowY + 37 )
+				{
+					mousestatus[SDL_BUTTON_LEFT] = 0;
+					questDialogueEditorSelectedObjective = index;
+				}
+			}
+		}
+
+		const int inspectorLeft = listRight + 12;
+		int inspectorY = y;
+		printTextFormattedColor(font8x8_bmp, inspectorLeft, inspectorY,
+			makeColorRGB(128, 210, 255), "SELECTED OBJECTIVE");
+		inspectorY += 21;
+		rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
+		if ( !objective )
+		{
+			printText(font8x8_bmp, inspectorLeft, inspectorY,
+				"Add or select an objective to edit it.");
+			return;
+		}
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Objective ID", QUEST_DIALOGUE_FIELD_OBJECTIVE_ID,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Active text", QUEST_DIALOGUE_FIELD_OBJECTIVE_TEXT,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Completed text", QUEST_DIALOGUE_FIELD_OBJECTIVE_COMPLETED_TEXT,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Stage", QUEST_DIALOGUE_FIELD_OBJECTIVE_STAGE,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		const bool optional = objective->HasMember("optional")
+			&& (*objective)["optional"].IsBool() && (*objective)["optional"].GetBool();
+		printTextFormatted(font8x8_bmp, inspectorLeft, inspectorY + 5,
+			"%-17s %s", "Optional", optional ? "yes" : "no");
+		if ( questDialogueEditorImmediateButton(fieldRight - 72, inspectorY, 72, "TOGGLE") )
+			questDialogueEditorToggleObjectiveOptional();
+		inspectorY += 23;
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Progress variable", QUEST_DIALOGUE_FIELD_OBJECTIVE_PROGRESS_VARIABLE,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Progress target", QUEST_DIALOGUE_FIELD_OBJECTIVE_TARGET,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+			"Defeat entity ID", QUEST_DIALOGUE_FIELD_OBJECTIVE_DEFEAT_ID,
+			QUEST_DIALOGUE_CATEGORY_OBJECTIVE);
+		const bool hasMarker = objective->HasMember("map_marker")
+			&& (*objective)["map_marker"].IsObject();
+		printTextFormattedColor(font8x8_bmp, inspectorLeft, inspectorY,
+			makeColorRGB(255, 230, 96), "MAP MARKER: %s",
+			hasMarker ? "configured" : "none");
+		inspectorY += 18;
+		if ( questDialogueEditorImmediateButton(inspectorLeft, inspectorY, 140,
+			"USE CURSOR TILE") ) questDialogueEditorSetObjectiveMarkerFromCursor();
+		if ( questDialogueEditorImmediateButton(inspectorLeft + 148, inspectorY, 110,
+			"CLEAR MARKER") ) questDialogueEditorClearObjectiveMarker();
+		inspectorY += 26;
+		if ( hasMarker )
+		{
+			questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+				"Marker map", QUEST_DIALOGUE_FIELD_MARKER_MAP,
+				QUEST_DIALOGUE_CATEGORY_MARKER);
+			questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+				"Marker tile X", QUEST_DIALOGUE_FIELD_MARKER_X,
+				QUEST_DIALOGUE_CATEGORY_MARKER);
+			questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+				"Marker tile Y", QUEST_DIALOGUE_FIELD_MARKER_Y,
+				QUEST_DIALOGUE_CATEGORY_MARKER);
+		}
+	}
+}
+
+static void questDialogueEditorDrawTutorialsPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int listLeft = subx1 + 8;
+	const int listRight = listLeft + 330;
+	const int detailLeft = listRight + 8;
+	const int right = subx2 - 8;
+	drawDepressed(listLeft, top, listRight, bottom);
+	drawDepressed(detailLeft, top, right, bottom);
+	printText(font8x8_bmp, listLeft + 8, top + 8, "VERIFIED TUTORIAL LIBRARY");
+	drawDepressed(listLeft + 7, top + 25, listRight - 7, top + 45);
+	printTextFormattedColor(font8x8_bmp, listLeft + 12, top + 31,
+		questDialogueEditorTutorialSearch[0] ? makeColorRGB(255, 255, 255)
+			: makeColorRGB(144, 144, 144), "%.35s",
+		questDialogueEditorTutorialSearch[0]
+			? questDialogueEditorTutorialSearch : "Search title, category, or difficulty...");
+	if ( mousestatus[SDL_BUTTON_LEFT]
+		&& omousex >= listLeft + 7 && omousex < listRight - 7
+		&& omousey >= top + 25 && omousey < top + 45 )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorTutorialSearchEditing = true;
+		inputstr = questDialogueEditorTutorialSearch;
+		inputlen = static_cast<int>(sizeof(questDialogueEditorTutorialSearch) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+	const auto& tutorials = automatia::dialogue::tutorialRecipes();
+	static const char* difficulties[] = {
+		"All", "Beginner", "Intermediate", "Advanced"
+	};
+	static const std::vector<std::string> categories = []
+	{
+		std::vector<std::string> values{ "All" };
+		for ( const auto& tutorial : automatia::dialogue::tutorialRecipes() )
+		{
+			if ( std::find(values.begin(), values.end(), tutorial.category)
+				== values.end() ) values.push_back(tutorial.category);
+		}
+		std::sort(values.begin() + 1, values.end());
+		return values;
+	}();
+	questDialogueEditorTutorialDifficulty = std::max(0,
+		std::min(questDialogueEditorTutorialDifficulty, 3));
+	questDialogueEditorTutorialCategory = std::max(0,
+		std::min(questDialogueEditorTutorialCategory,
+			static_cast<int>(categories.size()) - 1));
+	const std::string difficultyLabel = std::string("DIFF: ")
+		+ difficulties[questDialogueEditorTutorialDifficulty] + " >";
+	const std::string categoryLabel = "CAT: "
+		+ categories[questDialogueEditorTutorialCategory] + " >";
+	if ( questDialogueEditorImmediateButton(listLeft + 7, top + 50, 124,
+		difficultyLabel.c_str()) )
+	{
+		questDialogueEditorTutorialDifficulty =
+			(questDialogueEditorTutorialDifficulty + 1) % 4;
+		questDialogueEditorTutorialScroll = 0;
+	}
+	if ( questDialogueEditorImmediateButton(listLeft + 137, top + 50, 186,
+		questDialogueEditorClipText(categoryLabel, 174).c_str()) )
+	{
+		questDialogueEditorTutorialCategory =
+			(questDialogueEditorTutorialCategory + 1)
+			% static_cast<int>(categories.size());
+		questDialogueEditorTutorialScroll = 0;
+	}
+	std::vector<int> matches;
+	for ( int index = 0; index < static_cast<int>(tutorials.size()); ++index )
+	{
+		if ( questDialogueEditorTutorialDifficulty > 0
+			&& tutorials[index].difficulty
+				!= difficulties[questDialogueEditorTutorialDifficulty] ) continue;
+		if ( questDialogueEditorTutorialCategory > 0
+			&& tutorials[index].category
+				!= categories[questDialogueEditorTutorialCategory] ) continue;
+		const std::string searchable = tutorials[index].title + " "
+			+ tutorials[index].category + " " + tutorials[index].difficulty;
+		if ( questDialogueEditorMatches(searchable, questDialogueEditorTutorialSearch) )
+			matches.push_back(index);
+	}
+	const int listTop = top + 76;
+	const int visible = std::max(1, (bottom - listTop - 8) / 32);
+	const int maximumScroll = std::max(0, static_cast<int>(matches.size()) - visible);
+	if ( omousex >= listLeft && omousex < listRight
+		&& omousey >= listTop && omousey < bottom && scroll != 0 )
+	{
+		questDialogueEditorTutorialScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorTutorialScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorTutorialScroll = std::max(0,
+		std::min(maximumScroll, questDialogueEditorTutorialScroll));
+	for ( int row = 0; row < visible; ++row )
+	{
+		const int filtered = questDialogueEditorTutorialScroll + row;
+		if ( filtered >= static_cast<int>(matches.size()) ) break;
+		const int index = matches[filtered];
+		const int y = listTop + row * 32;
+		if ( index == questDialogueEditorTutorialSelection )
+			drawDepressed(listLeft + 6, y, listRight - 6, y + 29);
+		printTextFormatted(font8x8_bmp, listLeft + 11, y + 5, "%.36s",
+			tutorials[index].title.c_str());
+		printTextFormattedColor(font8x8_bmp, listLeft + 11, y + 18,
+			makeColorRGB(150, 185, 220), "%.16s | %.12s",
+			tutorials[index].category.c_str(), tutorials[index].difficulty.c_str());
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= listLeft + 6 && omousex < listRight - 6
+			&& omousey >= y && omousey < y + 29 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorTutorialSelection = index;
+		}
+	}
+	if ( tutorials.empty() ) return;
+	if ( matches.empty() )
+	{
+		printText(font8x8_bmp, listLeft + 11, listTop + 8,
+			"No recipes match these filters.");
+		printText(font8x8_bmp, detailLeft + 12, top + 12,
+			"Clear the search or cycle the difficulty/category filters.");
+		return;
+	}
+	if ( !matches.empty()
+		&& std::find(matches.begin(), matches.end(),
+			questDialogueEditorTutorialSelection) == matches.end() )
+	{
+		questDialogueEditorTutorialSelection = matches.front();
+	}
+	questDialogueEditorTutorialSelection = std::max(0,
+		std::min(questDialogueEditorTutorialSelection,
+			static_cast<int>(tutorials.size()) - 1));
+	const auto& tutorial = tutorials[questDialogueEditorTutorialSelection];
+	int y = top + 10;
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(255, 230, 96), "%s", tutorial.title.c_str());
+	y += 18;
+	printTextFormatted(font8x8_bmp, detailLeft + 12, y,
+		"%s | %s | ID: %s%s", tutorial.category.c_str(),
+		tutorial.difficulty.c_str(), tutorial.id.c_str(),
+		tutorial.manualGameTestRequired ? " | MANUAL GAME TEST" : "");
+	y += 22;
+	printTextFormatted(font8x8_bmp, detailLeft + 12, y,
+		"Goal: %.75s", tutorial.goal.c_str());
+	y += 18;
+	printTextFormatted(font8x8_bmp, detailLeft + 12, y,
+		"Player: %.73s", tutorial.playerExperience.c_str());
+	y += 18;
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(150, 185, 220), "Panel: %.74s", tutorial.panelHint.c_str());
+	y += 18;
+	std::string concepts;
+	for ( std::size_t index = 0; index < tutorial.concepts.size(); ++index )
+	{
+		if ( index ) concepts += ", ";
+		concepts += tutorial.concepts[index];
+	}
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(150, 185, 220), "Concepts: %.70s", concepts.c_str());
+	y += 22;
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(128, 210, 255), "STEPS");
+	y += 16;
+	for ( std::size_t index = 0; index < tutorial.steps.size() && y + 16 < bottom; ++index )
+	{
+		printTextFormatted(font8x8_bmp, detailLeft + 17, y, "%d. %.76s",
+			static_cast<int>(index) + 1, tutorial.steps[index].c_str());
+		y += 17;
+	}
+	y += 6;
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(128, 255, 160), "Expected: %.70s", tutorial.expectedResult.c_str());
+	y += 18;
+	printTextFormatted(font8x8_bmp, detailLeft + 12, y,
+		"Multiplayer: %.66s", tutorial.multiplayerNote.c_str());
+	y += 18;
+	printTextFormatted(font8x8_bmp, detailLeft + 12, y,
+		"Persistence: %.66s", tutorial.persistenceNote.c_str());
+	y += 18;
+	printTextFormattedColor(font8x8_bmp, detailLeft + 12, y,
+		makeColorRGB(255, 175, 96), "Common mistake: %.64s", tutorial.commonMistake.c_str());
+	if ( questDialogueEditorImmediateButton(right - 182, bottom - 30, 166,
+		"APPLY VERIFIED EXAMPLE") )
+	{
+		if ( questDialogueEditorSelectedFile < 0 )
+			questDialogueEditorSetMessage("Create or select a destination file first.");
+		else questDialogueEditorRequestTransition(
+			QUEST_DIALOGUE_PENDING_APPLY_TUTORIAL,
+			questDialogueEditorTutorialSelection);
+	}
+}
+
+static void questDialogueEditorLoadJSONBuffer()
+{
+	const std::string pretty = questDialogueEditorModel.serialize(true);
+	const std::string json = pretty.size() <= automatia::dialogue::MaximumDocumentBytes
+		? pretty : questDialogueEditorModel.serialize(false);
+	std::snprintf(questDialogueEditorJSONBuffer,
+		sizeof(questDialogueEditorJSONBuffer), "%s", json.c_str());
+}
+
+static void questDialogueEditorDrawJSONPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	drawDepressed(mainLeft, top, right, bottom);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 12, top + 9,
+		makeColorRGB(128, 210, 255), "ADVANCED JSON - LOSSLESS SOURCE VIEW");
+	printTextFormatted(font8x8_bmp, mainLeft + 12, top + 25,
+		"%zu / %zu bytes. Unknown extension fields are preserved.",
+		questDialogueEditorModel.serialize(false).size(),
+		automatia::dialogue::MaximumDocumentBytes);
+	if ( !questDialogueEditorJSONEditing )
+	{
+		if ( questDialogueEditorImmediateButton(right - 106, top + 7, 90, "EDIT JSON") )
+		{
+			questDialogueEditorEndTransientTextInput();
+			questDialogueEditorLoadJSONBuffer();
+			questDialogueEditorJSONEditing = true;
+			inputstr = questDialogueEditorJSONBuffer;
+			inputlen = static_cast<int>(sizeof(questDialogueEditorJSONBuffer) - 1);
+			cursorflash = ticks;
+			SDL_StartTextInput();
+		}
+	}
+	else
+	{
+		if ( questDialogueEditorImmediateButton(right - 210, top + 7, 90, "APPLY JSON") )
+		{
+			std::string error;
+			if ( questDialogueEditorModel.replaceWithEdit(
+					questDialogueEditorJSONBuffer, "Apply Advanced JSON", error) )
+			{
+				questDialogueEditorJSONEditing = false;
+				SDL_StopTextInput();
+				inputstr = nullptr;
+				const std::string filename = questDialogueEditorSelectedFile >= 0
+					? questDialogueEditorFiles[questDialogueEditorSelectedFile] : std::string{};
+				questDialogueEditorLoadPreview(filename, false);
+				questDialogueEditorSetMessage("Advanced JSON applied in memory.");
+			}
+			else questDialogueEditorSetMessage(error);
+		}
+		if ( questDialogueEditorImmediateButton(right - 106, top + 7, 90, "CANCEL") )
+		{
+			questDialogueEditorJSONEditing = false;
+			SDL_StopTextInput();
+			inputstr = nullptr;
+		}
+	}
+
+	const std::string source = questDialogueEditorJSONEditing
+		? std::string(questDialogueEditorJSONBuffer)
+		: questDialogueEditorModel.serialize(true);
+	std::vector<std::string> lines(1);
+	for ( const char character : source )
+	{
+		if ( character == '\n' ) lines.emplace_back();
+		else lines.back().push_back(character);
+	}
+	const int codeTop = top + 50;
+	const int visible = std::max(1, (bottom - codeTop - 8) / 13);
+	const int maximumScroll = std::max(0, static_cast<int>(lines.size()) - visible);
+	if ( omousex >= mainLeft && omousex < right
+		&& omousey >= codeTop && omousey < bottom && scroll != 0 )
+	{
+		questDialogueEditorJSONScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorJSONScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorJSONScroll = std::max(0,
+		std::min(maximumScroll, questDialogueEditorJSONScroll));
+	for ( int row = 0; row < visible; ++row )
+	{
+		const int index = questDialogueEditorJSONScroll + row;
+		if ( index >= static_cast<int>(lines.size()) ) break;
+		printTextFormattedColor(font8x8_bmp, mainLeft + 12, codeTop + row * 13,
+			makeColorRGB(155, 175, 195), "%4d", index + 1);
+		printTextFormatted(font8x8_bmp, mainLeft + 54, codeTop + row * 13,
+			"%s", questDialogueEditorClipText(lines[index], right - mainLeft - 66).c_str());
+	}
+}
+
+static const char* questDialogueEditorSandboxSeedKindName()
+{
+	switch ( questDialogueEditorSandboxSeedKind )
+	{
+		case QUEST_DIALOGUE_SANDBOX_WORLD_FLAG: return "World flag";
+		case QUEST_DIALOGUE_SANDBOX_NPC_FLAG: return "NPC flag";
+		case QUEST_DIALOGUE_SANDBOX_WORLD_VARIABLE: return "World variable";
+		case QUEST_DIALOGUE_SANDBOX_NPC_VARIABLE: return "NPC variable";
+		case QUEST_DIALOGUE_SANDBOX_QUEST_STARTED: return "Quest started";
+		case QUEST_DIALOGUE_SANDBOX_QUEST_ACCEPTED: return "Quest accepted";
+		case QUEST_DIALOGUE_SANDBOX_QUEST_COMPLETED: return "Quest completed";
+		case QUEST_DIALOGUE_SANDBOX_QUEST_FAILED: return "Quest failed";
+		case QUEST_DIALOGUE_SANDBOX_QUEST_STAGE: return "Quest stage";
+		case QUEST_DIALOGUE_SANDBOX_OBJECTIVE_COMPLETED: return "Objective";
+		case QUEST_DIALOGUE_SANDBOX_NODE_SEEN: return "Node seen";
+		case QUEST_DIALOGUE_SANDBOX_CHOICE_USED: return "Choice used";
+		default: return "World flag";
+	}
+}
+
+static bool questDialogueEditorSandboxSeedUsesBoolean()
+{
+	return questDialogueEditorSandboxSeedKind != QUEST_DIALOGUE_SANDBOX_WORLD_VARIABLE
+		&& questDialogueEditorSandboxSeedKind != QUEST_DIALOGUE_SANDBOX_NPC_VARIABLE
+		&& questDialogueEditorSandboxSeedKind != QUEST_DIALOGUE_SANDBOX_QUEST_STAGE;
+}
+
+static bool questDialogueEditorApplySandboxSeed()
+{
+	questDialogueEditorEndTransientTextInput();
+	const std::string key = questEditorNormalizeID(
+		questDialogueEditorSandboxSeedKey);
+	const std::string subkey = questEditorNormalizeID(
+		questDialogueEditorSandboxSeedSubkey);
+	if ( key.empty() )
+	{
+		questDialogueEditorSetMessage("Simulated-state key must contain letters or numbers.");
+		return false;
+	}
+	auto& state = questDialogueEditorSandboxConfiguredState;
+	switch ( questDialogueEditorSandboxSeedKind )
+	{
+		case QUEST_DIALOGUE_SANDBOX_WORLD_FLAG:
+			state.worldFlags[key] = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_NPC_FLAG:
+			state.npcFlags[key] = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_WORLD_VARIABLE:
+			state.worldVariables[key] = questDialogueEditorSandboxSeedValue;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_NPC_VARIABLE:
+			state.npcVariables[key] = questDialogueEditorSandboxSeedValue;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_QUEST_STARTED:
+			state.quests[key].started = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_QUEST_ACCEPTED:
+			state.quests[key].accepted = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_QUEST_COMPLETED:
+			state.quests[key].completed = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_QUEST_FAILED:
+			state.quests[key].failed = questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_QUEST_STAGE:
+			state.quests[key].stage = questDialogueEditorSandboxSeedValue;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_OBJECTIVE_COMPLETED:
+			if ( subkey.empty() )
+			{
+				questDialogueEditorSetMessage(
+					"Objective simulation also needs an objective ID.");
+				return false;
+			}
+			state.quests[key].objectives[subkey] =
+				questDialogueEditorSandboxSeedBoolean;
+			break;
+		case QUEST_DIALOGUE_SANDBOX_NODE_SEEN:
+			if ( questDialogueEditorSandboxSeedBoolean ) state.seenNodes.insert(key);
+			else state.seenNodes.erase(key);
+			break;
+		case QUEST_DIALOGUE_SANDBOX_CHOICE_USED:
+			if ( questDialogueEditorSandboxSeedBoolean ) state.usedChoices.insert(key);
+			else state.usedChoices.erase(key);
+			break;
+		default:
+			return false;
+	}
+	questDialogueEditorSandboxActive = false;
+	questDialogueEditorSetMessage(std::string("Configured preview state: ")
+		+ questDialogueEditorSandboxSeedKindName() + " " + key + ".");
+	return true;
+}
+
+static void questDialogueEditorDrawPreviewPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	drawDepressed(mainLeft, top, right, bottom);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 12, top + 9,
+		makeColorRGB(128, 210, 255), "SANDBOX PREVIEW - NO LIVE WORLD MUTATION");
+	printText(font8x8_bmp, mainLeft + 12, top + 25,
+		"Quest, flag, variable, gold, item, once-choice, and node-seen changes stay in this session only.");
+	int controlsY = top + 47;
+	printTextFormatted(font8x8_bmp, mainLeft + 16, controlsY + 5,
+		"Gold: %d", questDialogueEditorSandboxGold);
+	if ( questDialogueEditorImmediateButton(mainLeft + 104, controlsY, 30, "-") )
+		questDialogueEditorSandboxGold = std::max(0, questDialogueEditorSandboxGold - 10);
+	if ( questDialogueEditorImmediateButton(mainLeft + 140, controlsY, 30, "+") )
+		questDialogueEditorSandboxGold += 10;
+	printText(font8x8_bmp, mainLeft + 188, controlsY + 5, "Item");
+	drawDepressed(mainLeft + 226, controlsY, mainLeft + 356, controlsY + 19);
+	printTextFormatted(font8x8_bmp, mainLeft + 232, controlsY + 6,
+		"%.10s x%d%s", questDialogueEditorSandboxItem,
+		questDialogueEditorSandboxItemCount,
+		questDialogueEditorSandboxItemEditing ? "_" : "");
+	if ( mousestatus[SDL_BUTTON_LEFT]
+		&& omousex >= mainLeft + 226 && omousex < mainLeft + 356
+		&& omousey >= controlsY && omousey < controlsY + 19 )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSandboxItemEditing = true;
+		inputstr = questDialogueEditorSandboxItem;
+		inputlen = static_cast<int>(sizeof(questDialogueEditorSandboxItem) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+	if ( questDialogueEditorImmediateButton(mainLeft + 366, controlsY, 30, "-") )
+		questDialogueEditorSandboxItemCount = std::max(0,
+			questDialogueEditorSandboxItemCount - 1);
+	if ( questDialogueEditorImmediateButton(mainLeft + 402, controlsY, 30, "+") )
+		++questDialogueEditorSandboxItemCount;
+	if ( questDialogueEditorImmediateButton(right - 214, controlsY, 94, "START / RESET") )
+	{
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorRefreshValidation();
+		if ( automatia::dialogue::hasErrors(questDialogueEditorValidationIssues) )
+		{
+			questDialogueEditorSandboxActive = false;
+			questDialogueEditorSetMessage(
+				"Preview blocked until validation errors are fixed.");
+			questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_VALIDATION;
+			return;
+		}
+		questDialogueEditorSandboxInitialState =
+			questDialogueEditorSandboxConfiguredState;
+		questDialogueEditorSandboxInitialState.gold = questDialogueEditorSandboxGold;
+		if ( questDialogueEditorSandboxItem[0] && questDialogueEditorSandboxItemCount > 0 )
+			questDialogueEditorSandboxInitialState.items[questDialogueEditorSandboxItem]
+				= questDialogueEditorSandboxItemCount;
+		std::string error;
+		questDialogueEditorSandboxActive = questDialogueEditorSandbox.begin(
+			questDialogueEditorDocument, questDialogueEditorSandboxInitialState, error);
+		if ( !questDialogueEditorSandboxActive ) questDialogueEditorSetMessage(error);
+	}
+	if ( questDialogueEditorImmediateButton(right - 112, controlsY, 96, "VALIDATE FIRST") )
+		questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_VALIDATION;
+
+	const int seedY = controlsY + 27;
+	if ( questDialogueEditorImmediateButton(mainLeft + 16, seedY, 126,
+		questDialogueEditorSandboxSeedKindName()) )
+	{
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSandboxSeedKind =
+			static_cast<QuestDialogueSandboxSeedKind>(
+				(static_cast<int>(questDialogueEditorSandboxSeedKind) + 1)
+				% QUEST_DIALOGUE_SANDBOX_SEED_COUNT);
+	}
+	drawDepressed(mainLeft + 148, seedY, mainLeft + 292, seedY + 19);
+	printTextFormatted(font8x8_bmp, mainLeft + 154, seedY + 6, "%.15s%s",
+		questDialogueEditorSandboxSeedKey,
+		questDialogueEditorSandboxSeedKeyEditing ? "_" : "");
+	if ( mousestatus[SDL_BUTTON_LEFT]
+		&& omousex >= mainLeft + 148 && omousex < mainLeft + 292
+		&& omousey >= seedY && omousey < seedY + 19 )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSandboxSeedKeyEditing = true;
+		inputstr = questDialogueEditorSandboxSeedKey;
+		inputlen = static_cast<int>(sizeof(questDialogueEditorSandboxSeedKey) - 1);
+		cursorflash = ticks;
+		SDL_StartTextInput();
+	}
+	const bool objectiveSeed = questDialogueEditorSandboxSeedKind
+		== QUEST_DIALOGUE_SANDBOX_OBJECTIVE_COMPLETED;
+	if ( objectiveSeed )
+	{
+		drawDepressed(mainLeft + 298, seedY, mainLeft + 420, seedY + 19);
+		printTextFormatted(font8x8_bmp, mainLeft + 304, seedY + 6, "%.12s%s",
+			questDialogueEditorSandboxSeedSubkey,
+			questDialogueEditorSandboxSeedSubkeyEditing ? "_" : "");
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= mainLeft + 298 && omousex < mainLeft + 420
+			&& omousey >= seedY && omousey < seedY + 19 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorEndTransientTextInput();
+			questDialogueEditorSandboxSeedSubkeyEditing = true;
+			inputstr = questDialogueEditorSandboxSeedSubkey;
+			inputlen = static_cast<int>(sizeof(questDialogueEditorSandboxSeedSubkey) - 1);
+			cursorflash = ticks;
+			SDL_StartTextInput();
+		}
+	}
+	else
+	{
+		printTextFormattedColor(font8x8_bmp, mainLeft + 302, seedY + 6,
+			makeColorRGB(150, 185, 220), "%zu configured",
+			questDialogueEditorSandboxConfiguredState.worldFlags.size()
+				+ questDialogueEditorSandboxConfiguredState.npcFlags.size()
+				+ questDialogueEditorSandboxConfiguredState.worldVariables.size()
+				+ questDialogueEditorSandboxConfiguredState.npcVariables.size()
+				+ questDialogueEditorSandboxConfiguredState.quests.size()
+				+ questDialogueEditorSandboxConfiguredState.seenNodes.size()
+				+ questDialogueEditorSandboxConfiguredState.usedChoices.size());
+	}
+	if ( questDialogueEditorSandboxSeedUsesBoolean() )
+	{
+		if ( questDialogueEditorImmediateButton(mainLeft + 426, seedY, 58,
+			questDialogueEditorSandboxSeedBoolean ? "TRUE" : "FALSE") )
+			questDialogueEditorSandboxSeedBoolean =
+				!questDialogueEditorSandboxSeedBoolean;
+	}
+	else
+	{
+		if ( questDialogueEditorImmediateButton(mainLeft + 426, seedY, 24, "-") )
+			--questDialogueEditorSandboxSeedValue;
+		printTextFormatted(font8x8_bmp, mainLeft + 454, seedY + 6, "%d",
+			questDialogueEditorSandboxSeedValue);
+		if ( questDialogueEditorImmediateButton(mainLeft + 482, seedY, 24, "+") )
+			++questDialogueEditorSandboxSeedValue;
+	}
+	if ( questDialogueEditorImmediateButton(mainLeft + 512, seedY, 52, "SET") )
+		questDialogueEditorApplySandboxSeed();
+	if ( questDialogueEditorImmediateButton(mainLeft + 570, seedY, 82, "CLEAR ALL") )
+	{
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSandboxConfiguredState =
+			automatia::dialogue::PreviewState{};
+		questDialogueEditorSandboxActive = false;
+		questDialogueEditorSetMessage("Cleared configured preview state.");
+	}
+
+	if ( !questDialogueEditorSandboxActive )
+	{
+		printTextFormattedColor(font8x8_bmp, mainLeft + 18, controlsY + 74,
+			makeColorRGB(180, 180, 180),
+			"Seed any required state above, then START / RESET.");
+		return;
+	}
+	const auto& frame = questDialogueEditorSandbox.frame();
+	const auto& simulated = questDialogueEditorSandbox.state();
+	int y = controlsY + 66;
+	drawWindowFancy(mainLeft + 14, y, right - 14, y + 80);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 23, y + 8,
+		makeColorRGB(255, 230, 96), "NPC - NODE %d", frame.nodeID);
+	printTextFormatted(font8x8_bmp, mainLeft + 23, y + 26, "%.90s", frame.npcText.c_str());
+	int itemCount = 0;
+	for ( const auto& item : simulated.items ) itemCount += std::max(0, item.second);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 23, y + 44,
+		makeColorRGB(128, 210, 255),
+		"SIMULATED: %d gold | %d item%s | %zu world flag%s | %zu used response%s",
+		simulated.gold, itemCount, itemCount == 1 ? "" : "s",
+		simulated.worldFlags.size(), simulated.worldFlags.size() == 1 ? "" : "s",
+		simulated.usedChoices.size(), simulated.usedChoices.size() == 1 ? "" : "s");
+	const auto questState = simulated.quests.find(questDialogueEditorPreview.questID);
+	if ( questState != simulated.quests.end() )
+		printTextFormattedColor(font8x8_bmp, mainLeft + 23, y + 59,
+			makeColorRGB(170, 230, 170), "QUEST %s: stage %d | %s%s%s",
+			questDialogueEditorPreview.questID.c_str(), questState->second.stage,
+			questState->second.accepted ? "accepted " : "",
+			questState->second.completed ? "completed " : "",
+			questState->second.failed ? "failed" : "");
+	y += 90;
+	for ( int index = 0; index < static_cast<int>(frame.choices.size())
+		&& y + 61 < bottom; ++index )
+	{
+		const auto& choice = frame.choices[index];
+		drawWindowFancy(mainLeft + 30, y, right - 30, y + 56);
+		printTextFormatted(font8x8_bmp, mainLeft + 39, y + 7,
+			"%d. %.76s  -> node %d", index + 1, choice.text.c_str(), choice.nextNode);
+		if ( !choice.condition.empty() )
+			printTextFormattedColor(font8x8_bmp, mainLeft + 39, y + 23,
+				makeColorRGB(150, 200, 255), "Requires: %.70s", choice.condition.c_str());
+		if ( !choice.actions.empty() )
+			printTextFormattedColor(font8x8_bmp, mainLeft + 39, y + 38,
+				makeColorRGB(255, 190, 110), "Actions: %.72s", choice.actions.front().c_str());
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= mainLeft + 30 && omousex < right - 30
+			&& omousey >= y && omousey < y + 56 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			std::string error;
+			if ( !questDialogueEditorSandbox.choose(index, error) )
+				questDialogueEditorSetMessage(error);
+		}
+		y += 62;
+	}
+	for ( const std::string& notice : frame.notices )
+	{
+		if ( y + 13 >= bottom ) break;
+		printTextFormattedColor(font8x8_bmp, mainLeft + 22, y,
+			makeColorRGB(255, 175, 96), "NOTICE: %.78s", notice.c_str());
+		y += 14;
+	}
+}
+
+static void questDialogueEditorNavigateToIssue(
+	const automatia::dialogue::Issue& issue
+)
+{
+	if ( issue.location.nodeIndex >= 0 )
+		questDialogueEditorSelectedNode = issue.location.nodeIndex;
+	if ( issue.location.choiceIndex >= 0 )
+		questDialogueEditorSelectedChoice = issue.location.choiceIndex;
+	if ( issue.location.objectiveIndex >= 0 )
+		questDialogueEditorSelectedObjective = issue.location.objectiveIndex;
+	if ( issue.location.kind == automatia::dialogue::LocationKind::Quest
+		|| issue.location.kind == automatia::dialogue::LocationKind::Origin
+		|| issue.location.kind == automatia::dialogue::LocationKind::Objective )
+		questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_QUEST;
+	else if ( issue.location.nodeIndex >= 0 )
+		questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_CONVERSATION;
+	else questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_JSON;
+	questDialogueEditorSetMessage("Navigated to " + issue.location.path + ".");
+}
+
+static void questDialogueEditorDrawValidationPage()
+{
+	const int top = suby1 + 48;
+	const int bottom = suby2 - 34;
+	const int mainLeft = questDialogueEditorDrawFileRail(subx1 + 8, top, bottom);
+	const int right = subx2 - 8;
+	drawDepressed(mainLeft, top, right, bottom);
+	const int errors = automatia::dialogue::countIssues(
+		questDialogueEditorValidationIssues, automatia::dialogue::Severity::Error);
+	const int warnings = automatia::dialogue::countIssues(
+		questDialogueEditorValidationIssues, automatia::dialogue::Severity::Warning);
+	const int infos = automatia::dialogue::countIssues(
+		questDialogueEditorValidationIssues, automatia::dialogue::Severity::Info);
+	printTextFormattedColor(font8x8_bmp, mainLeft + 12, top + 9,
+		errors ? makeColorRGB(255, 110, 100) : makeColorRGB(128, 255, 160),
+		"VALIDATION - %d ERROR%s, %d WARNING%s, %d INFO",
+		errors, errors == 1 ? "" : "S", warnings, warnings == 1 ? "" : "S", infos);
+	if ( questDialogueEditorImmediateButton(right - 108, top + 5, 92, "RUN AGAIN") )
+		questDialogueEditorRefreshValidation();
+	const int listTop = top + 37;
+	const int rowHeight = 43;
+	const int visible = std::max(1, (bottom - listTop - 8) / rowHeight);
+	const int maximumScroll = std::max(0,
+		static_cast<int>(questDialogueEditorValidationIssues.size()) - visible);
+	if ( omousex >= mainLeft && omousex < right
+		&& omousey >= listTop && omousey < bottom && scroll != 0 )
+	{
+		questDialogueEditorValidationScroll = std::max(0,
+			std::min(maximumScroll, questDialogueEditorValidationScroll + scroll));
+		scroll = 0;
+	}
+	questDialogueEditorValidationScroll = std::max(0,
+		std::min(maximumScroll, questDialogueEditorValidationScroll));
+	if ( questDialogueEditorValidationIssues.empty() )
+	{
+		printTextFormattedColor(font8x8_bmp, mainLeft + 20, listTop + 12,
+			makeColorRGB(128, 255, 160), "No validation issues. This document is ready to save.");
+		return;
+	}
+	for ( int row = 0; row < visible; ++row )
+	{
+		const int index = questDialogueEditorValidationScroll + row;
+		if ( index >= static_cast<int>(questDialogueEditorValidationIssues.size()) ) break;
+		const auto& issue = questDialogueEditorValidationIssues[index];
+		const int y = listTop + row * rowHeight;
+		drawWindowFancy(mainLeft + 10, y, right - 10, y + rowHeight - 4);
+		const Uint32 color = issue.severity == automatia::dialogue::Severity::Error
+			? makeColorRGB(255, 110, 100)
+			: (issue.severity == automatia::dialogue::Severity::Warning
+				? makeColorRGB(255, 210, 96) : makeColorRGB(130, 190, 255));
+		printTextFormattedColor(font8x8_bmp, mainLeft + 18, y + 6, color,
+			"%s  %s", automatia::dialogue::severityName(issue.severity),
+			issue.location.path.c_str());
+		printTextFormatted(font8x8_bmp, mainLeft + 18, y + 21, "%.91s",
+			issue.message.c_str());
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= mainLeft + 10 && omousex < right - 10
+			&& omousey >= y && omousey < y + rowHeight - 4 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorNavigateToIssue(issue);
+		}
+	}
+}
+
+static void questDialogueEditorDrawWizard()
+{
+	const int width = std::min(760, subx2 - subx1 - 60);
+	const int height = 410;
+	const int left = (subx1 + subx2 - width) / 2;
+	const int right = left + width;
+	const int top = (suby1 + suby2 - height) / 2;
+	const int bottom = top + height;
+	drawWindowFancy(left, top, right, bottom);
+	printTextFormattedColor(font8x8_bmp, left + 16, top + 14,
+		makeColorRGB(128, 210, 255), "NEW DIALOGUE WIZARD - STEP %d OF 4",
+		questDialogueEditorWizardStep + 1);
+	const char* stepNames[] = { "IDENTITY", "CONVERSATION", "QUEST", "FINISH" };
+	int stepX = left + 18;
+	for ( int step = 0; step < 4; ++step )
+	{
+		if ( step == questDialogueEditorWizardStep )
+			drawDepressed(stepX, top + 34, stepX + 154, top + 53);
+		printTextFormattedColor(font8x8_bmp, stepX + 7, top + 40,
+			step == questDialogueEditorWizardStep ? makeColorRGB(255, 230, 96)
+				: makeColorRGB(145, 145, 145), "%d  %s", step + 1, stepNames[step]);
+		stepX += 164;
+	}
+	int y = top + 70;
+	const char* labels[] = {
+		"Dialogue/File ID", "Quest ID", "First NPC line",
+		"First response", "Quest title", "Quest summary"
+	};
+	char* values[] = {
+		questDialogueEditorWizardDialogueID, questDialogueEditorWizardQuestID,
+		questDialogueEditorWizardNPCText, questDialogueEditorWizardChoiceText,
+		questDialogueEditorWizardQuestTitle, questDialogueEditorWizardQuestSummary
+	};
+	auto drawField = [&](const int field)
+	{
+		printTextFormatted(font8x8_bmp, left + 18, y + 6, "%s", labels[field]);
+		const int fieldLeft = left + 218;
+		const bool active = field == questDialogueEditorWizardField
+			&& inputstr == values[field] && SDL_IsTextInputActive();
+		if ( active )
+			drawWindowFancy(fieldLeft, y, right - 24, y + 21);
+		else drawDepressed(fieldLeft, y, right - 24, y + 21);
+		printTextFormatted(font8x8_bmp, fieldLeft + 6, y + 7, "%.58s%s",
+			values[field], active ? "_" : "");
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= fieldLeft && omousex < right - 24
+			&& omousey >= y && omousey < y + 21 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			questDialogueEditorFocusWizardField(field);
+		}
+		y += 34;
+	};
+
+	if ( questDialogueEditorWizardStep == 0 )
+	{
+		printText(font8x8_bmp, left + 18, y + 5, "Starting template");
+		if ( questDialogueEditorImmediateButton(left + 180, y, 28, "<") )
+		{
+			questDialogueEditorWizardTemplate =
+				(questDialogueEditorWizardTemplate + 4) % 5;
+			if ( questDialogueEditorWizardTemplate == 3 )
+				questDialogueEditorWizardUseQuest = true;
+		}
+		drawDepressed(left + 214, y, right - 64, y + 19);
+		printTextFormatted(font8x8_bmp, left + 221, y + 6, "%s",
+			questDialogueEditorWizardTemplateName());
+		if ( questDialogueEditorImmediateButton(right - 56, y, 28, ">") )
+		{
+			questDialogueEditorWizardTemplate =
+				(questDialogueEditorWizardTemplate + 1) % 5;
+			if ( questDialogueEditorWizardTemplate == 3 )
+				questDialogueEditorWizardUseQuest = true;
+		}
+		y += 36;
+		drawField(0);
+		const bool questRequired = questDialogueEditorWizardTemplate == 3;
+		printText(font8x8_bmp, left + 18, y + 5, "Include a quest?");
+		if ( questDialogueEditorImmediateButton(left + 218, y, 64, "NO",
+			!questDialogueEditorWizardUseQuest) )
+		{
+			if ( questRequired ) questDialogueEditorSetMessage(
+				"Quest Giver template requires quest metadata.");
+			else questDialogueEditorWizardUseQuest = false;
+		}
+		if ( questDialogueEditorImmediateButton(left + 290, y, 64, "YES",
+			questDialogueEditorWizardUseQuest) ) questDialogueEditorWizardUseQuest = true;
+		y += 34;
+		if ( questDialogueEditorWizardUseQuest || questRequired ) drawField(1);
+		printTextFormattedColor(font8x8_bmp, left + 18, y + 7,
+			makeColorRGB(170, 190, 210),
+			"Creates: dialogue/%s.json",
+			questEditorNormalizeID(questDialogueEditorWizardDialogueID).c_str());
+		y += 21;
+		printText(font8x8_bmp, left + 18, y,
+			"The filename selects the resource. Quest ID is separate saved story identity.");
+	}
+	else if ( questDialogueEditorWizardStep == 1 )
+	{
+		printText(font8x8_bmp, left + 18, y,
+			"Write the first exchange. The graph editor handles every later branch.");
+		y += 28;
+		drawField(2);
+		if ( questDialogueEditorWizardTemplate != 0 ) drawField(3);
+		else
+		{
+			printTextFormattedColor(font8x8_bmp, left + 18, y,
+				makeColorRGB(170, 190, 210),
+				"Empty Conversation starts with one node and no player response.");
+			y += 24;
+		}
+		if ( questDialogueEditorWizardTemplate == 2
+			|| questDialogueEditorWizardTemplate == 3
+			|| questDialogueEditorWizardTemplate == 4 )
+			printText(font8x8_bmp, left + 18, y,
+				"This template also creates a second response and follow-up node.");
+	}
+	else if ( questDialogueEditorWizardStep == 2 )
+	{
+		const bool questRequired = questDialogueEditorWizardTemplate == 3;
+		if ( !questDialogueEditorWizardUseQuest && !questRequired )
+		{
+			printTextFormattedColor(font8x8_bmp, left + 18, y,
+				makeColorRGB(170, 190, 210), "CONVERSATION-ONLY RESOURCE");
+			y += 24;
+			printText(font8x8_bmp, left + 18, y,
+				"No quest state or journal metadata will be created.");
+			y += 30;
+			if ( questDialogueEditorImmediateButton(left + 18, y, 148,
+				"ENABLE QUEST") ) questDialogueEditorWizardUseQuest = true;
+		}
+		else
+		{
+			drawField(1);
+			drawField(4);
+			drawField(5);
+			printText(font8x8_bmp, left + 18, y + 5, "Scope");
+			printTextFormattedColor(font8x8_bmp, left + 218, y + 5,
+				makeColorRGB(128, 255, 160), "Player (host-authoritative; current runtime mode)");
+			y += 30;
+			printText(font8x8_bmp, left + 18, y + 5, "Repeatable");
+			if ( questDialogueEditorImmediateButton(left + 218, y, 82,
+				questDialogueEditorWizardRepeatable ? "YES" : "NO",
+				questDialogueEditorWizardRepeatable) )
+				questDialogueEditorWizardRepeatable = !questDialogueEditorWizardRepeatable;
+			y += 30;
+			printText(font8x8_bmp, left + 18, y + 5, "Quest giver");
+			const char* origins[] = { "NONE", "CURSOR TILE", "SELECTED NPC" };
+			int originX = left + 218;
+			for ( int origin = 0; origin < 3; ++origin )
+			{
+				if ( questDialogueEditorImmediateButton(originX, y,
+					origin == 0 ? 66 : 110, origins[origin],
+					questDialogueEditorWizardOrigin == origin) )
+					questDialogueEditorWizardOrigin = origin;
+				originX += origin == 0 ? 74 : 118;
+			}
+		}
+	}
+	else
+	{
+		const bool useQuest = questDialogueEditorWizardUseQuest
+			|| questDialogueEditorWizardTemplate == 3;
+		printTextFormattedColor(font8x8_bmp, left + 18, y,
+			makeColorRGB(128, 255, 160), "READY TO CREATE");
+		y += 28;
+		printTextFormatted(font8x8_bmp, left + 28, y,
+			"File: dialogue/%s.json",
+			questEditorNormalizeID(questDialogueEditorWizardDialogueID).c_str());
+		y += 22;
+		printTextFormatted(font8x8_bmp, left + 28, y, "Template: %s",
+			questDialogueEditorWizardTemplateName());
+		y += 22;
+		printTextFormatted(font8x8_bmp, left + 28, y, "Quest: %s",
+			useQuest ? questEditorNormalizeID(questDialogueEditorWizardQuestID).c_str()
+				: "none (conversation only)");
+		y += 22;
+		const char* originNames[] = { "none", "editor cursor tile", "selected persistent NPC" };
+		printTextFormatted(font8x8_bmp, left + 28, y, "Quest giver: %s",
+			useQuest ? originNames[questDialogueEditorWizardOrigin] : "not applicable");
+		y += 31;
+		printText(font8x8_bmp, left + 18, y,
+			"Create & Open validates the generated document, then publishes it atomically.");
+	}
+
+	printTextFormattedColor(font8x8_bmp, left + 18, bottom - 74,
+		makeColorRGB(255, 210, 96),
+		"Quest Giver adds quest actions; Recruitable NPC adds generic recruit_npc.");
+	if ( questDialogueEditorWizardStep > 0
+		&& questDialogueEditorImmediateButton(left + 18, bottom - 44, 82, "BACK") )
+	{
+		--questDialogueEditorWizardStep;
+		SDL_StopTextInput();
+		inputstr = nullptr;
+	}
+	if ( questDialogueEditorWizardStep < 3
+		&& questDialogueEditorImmediateButton(right - 222, bottom - 44, 94, "NEXT") )
+	{
+		bool valid = true;
+		if ( questDialogueEditorWizardStep == 0 )
+		{
+			const std::string dialogueID = questEditorNormalizeID(
+				questDialogueEditorWizardDialogueID);
+			const bool useQuest = questDialogueEditorWizardUseQuest
+				|| questDialogueEditorWizardTemplate == 3;
+			if ( dialogueID.empty() )
+			{
+				questDialogueEditorSetMessage("Dialogue/File ID cannot be empty.");
+				valid = false;
+			}
+			else if ( access(("./dialogue/" + dialogueID + ".json").c_str(), F_OK) == 0 )
+			{
+				questDialogueEditorSetMessage("That dialogue file already exists.");
+				valid = false;
+			}
+			else if ( useQuest
+				&& questEditorNormalizeID(questDialogueEditorWizardQuestID).empty() )
+			{
+				questDialogueEditorSetMessage("Quest ID is required when quest mode is enabled.");
+				valid = false;
+			}
+		}
+		else if ( questDialogueEditorWizardStep == 1
+			&& questDialogueEditorWizardNPCText[0] == '\0' )
+		{
+			questDialogueEditorSetMessage("The first NPC line cannot be empty.");
+			valid = false;
+		}
+		else if ( questDialogueEditorWizardStep == 2
+			&& (questDialogueEditorWizardUseQuest
+				|| questDialogueEditorWizardTemplate == 3)
+			&& questEditorNormalizeID(questDialogueEditorWizardQuestID).empty() )
+		{
+			questDialogueEditorSetMessage("Quest ID cannot be empty.");
+			valid = false;
+		}
+		if ( valid )
+		{
+			++questDialogueEditorWizardStep;
+			SDL_StopTextInput();
+			inputstr = nullptr;
+		}
+	}
+	if ( questDialogueEditorWizardStep == 3
+		&& questDialogueEditorImmediateButton(right - 250, bottom - 44, 122,
+			"CREATE & OPEN") ) questDialogueEditorCreateWizardFile();
+	if ( questDialogueEditorImmediateButton(right - 116, bottom - 44, 88, "CANCEL") )
+	{
+		questDialogueEditorWizardOpen = false;
+		SDL_StopTextInput();
+		inputstr = nullptr;
+	}
+}
+
+static void questDialogueEditorDrawUnsavedPrompt()
+{
+	const int width = 520;
+	const int height = 154;
+	const int left = (subx1 + subx2 - width) / 2;
+	const int right = left + width;
+	const int top = (suby1 + suby2 - height) / 2;
+	const int bottom = top + height;
+	drawWindowFancy(left, top, right, bottom);
+	printTextFormattedColor(font8x8_bmp, left + 18, top + 16,
+		makeColorRGB(255, 210, 96), "UNSAVED DIALOGUE CHANGES");
+	printText(font8x8_bmp, left + 18, top + 40,
+		"Save the current file before continuing, discard the in-memory edits, or cancel.");
+	const int y = bottom - 43;
+	if ( questDialogueEditorImmediateButton(left + 96, y, 92, "SAVE") )
+	{
+		const auto transition = questDialogueEditorPendingTransition;
+		const int argument = transition == QUEST_DIALOGUE_PENDING_APPLY_TUTORIAL
+			? questDialogueEditorPendingTutorial : questDialogueEditorPendingFile;
+		if ( questDialogueEditorWriteDocument() )
+		{
+			questDialogueEditorUnsavedPrompt = false;
+			questDialogueEditorPendingTransition = QUEST_DIALOGUE_PENDING_NONE;
+			questDialogueEditorPerformTransition(transition, argument);
+		}
+	}
+	if ( questDialogueEditorImmediateButton(left + 206, y, 92, "DISCARD") )
+	{
+		const auto transition = questDialogueEditorPendingTransition;
+		const int argument = transition == QUEST_DIALOGUE_PENDING_APPLY_TUTORIAL
+			? questDialogueEditorPendingTutorial : questDialogueEditorPendingFile;
+		if ( transition != QUEST_DIALOGUE_PENDING_CLOSE
+			&& questDialogueEditorSelectedFile >= 0
+			&& questDialogueEditorSelectedFile
+				< static_cast<int>(questDialogueEditorFiles.size()) )
+		{
+			questDialogueEditorLoadPreview(
+				questDialogueEditorFiles[questDialogueEditorSelectedFile]);
+			if ( !questDialogueEditorPreview.error.empty() )
+			{
+				questDialogueEditorSetMessage(
+					"Could not reload the on-disk file; discard was canceled.");
+				return;
+			}
+		}
+		else questDialogueEditorModel.markClean();
+		questDialogueEditorUnsavedPrompt = false;
+		questDialogueEditorPendingTransition = QUEST_DIALOGUE_PENDING_NONE;
+		questDialogueEditorPerformTransition(transition, argument);
+	}
+	if ( questDialogueEditorImmediateButton(left + 316, y, 92, "CANCEL") )
+	{
+		questDialogueEditorUnsavedPrompt = false;
+		questDialogueEditorPendingTransition = QUEST_DIALOGUE_PENDING_NONE;
+	}
+}
+
+static void questDialogueEditorDrawDeletePrompt()
+{
+	const int width = 520;
+	const int height = 160;
+	const int left = (subx1 + subx2 - width) / 2;
+	const int right = left + width;
+	const int top = (suby1 + suby2 - height) / 2;
+	const int bottom = top + height;
+	drawWindowFancy(left, top, right, bottom);
+	const std::string filename = questDialogueEditorSelectedFile >= 0
+		&& questDialogueEditorSelectedFile < static_cast<int>(questDialogueEditorFiles.size())
+		? questDialogueEditorFiles[questDialogueEditorSelectedFile] : "(none)";
+	printTextFormattedColor(font8x8_bmp, left + 18, top + 16,
+		makeColorRGB(255, 110, 100), "DELETE DIALOGUE FILE?");
+	printTextFormatted(font8x8_bmp, left + 18, top + 42,
+		"This permanently removes ./dialogue/%s", filename.c_str());
+	printText(font8x8_bmp, left + 18, top + 61,
+		"NPC references are not rewritten. This operation cannot be undone here.");
+	const int y = bottom - 43;
+	if ( questDialogueEditorImmediateButton(left + 145, y, 106, "DELETE FILE") )
+	{
+		questDialogueEditorDeletePrompt = false;
+		questDialogueEditorDeleteSelectedFileNow();
+	}
+	if ( questDialogueEditorImmediateButton(left + 269, y, 106, "CANCEL") )
+		questDialogueEditorDeletePrompt = false;
+}
+
+static void drawQuestDialogueEditor()
+{
+	const bool blockedAtStart = questDialogueEditorUnsavedPrompt
+		|| questDialogueEditorDeletePrompt || questDialogueEditorWizardOpen;
+	const int pendingMouse = mousestatus[SDL_BUTTON_LEFT];
+	if ( blockedAtStart ) mousestatus[SDL_BUTTON_LEFT] = 0;
+	if ( !blockedAtStart && questDialogueEditorEditingField
+		&& keystatus[SDLK_ESCAPE] )
+	{
+		keystatus[SDLK_ESCAPE] = 0;
+		questDialogueEditorEndTransientTextInput();
+		questDialogueEditorSetMessage("Field edit canceled; document was unchanged.");
+	}
+	else if ( !blockedAtStart && questDialogueEditorEditingField
+		&& keystatus[SDLK_RETURN] )
+	{
+		keystatus[SDLK_RETURN] = 0;
+		if ( questDialogueEditorLockedEditableField
+			== QUEST_DIALOGUE_FIELD_FILE_ID )
+			questDialogueEditorRenameSelectedFile();
+		else questDialogueEditorApplyEditableField();
+	}
+
+	const int tabY = suby1 + 23;
+	const char* tabLabels[] = {
+		"FILES", "CONVERSATION", "QUEST", "TUTORIALS", "JSON", "PREVIEW", "VALIDATION"
+	};
+	const int tabWidths[] = { 58, 104, 54, 84, 48, 68, 84 };
+	int tabX = subx1 + 8;
+	for ( int mode = 0; mode < QUEST_DIALOGUE_WORKSPACE_COUNT; ++mode )
+	{
+		if ( questDialogueEditorImmediateButton(tabX, tabY, tabWidths[mode],
+			tabLabels[mode], static_cast<int>(questDialogueEditorWorkspace) == mode) )
+		{
+			if ( questDialogueEditorJSONEditing
+				&& questDialogueEditorWorkspace == QUEST_DIALOGUE_WORKSPACE_JSON
+				&& mode != QUEST_DIALOGUE_WORKSPACE_JSON )
+			{
+				questDialogueEditorSetMessage(
+					"Apply or cancel Advanced JSON before changing tabs.");
+			}
+			else if ( questDialogueEditorEditingField )
+			{
+				questDialogueEditorSetMessage(
+					"Apply or cancel the active field before changing tabs.");
+			}
+			else
+			{
+				questDialogueEditorEndTransientTextInput();
+				questDialogueEditorWorkspace = static_cast<QuestDialogueWorkspaceMode>(mode);
+				if ( questDialogueEditorWorkspace == QUEST_DIALOGUE_WORKSPACE_QUEST )
+					questDialogueEditorFieldCategory = QUEST_DIALOGUE_CATEGORY_OBJECTIVE;
+				if ( questDialogueEditorWorkspace == QUEST_DIALOGUE_WORKSPACE_VALIDATION )
+					questDialogueEditorRefreshValidation();
+			}
+		}
+		tabX += tabWidths[mode] + 4;
+	}
+
+	int actionX = subx2 - 306;
+	if ( questDialogueEditorImmediateButton(actionX, tabY, 56, "SAVE") )
+	{
+		if ( questDialogueEditorJSONEditing )
+			questDialogueEditorSetMessage("Apply or cancel Advanced JSON before saving.");
+		else if ( questDialogueEditorEditingField )
+			questDialogueEditorSetMessage("Apply or cancel the active field before saving.");
+		else questDialogueEditorWriteDocument();
+	}
+	actionX += 62;
+	if ( questDialogueEditorImmediateButton(actionX, tabY, 56, "UNDO") )
+	{
+		if ( questDialogueEditorEditingField || questDialogueEditorJSONEditing )
+			questDialogueEditorSetMessage("Apply or cancel the active edit before undo.");
+		else questDialogueEditorUndo();
+	}
+	actionX += 62;
+	if ( questDialogueEditorImmediateButton(actionX, tabY, 56, "REDO") )
+	{
+		if ( questDialogueEditorEditingField || questDialogueEditorJSONEditing )
+			questDialogueEditorSetMessage("Apply or cancel the active edit before redo.");
+		else questDialogueEditorRedo();
+	}
+	actionX += 62;
+	if ( questDialogueEditorImmediateButton(actionX, tabY, 104, "RUN VALIDATION") )
+	{
+		if ( questDialogueEditorJSONEditing )
+			questDialogueEditorSetMessage(
+				"Apply or cancel Advanced JSON before running validation.");
+		else
+		{
+			questDialogueEditorEndTransientTextInput();
+			questDialogueEditorRefreshValidation();
+			questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_VALIDATION;
+		}
+	}
+
+	if ( !blockedAtStart )
+	{
+		const bool control = (SDL_GetModState() & KMOD_CTRL) != 0;
+		if ( control && keystatus[SDLK_s] )
+		{
+			keystatus[SDLK_s] = 0;
+			if ( questDialogueEditorEditingField || questDialogueEditorJSONEditing )
+				questDialogueEditorSetMessage("Apply or cancel the active edit before saving.");
+			else questDialogueEditorWriteDocument();
+		}
+		if ( control && keystatus[SDLK_z] )
+		{
+			keystatus[SDLK_z] = 0;
+			if ( questDialogueEditorEditingField || questDialogueEditorJSONEditing )
+				questDialogueEditorSetMessage("Apply or cancel the active edit before undo.");
+			else questDialogueEditorUndo();
+		}
+		if ( control && keystatus[SDLK_y] )
+		{
+			keystatus[SDLK_y] = 0;
+			if ( questDialogueEditorEditingField || questDialogueEditorJSONEditing )
+				questDialogueEditorSetMessage("Apply or cancel the active edit before redo.");
+			else questDialogueEditorRedo();
+		}
+	}
+
+	switch ( questDialogueEditorWorkspace )
+	{
+		case QUEST_DIALOGUE_WORKSPACE_FILES:
+			questDialogueEditorDrawFilesPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_CONVERSATION:
+			questDialogueEditorDrawConversationPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_QUEST:
+			questDialogueEditorDrawQuestPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_TUTORIALS:
+			questDialogueEditorDrawTutorialsPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_JSON:
+			questDialogueEditorDrawJSONPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_PREVIEW:
+			questDialogueEditorDrawPreviewPage();
+			break;
+		case QUEST_DIALOGUE_WORKSPACE_VALIDATION:
+			questDialogueEditorDrawValidationPage();
+			break;
+		default:
+			break;
+	}
+
+	printTextFormattedColor(font8x8_bmp, subx2 - 292, suby2 - 21,
+		questDialogueEditorModel.dirty()
+			? makeColorRGB(255, 210, 96) : makeColorRGB(128, 255, 160),
+		"%s | Ctrl+S save | Ctrl+Z/Y undo/redo",
+		questDialogueEditorModel.dirty() ? "UNSAVED" : "SAVED");
+
+	if ( blockedAtStart ) mousestatus[SDL_BUTTON_LEFT] = pendingMouse;
+	if ( questDialogueEditorUnsavedPrompt ) questDialogueEditorDrawUnsavedPrompt();
+	else if ( questDialogueEditorDeletePrompt ) questDialogueEditorDrawDeletePrompt();
+	else if ( questDialogueEditorWizardOpen ) questDialogueEditorDrawWizard();
 }
 
 static std::string questEditorJsonEscape(const std::string& value)
@@ -11917,22 +16641,14 @@ static bool questEditorWriteStarterJSON(
 		"./dialogue/" + dialogueID + ".json";
 
 	mkdir("./dialogue", 0755);
-
-	std::ofstream output(
-		path.c_str(),
-		std::ios::out | std::ios::trunc
-	);
-
-	if ( !output.is_open() )
+	if ( access(path.c_str(), F_OK) == 0 )
 	{
-		questEditorStatusMessage =
-			"Could not write " + path;
-
-		questEditorStatusUntil =
-			ticks + TICKS_PER_SECOND * 5;
-
+		questEditorStatusMessage = path + " already exists; existing data was not replaced.";
+		questEditorStatusUntil = ticks + TICKS_PER_SECOND * 5;
 		return false;
 	}
+
+	std::ostringstream output;
 
 	output
 		<< "{\n"
@@ -12029,7 +16745,16 @@ static bool questEditorWriteStarterJSON(
 		<< "  ]\n"
 		<< "}\n";
 
-	output.close();
+	automatia::dialogue::Document created;
+	std::string error;
+	if ( !created.parse(output.str(), error)
+		|| !created.saveAtomic(path, error) )
+	{
+		questEditorStatusMessage = error.empty()
+			? "Could not write " + path : error;
+		questEditorStatusUntil = ticks + TICKS_PER_SECOND * 5;
+		return false;
+	}
 
 	questEditorStatusMessage =
 		"Wrote " + path;
