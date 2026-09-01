@@ -105,7 +105,7 @@ namespace
 	{
 		using namespace automatia::dialogue;
 		const auto& tutorials = tutorialRecipes();
-		EXPECT(tutorials.size() == 34);
+		EXPECT(tutorials.size() == 39);
 		std::set<std::string> ids;
 		ValidationOptions options;
 		options.vanillaItemCount = 400;
@@ -144,6 +144,11 @@ namespace
 			EXPECT(roundTripped.serialize(false) == canonical);
 		}
 		EXPECT(findTutorialRecipe("sam_stable_item") != nullptr);
+		EXPECT(findTutorialRecipe("party_shared_quest") != nullptr);
+		EXPECT(findTutorialRecipe("world_shared_quest") != nullptr);
+		EXPECT(findTutorialRecipe("floor_aware_markers") != nullptr);
+		EXPECT(findTutorialRecipe("enemy_group_defeat") != nullptr);
+		EXPECT(findTutorialRecipe("complex_quest_interaction") != nullptr);
 		EXPECT(findTutorialRecipe("not_a_recipe") == nullptr);
 		return true;
 	}
@@ -496,7 +501,7 @@ namespace
 		EXPECT(runtime.find("if ( multiplayer == CLIENT )") != std::string::npos);
 		EXPECT(runtime.find("\"CDSL\"") != std::string::npos);
 		EXPECT(runtime.find("pendingCustomDialogueChoices") != std::string::npos);
-		EXPECT(runtime.find("serverSyncAutomatiaPlayerStoryState") != std::string::npos);
+		EXPECT(runtime.find("serverSyncAutomatiaQuestStateForActor") != std::string::npos);
 		return true;
 	}
 
@@ -582,6 +587,10 @@ namespace
 			"questDialogueEditorDeleteSelectedFileNow",
 			"questDialogueEditorDrawWizard", "questDialogueEditorDrawPreviewPage",
 			"questDialogueEditorDrawJSONPage", "questDialogueEditorDrawValidationPage",
+			"questDialogueEditorJSONHandleKey", "APPLY & SAVE",
+			"questDialogueEditorBeginMarkerPick", "MANUAL COORDS",
+			"USE WHOLE COLUMN", "USE SAME FLOOR",
+			"questDialogueEditorUpgradeSharedQuestOwnership", "UPGRADE SHARING",
 			"questDialogueEditorSelectStableItem", "editorSAMItemCatalogCount",
 			"replaceWithEdit", "saveAtomic" } )
 		{
@@ -589,6 +598,44 @@ namespace
 		}
 		EXPECT(buttons.find("editorSAMItemStableIDIsAvailable") != std::string::npos);
 		EXPECT(buttons.find("sam_item_catalog.json") != std::string::npos);
+		return true;
+	}
+
+	bool testFloorAwareMarkerValidation()
+	{
+		using namespace automatia::dialogue;
+		Document valid;
+		std::string error;
+		EXPECT(valid.parse(
+			"{\"version\":2,\"quest_id\":\"tower\",\"quest\":"
+			"{"
+			"\"title\":\"Tower\",\"origin\":{\"map\":\"tower.lmp\",\"x\":1,\"y\":2,"
+			"\"playable_floor\":3,\"floor_visibility\":\"same_floor\"},"
+			"\"objectives\":[{\"id\":\"signal\",\"text\":\"Find it.\","
+			"\"map_marker\":{\"map\":\"tower.lmp\",\"x\":4,\"y\":5,"
+			"\"floor_visibility\":\"column\"}}]},\"start_node\":0,"
+			"\"nodes\":[{\"id\":0,\"text\":\"Go.\",\"next\":0}]}", error));
+		EXPECT(!hasErrors(validate(valid.json())));
+
+		Document missingFloor;
+		EXPECT(missingFloor.parse(
+			"{\"version\":2,\"quest_id\":\"tower\",\"quest\":"
+			"{"
+			"\"title\":\"Tower\",\"origin\":{\"map\":\"tower.lmp\",\"x\":1,\"y\":2,"
+			"\"floor_visibility\":\"same_floor\"}},\"start_node\":0,"
+			"\"nodes\":[{\"id\":0,\"text\":\"Go.\",\"next\":0}]}", error));
+		EXPECT(hasCode(validate(missingFloor.json()), "missing_origin_floor"));
+
+		Document invalidVisibility;
+		EXPECT(invalidVisibility.parse(
+			"{\"version\":2,\"quest_id\":\"tower\",\"quest\":"
+			"{"
+			"\"title\":\"Tower\",\"objectives\":[{\"id\":\"signal\",\"text\":\"Find it.\","
+			"\"map_marker\":{\"map\":\"tower.lmp\",\"x\":4,\"y\":5,"
+			"\"floor_visibility\":\"everywhere\"}}]},\"start_node\":0,"
+			"\"nodes\":[{\"id\":0,\"text\":\"Go.\",\"next\":0}]}", error));
+		EXPECT(hasCode(validate(invalidVisibility.json()),
+			"invalid_marker_floor_visibility"));
 		return true;
 	}
 
@@ -602,6 +649,7 @@ namespace
 			std::string error;
 			EXPECT(document.parse(createStarterDocument(id, "file_id", "My Quest",
 				"Hello", "Continue", "A Quest", "Summary"), error));
+			EXPECT(document.json()["version"].GetInt() == SchemaVersion);
 			EXPECT(!hasErrors(validate(document.json())));
 		}
 		const std::string identities = createStarterDocument(
@@ -610,6 +658,36 @@ namespace
 		EXPECT(identities.find("dialogue_file_identity") == std::string::npos);
 		EXPECT(identities.find("\"quest_id\": \"persistent_quest_identity\"")
 			!= std::string::npos);
+		return true;
+	}
+
+	bool testSharedOwnershipSchemaMigration()
+	{
+		using namespace automatia::dialogue;
+		Document legacy;
+		std::string error;
+		EXPECT(legacy.parse(
+			"{\"version\":1,\"quest_id\":\"legacy_party\",\"quest\":{"
+			"\"title\":\"Legacy\",\"scope\":\"party\"},\"start_node\":0,"
+			"\"nodes\":[{\"id\":0,\"text\":\"Legacy\",\"next\":0}]}", error));
+		const auto legacyIssues = validate(legacy.json());
+		EXPECT(!hasErrors(legacyIssues));
+		EXPECT(hasCode(legacyIssues, "legacy_scope_falls_back_to_player"));
+
+		Document shared;
+		EXPECT(shared.parse(
+			"{\"version\":2,\"quest_id\":\"shared_party\",\"quest\":{"
+			"\"title\":\"Shared\",\"scope\":\"party\"},\"start_node\":0,"
+			"\"nodes\":[{\"id\":0,\"text\":\"Shared\",\"next\":0}]}", error));
+		const auto sharedIssues = validate(shared.json());
+		EXPECT(!hasErrors(sharedIssues));
+		EXPECT(!hasCode(sharedIssues, "legacy_scope_falls_back_to_player"));
+
+		Document invalid;
+		EXPECT(invalid.parse(
+			"{\"version\":3,\"start_node\":0,\"nodes\":[{\"id\":0,"
+			"\"text\":\"Invalid\",\"next\":0}]}", error));
+		EXPECT(hasCode(validate(invalid.json()), "invalid_version"));
 		return true;
 	}
 }
@@ -625,7 +703,9 @@ int main()
 		&& testCapabilityAndRuntimeParityContract()
 		&& testEveryConditionAndActionFixture()
 		&& testEditorAndIntegrationSourceContracts()
-		&& testStarterTemplates();
+		&& testFloorAwareMarkerValidation()
+		&& testStarterTemplates()
+		&& testSharedOwnershipSchemaMigration();
 	if ( passed )
 	{
 		std::cout << "Custom dialogue document tests passed.\n";

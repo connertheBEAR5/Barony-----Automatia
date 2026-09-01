@@ -419,6 +419,10 @@ OPENAL_CHANNELGROUP* getChannelGroupForSoundIndex(Uint32 snd)
 	{
 		return soundAmbient_group;
 	}
+	if ( SkillUpAnimation_t::soundIndexUsedForNotification(snd) )
+	{
+		return soundNotification_group;
+	}
 	return sound_group;
 }
 
@@ -459,7 +463,20 @@ OPENAL_SOUND* playSoundPlayer(int player, Uint16 snd, Uint8 vol)
 
 OPENAL_SOUND* playSoundNotification(Uint16 snd, Uint8 vol)
 {
-    return playSound(snd, vol);
+	if (no_sound || !openal_context || snd >= numsounds
+		|| !sounds || !sounds[snd] || vol == 0 || !music_notification_group)
+	{
+		return nullptr;
+	}
+	OPENAL_SOUND* channel = OPENAL_CreateChannel(sounds[snd]);
+	if (!channel)
+	{
+		return nullptr;
+	}
+	OPENAL_Channel_SetVolume(channel, vol / 255.f);
+	OPENAL_Channel_SetChannelGroup(channel, music_notification_group);
+	OPENAL_Channel_Play(channel);
+	return channel;
 }
 
 OPENAL_SOUND* playSoundNotificationPlayer(int player, Uint16 snd, Uint8 vol)
@@ -544,12 +561,20 @@ OPENAL_SOUND* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 		}
 	}
 
+	if (!activeWorldHasLocalListener())
+	{
+		return nullptr;
+	}
 	if (!openal_context)   //For the client.
 	{
 		return NULL;
 	}
 
 	channel = OPENAL_CreateChannel(sounds[snd]);
+	if (!channel)
+	{
+		return nullptr;
+	}
 	OPENAL_Channel_SetVolume(channel, vol / 255.f);
 	OPENAL_Channel_Set3DAttributes(channel, -y / 16.0, 0, -x / 16.0);
 	OPENAL_Channel_SetChannelGroup(channel, getChannelGroupForSoundIndex(snd));
@@ -560,7 +585,7 @@ OPENAL_SOUND* playSoundPos(real_t x, real_t y, Uint16 snd, Uint8 vol)
 
 OPENAL_SOUND* playSoundPosLocal(real_t x, real_t y, Uint16 snd, Uint8 vol)
 {
-	if (no_sound)
+	if (no_sound || !activeWorldHasLocalListener())
 	{
 		return NULL;
 	}
@@ -590,6 +615,10 @@ OPENAL_SOUND* playSoundPosLocal(real_t x, real_t y, Uint16 snd, Uint8 vol)
 	}
 
 	channel = OPENAL_CreateChannel(sounds[snd]);
+	if (!channel)
+	{
+		return nullptr;
+	}
 	OPENAL_Channel_SetVolume(channel, vol / 255.f);
 	OPENAL_Channel_Set3DAttributes(channel, -y / 16.0, 0, -x / 16.0);
 	OPENAL_Channel_SetChannelGroup(channel, getChannelGroupForSoundIndex(snd));
@@ -657,6 +686,10 @@ OPENAL_SOUND* playSound(Uint16 snd, Uint8 vol)
 		return NULL;
 	}
 	OPENAL_SOUND* channel = OPENAL_CreateChannel(sounds[snd]);
+	if (!channel)
+	{
+		return nullptr;
+	}
 	OPENAL_Channel_SetVolume(channel, vol / 255.f);
 
 	OPENAL_Channel_SetChannelGroup(channel, getChannelGroupForSoundIndex(snd));
@@ -707,6 +740,11 @@ void playMusic(OPENAL_BUFFER* sound, bool loop, bool crossfade, bool resume)
 		OPENAL_Channel_Stop(music_channel2);
 		music_channel2 = music_channel;
 		music_channel = OPENAL_CreateChannel(sound);
+	}
+	if (!music_channel)
+	{
+		printlog("[OpenAL]: failed to create a music channel.\n");
+		return;
 	}
 	OPENAL_Channel_SetChannelGroup(music_channel, music_group);
 	if (crossfade == true)
@@ -1268,6 +1306,20 @@ namespace
 #ifdef USE_FMOD
 FMOD::Channel* mapAmbienceChannel = nullptr;
 FMOD::Sound* mapAmbienceSound = nullptr;
+#elif defined USE_OPENAL
+OPENAL_SOUND* mapAmbienceChannel = nullptr;
+OPENAL_BUFFER* mapAmbienceSound = nullptr;
+OPENAL_SOUND* mapAmbienceFadingChannel = nullptr;
+OPENAL_BUFFER* mapAmbienceFadingSound = nullptr;
+Uint32 mapAmbienceFadeInStart = 0;
+Uint16 mapAmbienceFadeInDuration = 0;
+float mapAmbienceTargetVolume = 0.f;
+Uint32 mapAmbienceFadeOutStart = 0;
+Uint16 mapAmbienceActiveFadeOutDuration = 0;
+float mapAmbienceFadeOutStartVolume = 0.f;
+#endif
+
+#if defined(USE_FMOD) || defined(USE_OPENAL)
 std::string mapAmbienceSignature;
 std::string mapAmbienceInstanceKey;
 Uint16 mapAmbienceFadeOutMilliseconds = 0;
@@ -1305,6 +1357,7 @@ bool isSafeAmbienceVfsPath(const char* resource)
 
 void fadeAndStopMapAmbience(const Uint16 fadeMilliseconds)
 {
+#ifdef USE_FMOD
 	if (!mapAmbienceChannel)
 	{
 		return;
@@ -1337,13 +1390,60 @@ void fadeAndStopMapAmbience(const Uint16 fadeMilliseconds)
 		mapAmbienceSound->release();
 		mapAmbienceSound = nullptr;
 	}
+#elif defined USE_OPENAL
+	auto stopAndRelease = [](OPENAL_SOUND*& channel, OPENAL_BUFFER*& sound)
+	{
+		if (channel)
+		{
+			OPENAL_Channel_Stop(channel);
+			channel = nullptr;
+		}
+		if (sound)
+		{
+			OPENAL_Sound_Release(sound);
+			sound = nullptr;
+		}
+	};
+	// Only one retired ambience needs to fade at once. A second transition
+	// completes the older fade before retiring the current channel.
+	stopAndRelease(mapAmbienceFadingChannel, mapAmbienceFadingSound);
+	mapAmbienceActiveFadeOutDuration = 0;
+	if (!mapAmbienceChannel)
+	{
+		if (mapAmbienceSound)
+		{
+			OPENAL_Sound_Release(mapAmbienceSound);
+			mapAmbienceSound = nullptr;
+		}
+		mapAmbienceFadeInDuration = 0;
+		return;
+	}
+	ALboolean playing = AL_FALSE;
+	OPENAL_Channel_IsPlaying(mapAmbienceChannel, &playing);
+	if (playing == AL_TRUE && fadeMilliseconds > 0)
+	{
+		mapAmbienceFadingChannel = mapAmbienceChannel;
+		mapAmbienceFadingSound = mapAmbienceSound;
+		mapAmbienceFadeOutStartVolume =
+			OPENAL_Channel_GetVolume(mapAmbienceFadingChannel);
+		mapAmbienceFadeOutStart = SDL_GetTicks();
+		mapAmbienceActiveFadeOutDuration = fadeMilliseconds;
+	}
+	else
+	{
+		stopAndRelease(mapAmbienceChannel, mapAmbienceSound);
+	}
+	mapAmbienceChannel = nullptr;
+	mapAmbienceSound = nullptr;
+	mapAmbienceFadeInDuration = 0;
+#endif
 }
 #endif
 }
 
 void stopMapAmbience()
 {
-#ifdef USE_FMOD
+#if defined(USE_FMOD) || defined(USE_OPENAL)
 	fadeAndStopMapAmbience(0);
 	mapAmbienceSignature.clear();
 	mapAmbienceInstanceKey.clear();
@@ -1353,8 +1453,14 @@ void stopMapAmbience()
 
 void syncMapAmbience(const map_t& loadedMap, const std::string& mapInstanceKey)
 {
+#if defined(USE_FMOD) || defined(USE_OPENAL)
+	const bool backendReady =
 #ifdef USE_FMOD
-	if (!mapAmbienceCanUseAudio(headless, no_sound) || !fmod_system || !soundEnvironment_group
+		fmod_system && soundEnvironment_group;
+#else
+		openal_device && openal_context && soundEnvironment_group;
+#endif
+	if (!mapAmbienceCanUseAudio(headless, no_sound) || !backendReady
 		|| !loadedMap.ambience.enabled
 		|| !isSafeAmbienceVfsPath(loadedMap.ambience.resource))
 	{
@@ -1386,6 +1492,7 @@ void syncMapAmbience(const map_t& loadedMap, const std::string& mapInstanceKey)
 			loadedMap.ambience.resource);
 		return;
 	}
+#ifdef USE_FMOD
 	std::string fullPath(realDir);
 	fullPath.append(PHYSFS_getDirSeparator()).append(loadedMap.ambience.resource);
 	fmod_result = fmod_system->createSound(
@@ -1423,12 +1530,76 @@ void syncMapAmbience(const map_t& loadedMap, const std::string& mapInstanceKey)
 				* loadedMap.ambience.fadeInMilliseconds / 1000U,
 			targetVolume);
 	}
+#else
+	if (!OPENAL_CreateStreamSound(
+		loadedMap.ambience.resource, &mapAmbienceSound) || !mapAmbienceSound)
+	{
+		mapAmbienceSound = nullptr;
+		return;
+	}
+	mapAmbienceChannel = OPENAL_CreateChannel(mapAmbienceSound);
+	if (!mapAmbienceChannel)
+	{
+		OPENAL_Sound_Release(mapAmbienceSound);
+		mapAmbienceSound = nullptr;
+		return;
+	}
+	OPENAL_SetLoop(mapAmbienceChannel,
+		loadedMap.ambience.loop ? AL_TRUE : AL_FALSE);
+	OPENAL_Channel_SetChannelGroup(
+		mapAmbienceChannel, soundEnvironment_group);
+	mapAmbienceTargetVolume = loadedMap.ambience.volume / 100.f;
+	mapAmbienceFadeInDuration = loadedMap.ambience.fadeInMilliseconds;
+	mapAmbienceFadeInStart = SDL_GetTicks();
+	OPENAL_Channel_SetVolume(mapAmbienceChannel,
+		mapAmbienceFadeInDuration > 0 ? 0.f : mapAmbienceTargetVolume);
+	OPENAL_Channel_Play(mapAmbienceChannel);
+#endif
 	mapAmbienceSignature = signature;
 	mapAmbienceInstanceKey = mapInstanceKey;
 	mapAmbienceFadeOutMilliseconds = loadedMap.ambience.fadeOutMilliseconds;
 #else
 	(void)loadedMap;
 	(void)mapInstanceKey;
+#endif
+}
+
+void updateMapAmbience()
+{
+#ifdef USE_OPENAL
+	if (!openal_context)
+	{
+		return;
+	}
+	const Uint32 now = SDL_GetTicks();
+	if (mapAmbienceChannel && mapAmbienceFadeInDuration > 0)
+	{
+		const Uint32 elapsed = now - mapAmbienceFadeInStart;
+		const float progress = std::min(1.f,
+			elapsed / static_cast<float>(mapAmbienceFadeInDuration));
+		OPENAL_Channel_SetVolume(
+			mapAmbienceChannel, mapAmbienceTargetVolume * progress);
+		if (progress >= 1.f)
+		{
+			mapAmbienceFadeInDuration = 0;
+		}
+	}
+	if (mapAmbienceFadingChannel && mapAmbienceActiveFadeOutDuration > 0)
+	{
+		const Uint32 elapsed = now - mapAmbienceFadeOutStart;
+		const float progress = std::min(1.f,
+			elapsed / static_cast<float>(mapAmbienceActiveFadeOutDuration));
+		OPENAL_Channel_SetVolume(mapAmbienceFadingChannel,
+			mapAmbienceFadeOutStartVolume * (1.f - progress));
+		if (progress >= 1.f)
+		{
+			OPENAL_Channel_Stop(mapAmbienceFadingChannel);
+			mapAmbienceFadingChannel = nullptr;
+			OPENAL_Sound_Release(mapAmbienceFadingSound);
+			mapAmbienceFadingSound = nullptr;
+			mapAmbienceActiveFadeOutDuration = 0;
+		}
+	}
 #endif
 }
 

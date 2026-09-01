@@ -309,7 +309,7 @@ bool testWorldSaveAndPlacementContracts()
 {
     using AutomatiaSave::Json;
     Json schemaThree = makeSpatialWorldDocument();
-    EXPECT(schemaThree["schema_version"] == 3);
+    EXPECT(schemaThree["schema_version"] == 4);
     EXPECT(AutomatiaSave::validate(schemaThree).ok);
     EXPECT(schemaThree["map_instances"][0]["playable_floors"].size() == 2);
     EXPECT(schemaThree["players"][0]["playable_floor"] == 2);
@@ -320,6 +320,7 @@ bool testWorldSaveAndPlacementContracts()
 	// Early schema-3 saves predate the independent authored-layer field. They
 	// remain valid and are migrated only through explicit derived-stack metadata.
 	Json schemaThreeWithoutAuthoredLayer = schemaThree;
+	schemaThreeWithoutAuthoredLayer["schema_version"] = 3;
 	schemaThreeWithoutAuthoredLayer["players"][0].erase("authored_map_layer");
 	for (const char* collection : {
 		"dynamic_world_items", "dynamic_boulders", "mechanisms"})
@@ -576,7 +577,7 @@ bool testPlayableZDataFoundationContract()
     EXPECT(contains(files, "BARONY LMPV4.9"));
     EXPECT(contains(files, "loadPlayableZExtension"));
     EXPECT(contains(files, "savePlayableZExtension"));
-    EXPECT(AutomatiaSave::CURRENT_SCHEMA_VERSION == 3);
+    EXPECT(AutomatiaSave::CURRENT_SCHEMA_VERSION == 4);
 
     // Z2A begins real floor isolation while preserving local continuous z.
     const std::string distance = section(
@@ -1200,6 +1201,8 @@ bool testZ33LayerAuthoringCorrectionContracts()
     EXPECT(contains(collisionSource, "playerHasLowerStackedLanding"));
     EXPECT(contains(gameHeader, "fallAutomatiaPlayerToLowerPlayableFloor"));
     EXPECT(contains(game, "fallAutomatiaPlayerToLowerPlayableFloor("));
+	EXPECT(contains(game,
+		"fallAutomatiaPlayerFollowersToLowerPlayableFloor("));
 	EXPECT(contains(game, "resolveLowerPlayableFloorLandingPosition("));
 	EXPECT(contains(game, "playableFloorPlacementFootprintIsSafe("));
     EXPECT(contains(game, "broadcastAutomatiaPlayerFloorPlacement(playerIndex)"));
@@ -1267,9 +1270,11 @@ bool testStackedFollowerAndWorldSpriteContracts()
 	EXPECT(!followerVertical.empty());
 	EXPECT(!hostileVertical.empty());
 
-	// Z4C no longer instant-teleports followers as part of the player's PZTR.
-	// Followers consume Z4B routes and then use a generic authoritative
-	// non-player transaction with ordinary ENTU replication.
+	// Ordinary stair/endpoint PZTRs do not instant-teleport followers: Z4C
+	// consumes Z4B routes and uses the generic authoritative non-player
+	// transaction with ordinary ENTU replication. A player pit fall is the
+	// narrow exception because no authored transition graph edge exists for the
+	// drop; owned followers on the source floor share that fall transaction.
 	const std::string followerFloorTransition = section(
 		game,
 		"bool transitionAutomatiaNonPlayerEntityToPlayableFloor(",
@@ -1283,6 +1288,22 @@ bool testStackedFollowerAndWorldSpriteContracts()
 		"sendEntityUDPToActiveMap(&entity, recipient, true)"));
 	EXPECT(!contains(game,
 		"transitionAutomatiaPlayerFollowersToPlayableFloor(playerIndex, entity)"));
+	EXPECT(contains(game,
+		"fallAutomatiaPlayerFollowersToLowerPlayableFloor("));
+	const std::string playerFloorPlacement = section(
+		game,
+		"bool applyAutomatiaPlayableFloorPlacement(",
+		"bool fallAutomatiaPlayerToLowerPlayableFloor(");
+	const std::string playerFall = section(
+		game,
+		"bool fallAutomatiaPlayerToLowerPlayableFloor(",
+		"bool transitionAutomatiaPlayerThroughPlayableFloorEndpoint(");
+	EXPECT(!contains(playerFloorPlacement,
+		"fallAutomatiaPlayerFollowersToLowerPlayableFloor("));
+	EXPECT(contains(playerFall,
+		"fallAutomatiaPlayerFollowersToLowerPlayableFloor("));
+	EXPECT(contains(followerFloorTransition,
+		"follower->playableFloor != sourceFloor"));
 	EXPECT(contains(followerVertical, "generateCrossFloorPath("));
 	EXPECT(contains(followerVertical, "GENERATE_PATH_ALLY_FOLLOW"));
 	EXPECT(contains(followerVertical, "follower.monsterSetPathToLocation("));

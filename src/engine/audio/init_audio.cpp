@@ -354,7 +354,13 @@ bool initSoundEngine()
 #elif defined USE_OPENAL
 	if (!no_sound)
 	{
-		initOPENAL();
+		printlog("[OpenAL]: initializing OpenAL...\n");
+		if (!initOPENAL())
+		{
+			printlog("[OpenAL]: Failed to initialize OpenAL. DISABLING AUDIO.\n");
+			no_sound = true;
+			return false;
+		}
 	}
 #endif
 
@@ -370,7 +376,7 @@ int loadSoundResources(real_t base_load_percent, real_t top_load_percent)
 {
 	File* fp;
 	Uint32 c;
-	char name[128];
+	char name[PATH_MAX];
 
 	if ( !PHYSFS_getRealDir("sound/sounds.txt") )
 	{
@@ -405,7 +411,7 @@ int loadSoundResources(real_t base_load_percent, real_t top_load_percent)
 	char full_path[PATH_MAX];
 	for ( c = 0; !fp->eof(); ++c )
 	{
-		fp->gets2(name, 128);
+		fp->gets2(name, PATH_MAX);
 		completePath(full_path, name);
 		FMOD_MODE flags = FMOD_DEFAULT | FMOD_3D | FMOD_LOWMEM;
 		if ( c == 133 || c == 672 || c == 135 || c == 155 || c == 149 || c == 710 )
@@ -422,12 +428,25 @@ int loadSoundResources(real_t base_load_percent, real_t top_load_percent)
 	FileIO::close(fp);
 	fmod_system->set3DSettings(1.0, 2.0, 1.0);
 #elif defined USE_OPENAL
-	sounds = (OPENAL_BUFFER**) malloc(sizeof(OPENAL_BUFFER*)*numsounds);
-	for (c = 0, fp = openDataFile(soundsDirectory.c_str(), "rb"); fp->gets2(name, 128); ++c)
+	sounds = (OPENAL_BUFFER**) calloc(numsounds, sizeof(OPENAL_BUFFER*));
+	if (!sounds)
 	{
-		//TODO: Might need to malloc the sounds[c]->sound
-		OPENAL_CreateSound(name, true, &sounds[c]);
-		//TODO: set sound volume? Or otherwise handle sound volume.
+		printlog("[OpenAL]: failed to allocate the sound table.\n");
+		return 10;
+	}
+	for (c = 0, fp = openDataFile(soundsDirectory.c_str(), "rb");
+		c < numsounds && fp->gets2(name, PATH_MAX); ++c)
+	{
+		if (!OPENAL_CreateSound(name, true, &sounds[c]))
+		{
+			printlog("warning: failed to load '%s' listed at line %d in sounds.txt\n",
+				name, c + 1);
+		}
+		else if (c == 133 || c == 672 || c == 135 || c == 155
+			|| c == 149 || c == 710)
+		{
+			OPENAL_Sound_SetDefaultLoop(sounds[c], AL_TRUE);
+		}
 		updateLoadingScreen(base_load_percent + (top_load_percent * c) / numsounds);
 	}
 	FileIO::close(fp);
@@ -439,29 +458,35 @@ int loadSoundResources(real_t base_load_percent, real_t top_load_percent)
 
 void freeSoundResources()
 {
-	uint32_t c;
 	// free sounds
-#ifdef USE_FMOD
+#if defined(USE_FMOD) || defined(USE_OPENAL)
 	printlog("freeing sounds...\n");
 	if ( sounds != nullptr )
 	{
-		for ( c = 0; c < numsounds && !no_sound; c++ )
+		for ( uint32_t c = 0; c < numsounds; ++c )
 		{
 			if (sounds[c] != nullptr)
 			{
-				if (sounds[c] != nullptr)
-				{
-					sounds[c]->release(); //Free the sound's FMOD sound.
-				}
+#ifdef USE_FMOD
+				sounds[c]->release();
+#else
+				OPENAL_Sound_Release(sounds[c]);
+#endif
+				sounds[c] = nullptr;
 			}
 		}
-		free(sounds); //Then free the sound array.
+		free(sounds);
+		sounds = nullptr;
 	}
+	numsounds = 0;
 #endif
 }
 
 void exitSoundEngine()
 {
+#ifndef EDITOR
+	stopMapAmbience();
+#endif
 #ifdef USE_FMOD
 	if ( fmod_system )
 	{
@@ -473,5 +498,7 @@ void exitSoundEngine()
 #endif
 		fmod_system = nullptr;
 	}
+#elif defined USE_OPENAL
+	closeOPENAL();
 #endif
 }

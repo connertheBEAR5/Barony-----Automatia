@@ -31385,6 +31385,19 @@ namespace CustomDialogueQuestJournalUI
         }
     }
 
+    static const char* ownershipName(const std::string& scope)
+    {
+        if (scope == "party")
+        {
+            return "Party";
+        }
+        if (scope == "world")
+        {
+            return "World";
+        }
+        return "Personal";
+    }
+
     static void addNineSlice(
         Frame* frame,
         const std::vector<std::string>& names,
@@ -33055,6 +33068,8 @@ namespace CustomDialogueQuestJournalUI
 
         std::string statusText =
             std::string(statusName(entry.status))
+            + "    "
+            + ownershipName(entry.scope)
             + "    Stage "
             + std::to_string(entry.stage);
 

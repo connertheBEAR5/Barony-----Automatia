@@ -13,6 +13,7 @@
 #include "playable_z.hpp"
 
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -138,6 +139,83 @@ bool finiteTriplet(const Json& value)
         && finiteNumber(value[0])
         && finiteNumber(value[1])
         && finiteNumber(value[2]);
+}
+
+Result validateQuestStateCollection(
+    const Json& collection,
+    const std::string& location,
+    const std::size_t maximumQuestKeyBytes = 255)
+{
+    if (!collection.is_object() || collection.size() > 65536)
+    {
+        return failure(location + " is not a bounded quest object");
+    }
+    for (auto quest = collection.begin(); quest != collection.end(); ++quest)
+    {
+        if (!safeTextId(quest.key(), maximumQuestKeyBytes)
+            || !quest.value().is_object())
+        {
+            return failure(location + " contains an invalid quest record");
+        }
+        const Json& state = quest.value();
+        for (const char* field :
+            {"started", "accepted", "completed", "failed"})
+        {
+            if (state.contains(field) && !state[field].is_boolean())
+            {
+                return failure(location + "." + quest.key()
+                    + " has an invalid Boolean field");
+            }
+        }
+        if (state.contains("stage") && !state["stage"].is_number_integer())
+        {
+            return failure(location + "." + quest.key()
+                + " has an invalid stage");
+        }
+        if (state.contains("variables"))
+        {
+            const Json& variables = state["variables"];
+            if (!variables.is_object() || variables.size() > 65536)
+            {
+                return failure(location + "." + quest.key()
+                    + " has invalid variables");
+            }
+            for (auto variable = variables.begin();
+                variable != variables.end(); ++variable)
+            {
+                if (!safeTextId(variable.key(), 255)
+                    || !variable.value().is_number_integer())
+                {
+                    return failure(location + "." + quest.key()
+                        + " has an invalid variable");
+                }
+            }
+        }
+        for (const char* field :
+            {"flags", "completed_objectives", "used_choices"})
+        {
+            if (!state.contains(field))
+            {
+                continue;
+            }
+            const Json& values = state[field];
+            if (!values.is_array() || values.size() > 65536)
+            {
+                return failure(location + "." + quest.key()
+                    + " has an invalid string set");
+            }
+            for (const Json& value : values)
+            {
+                if (!value.is_string()
+                    || !safeTextId(value.get<std::string>(), 255))
+                {
+                    return failure(location + "." + quest.key()
+                        + " has an invalid string-set member");
+                }
+            }
+        }
+    }
+    return success();
 }
 
 Result validatePersistentSpatialState(
@@ -331,7 +409,11 @@ Json makeEmptyWorldSave(const std::string& sessionId)
             {"next_id", 1},
             {"parties", Json::array()}
         }},
-        {"quests", Json::object()},
+        {"quests", Json{
+            {"players", Json::object()},
+            {"world", Json::object()},
+            {"parties", Json::object()}
+        }},
         {"dialogue", Json::object()},
         {"world_flags", Json::array()},
         {"world_variables", Json::object()},
@@ -403,6 +485,64 @@ Result validate(const Json& document)
                 document["party"], partyError))
         {
             return failure("world save party state is invalid: " + partyError);
+        }
+    }
+
+    if (version >= 4)
+    {
+        if (!document.contains("quests")
+            || !document["quests"].is_object()
+            || !document["quests"].contains("players")
+            || !document["quests"].contains("world")
+            || !document["quests"].contains("parties")
+            || !document["quests"]["players"].is_object()
+            || !document["quests"]["parties"].is_object()
+            || document["quests"]["parties"].size() > 4096)
+        {
+            return failure("world save shared quest state is missing or invalid");
+        }
+        const Result worldQuests = validateQuestStateCollection(
+            document["quests"]["world"], "quests.world");
+        if (!worldQuests)
+        {
+            return worldQuests;
+        }
+        const Json& playerQuests = document["quests"]["players"];
+        const Result personalQuests = validateQuestStateCollection(
+            playerQuests, "quests.players", 1024);
+        if (!personalQuests)
+        {
+            return personalQuests;
+        }
+        for (auto playerQuest = playerQuests.begin();
+            playerQuest != playerQuests.end(); ++playerQuest)
+        {
+            if (playerQuest.key().rfind("player:", 0) != 0
+                && playerQuest.key().rfind("player_", 0) != 0)
+            {
+                return failure(
+                    "quests.players contains a non-player ownership key");
+            }
+        }
+        for (auto party = document["quests"]["parties"].begin();
+            party != document["quests"]["parties"].end(); ++party)
+        {
+            std::uint64_t partyId = 0;
+            const char* begin = party.key().data();
+            const char* end = begin + party.key().size();
+            const std::from_chars_result conversion =
+                std::from_chars(begin, end, partyId);
+            if (conversion.ec != std::errc{} || conversion.ptr != end
+                || partyId == 0)
+            {
+                return failure("quests.parties contains an invalid PartyID");
+            }
+            const Result partyQuests = validateQuestStateCollection(
+                party.value(), "quests.parties." + party.key());
+            if (!partyQuests)
+            {
+                return partyQuests;
+            }
         }
     }
 

@@ -103,6 +103,7 @@ list(APPEND GAME_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/player.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/automatia_save.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/automatia_identity.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/quest_ownership.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/automatia_world_save.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/party_manager.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/party_protocol.cpp"

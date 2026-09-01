@@ -1,0 +1,25 @@
+if(NOT DEFINED GENERATED_CONFIG OR NOT EXISTS "${GENERATED_CONFIG}")
+	message(FATAL_ERROR "Generated Config.hpp was not provided to the audio backend test.")
+endif()
+
+file(READ "${GENERATED_CONFIG}" config_contents)
+string(REGEX MATCH "#if 1[\r\n\t ]+#define USE_FMOD" fmod_define
+	"${config_contents}")
+string(REGEX MATCH "#if 1[\r\n\t ]+#define USE_OPENAL" openal_define
+	"${config_contents}")
+
+if("x${EXPECTED_BACKEND}" STREQUAL "xFMOD")
+	if("x${fmod_define}" STREQUAL "x" OR NOT "x${openal_define}" STREQUAL "x")
+		message(FATAL_ERROR "FMOD build must define only USE_FMOD.")
+	endif()
+elseif("x${EXPECTED_BACKEND}" STREQUAL "xOPENAL")
+	if("x${openal_define}" STREQUAL "x" OR NOT "x${fmod_define}" STREQUAL "x")
+		message(FATAL_ERROR "OpenAL build must define only USE_OPENAL.")
+	endif()
+elseif("x${EXPECTED_BACKEND}" STREQUAL "xNONE")
+	if(NOT "x${fmod_define}" STREQUAL "x" OR NOT "x${openal_define}" STREQUAL "x")
+		message(FATAL_ERROR "No-audio build must not define an audio backend.")
+	endif()
+else()
+	message(FATAL_ERROR "Unexpected resolved audio backend '${EXPECTED_BACKEND}'.")
+endif()

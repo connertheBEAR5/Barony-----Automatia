@@ -1815,6 +1815,7 @@ bool testLocalElevationAndRuntimeSpawns()
 bool testZ34CStructuralLayersAndFalling()
 {
     multiplayer = SINGLE;
+	resetPersistentWorldSession();
     EXPECT(resetGlobalMapHarness(4, 4, 1));
 
     // A dynamic/runtime entity follows its current playable floor for world
@@ -1866,8 +1867,11 @@ bool testZ34CStructuralLayersAndFalling()
 	// The destination tile is clear, but its eastern neighbor is a lower-floor
 	// wall. A ledge-edge position must be moved inward far enough for the
 	// player's complete collision footprint, not merely its center point.
-	map.tiles[tileIndex(x + 1, y, 1, map.height)] = 71;
+    map.tiles[tileIndex(x + 1, y, 1, map.height)] = 71;
     EXPECT(map.ensurePlayableFloorGeometry(1, false));
+	std::snprintf(
+		map.filename, sizeof(map.filename), "%s", "z34c_fall.lmp");
+	EXPECT(worldState.bindMap(map, map.filename, "world"));
     PlayableFloorId landingFloor = -1;
     int floorsFallen = -1;
     EXPECT(map.findLowerPlayableFloorLanding(
@@ -1940,9 +1944,9 @@ bool testZ34CStructuralLayersAndFalling()
 		ordinaryProjectile->parent = fallingEntity->getUID();
 		ordinaryProjectile->z = 7.5;
 
-		// Followers are gameplay actors, not visual attachments. Z4C deliberately
-		// leaves them on their source floor here; their AI must walk a real graph
-		// route rather than riding the player's falling/PZTR transaction.
+		// A player pit drop has no authored stair/endpoint graph edge. Followers
+		// therefore use the same fall boundary transaction, while ordinary stair
+		// and endpoint changes remain owned by Z4C cross-floor pathfinding.
 		Stat* followerOwnerStats = new Stat(0);
 		EXPECT(followerOwnerStats != nullptr);
 		stats[0] = followerOwnerStats;
@@ -1957,6 +1961,12 @@ bool testZ34CStructuralLayersAndFalling()
 		floorFollower->sizey = 4;
 		floorFollower->playableFloor = 1;
 		floorFollower->authoredMapLayer = 1;
+		floorFollower->persistentID = 901;
+		floorFollower->monsterState = MONSTER_STATE_HUNT;
+		floorFollower->monsterTarget = 123;
+		floorFollower->vel_x = 0.25;
+		floorFollower->vel_y = -0.25;
+		floorFollower->followerVerticalNavigationActive = true;
 		Entity* followerNameTag = newEntityWithSpatialContext(
 			-1, 1, map.entities, nullptr, floorFollower);
 		EXPECT(followerNameTag != nullptr);
@@ -1971,6 +1981,10 @@ bool testZ34CStructuralLayersAndFalling()
 		followerNode->element = followerUid;
 		followerNode->deconstructor = &defaultDeconstructor;
 		followerNode->size = sizeof(Uint32);
+		const Uint32 originalFollowerUID = floorFollower->getUID();
+		const Sint32 originalFollowerPersistentID = floorFollower->persistentID;
+		const std::uint64_t originalFollowerSpatialRevision =
+			floorFollower->spatialRevision;
 
         int appliedFloorsFallen = 0;
         EXPECT(fallAutomatiaPlayerToLowerPlayableFloor(
@@ -1994,10 +2008,20 @@ bool testZ34CStructuralLayersAndFalling()
 		EXPECT(ordinaryProjectile->playableFloor == 1);
 		EXPECT(ordinaryProjectile->authoredMapLayer == 1);
 		EXPECT(ordinaryProjectile->z == 7.5);
-		EXPECT(floorFollower->playableFloor == 1);
-		EXPECT(floorFollower->authoredMapLayer == 1);
-		EXPECT(followerNameTag->playableFloor == 1);
-		EXPECT(followerNameTag->authoredMapLayer == 1);
+		EXPECT(floorFollower->playableFloor == 0);
+		EXPECT(floorFollower->authoredMapLayer == 0);
+		EXPECT(floorFollower->spatialRevision
+			> originalFollowerSpatialRevision);
+		EXPECT(floorFollower->getUID() == originalFollowerUID);
+		EXPECT(floorFollower->persistentID == originalFollowerPersistentID);
+		EXPECT(floorFollower->monsterAllyIndex == 0);
+		EXPECT(floorFollower->monsterState == MONSTER_STATE_WAIT);
+		EXPECT(floorFollower->monsterTarget == 0);
+		EXPECT(floorFollower->vel_x == 0.0);
+		EXPECT(floorFollower->vel_y == 0.0);
+		EXPECT(!floorFollower->followerVerticalNavigationActive);
+		EXPECT(followerNameTag->playableFloor == 0);
+		EXPECT(followerNameTag->authoredMapLayer == 0);
 
 		list_FreeAll(&followerOwnerStats->FOLLOWERS);
 		delete followerOwnerStats;
@@ -2057,6 +2081,7 @@ bool testZ34CStructuralLayersAndFalling()
         static_cast<int>(x), static_cast<int>(y), 2,
         landingFloor, floorsFallen));
     EXPECT(floorsFallen == 0);
+	resetPersistentWorldSession();
     return true;
 }
 

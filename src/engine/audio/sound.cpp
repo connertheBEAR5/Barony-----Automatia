@@ -13,6 +13,10 @@
 #include "../../files.hpp"
 #include "../../game.hpp"
 #include "sound.hpp"
+#include <atomic>
+#include <cctype>
+#include <limits>
+#include <vector>
 #ifndef EDITOR
 #include "../../player.hpp"
 #endif
@@ -420,7 +424,9 @@ void sound_update(int player, int index, int numplayers)
 struct OPENAL_BUFFER {
 	ALuint id;
 	bool stream;
-	char oggfile[64];
+	bool loop;
+	bool persistent_channel;
+	char oggfile[PATH_MAX];
 };
 struct OPENAL_SOUND {
 	ALuint id;
@@ -437,6 +443,7 @@ struct OPENAL_SOUND {
 	ALuint streambuff[4];
 	bool loop;
 	bool stream_active;
+	bool stream_open;
 	int indice;
 };
 
@@ -451,20 +458,25 @@ SDL_mutex *openal_mutex;
 
 static size_t openal_oggread(void* ptr, size_t size, size_t nmemb, void* datasource) {
 	OPENAL_SOUND* self = (OPENAL_SOUND*)datasource;
-
-	int bytes = size*nmemb;
-	int remain = self->oggdata_length - self->ogg_seekoffset - bytes;
-	if(remain < 0) bytes += remain;
-
-	memcpy(ptr, self->oggdata + self->ogg_seekoffset, bytes);
-	self->ogg_seekoffset += bytes;
-
-	return bytes;
+	if (!self || !ptr || size == 0 || nmemb == 0 || !self->oggdata) {
+		return 0;
+	}
+	const size_t offset = static_cast<size_t>(self->ogg_seekoffset);
+	const size_t length = static_cast<size_t>(self->oggdata_length);
+	const size_t availableItems = offset < length ? (length - offset) / size : 0U;
+	const size_t itemCount = std::min(nmemb, availableItems);
+	const size_t bytes = itemCount * size;
+	memcpy(ptr, self->oggdata + offset, bytes);
+	self->ogg_seekoffset += static_cast<int>(bytes);
+	return itemCount;
 }
 
 static int openal_oggseek(void* datasource, ogg_int64_t offset, int whence) {
 	OPENAL_SOUND* self = (OPENAL_SOUND*)datasource;
-	int seek_offset;
+	if (!self) {
+		return -1;
+	}
+	ogg_int64_t seek_offset = 0;
 
 	switch(whence) {
 	case SEEK_CUR:
@@ -476,12 +488,12 @@ static int openal_oggseek(void* datasource, ogg_int64_t offset, int whence) {
 	case SEEK_SET:
 		seek_offset = offset;
 		break;
-	/*default:
-		exit(1);*/
+	default:
+		return -1;
 	}
-	if(seek_offset > self->oggdata_length) return -1;
+	if(seek_offset < 0 || seek_offset > self->oggdata_length) return -1;
 
-	self->ogg_seekoffset = seek_offset;
+	self->ogg_seekoffset = static_cast<int>(seek_offset);
 	return 0;
 }
 
@@ -491,12 +503,14 @@ static int openal_oggclose(void* datasource) {
 
 static long int openal_oggtell(void* datasource) {
 	OPENAL_SOUND* self = (OPENAL_SOUND*)datasource;
-	return self->ogg_seekoffset;
+	return self ? self->ogg_seekoffset : -1;
 }
 
 static int openal_oggopen(OPENAL_SOUND *self, const char* oggfile) {
+	if (!self || !oggfile) {
+		return 0;
+	}
 	File *f = openDataFile(oggfile, "rb");
-	int err;
 
 	ov_callbacks oggcb = {openal_oggread, openal_oggseek, openal_oggclose, openal_oggtell};
 
@@ -504,26 +518,65 @@ static int openal_oggopen(OPENAL_SOUND *self, const char* oggfile) {
 		return 0;
 	}
 
+	const size_t fileSize = f->size();
+	if (fileSize == 0 || fileSize > static_cast<size_t>(std::numeric_limits<int>::max())) {
+		FileIO::close(f);
+		printlog("[OpenAL]: invalid OGG stream size for '%s'.", oggfile);
+		return 0;
+	}
 	self->ogg_seekoffset = 0;
-	self->oggdata_length = f->size();
-
-	self->oggdata = (char*)malloc(self->oggdata_length);
-	f->read(self->oggdata, sizeof(char), self->oggdata_length);
+	self->oggdata_length = static_cast<int>(fileSize);
+	self->oggdata = (char*)malloc(fileSize);
+	if (!self->oggdata || f->read(self->oggdata, sizeof(char), fileSize) != fileSize) {
+		free(self->oggdata);
+		self->oggdata = nullptr;
+		self->oggdata_length = 0;
+		FileIO::close(f);
+		printlog("[OpenAL]: failed to read OGG stream '%s'.", oggfile);
+		return 0;
+	}
 	FileIO::close(f);
 
 	if(ov_open_callbacks(self, &self->oggStream, 0, 0, oggcb)) {
-		printf("Issues with OGG callbacks\n");
+		printlog("[OpenAL]: invalid OGG stream '%s'.", oggfile);
+		free(self->oggdata);
+		self->oggdata = nullptr;
+		self->oggdata_length = 0;
 		return 0;
 	}
+	self->stream_open = true;
 
 	self->vorbisInfo = ov_info(&self->oggStream, -1);
 	self->vorbisComment = ov_comment(&self->oggStream, -1);
+	if (!self->vorbisInfo || self->vorbisInfo->channels < 1
+		|| self->vorbisInfo->channels > 2 || self->vorbisInfo->rate <= 0) {
+		printlog("[OpenAL]: unsupported OGG stream format in '%s'.", oggfile);
+		ov_clear(&self->oggStream);
+		free(self->oggdata);
+		self->oggdata = nullptr;
+		self->oggdata_length = 0;
+		self->stream_open = false;
+		return 0;
+	}
 
+	alGetError();
 	alGenBuffers(4, self->streambuff);
+	if (alGetError() != AL_NO_ERROR) {
+		printlog("[OpenAL]: failed to allocate stream buffers for '%s'.", oggfile);
+		ov_clear(&self->oggStream);
+		free(self->oggdata);
+		self->oggdata = nullptr;
+		self->oggdata_length = 0;
+		self->stream_open = false;
+		return 0;
+	}
 	return 1;
 }
 
 static int openal_oggrelease(OPENAL_SOUND *self) {
+	if (!self || !self->stream_open) {
+		return 0;
+	}
 	alSourceStop(self->id);
 	ov_raw_seek(&self->oggStream, 0);
 	int queued;
@@ -535,6 +588,12 @@ static int openal_oggrelease(OPENAL_SOUND *self) {
 	alDeleteBuffers(4, self->streambuff);
 	ov_clear(&self->oggStream);
 	free(self->oggdata);
+	self->oggdata = nullptr;
+	self->oggdata_length = 0;
+	self->ogg_seekoffset = 0;
+	self->vorbisInfo = nullptr;
+	self->vorbisComment = nullptr;
+	self->stream_open = false;
 	return 1;
 }
 
@@ -544,7 +603,7 @@ static int openal_streamread(OPENAL_SOUND *self, ALuint buffer) {
 	int size = 0;
 	int section;
 	int result;
-
+	bool rewoundWithoutData = false;
 
 	while (size < OGGSIZE) {
 		#ifdef USE_TREMOR
@@ -552,13 +611,16 @@ static int openal_streamread(OPENAL_SOUND *self, ALuint buffer) {
 		#else
 		result = ov_read(&self->oggStream, pcm+size, OGGSIZE -size, 0, 2, 1, &section);
 		#endif
-		if(result==0 && self->loop)
-			ov_raw_seek(&self->oggStream, 0);
-
-		if(result>0)
+		if(result>0) {
 			size += result;
-		else
+			rewoundWithoutData = false;
+		} else if (result == 0 && self->loop && !rewoundWithoutData
+			&& ov_raw_seek(&self->oggStream, 0) == 0) {
+			rewoundWithoutData = true;
+			continue;
+		} else {
 			break;
+		}
 	}
 
 	if(size==0) {
@@ -574,8 +636,7 @@ static int openal_streamread(OPENAL_SOUND *self, ALuint buffer) {
 }
 
 static int openal_streamupdate(OPENAL_SOUND* self) {
-	int processed;
-	int active = 1;
+	int processed = 0;
 
 	alGetSourcei(self->id, AL_BUFFERS_PROCESSED, &processed);
 
@@ -584,13 +645,19 @@ static int openal_streamupdate(OPENAL_SOUND* self) {
 
 		alSourceUnqueueBuffers(self->id, 1, &buffer);
 
-		active = openal_streamread(self, buffer);
-		if(active)
+		if(openal_streamread(self, buffer))
 			alSourceQueueBuffers(self->id, 1, &buffer);
 	}
-	self->stream_active = active;
+	ALint state = AL_STOPPED;
+	ALint queued = 0;
+	alGetSourcei(self->id, AL_SOURCE_STATE, &state);
+	alGetSourcei(self->id, AL_BUFFERS_QUEUED, &queued);
+	self->stream_active = queued > 0;
+	if (state != AL_PLAYING && state != AL_PAUSED && queued > 0) {
+		alSourcePlay(self->id);
+	}
 
-	return active;
+	return self->stream_active ? 1 : 0;
 }
 
 bool sfxUseDynamicAmbientVolume = true;
@@ -658,6 +725,7 @@ OPENAL_CHANNELGROUP *soundAmbient_group = NULL;
 OPENAL_CHANNELGROUP *soundEnvironment_group = NULL;
 OPENAL_CHANNELGROUP *music_group = NULL;
 OPENAL_CHANNELGROUP *music_notification_group = NULL;
+OPENAL_CHANNELGROUP *soundNotification_group = NULL;
 
 float fadein_increment = 0.002f;
 float default_fadein_increment = 0.002f;
@@ -670,39 +738,48 @@ int lower_freechannel = 0;
 int upper_unfreechannel = 0;
 
 SDL_Thread* openal_soundthread;
-bool OpenALSoundON = true;
+static std::atomic<bool> openalSoundRunning{ false };
+static bool openalInitialized = false;
 
 void OPENAL_RemoveChannelGroup(OPENAL_SOUND *channel, OPENAL_CHANNELGROUP *group);
 
 static void private_OPENAL_Channel_Stop(OPENAL_SOUND* channel) {
+	if (!channel || !channel->active) {
+		return;
+	}
 	// stop and delete Sound (channel)
 	channel->stream_active = false;
 	alSourceStop(channel->id);
 	if(channel->group)
 		OPENAL_RemoveChannelGroup(channel, channel->group);
-	if(channel->buffer->stream)
+	if(channel->buffer && channel->buffer->stream)
 		openal_oggrelease(channel);
 	alDeleteSources( 1, &channel->id );
-	//free(channel);
+	channel->id = 0;
+	channel->buffer = nullptr;
+	channel->group = nullptr;
 	channel->active = false;
 }
 
 
 int OPENAL_ThreadFunction(void* data) {
 	(void)data;
-	while(OpenALSoundON) {
+	while(openalSoundRunning.load()) {
 		SDL_LockMutex(openal_mutex);
 
 		// Updates Stream channel
 		for (int i=0; i<upper_unfreechannel; i++) {
-			if(openal_sounds[i].active && openal_sounds[i].buffer->stream && openal_sounds[i].stream_active) {
+			if(openal_sounds[i].active && openal_sounds[i].buffer
+				&& openal_sounds[i].buffer->stream && openal_sounds[i].stream_active) {
 				openal_streamupdate(&openal_sounds[i]);
 			}
 		}
 
 		// check finished sound to free them, unless it's a streamed channel...
 		for (int i=0; i<upper_unfreechannel; i++) {
-			if(openal_sounds[i].active && !openal_sounds[i].buffer->stream) {
+			if(openal_sounds[i].active && openal_sounds[i].buffer
+				&& !openal_sounds[i].buffer->stream
+				&& !openal_sounds[i].buffer->persistent_channel) {
 				ALint state = 0;
 				alGetSourcei(openal_sounds[i].id, AL_SOURCE_STATE, &state);
 				if(!(state==AL_PLAYING || state==AL_PAUSED || state==AL_INITIAL)) {
@@ -724,49 +801,113 @@ int OPENAL_ThreadFunction(void* data) {
 
 int initOPENAL()
 {
-	static int initialized = 0;
-	if(initialized)
+	if(openalInitialized)
 		return 1;
 
 	openal_device = alcOpenDevice(NULL); // preferred device
-	if(!openal_device)
+	if(!openal_device) {
+		printlog("[OpenAL]: no playback device is available.");
 		return 0;
+	}
 
 	openal_context = alcCreateContext(openal_device,NULL);
-	if(!openal_context)
+	if(!openal_context) {
+		printlog("[OpenAL]: failed to create a playback context.");
+		alcCloseDevice(openal_device);
+		openal_device = nullptr;
 		return 0;
+	}
 
-	alcMakeContextCurrent(openal_context);
+	if (!alcMakeContextCurrent(openal_context)) {
+		printlog("[OpenAL]: failed to activate the playback context.");
+		alcDestroyContext(openal_context);
+		openal_context = nullptr;
+		alcCloseDevice(openal_device);
+		openal_device = nullptr;
+		return 0;
+	}
 
 	alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
 	alDopplerFactor(2.0f);
 
 	// creates channels groups
-	sound_group = (OPENAL_CHANNELGROUP*)malloc(sizeof(OPENAL_CHANNELGROUP));
-	soundAmbient_group = (OPENAL_CHANNELGROUP*)malloc(sizeof(OPENAL_CHANNELGROUP));
-	soundEnvironment_group = (OPENAL_CHANNELGROUP*)malloc(sizeof(OPENAL_CHANNELGROUP));
-	music_group = (OPENAL_CHANNELGROUP*)malloc(sizeof(OPENAL_CHANNELGROUP));
-	music_notification_group = (OPENAL_CHANNELGROUP*)malloc(sizeof(OPENAL_CHANNELGROUP));
-	memset(sound_group, 0, sizeof(OPENAL_CHANNELGROUP));
-	memset(soundAmbient_group, 0, sizeof(OPENAL_CHANNELGROUP));
-	memset(soundEnvironment_group, 0, sizeof(OPENAL_CHANNELGROUP));
-	memset(music_group, 0, sizeof(OPENAL_CHANNELGROUP));
-	memset(music_notification_group, 0, sizeof(OPENAL_CHANNELGROUP));
+	sound_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	soundAmbient_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	soundEnvironment_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	music_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	music_notification_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	soundNotification_group = (OPENAL_CHANNELGROUP*)calloc(1, sizeof(OPENAL_CHANNELGROUP));
+	if (!sound_group || !soundAmbient_group || !soundEnvironment_group
+		|| !music_group || !music_notification_group || !soundNotification_group) {
+		printlog("[OpenAL]: failed to allocate channel groups.");
+		free(sound_group);
+		free(soundAmbient_group);
+		free(soundEnvironment_group);
+		free(music_group);
+		free(music_notification_group);
+		free(soundNotification_group);
+		sound_group = soundAmbient_group = soundEnvironment_group = nullptr;
+		music_group = music_notification_group = soundNotification_group = nullptr;
+		alcMakeContextCurrent(nullptr);
+		alcDestroyContext(openal_context);
+		openal_context = nullptr;
+		alcCloseDevice(openal_device);
+		openal_device = nullptr;
+		return 0;
+	}
 	sound_group->volume = 1.0f;
 	soundAmbient_group->volume = 1.0f;
 	soundEnvironment_group->volume = 1.0f;
 	music_group->volume = 1.0f;
 	music_notification_group->volume = 1.0f;
+	soundNotification_group->volume = 1.0f;
 
 	memset(openal_sounds, 0, sizeof(openal_sounds));
 	lower_freechannel = 0;
 	upper_unfreechannel = 0;
 
-	OpenALSoundON = true;
 	openal_mutex = SDL_CreateMutex();
+	if (!openal_mutex) {
+		printlog("[OpenAL]: failed to create the audio mutex: %s", SDL_GetError());
+		free(sound_group);
+		free(soundAmbient_group);
+		free(soundEnvironment_group);
+		free(music_group);
+		free(music_notification_group);
+		free(soundNotification_group);
+		sound_group = soundAmbient_group = soundEnvironment_group = nullptr;
+		music_group = music_notification_group = soundNotification_group = nullptr;
+		alcMakeContextCurrent(nullptr);
+		alcDestroyContext(openal_context);
+		openal_context = nullptr;
+		alcCloseDevice(openal_device);
+		openal_device = nullptr;
+		return 0;
+	}
+	openalSoundRunning.store(true);
 	openal_soundthread = SDL_CreateThread(OPENAL_ThreadFunction, "openal", NULL);
+	if (!openal_soundthread) {
+		printlog("[OpenAL]: failed to create the audio thread: %s", SDL_GetError());
+		openalSoundRunning.store(false);
+		SDL_DestroyMutex(openal_mutex);
+		openal_mutex = nullptr;
+		free(sound_group);
+		free(soundAmbient_group);
+		free(soundEnvironment_group);
+		free(music_group);
+		free(music_notification_group);
+		free(soundNotification_group);
+		sound_group = soundAmbient_group = soundEnvironment_group = nullptr;
+		music_group = music_notification_group = soundNotification_group = nullptr;
+		alcMakeContextCurrent(nullptr);
+		alcDestroyContext(openal_context);
+		openal_context = nullptr;
+		alcCloseDevice(openal_device);
+		openal_device = nullptr;
+		return 0;
+	}
 
-	initialized = 1;
+	openalInitialized = true;
 
 #ifdef NINTENDO
 	//TODO: Do we also want this on other platforms?
@@ -784,33 +925,60 @@ int initOPENAL()
 
 int closeOPENAL()
 {
-	if(OpenALSoundON) return 0;
+	if(!openalInitialized) return 0;
 
-	OpenALSoundON = false;
+	openalSoundRunning.store(false);
 	int i = 0;
-	SDL_WaitThread(openal_soundthread, &i);
-	if(i!=1) {
-		printlog("Warning, unable to stop Openal thread\n");
+	if (openal_soundthread) {
+		SDL_WaitThread(openal_soundthread, &i);
+		openal_soundthread = nullptr;
+		if(i!=1) {
+			printlog("Warning, unable to stop OpenAL thread\n");
+		}
 	}
+
+	// stop all remaining sound
+	for (int i=0; i<upper_unfreechannel; i++) {
+		if(openal_sounds[i].active) {
+			private_OPENAL_Channel_Stop(&openal_sounds[i]);
+		}
+	}
+	lower_freechannel = 0;
+	upper_unfreechannel = 0;
+	music_channel = nullptr;
+	music_channel2 = nullptr;
+	music_resume = nullptr;
 
 	if(openal_mutex) {
 		SDL_DestroyMutex(openal_mutex);
 		openal_mutex = NULL;
 	}
 
-	// stop all remaining sound
-	for (int i=0; i<upper_unfreechannel; i++) {
-		if(openal_sounds[i].active && !openal_sounds[i].buffer->stream) {
-			private_OPENAL_Channel_Stop(&openal_sounds[i]);
+	auto freeGroup = [](OPENAL_CHANNELGROUP*& group) {
+		if (!group) {
+			return;
 		}
-	}
+		free(group->sounds);
+		free(group);
+		group = nullptr;
+	};
+	freeGroup(sound_group);
+	freeGroup(soundAmbient_group);
+	freeGroup(soundEnvironment_group);
+	freeGroup(music_group);
+	freeGroup(music_notification_group);
+	freeGroup(soundNotification_group);
 
 	alcMakeContextCurrent(NULL);
-	alcDestroyContext(openal_context);
-	openal_context = NULL;
-	alcCloseDevice(openal_device);
-	openal_device = NULL;
-	initialized = 0;
+	if (openal_context) {
+		alcDestroyContext(openal_context);
+		openal_context = NULL;
+	}
+	if (openal_device) {
+		alcCloseDevice(openal_device);
+		openal_device = NULL;
+	}
+	openalInitialized = false;
 
 	return 1;
 }
@@ -824,11 +992,18 @@ static int get_firstfreechannel()
 	if (i<MAXSOUND) {
 		return i;
 	}
-	//no free channels, force free last one :(
-	i = MAXSOUND-1;
-	// TODO, check if it's a Stream one, then skip it if yes
-	while((i>0) && (!openal_sounds[i].buffer->stream))
-		--i;
+	// No free channels: prefer reclaiming an ordinary effect so music and map
+	// ambience handles are not invalidated by a transient sound burst.
+	for (i = MAXSOUND - 1; i >= 0; --i) {
+		if (openal_sounds[i].active && openal_sounds[i].buffer
+			&& !openal_sounds[i].buffer->stream
+			&& !openal_sounds[i].buffer->persistent_channel) {
+			break;
+		}
+	}
+	if (i < 0) {
+		i = MAXSOUND - 1;
+	}
 
 	private_OPENAL_Channel_Stop(&openal_sounds[i]);
 
@@ -848,6 +1023,7 @@ void setGlobalVolume(real_t master, real_t music, real_t gameplay, real_t ambien
 	OPENAL_ChannelGroup_SetVolume(soundAmbient_group, master * ambient);
 	OPENAL_ChannelGroup_SetVolume(soundEnvironment_group, master * environment);
     OPENAL_ChannelGroup_SetVolume(music_notification_group, master * notification);
+	OPENAL_ChannelGroup_SetVolume(soundNotification_group, master * notification);
 }
 
 void sound_update(int player, int index, int numplayers)
@@ -903,20 +1079,22 @@ void sound_update(int player, int index, int numplayers)
 	up.y = ry;
 	up.z = rz;*/
 
+	if (openal_mutex) SDL_LockMutex(openal_mutex);
 	alListenerfv(AL_POSITION, (float*)&position);
 	alListenerfv(AL_ORIENTATION, vector);
+	if (openal_mutex) SDL_UnlockMutex(openal_mutex);
 	//FMOD_System_Set3DListenerAttributes(fmod_system, 0, &position, 0, &forward, &up);
 
 	//Fade in the currently playing music.
-	if (player == 0) {
+	if (player == 0)
+	{
 		if (music_channel)
 		{
-			ALint playing = 0;
-			alGetSourcei( music_channel->id, AL_SOURCE_STATE, &playing );
-			if (playing==AL_PLAYING)
+			ALboolean playing = AL_FALSE;
+			OPENAL_Channel_IsPlaying(music_channel, &playing);
+			if (playing == AL_TRUE)
 			{
-				float volume = music_channel->volume;
-
+				float volume = OPENAL_Channel_GetVolume(music_channel);
 				if (volume < 1.0f)
 				{
 					volume += fadein_increment * 2;
@@ -931,65 +1109,111 @@ void sound_update(int player, int index, int numplayers)
 		//The following makes crossfading possible. Fade out the last playing music. //TODO: Support for saving music so that it can be resumed (for stuff interrupting like combat music).
 		if (music_channel2)
 		{
-			ALint playing = 0;
-			alGetSourcei( music_channel2->id, AL_SOURCE_STATE, &playing );
-			if (playing)
+			ALboolean playing = AL_FALSE;
+			OPENAL_Channel_IsPlaying(music_channel2, &playing);
+			if (playing == AL_TRUE)
 			{
-				float volume = music_channel2->volume;
-
+				float volume = OPENAL_Channel_GetVolume(music_channel2);
 				if (volume > 0.0f)
 				{
-					//volume -= 0.001f;
-					//volume -= 0.005f;
 					volume -= fadeout_increment * 2;
 					if (volume < 0.0f)
 					{
 						volume = 0.0f;
 					}
 					OPENAL_Channel_SetVolume(music_channel2, volume);
-				} else {
-					/*OPENAL_Channel_Stop(music_channel2);
-					music_channel2 = NULL;*/
+				}
+				else
+				{
 					OPENAL_Channel_Pause(music_channel2);
 				}
 			}
 		}
+#ifndef EDITOR
+		updateMapAmbience();
+#endif
 	}
 }
 
 void OPENAL_Channel_SetVolume(OPENAL_SOUND *channel, float f) {
-	channel->volume = f;
-	if(channel->group)
-		f *= channel->group->volume;
-	alSourcef(channel->id, AL_GAIN, f);
+	if (!channel || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	if (channel->active) {
+		channel->volume = f;
+		if(channel->group)
+			f *= channel->group->volume;
+		alSourcef(channel->id, AL_GAIN, f);
+	}
+	SDL_UnlockMutex(openal_mutex);
+}
+
+float OPENAL_Channel_GetVolume(OPENAL_SOUND *channel) {
+	if (!channel || !openal_mutex) return 0.f;
+	SDL_LockMutex(openal_mutex);
+	const float volume = channel->active ? channel->volume : 0.f;
+	SDL_UnlockMutex(openal_mutex);
+	return volume;
 }
 
 void OPENAL_ChannelGroup_Stop(OPENAL_CHANNELGROUP* group) {
-	for (int i = 0; i< group->num; i++) {
-		if (group->sounds[i])
-			alSourceStop( group->sounds[i]->id );
+	if (!group || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	while (group->num > 0) {
+		OPENAL_SOUND* channel = group->sounds[group->num - 1];
+		if (channel && channel->active) {
+			const int index = channel->indice;
+			private_OPENAL_Channel_Stop(channel);
+			if (lower_freechannel > index) {
+				lower_freechannel = index;
+			}
+		} else {
+			--group->num;
+		}
 	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_ChannelGroup_SetVolume(OPENAL_CHANNELGROUP* group, float f) {
+	if (!group || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
 	group->volume = f;
 	for (int i = 0; i< group->num; i++) {
-		if (group->sounds[i])
+		if (group->sounds[i] && group->sounds[i]->active)
 			alSourcef( group->sounds[i]->id, AL_GAIN, f*group->sounds[i]->volume );
 	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Channel_SetChannelGroup(OPENAL_SOUND *channel, OPENAL_CHANNELGROUP *group) {
+	if (!channel || !channel->active || !group || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	if (channel->group == group) {
+		alSourcef(channel->id, AL_GAIN, channel->volume * group->volume);
+		SDL_UnlockMutex(openal_mutex);
+		return;
+	}
+	if (channel->group) {
+		OPENAL_RemoveChannelGroup(channel, channel->group);
+	}
 	if(group->num==group->cap) {
-		group->cap += 8;
-		group->sounds = (OPENAL_SOUND**)realloc(group->sounds, group->cap*sizeof(OPENAL_SOUND*));
+		const int newCapacity = group->cap + 8;
+		OPENAL_SOUND** grown = (OPENAL_SOUND**)realloc(
+			group->sounds, newCapacity * sizeof(OPENAL_SOUND*));
+		if (!grown) {
+			SDL_UnlockMutex(openal_mutex);
+			return;
+		}
+		group->sounds = grown;
+		group->cap = newCapacity;
 	}
 	alSourcef(channel->id, AL_GAIN, channel->volume * group->volume);
 	group->sounds[group->num++] = channel;
 	channel->group = group;
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_RemoveChannelGroup(OPENAL_SOUND *channel, OPENAL_CHANNELGROUP *group) {
+	if (!channel || !group) return;
 	int i = 0;
 	while ((i<group->num) && (channel!=group->sounds[i]))
 		i++;
@@ -997,24 +1221,59 @@ void OPENAL_RemoveChannelGroup(OPENAL_SOUND *channel, OPENAL_CHANNELGROUP *group
 		return;
 	memmove(group->sounds+i, group->sounds+i+1, sizeof(OPENAL_SOUND*)*(group->num-(i+1)));
 	group->num--;
+	if (group->sounds) {
+		group->sounds[group->num] = nullptr;
+	}
+	channel->group = nullptr;
 }
 
 static size_t openal_file_oggread(void* ptr, size_t size, size_t nmemb, void* datasource) {
 	File* file = (File*)datasource;
+	if (!file || size == 0) return 0;
 	return file->read(ptr, size, nmemb);
 }
 
 static int openal_file_oggseek(void* datasource, ogg_int64_t offset, int whence) {
 	File* file = (File*)datasource;
+	if (!file) return -1;
+	const size_t fileSize = file->size();
+	const long int positionBeforeSeek = file->tell();
+	bool requestedEndOfFile = false;
+	File::SeekMode mode = File::SeekMode::SET;
 	switch (whence) {
 	case SEEK_CUR:
-		return file->seek((ptrdiff_t)offset, File::SeekMode::ADD);
+		mode = File::SeekMode::ADD;
+		if (positionBeforeSeek >= 0 && offset >= 0
+			&& static_cast<size_t>(positionBeforeSeek) <= fileSize
+			&& static_cast<uint64_t>(offset)
+				== fileSize - static_cast<size_t>(positionBeforeSeek)) {
+			requestedEndOfFile = true;
+		}
+		break;
 	case SEEK_END:
-		return file->seek((ptrdiff_t)offset, File::SeekMode::SETEND);
+		mode = File::SeekMode::SETEND;
+		requestedEndOfFile = offset == 0;
+		break;
 	case SEEK_SET:
-		return file->seek((ptrdiff_t)offset, File::SeekMode::SET);
+		mode = File::SeekMode::SET;
+		requestedEndOfFile = offset >= 0
+			&& static_cast<uint64_t>(offset) == fileSize;
+		break;
+	default:
+		return -1;
 	}
-	return 0;
+	if (offset < std::numeric_limits<ptrdiff_t>::min()
+		|| offset > std::numeric_limits<ptrdiff_t>::max()) {
+		return -1;
+	}
+	const int result = file->seek(static_cast<ptrdiff_t>(offset), mode);
+	// FilePC historically reports EOF as a seek error even when it moved to the
+	// requested end position. Vorbis expects stdio-style success for that seek.
+	if (result != 0 && requestedEndOfFile && file->tell() >= 0
+		&& static_cast<size_t>(file->tell()) == fileSize) {
+		return 0;
+	}
+	return result;
 }
 
 static int openal_file_oggclose(void* datasource) {
@@ -1023,80 +1282,268 @@ static int openal_file_oggclose(void* datasource) {
 
 static long int openal_file_oggtell(void* datasource) {
 	File* file = (File*)datasource;
-	return file->tell();
+	return file ? file->tell() : -1;
+}
+
+static bool openalHasExtension(const char* name, const char* extension) {
+	if (!name || !extension) return false;
+	const size_t nameLength = strlen(name);
+	const size_t extensionLength = strlen(extension);
+	if (nameLength < extensionLength) return false;
+	for (size_t i = 0; i < extensionLength; ++i) {
+		const unsigned char lhs = static_cast<unsigned char>(
+			name[nameLength - extensionLength + i]);
+		const unsigned char rhs = static_cast<unsigned char>(extension[i]);
+		if (std::tolower(lhs) != std::tolower(rhs)) return false;
+	}
+	return true;
+}
+
+static bool openalUploadPcm(OPENAL_BUFFER* buffer, const int channels,
+	const void* data, const size_t size, const int frequency) {
+	if (!buffer || !data || size == 0
+		|| size > static_cast<size_t>(std::numeric_limits<ALsizei>::max())
+		|| (channels != 1 && channels != 2) || frequency <= 0) {
+		return false;
+	}
+	if (!openal_context) {
+		return false;
+	}
+	if (openal_mutex) SDL_LockMutex(openal_mutex);
+	alGetError();
+	alGenBuffers(1, &buffer->id);
+	if (alGetError() != AL_NO_ERROR || buffer->id == 0) {
+		buffer->id = 0;
+		if (openal_mutex) SDL_UnlockMutex(openal_mutex);
+		return false;
+	}
+	alBufferData(buffer->id,
+		channels == 1 ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16,
+		data, static_cast<ALsizei>(size), frequency);
+	if (alGetError() != AL_NO_ERROR) {
+		alDeleteBuffers(1, &buffer->id);
+		buffer->id = 0;
+		if (openal_mutex) SDL_UnlockMutex(openal_mutex);
+		return false;
+	}
+	if (openal_mutex) SDL_UnlockMutex(openal_mutex);
+	return true;
+}
+
+static bool openalLoadWav(File* file, const char* name, const bool b3D,
+	OPENAL_BUFFER* buffer) {
+	const size_t fileSize = file ? file->size() : 0;
+	if (fileSize == 0 || fileSize > static_cast<size_t>(std::numeric_limits<int>::max())) {
+		return false;
+	}
+	std::vector<Uint8> encoded(fileSize);
+	if (file->read(encoded.data(), sizeof(Uint8), fileSize) != fileSize) {
+		return false;
+	}
+	SDL_RWops* rw = SDL_RWFromConstMem(encoded.data(), static_cast<int>(fileSize));
+	if (!rw) {
+		return false;
+	}
+	SDL_AudioSpec sourceSpec{};
+	Uint8* sourceData = nullptr;
+	Uint32 sourceLength = 0;
+	if (!SDL_LoadWAV_RW(rw, 1, &sourceSpec, &sourceData, &sourceLength)) {
+		printlog("[OpenAL]: invalid WAV file '%s': %s", name, SDL_GetError());
+		return false;
+	}
+
+	const Uint8 targetChannels = b3D || sourceSpec.channels == 1 ? 1 : 2;
+	SDL_AudioCVT converter{};
+	const int conversion = SDL_BuildAudioCVT(&converter,
+		sourceSpec.format, sourceSpec.channels, sourceSpec.freq,
+		AUDIO_S16SYS, targetChannels, sourceSpec.freq);
+	if (conversion < 0) {
+		printlog("[OpenAL]: cannot convert WAV file '%s': %s", name, SDL_GetError());
+		SDL_FreeWAV(sourceData);
+		return false;
+	}
+
+	const Uint8* pcmData = sourceData;
+	size_t pcmLength = sourceLength;
+	Uint8* convertedData = nullptr;
+	if (conversion > 0) {
+		if (sourceLength > static_cast<Uint32>(
+			std::numeric_limits<int>::max() / std::max(1, converter.len_mult))) {
+			SDL_FreeWAV(sourceData);
+			return false;
+		}
+		converter.len = static_cast<int>(sourceLength);
+		converter.buf = (Uint8*)SDL_malloc(
+			static_cast<size_t>(sourceLength) * converter.len_mult);
+		if (!converter.buf) {
+			SDL_FreeWAV(sourceData);
+			return false;
+		}
+		memcpy(converter.buf, sourceData, sourceLength);
+		if (SDL_ConvertAudio(&converter) < 0) {
+			printlog("[OpenAL]: cannot convert WAV file '%s': %s", name, SDL_GetError());
+			SDL_free(converter.buf);
+			SDL_FreeWAV(sourceData);
+			return false;
+		}
+		convertedData = converter.buf;
+		pcmData = convertedData;
+		pcmLength = static_cast<size_t>(converter.len_cvt);
+	}
+
+	const bool loaded = openalUploadPcm(
+		buffer, targetChannels, pcmData, pcmLength, sourceSpec.freq);
+	SDL_free(convertedData);
+	SDL_FreeWAV(sourceData);
+	return loaded;
+}
+
+static bool openalLoadOgg(File* file, const char* name, const bool b3D,
+	OPENAL_BUFFER* buffer) {
+	if (!file) return false;
+	ov_callbacks oggCallbacks = {
+		openal_file_oggread, openal_file_oggseek,
+		openal_file_oggclose, openal_file_oggtell
+	};
+	OggVorbis_File oggFile{};
+	if (ov_open_callbacks(file, &oggFile, nullptr, 0, oggCallbacks) != 0) {
+		printlog("[OpenAL]: invalid OGG file '%s'.", name);
+		return false;
+	}
+	vorbis_info* info = ov_info(&oggFile, -1);
+	const ogg_int64_t frameCount = ov_pcm_total(&oggFile, -1);
+	if (!info || (info->channels != 1 && info->channels != 2)
+		|| info->rate <= 0 || frameCount <= 0
+		|| static_cast<uint64_t>(frameCount)
+			> std::numeric_limits<size_t>::max()
+				/ (static_cast<size_t>(info->channels) * sizeof(int16_t))) {
+		printlog("[OpenAL]: unsupported OGG format in '%s'.", name);
+		ov_clear(&oggFile);
+		return false;
+	}
+
+	const size_t sampleCount = static_cast<size_t>(frameCount)
+		* static_cast<size_t>(info->channels);
+	const size_t capacity = sampleCount * sizeof(int16_t);
+	std::vector<int16_t> decoded(sampleCount);
+	char* decodedBytes = reinterpret_cast<char*>(decoded.data());
+	size_t decodedLength = 0;
+	bool decodeFailed = false;
+	while (decodedLength < capacity) {
+		int bitStream = 0;
+		const int request = static_cast<int>(std::min(
+			capacity - decodedLength,
+			static_cast<size_t>(std::numeric_limits<int>::max())));
+#ifdef USE_TREMOR
+		const long bytes = ov_read(
+			&oggFile, decodedBytes + decodedLength, request, &bitStream);
+#else
+		const long bytes = ov_read(
+			&oggFile, decodedBytes + decodedLength, request, 0, 2, 1, &bitStream);
+#endif
+		if (bytes == 0) break;
+		if (bytes < 0) {
+			decodeFailed = true;
+			break;
+		}
+		decodedLength += static_cast<size_t>(bytes);
+	}
+	const int sourceChannels = info->channels;
+	const int frequency = info->rate;
+	ov_clear(&oggFile);
+	if (decodeFailed || decodedLength == 0
+		|| decodedLength % (sourceChannels * sizeof(int16_t)) != 0) {
+		printlog("[OpenAL]: failed decoding OGG file '%s'.", name);
+		return false;
+	}
+
+	if (b3D && sourceChannels == 2) {
+		const size_t stereoFrames = decodedLength / (2 * sizeof(int16_t));
+		std::vector<int16_t> mono(stereoFrames);
+		const int16_t* stereo = decoded.data();
+		for (size_t i = 0; i < stereoFrames; ++i) {
+			const int mixed = static_cast<int>(stereo[i * 2])
+				+ static_cast<int>(stereo[i * 2 + 1]);
+			mono[i] = static_cast<int16_t>(mixed / 2);
+		}
+		return openalUploadPcm(
+			buffer, 1, mono.data(), mono.size() * sizeof(int16_t), frequency);
+	}
+	return openalUploadPcm(
+		buffer, sourceChannels, decoded.data(), decodedLength, frequency);
 }
 
 int OPENAL_CreateSound(const char* name, bool b3D, OPENAL_BUFFER **buffer) {
-	*buffer = (OPENAL_BUFFER*)malloc(sizeof(OPENAL_BUFFER));
-	strncpy((*buffer)->oggfile, name, 64);	// for debugging purpose
-	(*buffer)->stream = false;
-	File *f = openDataFile(name, "rb");
-	if(!f) {
-		printlog("Error loading sound %s\n", name);
+	if (!buffer || !name) {
 		return 0;
 	}
-
-	ov_callbacks oggcb = { openal_file_oggread, openal_file_oggseek, openal_file_oggclose, openal_file_oggtell };
-
-	vorbis_info * pInfo;
-	OggVorbis_File oggFile;
-	ov_open_callbacks(f, &oggFile, NULL, 0, oggcb);
-	pInfo = ov_info(&oggFile, -1);
-
-	int channels = pInfo->channels;
-	int freq = pInfo->rate;
-	ov_pcm_seek(&oggFile, 0);
-	size_t size = ov_pcm_total(&oggFile, -1) * 2 * (pInfo->channels+1);
-	char* data = (char*)malloc(size+size/2);	// safe side
-	char* ptr = data;
-	int bytes = 0;
-	size_t sz = 0;
-	do {
-		int bitStream;
-		#ifdef USE_TREMOR
-		bytes = ov_read(&oggFile, ptr, size, &bitStream);
-		#else
-		bytes = ov_read(&oggFile, ptr, size, 0, 2, 1, &bitStream);
-		#endif
-		size-=bytes;
-		ptr+=bytes;
-		sz+=bytes;
-	} while(bytes>0);
-	char *data2 = data;
-	if(b3D && channels==2) {
-		// downmixing sound to mono, because 3D sounds NEEDS mono sound
-		data2 = (char*)malloc(sz/2);
-		int16_t *p1, *p2;
-		p1 = (int16_t*)data2;
-		p2 = (int16_t*)data;
-		sz/=2;
-		for(int i=0; i<sz/2; i++) {
-			*(p1++) = (p2[0]+p2[1])/2;
-			p2+=2;
-		}
-		channels = 1;
+	*buffer = (OPENAL_BUFFER*)calloc(1, sizeof(OPENAL_BUFFER));
+	if (!*buffer) {
+		return 0;
 	}
-
-	ov_clear(&oggFile);
-	alGenBuffers(1, &(*buffer)->id);
-	alBufferData((*buffer)->id, (channels==1)?AL_FORMAT_MONO16:AL_FORMAT_STEREO16, data2, sz, freq);
-	if(data2!=data)
-		free(data2);
-	free(data);
+	snprintf((*buffer)->oggfile, sizeof((*buffer)->oggfile), "%s", name);
+	(*buffer)->stream = false;
+	(*buffer)->loop = false;
+	(*buffer)->persistent_channel = false;
+	if (strlen(name) >= sizeof((*buffer)->oggfile)) {
+		printlog("[OpenAL]: audio path is too long: '%s'.", name);
+		free(*buffer);
+		*buffer = nullptr;
+		return 0;
+	}
+	File *f = openDataFile(name, "rb");
+	if(!f) {
+		printlog("[OpenAL]: error opening sound '%s'.", name);
+		free(*buffer);
+		*buffer = nullptr;
+		return 0;
+	}
+	const bool loaded = openalHasExtension(name, ".wav")
+		? openalLoadWav(f, name, b3D, *buffer)
+		: openalLoadOgg(f, name, b3D, *buffer);
 	FileIO::close(f);
+	if (!loaded) {
+		free(*buffer);
+		*buffer = nullptr;
+		return 0;
+	}
 	return 1;
 }
 
 int OPENAL_CreateStreamSound(const char* name, OPENAL_BUFFER **buffer) {
-	*buffer = (OPENAL_BUFFER*)malloc(sizeof(OPENAL_BUFFER));
+	if (!buffer || !name) {
+		return 0;
+	}
+	// OpenAL's streaming decoder is Vorbis-based. WAV remains fully supported,
+	// but is decoded into a regular buffer when streaming was requested.
+	if (openalHasExtension(name, ".wav")) {
+		const int result = OPENAL_CreateSound(name, false, buffer);
+		if (result && *buffer) {
+			(*buffer)->persistent_channel = true;
+		}
+		return result;
+	}
+	*buffer = (OPENAL_BUFFER*)calloc(1, sizeof(OPENAL_BUFFER));
+	if (!*buffer) {
+		return 0;
+	}
 	(*buffer)->stream = true;
-	strcpy((*buffer)->oggfile, name);
+	(*buffer)->loop = false;
+	(*buffer)->persistent_channel = true;
+	if (strlen(name) >= sizeof((*buffer)->oggfile)) {
+		printlog("[OpenAL]: audio path is too long: '%s'.", name);
+		free(*buffer);
+		*buffer = nullptr;
+		return 0;
+	}
+	snprintf((*buffer)->oggfile, sizeof((*buffer)->oggfile), "%s", name);
 	return 1;
 }
 
 OPENAL_SOUND* OPENAL_CreateChannel(OPENAL_BUFFER* buffer) {
-	//OPENAL_SOUND *channel=(OPENAL_SOUND*)malloc(sizeof(OPENAL_SOUND));
-
+	if (!buffer || !openal_context || !openal_mutex) {
+		return nullptr;
+	}
 	SDL_LockMutex(openal_mutex);
 
 	int i = get_firstfreechannel();
@@ -1106,19 +1553,35 @@ OPENAL_SOUND* OPENAL_CreateChannel(OPENAL_BUFFER* buffer) {
 	lower_freechannel = i+1;
 
 	OPENAL_SOUND *channel = &openal_sounds[i];
+	memset(channel, 0, sizeof(*channel));
+	alGetError();
 	alGenSources(1,&channel->id);
+	if (alGetError() != AL_NO_ERROR || channel->id == 0) {
+		channel->active = false;
+		if (lower_freechannel > i) lower_freechannel = i;
+		SDL_UnlockMutex(openal_mutex);
+		return nullptr;
+	}
 	channel->volume = 1.0f;
 	channel->group = NULL;
 	channel->active = true;
-	channel->loop = false;
+	channel->loop = buffer->loop;
 	channel->buffer = buffer;
 	channel->stream_active = false;
+	channel->stream_open = false;
 	channel->indice = i;
 
 	if(buffer->stream) {
-		openal_oggopen(channel, buffer->oggfile);
-	} else
+		if (!openal_oggopen(channel, buffer->oggfile)) {
+			private_OPENAL_Channel_Stop(channel);
+			if (lower_freechannel > i) lower_freechannel = i;
+			SDL_UnlockMutex(openal_mutex);
+			return nullptr;
+		}
+	} else {
 		alSourcei(channel->id, AL_BUFFER, buffer->id);
+		alSourcei(channel->id, AL_LOOPING, buffer->loop ? AL_TRUE : AL_FALSE);
+	}
 	// default to 2D...
 	alSourcei(channel->id,AL_SOURCE_RELATIVE, AL_TRUE);
 	alSource3f(channel->id, AL_POSITION, 0, 0, 0);
@@ -1128,16 +1591,31 @@ OPENAL_SOUND* OPENAL_CreateChannel(OPENAL_BUFFER* buffer) {
 }
 
 void OPENAL_Channel_IsPlaying(void* channel, ALboolean *playing) {
-	ALint state;
-	alGetSourcei( ((OPENAL_SOUND*)channel)->id, AL_SOURCE_STATE, &state );
-	(*playing) = (state == AL_PLAYING);
+	if (!playing) return;
+	if (!channel || !openal_mutex) {
+		*playing = AL_FALSE;
+		return;
+	}
+	SDL_LockMutex(openal_mutex);
+	OPENAL_SOUND* openalChannel = (OPENAL_SOUND*)channel;
+	if (!openalChannel->active) {
+		*playing = AL_FALSE;
+	} else {
+		ALint state = AL_STOPPED;
+		alGetSourcei(openalChannel->id, AL_SOURCE_STATE, &state);
+		*playing = state == AL_PLAYING ? AL_TRUE : AL_FALSE;
+	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Channel_Stop(void* chan) {
+	OPENAL_SOUND* channel = (OPENAL_SOUND*)chan;
+	if(channel==NULL || !openal_mutex) {
+		return;
+	}
 	SDL_LockMutex(openal_mutex);
 
-	OPENAL_SOUND* channel = (OPENAL_SOUND*)chan;
-	if(channel==NULL || !channel->active) {
+	if(!channel->active) {
 		SDL_UnlockMutex(openal_mutex);
 		return;
 	}
@@ -1152,21 +1630,26 @@ void OPENAL_Channel_Stop(void* chan) {
 }
 
 void OPENAL_Channel_Set3DAttributes(OPENAL_SOUND* channel, float x, float y, float z) {
-
-	alSourcei(channel->id,AL_SOURCE_RELATIVE, AL_FALSE);
-	alSource3f(channel->id, AL_POSITION, x, y, z);
-	alSourcef(channel->id, AL_REFERENCE_DISTANCE, 1.f);	// hardcoding FMOD_System_Set3DSettings(fmod_system, 1.0, 2.0, 1.0);
-	alSourcef(channel->id, AL_MAX_DISTANCE, 10.f);		// but this are simply OpenAL default (the 2.0f is used for Dopler only)
+	if (!channel || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	if (channel->active) {
+		alSourcei(channel->id,AL_SOURCE_RELATIVE, AL_FALSE);
+		alSource3f(channel->id, AL_POSITION, x, y, z);
+		alSourcef(channel->id, AL_REFERENCE_DISTANCE, 1.f);	// hardcoding FMOD_System_Set3DSettings(fmod_system, 1.0, 2.0, 1.0);
+		alSourcef(channel->id, AL_MAX_DISTANCE, 10.f);		// but this are simply OpenAL default (the 2.0f is used for Dopler only)
+	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Channel_Play(OPENAL_SOUND* channel) {
+	if (!channel || !channel->active || !openal_mutex) return;
 	SDL_LockMutex(openal_mutex);
 
 	ALint state;
 	alGetSourcei( channel->id, AL_SOURCE_STATE, &state );
 	if(state != AL_PLAYING && state != AL_PAUSED) {
 		if(channel->buffer->stream) {
-			int processed;
+			int processed = 0;
 			int num_buffers = 4;
 			int i;
 			ALuint trash[256];
@@ -1181,42 +1664,95 @@ void OPENAL_Channel_Play(OPENAL_SOUND* channel) {
 				}
 			}
 
-			alSourceQueueBuffers(channel->id, num_buffers, channel->streambuff);
-			channel->stream_active = true;
+			if (num_buffers > 0) {
+				alSourceQueueBuffers(channel->id, num_buffers, channel->streambuff);
+				channel->stream_active = true;
+			} else {
+				channel->stream_active = false;
+			}
 		}
 	}
-	alSourcePlay(channel->id);
+	if (!channel->buffer->stream || channel->stream_active) {
+		alSourcePlay(channel->id);
+	}
 
 	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Channel_Pause(OPENAL_SOUND* channel) {
-	alSourcePause(channel->id);
+	if (!channel || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	if (channel->active) alSourcePause(channel->id);
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_GetBuffer(OPENAL_SOUND* channel, OPENAL_BUFFER** buffer) {
-	(*buffer) = channel->buffer;
+	if (!buffer) return;
+	if (!channel || !openal_mutex) {
+		*buffer = nullptr;
+		return;
+	}
+	SDL_LockMutex(openal_mutex);
+	*buffer = channel->active ? channel->buffer : nullptr;
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_SetLoop(OPENAL_SOUND* channel, ALboolean looping) {
-	channel->loop = looping;
-	if(!channel->buffer->stream)
-		alSourcei(channel->id, AL_LOOPING, looping);
+	if (!channel || !openal_mutex) return;
+	SDL_LockMutex(openal_mutex);
+	if (channel->active && channel->buffer) {
+		channel->loop = looping;
+		if(!channel->buffer->stream)
+			alSourcei(channel->id, AL_LOOPING, looping);
+	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Channel_GetPosition(OPENAL_SOUND* channel, unsigned int *position) {
-	alGetSourcei(channel->id, AL_BYTE_OFFSET, (GLint*)position);
+	if (!position) return;
+	if (!channel || !openal_mutex) {
+		*position = 0;
+		return;
+	}
+	SDL_LockMutex(openal_mutex);
+	if (channel->active) {
+		alGetSourcei(channel->id, AL_BYTE_OFFSET, (GLint*)position);
+	} else {
+		*position = 0;
+	}
+	SDL_UnlockMutex(openal_mutex);
 }
 
 void OPENAL_Sound_GetLength(OPENAL_BUFFER* buffer, unsigned int *length) {
-	if(!buffer) return;
+	if(!length) return;
+	*length = 0;
+	if(!buffer || buffer->stream || !openal_context) return;
+	if (openal_mutex) SDL_LockMutex(openal_mutex);
 	alGetBufferi(buffer->id, AL_SIZE, (GLint*)length);
+	if (openal_mutex) SDL_UnlockMutex(openal_mutex);
+}
+
+void OPENAL_Sound_SetDefaultLoop(OPENAL_BUFFER* buffer, ALboolean looping) {
+	if (!buffer) return;
+	buffer->loop = looping == AL_TRUE;
 }
 
 void OPENAL_Sound_Release(OPENAL_BUFFER* buffer) {
 	if(!buffer) return;
-	if(!buffer->stream)
+	if (openal_mutex) {
+		SDL_LockMutex(openal_mutex);
+		for (int i = 0; i < upper_unfreechannel; ++i) {
+			if (openal_sounds[i].active && openal_sounds[i].buffer == buffer) {
+				private_OPENAL_Channel_Stop(&openal_sounds[i]);
+				if (lower_freechannel > i) lower_freechannel = i;
+			}
+		}
+		if(!buffer->stream && openal_context)
+			alDeleteBuffers( 1, &buffer->id );
+		SDL_UnlockMutex(openal_mutex);
+	} else if(!buffer->stream && openal_context) {
 		alDeleteBuffers( 1, &buffer->id );
+	}
 	free(buffer);
 }
 
@@ -1239,6 +1775,10 @@ static bool reloadOpenALMusicBuffer(
     const int result = musicPreload
         ? OPENAL_CreateSound(filename.c_str(), false, &buffer)
         : OPENAL_CreateStreamSound(filename.c_str(), &buffer);
+    if (result != 0 && buffer)
+    {
+        buffer->persistent_channel = true;
+    }
     if ( result == 0 )
     {
         printlog(

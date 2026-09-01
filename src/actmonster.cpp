@@ -33,6 +33,7 @@
 #include "ui/MainMenu.hpp"
 #include "menu.hpp"
 #include "custom_dialogue_document.hpp"
+#include "quest_ownership.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #endif
@@ -274,6 +275,8 @@ struct CustomDialogueQuestObjective
     std::string markerMap;
     Sint32 markerX = -1;
     Sint32 markerY = -1;
+    Sint32 markerPlayableFloor = 0;
+    bool markerWholeColumn = true;
 };
 
 struct CustomDialogueDefinition
@@ -294,19 +297,14 @@ struct CustomDialogueDefinition
     std::string questOriginMap;
     Sint32 questOriginX = -1;
     Sint32 questOriginY = -1;
+    Sint32 questOriginPlayableFloor = 0;
+    bool questOriginWholeColumn = true;
     bool questOriginTrackNPC = false;
     Sint32 questOriginPersistentID = 0;
 
-    /*
-     * Authored ownership and repeatability metadata.
-     *
-     * Runtime support in this stage:
-     *     scope = "player"
-     *     repeatable = false
-     *
-     * Other combinations are parsed but rejected clearly until their
-     * authoritative reset/share behavior is implemented.
-     */
+    int dialogueSchemaVersion =
+        AutomatiaQuest::LEGACY_DIALOGUE_SCHEMA_VERSION;
+    std::string questAuthoredScope = "player";
     std::string questScope = "player";
     bool questRepeatable = false;
 
@@ -320,6 +318,53 @@ struct CustomDialogueDefinition
         CustomDialogueNode
     > nodes;
 };
+
+static AutomatiaQuest::Definition customDialogueQuestRegistryDefinition(
+    const CustomDialogueDefinition& source
+)
+{
+    AutomatiaQuest::Definition result;
+    result.questId = source.questID;
+    result.dialogueId = source.dialogueID;
+    result.title = source.questTitle;
+    result.summary = source.questSummary;
+    result.objective = source.questObjective;
+    result.completedText = source.questCompletedText;
+    result.failedText = source.questFailedText;
+    result.originLabel = source.questOriginLabel;
+    result.originMap = source.questOriginMap;
+    result.originX = source.questOriginX;
+    result.originY = source.questOriginY;
+    result.originPlayableFloor = source.questOriginPlayableFloor;
+    result.originWholeColumn = source.questOriginWholeColumn;
+    result.originTrackNpc = source.questOriginTrackNPC;
+    result.originPersistentId = source.questOriginPersistentID;
+    result.dialogueSchemaVersion = source.dialogueSchemaVersion;
+    (void)AutomatiaQuest::scopeFromName(
+        source.questAuthoredScope, result.authoredScope);
+    result.repeatable = source.questRepeatable;
+    result.objectives.reserve(source.questObjectives.size());
+    for (const CustomDialogueQuestObjective& sourceObjective :
+        source.questObjectives)
+    {
+        AutomatiaQuest::ObjectiveDefinition objective;
+        objective.id = sourceObjective.id;
+        objective.text = sourceObjective.text;
+        objective.completedText = sourceObjective.completedText;
+        objective.progressVariable = sourceObjective.progressVariable;
+        objective.stage = sourceObjective.stage;
+        objective.target = sourceObjective.target;
+        objective.defeatId = sourceObjective.defeatID;
+        objective.optional = sourceObjective.optional;
+        objective.markerMap = sourceObjective.markerMap;
+        objective.markerX = sourceObjective.markerX;
+        objective.markerY = sourceObjective.markerY;
+        objective.markerPlayableFloor = sourceObjective.markerPlayableFloor;
+        objective.markerWholeColumn = sourceObjective.markerWholeColumn;
+        result.objectives.push_back(std::move(objective));
+    }
+    return result;
+}
 
 /*
  * Dialogue definitions are immutable authored data, so they can be
@@ -1186,12 +1231,18 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
         return definition;
     }
 
-    if ( document["version"].GetInt() != 1 )
+    definition.dialogueSchemaVersion =
+        document["version"].GetInt();
+
+    if ( definition.dialogueSchemaVersion
+            < AutomatiaQuest::LEGACY_DIALOGUE_SCHEMA_VERSION
+        || definition.dialogueSchemaVersion
+            > AutomatiaQuest::CURRENT_DIALOGUE_SCHEMA_VERSION )
     {
         printlog(
             "[Custom Dialogue] '%s' uses unsupported dialogue version %d.",
             realPath.c_str(),
-            document["version"].GetInt()
+            definition.dialogueSchemaVersion
         );
 
         return definition;
@@ -1299,6 +1350,42 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 }
                 definition.questOriginX = origin["x"].GetInt();
                 definition.questOriginY = origin["y"].GetInt();
+            }
+            if ( origin.HasMember("floor_visibility") )
+            {
+                if ( !origin["floor_visibility"].IsString() )
+                {
+                    return definition;
+                }
+                const std::string visibility = normalizeCustomDialogueID(
+                    origin["floor_visibility"].GetString());
+                if ( visibility == "same_floor" )
+                {
+                    definition.questOriginWholeColumn = false;
+                }
+                else if ( visibility == "column" )
+                {
+                    definition.questOriginWholeColumn = true;
+                }
+                else
+                {
+                    return definition;
+                }
+            }
+            if ( origin.HasMember("playable_floor") )
+            {
+                if ( !origin["playable_floor"].IsInt()
+                    || origin["playable_floor"].GetInt() < 0 )
+                {
+                    return definition;
+                }
+                definition.questOriginPlayableFloor =
+                    origin["playable_floor"].GetInt();
+            }
+            if ( !definition.questOriginWholeColumn
+                && !origin.HasMember("playable_floor") )
+            {
+                return definition;
             }
             if ( origin.HasMember("track_npc") )
             {
@@ -1497,6 +1584,42 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                     {
                         return definition;
                     }
+                    if ( marker.HasMember("floor_visibility") )
+                    {
+                        if ( !marker["floor_visibility"].IsString() )
+                        {
+                            return definition;
+                        }
+                        const std::string visibility = normalizeCustomDialogueID(
+                            marker["floor_visibility"].GetString());
+                        if ( visibility == "same_floor" )
+                        {
+                            objective.markerWholeColumn = false;
+                        }
+                        else if ( visibility == "column" )
+                        {
+                            objective.markerWholeColumn = true;
+                        }
+                        else
+                        {
+                            return definition;
+                        }
+                    }
+                    if ( marker.HasMember("playable_floor") )
+                    {
+                        if ( !marker["playable_floor"].IsInt()
+                            || marker["playable_floor"].GetInt() < 0 )
+                        {
+                            return definition;
+                        }
+                        objective.markerPlayableFloor =
+                            marker["playable_floor"].GetInt();
+                    }
+                    if ( !objective.markerWholeColumn
+                        && !marker.HasMember("playable_floor") )
+                    {
+                        return definition;
+                    }
                 }
 
                 definition.questObjectives.push_back(
@@ -1518,19 +1641,19 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 return definition;
             }
 
-            definition.questScope =
+            definition.questAuthoredScope =
                 normalizeCustomDialogueID(
                     quest["scope"].GetString()
                 );
 
-            if ( definition.questScope != "player"
-                && definition.questScope != "party"
-                && definition.questScope != "world" )
+            if ( definition.questAuthoredScope != "player"
+                && definition.questAuthoredScope != "party"
+                && definition.questAuthoredScope != "world" )
             {
                 printlog(
                     "[Custom Dialogue] '%s' uses unsupported quest scope '%s'.",
                     realPath.c_str(),
-                    definition.questScope.c_str()
+                    definition.questAuthoredScope.c_str()
                 );
 
                 return definition;
@@ -1553,17 +1676,16 @@ static CustomDialogueDefinition loadCustomDialogueDefinition(
                 quest["repeatable"].GetBool();
         }
 
-        /*
-         * Party/world ownership is not implemented yet. Older editor
-         * builds could still write those values, so load them safely as
-         * per-player quests instead of rejecting the entire dialogue.
-         */
-        if ( definition.questScope != "player" )
+        definition.questScope = definition.questAuthoredScope;
+        if ( definition.dialogueSchemaVersion
+                < AutomatiaQuest::SHARED_OWNERSHIP_DIALOGUE_SCHEMA_VERSION
+            && definition.questAuthoredScope != "player" )
         {
             printlog(
-                "[Custom Dialogue] '%s' quest scope '%s' is not implemented; loading as player scope.",
+                "[Custom Dialogue] '%s' uses legacy schema %d; authored quest scope '%s' retains personal ownership until explicitly upgraded.",
                 realPath.c_str(),
-                definition.questScope.c_str()
+                definition.dialogueSchemaVersion,
+                definition.questAuthoredScope.c_str()
             );
             definition.questScope = "player";
         }
@@ -3217,6 +3339,23 @@ getCustomDialogueDefinition(
                     std::move(definition)
                 )
             ).first;
+
+        if ( iterator->second.valid
+            && !iterator->second.questID.empty() )
+        {
+            std::string registryError;
+            if ( !AutomatiaQuest::definitionRegistry().registerDefinition(
+                    customDialogueQuestRegistryDefinition(iterator->second),
+                    registryError) )
+            {
+                printlog(
+                    "[Custom Dialogue] Rejected quest definition '%s' from dialogue '%s': %s.",
+                    iterator->second.questID.c_str(),
+                    iterator->second.dialogueID.c_str(),
+                    registryError.c_str());
+                iterator->second.valid = false;
+            }
+        }
     }
 
     if ( !iterator->second.valid )
@@ -3230,6 +3369,55 @@ getCustomDialogueDefinition(
 
 
 
+static size_t preloadCustomDialogueQuestDirectories()
+{
+    constexpr size_t maximumDefinitions = 4096;
+    std::unordered_set<std::string> dialogueIDs;
+    for ( const char* directory : { "dialogue", "data/dialogue" } )
+    {
+        char** entries = PHYSFS_enumerateFiles(directory);
+        if ( !entries )
+        {
+            continue;
+        }
+        for ( char** entry = entries;
+            *entry && dialogueIDs.size() < maximumDefinitions;
+            ++entry )
+        {
+            std::string filename = *entry;
+            if ( filename.size() <= 5
+                || filename.compare(filename.size() - 5, 5, ".json") != 0 )
+            {
+                continue;
+            }
+            filename.resize(filename.size() - 5);
+            const std::string dialogueID =
+                normalizeCustomDialogueID(filename);
+            if ( !dialogueID.empty() && dialogueID != "quests" )
+            {
+                dialogueIDs.insert(dialogueID);
+            }
+        }
+        PHYSFS_freeList(entries);
+    }
+
+    size_t validDefinitions = 0;
+    for ( const std::string& dialogueID : dialogueIDs )
+    {
+        if ( getCustomDialogueDefinition(dialogueID) )
+        {
+            ++validDefinitions;
+        }
+    }
+    if ( validDefinitions > 0 )
+    {
+        printlog(
+            "[Custom Dialogue] Central quest registry discovered %zu definition(s) from mounted dialogue directories.",
+            validDefinitions);
+    }
+    return validDefinitions;
+}
+
 static bool preloadCustomDialogueQuestManifest()
 {
     if ( customDialogueQuestManifestLoadAttempted )
@@ -3238,6 +3426,9 @@ static bool preloadCustomDialogueQuestManifest()
     }
 
     customDialogueQuestManifestLoadAttempted = true;
+    const size_t discoveredDefinitions =
+        preloadCustomDialogueQuestDirectories();
+    customDialogueQuestManifestLoaded = discoveredDefinitions > 0;
 
     const std::string relativeManifestPath =
         "dialogue/quests.json";
@@ -3327,7 +3518,7 @@ static bool preloadCustomDialogueQuestManifest()
             "[Custom Dialogue] Quest manifest not found; journal will use already-loaded definitions."
         );
 
-        return false;
+        return customDialogueQuestManifestLoaded;
     }
 
     File* file =
@@ -3343,7 +3534,7 @@ static bool preloadCustomDialogueQuestManifest()
             realPath.c_str()
         );
 
-        return false;
+        return customDialogueQuestManifestLoaded;
     }
 
     constexpr size_t maximumFileLength =
@@ -3367,7 +3558,7 @@ static bool preloadCustomDialogueQuestManifest()
             realPath.c_str()
         );
 
-        return false;
+        return customDialogueQuestManifestLoaded;
     }
 
     buffer[bytesRead] = '\0';
@@ -3388,7 +3579,7 @@ static bool preloadCustomDialogueQuestManifest()
             realPath.c_str()
         );
 
-        return false;
+        return customDialogueQuestManifestLoaded;
     }
 
     const rapidjson::Value& dialogues =
@@ -3736,8 +3927,9 @@ void customDialogueCreditAuthoredDefeat(
                 );
                 if ( multiplayer == SERVER )
                 {
-                    (void)serverSyncAutomatiaPlayerStoryState(
+                    (void)serverSyncAutomatiaQuestStateForActor(
                         player,
+                        definition.questID,
                         "quest objective update"
                     );
                 }
@@ -3846,6 +4038,8 @@ bool getCustomDialogueQuestJournalEntries(
         entry.originMap = definition.questOriginMap;
         entry.originX = definition.questOriginX;
         entry.originY = definition.questOriginY;
+        entry.originPlayableFloor = definition.questOriginPlayableFloor;
+        entry.originWholeColumn = definition.questOriginWholeColumn;
         entry.originTracksNPC =
             definition.questOriginTrackNPC;
         entry.originNPCPersistentID =
@@ -3899,6 +4093,7 @@ bool getCustomDialogueQuestJournalEntries(
                         static_cast<Sint32>(
                             floor(originNPC->y / 16.0)
                         );
+                    entry.originPlayableFloor = originNPC->playableFloor;
                     break;
                 }
             }
@@ -4033,6 +4228,10 @@ bool getCustomDialogueQuestJournalEntries(
             journalObjective.markerMap = objective.markerMap;
             journalObjective.markerX = objective.markerX;
             journalObjective.markerY = objective.markerY;
+            journalObjective.markerPlayableFloor =
+                objective.markerPlayableFloor;
+            journalObjective.markerWholeColumn =
+                objective.markerWholeColumn;
             journalObjective.hasMapMarker =
                 !objective.markerMap.empty()
                 && objective.markerX >= 0 && objective.markerY >= 0;
@@ -4289,6 +4488,47 @@ bool getCustomDialogueQuestOwnership(
         definition->questRepeatable;
 
     return true;
+}
+
+bool getCustomDialogueQuestOwnershipByQuestID(
+    const std::string& rawQuestID,
+    std::string& effectiveScope,
+    std::string& authoredScope,
+    bool& repeatable,
+    int& dialogueSchemaVersion
+)
+{
+    effectiveScope.clear();
+    authoredScope.clear();
+    repeatable = false;
+    dialogueSchemaVersion = 0;
+
+    preloadCustomDialogueQuestManifest();
+    const std::string questID = normalizeCustomDialogueID(rawQuestID);
+    const AutomatiaQuest::Definition* definition =
+        AutomatiaQuest::definitionRegistry().findByQuestId(questID);
+    if ( !definition )
+    {
+        return false;
+    }
+
+    effectiveScope = AutomatiaQuest::scopeName(
+        definition->effectiveScope());
+    authoredScope = AutomatiaQuest::scopeName(
+        definition->authoredScope);
+    repeatable = definition->repeatable;
+    dialogueSchemaVersion = definition->dialogueSchemaVersion;
+    return true;
+}
+
+void collectCustomDialogueDefinitionIDsForQuest(
+    const std::string& rawQuestID,
+    std::vector<std::string>& dialogueIDs
+)
+{
+    preloadCustomDialogueQuestManifest();
+    dialogueIDs = AutomatiaQuest::definitionRegistry().dialogueIdsForQuest(
+        normalizeCustomDialogueID(rawQuestID));
 }
 
 bool getCustomDialogueQuestMetadata(
@@ -17862,8 +18102,9 @@ bool handleCustomMonsterDialogue(
 
     if ( multiplayer == SERVER )
     {
-        (void)serverSyncAutomatiaPlayerStoryState(
+        (void)serverSyncAutomatiaQuestStateForActor(
             monsterclicked,
+            definition->questID,
             "custom dialogue node"
         );
     }
@@ -18107,8 +18348,7 @@ bool handleCustomMonsterDialogueChoice(
 	{
 		if ( choice.resetQuest )
 		{
-			if ( definition->questScope != "player"
-				|| !definition->questRepeatable )
+			if ( !definition->questRepeatable )
 			{
 				printlog(
 					"[Custom Dialogue] Rejected quest_reset for quest '%s'.",
@@ -18725,8 +18965,9 @@ bool handleCustomMonsterDialogueChoice(
 	// so its quest journal and local dialogue state match the server.
 	if ( multiplayer == SERVER )
 	{
-		(void)serverSyncAutomatiaPlayerStoryState(
+		(void)serverSyncAutomatiaQuestStateForActor(
 			player,
+			definition->questID,
 			"custom dialogue choice"
 		);
 	}

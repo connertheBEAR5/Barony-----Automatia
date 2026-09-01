@@ -23,7 +23,9 @@ namespace automatia
 namespace dialogue
 {
 
-constexpr int SchemaVersion = 1;
+constexpr int LegacySchemaVersion = 1;
+constexpr int SharedQuestOwnershipSchemaVersion = 2;
+constexpr int SchemaVersion = SharedQuestOwnershipSchemaVersion;
 constexpr std::size_t MaximumDocumentBytes = 64 * 1024;
 
 enum class CapabilityOwner

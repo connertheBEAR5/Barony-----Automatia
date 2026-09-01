@@ -8998,6 +8998,10 @@ void doNewGame(bool makeHighscore) {
 		{
 			OPENAL_ChannelGroup_Stop(soundEnvironment_group);
 		}
+		if ( soundNotification_group )
+		{
+			OPENAL_ChannelGroup_Stop(soundNotification_group);
+		}
 #endif
 
         if ( !loadingsavegame )
@@ -9616,6 +9620,10 @@ void doNewGame(bool makeHighscore) {
 		{
 			OPENAL_ChannelGroup_Stop(soundEnvironment_group);
 		}
+		if ( soundNotification_group )
+		{
+			OPENAL_ChannelGroup_Stop(soundNotification_group);
+		}
 #endif
 		// load next level
 		entity_uids = 1;
@@ -10134,6 +10142,10 @@ void doEndgame(bool saveHighscore, bool onServerDisconnect) {
 	if ( soundEnvironment_group )
 	{
 		OPENAL_ChannelGroup_Stop(soundEnvironment_group);
+	}
+	if ( soundNotification_group )
+	{
+		OPENAL_ChannelGroup_Stop(soundNotification_group);
 	}
 #endif
 

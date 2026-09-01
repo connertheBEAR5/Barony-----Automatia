@@ -168,6 +168,27 @@ if(BUILD_TESTING)
     add_test(NAME party_backend COMMAND party_backend_tests)
 
     add_executable(
+        quest_ownership_tests
+        tests/quest_ownership_tests.cpp
+        src/automatia_save.cpp
+        src/automatia_identity.cpp
+        src/party_manager.cpp
+        src/quest_ownership.cpp
+    )
+    target_include_directories(
+        quest_ownership_tests
+        PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+    )
+    target_compile_definitions(
+        quest_ownership_tests
+        PRIVATE
+        BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+    )
+    target_compile_features(quest_ownership_tests PRIVATE cxx_std_17)
+    add_test(NAME quest_ownership COMMAND quest_ownership_tests)
+
+    add_executable(
         social_party_ui_model_tests
         tests/social_party_ui_model_tests.cpp
         src/automatia_identity.cpp
@@ -452,19 +473,47 @@ if (DEFINED ENV{BARONY_DATADIR}) # Used by visual studio to set the current work
 	set (BARONY_DATADIR $ENV{BARONY_DATADIR})
 endif()
 
-#FMOD can be disabled in one of two ways:
-# * Not having FMOD installed will automatically disable FMOD (and, consequently, the game's sound engine as a whole).
-# * Running cmake with -DFMOD_ENABLED=OFF
-set(FMOD 0) #Acts as an alias to FMOD_FOUND
-option(FMOD_ENABLED "Use the FMOD Ex library in the sound engine" ON)
-set(OPENAL 0) #Acts as an alias to OPENAL_FOUND
-option(OPENAL_ENABLED "Use the OpenAL library in the sound engine" OFF)
+# Select exactly one audio implementation. AUTO preserves the historical
+# FMOD_ENABLED/OPENAL_ENABLED switches so existing build scripts keep working;
+# new builds should use BARONY_AUDIO_BACKEND directly.
+set(BARONY_AUDIO_BACKEND "AUTO" CACHE STRING
+	"Audio backend to build (AUTO, FMOD, OPENAL, or NONE)")
+set_property(CACHE BARONY_AUDIO_BACKEND PROPERTY STRINGS AUTO FMOD OPENAL NONE)
+option(FMOD_ENABLED "Legacy switch: prefer FMOD when BARONY_AUDIO_BACKEND=AUTO" ON)
+option(OPENAL_ENABLED "Legacy switch: prefer OpenAL when BARONY_AUDIO_BACKEND=AUTO" OFF)
 set(TREMOR 0) #Acts as an alias to TREMOR_FOUND
 option(TREMOR_ENABLED "Use Tremor instead of libvorbis for OpenAL" OFF)
 
-if(FMOD_ENABLED AND OPENAL_ENABLED)
-	set(FMOD_ENABLED OFF)
+string(TOUPPER "${BARONY_AUDIO_BACKEND}" BARONY_AUDIO_BACKEND_NORMALIZED)
+if(NOT BARONY_AUDIO_BACKEND_NORMALIZED MATCHES "^(AUTO|FMOD|OPENAL|NONE)$")
+	message(FATAL_ERROR
+		"Invalid BARONY_AUDIO_BACKEND='${BARONY_AUDIO_BACKEND}'. "
+		"Choose AUTO, FMOD, OPENAL, or NONE.")
 endif()
+
+if("x${BARONY_AUDIO_BACKEND_NORMALIZED}" STREQUAL "xAUTO")
+	# OPENAL_ENABLED historically won when both legacy flags were enabled.
+	if(OPENAL_ENABLED)
+		set(BARONY_AUDIO_BACKEND_RESOLVED "OPENAL")
+		if(FMOD_ENABLED)
+			message(WARNING
+				"Both legacy audio switches are enabled; selecting OpenAL as before. "
+				"Use -DBARONY_AUDIO_BACKEND=FMOD or OPENAL to select explicitly.")
+		endif()
+	elseif(FMOD_ENABLED)
+		set(BARONY_AUDIO_BACKEND_RESOLVED "FMOD")
+	else()
+		set(BARONY_AUDIO_BACKEND_RESOLVED "NONE")
+	endif()
+else()
+	set(BARONY_AUDIO_BACKEND_RESOLVED "${BARONY_AUDIO_BACKEND_NORMALIZED}")
+endif()
+
+# These values exclusively drive Config.hpp and link selection. Never infer the
+# active backend from a stale *_FOUND value left in a reused CMake cache.
+set(FMOD 0)
+set(OPENAL 0)
+message(STATUS "Barony audio backend: ${BARONY_AUDIO_BACKEND_RESOLVED}")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 
@@ -654,39 +703,47 @@ LINK_DIRECTORIES(${SDL2_LINK_DIRS} ${SDL2_LINK_DIR} ${SDL2IMAGE_LINK_DIRS} ${SDL
 # else()
 #   INCLUDE_DIRECTORIES(${SDL2_INCLUDE_DIRS} ${SDL2IMAGE_INCLUDE_DIRS})
 # endif()
-if (OPENAL_ENABLED)
-  find_package(OpenAL)
+if ("x${BARONY_AUDIO_BACKEND_RESOLVED}" STREQUAL "xOPENAL")
+  find_package(OpenAL REQUIRED)
   if(TREMOR_ENABLED)
-	find_package(TREMOR)
+	find_package(TREMOR REQUIRED)
   else()
-	find_package(OGGVORBIS)
+	find_package(OGGVORBIS REQUIRED)
   endif()
-  if (OPENAL_FOUND AND ((TREMOR_ENABLED AND TREMOR_FOUND) OR ((NOT TREMOR_ENABLED) AND OGGVORBIS_FOUND)))
-	INCLUDE_DIRECTORIES(${OPENAL_INCLUDE_DIR})
-	if(TREMOR_ENABLED)
-	  set(TREMOR 1)
-	  INCLUDE_DIRECTORIES(${TREMOR_INCLUDE_DIR})
-	else()
-	  INCLUDE_DIRECTORIES(${OGG_INCLUDE_DIR} ${VORBIS_INCLUDE_DIR})
+  if(NOT OPENAL_FOUND)
+	message(FATAL_ERROR "OpenAL was selected but the OpenAL library was not found.")
+  endif()
+  INCLUDE_DIRECTORIES(${OPENAL_INCLUDE_DIR})
+  if(TREMOR_ENABLED)
+	if(NOT TREMOR_FOUND)
+	  message(FATAL_ERROR "OpenAL with Tremor was selected but Tremor was not found.")
 	endif()
-	set(OPENAL 1)
+	set(TREMOR 1)
+	INCLUDE_DIRECTORIES(${TREMOR_INCLUDE_DIR})
+  else()
+	if(NOT OGGVORBIS_FOUND)
+	  message(FATAL_ERROR "OpenAL was selected but libogg/libvorbis were not found.")
+	endif()
+	INCLUDE_DIRECTORIES(${OGG_INCLUDE_DIR} ${VORBIS_INCLUDE_DIR})
   endif()
+  set(OPENAL 1)
 endif()
 
 set(IMGUI 1)
 
 find_package(Threads REQUIRED)
-if (FMOD_ENABLED)
+if ("x${BARONY_AUDIO_BACKEND_RESOLVED}" STREQUAL "xFMOD")
 	find_package(FMOD REQUIRED)
-	if (FMOD_FOUND)
-		set(FMOD 1)
+	if (NOT FMOD_FOUND)
+		message(FATAL_ERROR "FMOD was selected but the FMOD library was not found.")
 	endif()
+	set(FMOD 1)
 endif()
 if(NOT APPLE)
   #Linux needs these two.
   #Macs have their own special line.
   find_package(PNG REQUIRED)
-elseif (APPLE)
+elseif (APPLE AND FMOD)
   set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FMOD_CXX_FLAGS}")
   MESSAGE("CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
   set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${FMOD_LINK_FLAGS}")
@@ -744,7 +801,7 @@ endif()
 if(NOT APPLE)
  	include_directories(${PNG_INCLUDE_DIR})
 endif()
-if (FMOD_FOUND)
+if (FMOD)
 	include_directories(${FMOD_INCLUDE_DIR})
 endif()
 
@@ -770,6 +827,15 @@ configure_file(
 	"${BARONY_GENERATED_INCLUDE_DIR}/Config.hpp"
 )
 include_directories(BEFORE "${BARONY_GENERATED_INCLUDE_DIR}")
+if(BUILD_TESTING)
+	add_test(
+		NAME audio_backend_configuration
+		COMMAND "${CMAKE_COMMAND}"
+			-DGENERATED_CONFIG=${BARONY_GENERATED_INCLUDE_DIR}/Config.hpp
+			-DEXPECTED_BACKEND=${BARONY_AUDIO_BACKEND_RESOLVED}
+			-P "${PROJECT_SOURCE_DIR}/tests/audio_backend_configuration.cmake"
+	)
+endif()
 
 message("***************************")
 message("Debug flags: ")
@@ -793,7 +859,7 @@ endif()
 if (APPLE)
   set(COPY_FRAMEWORKS ${PROJECT_SOURCE_DIR}/../Frameworks/SDL.framework ${PROJECT_SOURCE_DIR}/../Frameworks/SDL_image.framework ${PROJECT_SOURCE_DIR}/../Frameworks/SDL_mixer.framework ${PROJECT_SOURCE_DIR}/../Frameworks/SDL_net.framework)
   message("{COPY_FRAMEWORKS}: ${COPY_FRAMEWORKS}")
-  if (FMOD_ENABLED)
+  if (FMOD)
 	SET_SOURCE_FILES_PROPERTIES(libfmod.dylib PROPERTIES MACOSX_PACKAGE_LOCATION MacOS) # TODO: Use ${FMOD_LIBRARY} instead?
   endif()
   #add_executable(barony MACOSX_BUNDLE OSX/SDLmain.m ${GAME_SOURCES} ${COPY_FRAMEWORKS} ${BOOK_FILES} ${IMAGE_FILES} ${ITEM_FILES} ${MAP_FILES} ${MODEL_FILES} ${MUSIC_FILES} ${SOUND_FILES} libfmodex.dylib)
@@ -1053,7 +1119,7 @@ if (GAME_ENABLED)
   if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
 	  target_link_libraries(barony -lc)
   endif()
-  if (FMOD_FOUND)
+  if (FMOD)
     target_link_libraries(barony ${FMOD_LIBRARY})
   endif()
   target_link_libraries(barony ${PHYSFS_LIBRARY})
@@ -1076,7 +1142,8 @@ if (GAME_ENABLED)
 	if(TREMOR_ENABLED)
 	  target_link_libraries(barony ${TREMOR_LIBRARY})
 	else()
-	  target_link_libraries(barony ${VORBISFILE_LIBRARY} ${OGG_LIBRARY})
+	  target_link_libraries(barony
+		${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY})
 	endif()
   endif()
 endif(GAME_ENABLED)
@@ -1169,7 +1236,7 @@ if (EDITOR_ENABLED)
 	  target_link_libraries(${EDITOR_EXE_NAME} -lc)
   endif()
   # We need to link to Winsock if we're on Windows
-  if (FMOD_FOUND)
+  if (FMOD)
     target_link_libraries(${EDITOR_EXE_NAME} ${FMOD_LIBRARY})
   endif()
   if(NOT APPLE)
@@ -1188,7 +1255,7 @@ if (EDITOR_ENABLED)
 	target_link_libraries(${EDITOR_EXE_NAME} wsock32 ws2_32)
   endif()
   if (APPLE)
-	if (FMOD_ENABLED)
+	if (FMOD)
 	  target_link_libraries(${EDITOR_EXE_NAME} ${FMOD_LIBRARY}) #Finally manually link fmod for mac.
 	endif()
   endif()
@@ -1198,7 +1265,8 @@ if (EDITOR_ENABLED)
 	if(TREMOR_ENABLED)
 	  target_link_libraries(${EDITOR_EXE_NAME} ${TREMOR_LIBRARY})
 	else()
-	  target_link_libraries(${EDITOR_EXE_NAME} ${VORBISFILE_LIBRARY})
+	  target_link_libraries(${EDITOR_EXE_NAME}
+		${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY})
 	endif()
   endif()
 endif(EDITOR_ENABLED)

@@ -1648,6 +1648,23 @@ static bool appendPlayerStoryTransferToLateJoinCatchup(
     return g_lateJoinCatchupBuffers[player].append(end.data(), end.size());
 }
 
+static bool appendAutomatiaQuestRecipientStateToLateJoinCatchup(
+    const int player)
+{
+    std::string payload;
+    std::string error;
+    if (!exportAutomatiaQuestRecipientState(player, payload, error)
+        || !appendPlayerStoryTransferToLateJoinCatchup(player, payload))
+    {
+        printlog(
+            "[Custom Dialogue] Could not append player %d quest state to late-join catch-up: %s.",
+            player,
+            error.empty() ? "transfer assembly failed" : error.c_str());
+        return false;
+    }
+    return true;
+}
+
 static bool sendPlayerStoryRecordToClient(
     int player,
     const std::vector<std::uint8_t>& record)
@@ -1677,7 +1694,7 @@ bool serverSyncAutomatiaPlayerStoryState(
 
     std::string payload;
     std::string error;
-    if ( !exportAutomatiaPlayerStoryState(player, payload, error) )
+    if ( !exportAutomatiaQuestRecipientState(player, payload, error) )
     {
         printlog(
             "[Custom Dialogue] Could not export player %d story state for sync: %s.",
@@ -1735,6 +1752,148 @@ bool serverSyncAutomatiaPlayerStoryState(
         player,
         reason ? reason : "update");
     return true;
+}
+
+bool serverSyncAutomatiaQuestStateForActor(
+    const int authenticatedPlayer,
+    const std::string& questID,
+    const char* reason)
+{
+    if (multiplayer != SERVER
+        || authenticatedPlayer < 0
+        || authenticatedPlayer >= MAXPLAYERS)
+    {
+        return false;
+    }
+
+    std::string effectiveScope;
+    std::string authoredScope;
+    bool repeatable = false;
+    int dialogueSchemaVersion = 0;
+    if (!getCustomDialogueQuestOwnershipByQuestID(
+            questID, effectiveScope, authoredScope, repeatable,
+            dialogueSchemaVersion))
+    {
+        return serverSyncAutomatiaPlayerStoryState(
+            authenticatedPlayer, reason);
+    }
+
+    const auto synchronizePlayer = [&](const int recipient)
+    {
+        if (recipient < 0 || recipient >= MAXPLAYERS
+            || !players[recipient]
+            || (recipient > 0 && client_disconnected[recipient]))
+        {
+            return false;
+        }
+        if (players[recipient]->isLocalPlayer())
+        {
+            return true;
+        }
+        const LateJoinSnapshotTransaction::Phase phase =
+            g_lateJoinTransactions[recipient].phase();
+        const bool snapshotTransferActive =
+            phase == LateJoinSnapshotTransaction::Phase::Receiving
+            || phase == LateJoinSnapshotTransaction::Phase::Complete;
+        if (snapshotTransferActive)
+        {
+            return appendAutomatiaQuestRecipientStateToLateJoinCatchup(
+                recipient);
+        }
+        if (!serverPlayerCanReceiveGameplayUpdates(recipient))
+        {
+            return false;
+        }
+        return serverSyncAutomatiaPlayerStoryState(recipient, reason);
+    };
+
+    if (effectiveScope == "player")
+    {
+        return synchronizePlayer(authenticatedPlayer);
+    }
+
+    const AutomatiaParty::PartyManager& manager =
+        worldState.partyManager();
+    const AutomatiaParty::DurablePlayerIdentity* actor =
+        manager.onlineIdentityFor(authenticatedPlayer);
+    if (!actor)
+    {
+        return false;
+    }
+    const AutomatiaParty::PartyID partyId =
+        manager.partyIdForPlayer(*actor);
+    if (effectiveScope == "party"
+        && partyId == AutomatiaParty::INVALID_PARTY_ID)
+    {
+        return false;
+    }
+
+    bool synchronized = false;
+    bool allSucceeded = true;
+    for (const AutomatiaParty::DurablePlayerIdentity& identity :
+        manager.onlineIdentities())
+    {
+        if (effectiveScope == "party"
+            && manager.partyIdForPlayer(identity) != partyId)
+        {
+            continue;
+        }
+        const int recipient = manager.onlineSlotFor(identity);
+        const bool result = synchronizePlayer(recipient);
+        synchronized = synchronized || result;
+        allSucceeded = allSucceeded && result;
+    }
+    return synchronized && allSucceeded;
+}
+
+void serverSynchronizeAllAutomatiaQuestRecipients(const char* reason)
+{
+    if (multiplayer != SERVER)
+    {
+        return;
+    }
+    const AutomatiaParty::PartyManager& manager =
+        worldState.partyManager();
+    for (const AutomatiaParty::DurablePlayerIdentity& identity :
+        manager.onlineIdentities())
+    {
+        const int recipient = manager.onlineSlotFor(identity);
+        if (recipient <= 0 || recipient >= MAXPLAYERS
+            || client_disconnected[recipient]
+            || !players[recipient]
+            || players[recipient]->isLocalPlayer())
+        {
+            continue;
+        }
+        const LateJoinSnapshotTransaction::Phase phase =
+            g_lateJoinTransactions[recipient].phase();
+        const bool snapshotTransferActive =
+            phase == LateJoinSnapshotTransaction::Phase::Receiving
+            || phase == LateJoinSnapshotTransaction::Phase::Complete;
+        if (snapshotTransferActive)
+        {
+            if (!appendAutomatiaQuestRecipientStateToLateJoinCatchup(
+                    recipient))
+            {
+                printlog(
+                    "[Custom Dialogue] Could not resynchronize late-join quest scopes for player %d (%s).",
+                    recipient,
+                    reason ? reason : "scope membership update");
+            }
+            continue;
+        }
+        if (!serverPlayerCanReceiveGameplayUpdates(recipient))
+        {
+            continue;
+        }
+        if (!serverSyncAutomatiaPlayerStoryState(recipient, reason))
+        {
+            printlog(
+                "[Custom Dialogue] Could not resynchronize quest scopes for player %d (%s).",
+                recipient,
+                reason ? reason : "scope membership update");
+        }
+    }
 }
 
 static bool sendCharacterTransferToServer(
@@ -2147,7 +2306,7 @@ static bool finalizeClientPlayerStoryTransfer()
     }
 
     std::string error;
-    const bool imported = importAutomatiaPlayerStoryState(
+    const bool imported = importAutomatiaQuestRecipientState(
         clientnum, payload, error);
     if ( !imported )
     {
@@ -4036,6 +4195,8 @@ static void serverSynchronizeAllAutomatiaPartyRecipients()
 				playerIndex);
 		}
 	}
+	serverSynchronizeAllAutomatiaQuestRecipients(
+		"party membership synchronization");
 }
 
 static bool appendAutomatiaPartyRecordsToLateJoinCatchup(
@@ -4669,7 +4830,7 @@ static bool startServerLateJoinSnapshotTransfer(int playerIndex)
 
     std::string playerStoryPayload;
     std::string playerStoryError;
-    if (!exportAutomatiaPlayerStoryState(
+    if (!exportAutomatiaQuestRecipientState(
             playerIndex, playerStoryPayload, playerStoryError)
         || !appendPlayerStoryTransferToLateJoinCatchup(
             playerIndex, playerStoryPayload))
@@ -7677,6 +7838,10 @@ static void changeLevel()
 	if ( soundEnvironment_group )
 	{
 		OPENAL_ChannelGroup_Stop(soundEnvironment_group);
+	}
+	if ( soundNotification_group )
+	{
+		OPENAL_ChannelGroup_Stop(soundNotification_group);
 	}
 #endif
 	if ( openedChest[clientnum] )

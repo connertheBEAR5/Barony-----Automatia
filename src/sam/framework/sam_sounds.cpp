@@ -14,8 +14,8 @@
 #include <vector>
 #include <map>
 
-// Engine build: pull in the FMOD sound globals. In the standalone/editor build these
-// headers are absent, so appendSounds() compiles to a no-op stub.
+// Engine build: pull in the selected backend's sound globals. In a standalone
+// tooling build these headers are absent, so appendSounds() remains a no-op stub.
 #if defined(__has_include) && __has_include("main.hpp")
 #	define SAM_SOUNDS_HAVE_BARONY 1
 #	include "main.hpp"                  // Config (USE_FMOD), umbrella decls
@@ -170,6 +170,10 @@ int SAMSounds::appendSounds()
 {
 #ifndef SAM_SOUNDS_HAVE_BARONY
 	return 0;
+#elif !defined(USE_FMOD) && !defined(USE_OPENAL)
+	s_index.clear();
+	s_staged.clear();
+	return 0;
 #else
 	// Capture the vanilla base the first time we ever append, so a mod reload
 	// (which re-stages) resets the engine table to base instead of accumulating.
@@ -181,14 +185,28 @@ int SAMSounds::appendSounds()
 	{
 		for ( Uint32 i = s_baseNumsounds; i < numsounds; ++i )
 		{
-			if ( sounds[i] ) { sounds[i]->release(); sounds[i] = nullptr; }
+			if ( sounds[i] )
+			{
+#ifdef USE_FMOD
+				sounds[i]->release();
+#elif defined(USE_OPENAL)
+				OPENAL_Sound_Release(sounds[i]);
+#endif
+				sounds[i] = nullptr;
+			}
 		}
 		numsounds = s_baseNumsounds;
 	}
 	s_index.clear();
 
 	if ( s_staged.empty() ) { return 0; }
-	if ( !fmod_system || !sounds || numsounds == 0 )
+	const bool backendReady =
+#ifdef USE_FMOD
+		fmod_system != nullptr;
+#elif defined(USE_OPENAL)
+		openal_device != nullptr && openal_context != nullptr;
+#endif
+	if ( !backendReady || !sounds || numsounds == 0 )
 	{
 		SAM_ERROR(MOD, "Sound engine not initialised — cannot append " + std::to_string(s_staged.size()) + " custom sound(s).");
 		return 0;
@@ -196,7 +214,12 @@ int SAMSounds::appendSounds()
 
 	const Uint32 oldCount = numsounds;
 	const int addCount = (int)s_staged.size();
+#ifdef USE_FMOD
 	FMOD::Sound** grown = (FMOD::Sound**)realloc(sounds, sizeof(FMOD::Sound*) * (size_t)(oldCount + (Uint32)addCount));
+#elif defined(USE_OPENAL)
+	OPENAL_BUFFER** grown = (OPENAL_BUFFER**)realloc(
+		sounds, sizeof(OPENAL_BUFFER*) * (size_t)(oldCount + (Uint32)addCount));
+#endif
 	if ( !grown )
 	{
 		SAM_ERROR(MOD, "Out of memory growing the sound table to " + std::to_string(oldCount + addCount) + " — leaving it untouched.");
@@ -208,12 +231,23 @@ int SAMSounds::appendSounds()
 	{
 		const StagedSound& s = s_staged[i];
 		const Uint32 idx = oldCount + (Uint32)i;
+#ifdef USE_FMOD
 		FMOD_MODE flags = FMOD_DEFAULT | FMOD_3D | FMOD_LOWMEM;
 		if ( s.loop ) { flags |= FMOD_LOOP_NORMAL; }
 		FMOD::Sound* snd = nullptr;
 		FMOD_RESULT r = fmod_system->createSound(s.absPath.c_str(), flags, nullptr, &snd);
+		const bool loaded = r == FMOD_OK && snd != nullptr;
+#elif defined(USE_OPENAL)
+		OPENAL_BUFFER* snd = nullptr;
+		const bool loaded = OPENAL_CreateSound(s.absPath.c_str(), true, &snd) != 0
+			&& snd != nullptr;
+		if ( loaded )
+		{
+			OPENAL_Sound_SetDefaultLoop(snd, s.loop ? AL_TRUE : AL_FALSE);
+		}
+#endif
 		sounds[idx] = snd; // may be null on failure — play paths guard sounds[snd]==nullptr
-		if ( r != FMOD_OK || !snd )
+		if ( !loaded )
 		{
 			SAM_ERROR(MOD, "Failed to load sound '" + s.absPath + "' for [" + s.id
 				+ "] — the id resolves but plays silent. Is the file really in the mod folder?");

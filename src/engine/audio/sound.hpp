@@ -55,6 +55,7 @@ bool loadMusic();
 // The implementation is a no-op for headless/no-audio builds.
 void syncMapAmbience(const map_t& map, const std::string& mapInstanceKey);
 void stopMapAmbience();
+void updateMapAmbience();
 
 // Kept independent of the audio backend so runtime characterizations can prove
 // instance scoping without claiming to verify audible output.
@@ -568,7 +569,8 @@ extern OPENAL_BUFFER* hamletmusic;
 
 extern OPENAL_SOUND* music_channel, *music_channel2, *music_resume; //TODO: List of music, play first one, fade out all the others? Eh, maybe some other day. //music_resume is the music to resume after, say, combat or shops. //TODO: Clear music_resume every biome change. Or otherwise validate it for that level set.
 extern OPENAL_CHANNELGROUP *sound_group, *music_group;
-extern OPENAL_CHANNELGROUP *soundAmbient_group, *soundEnvironment_group, *music_notification_group;
+extern OPENAL_CHANNELGROUP *soundAmbient_group, *soundEnvironment_group;
+extern OPENAL_CHANNELGROUP *music_notification_group, *soundNotification_group;
 
 int initOPENAL();
 int closeOPENAL();
@@ -597,6 +599,7 @@ void OPENAL_ChannelGroup_Stop(OPENAL_CHANNELGROUP* group);
 void OPENAL_ChannelGroup_SetVolume(OPENAL_CHANNELGROUP* group, float f);
 void OPENAL_Channel_SetChannelGroup(OPENAL_SOUND *channel, OPENAL_CHANNELGROUP *group);
 void OPENAL_Channel_SetVolume(OPENAL_SOUND *channel, float f);
+float OPENAL_Channel_GetVolume(OPENAL_SOUND *channel);
 void OPENAL_Channel_Stop(void* channel);
 void OPENAL_Channel_Pause(OPENAL_SOUND* channel);
 void OPENAL_Channel_IsPlaying(void* channel, ALboolean *playing);
@@ -607,6 +610,7 @@ void OPENAL_GetBuffer(OPENAL_SOUND* channel, OPENAL_BUFFER** buffer);
 void OPENAL_SetLoop(OPENAL_SOUND* channel, ALboolean looping);
 void OPENAL_Channel_GetPosition(OPENAL_SOUND* channel, unsigned int *position);
 void OPENAL_Sound_GetLength(OPENAL_BUFFER* buffer, unsigned int *length);
+void OPENAL_Sound_SetDefaultLoop(OPENAL_BUFFER* buffer, ALboolean looping);
 void OPENAL_Sound_Release(OPENAL_BUFFER* buffer);
 
 extern float fadein_increment, fadeout_increment, default_fadein_increment, default_fadeout_increment;

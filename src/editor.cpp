@@ -511,6 +511,7 @@ struct QuestDialogueEditorNodePreview
 struct QuestDialogueEditorPreview
 {
 	std::string filename;
+	int schemaVersion = 0;
 	std::string questID;
 	std::string title;
 	std::string summary;
@@ -592,10 +593,12 @@ enum QuestDialogueEditableField
 	QUEST_DIALOGUE_FIELD_MARKER_MAP,
 	QUEST_DIALOGUE_FIELD_MARKER_X,
 	QUEST_DIALOGUE_FIELD_MARKER_Y,
+	QUEST_DIALOGUE_FIELD_MARKER_FLOOR,
 	QUEST_DIALOGUE_FIELD_ORIGIN_LABEL,
 	QUEST_DIALOGUE_FIELD_ORIGIN_MAP,
 	QUEST_DIALOGUE_FIELD_ORIGIN_X,
 	QUEST_DIALOGUE_FIELD_ORIGIN_Y,
+	QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR,
 	QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID,
 	QUEST_DIALOGUE_FIELD_NUM_FIELDS
 };
@@ -728,6 +731,25 @@ static char questDialogueEditorJSONBuffer[
 	automatia::dialogue::MaximumDocumentBytes + 1] = "";
 static bool questDialogueEditorJSONEditing = false;
 static int questDialogueEditorJSONScroll = 0;
+static int questDialogueEditorJSONHorizontalScroll = 0;
+static std::size_t questDialogueEditorJSONCaret = 0;
+static bool questDialogueEditorJSONSelectAll = false;
+
+enum QuestDialogueMarkerPickKind
+{
+	QUEST_DIALOGUE_MARKER_PICK_NONE = 0,
+	QUEST_DIALOGUE_MARKER_PICK_ORIGIN,
+	QUEST_DIALOGUE_MARKER_PICK_OBJECTIVE
+};
+
+static QuestDialogueMarkerPickKind questDialogueEditorMarkerPick =
+	QUEST_DIALOGUE_MARKER_PICK_NONE;
+static int questDialogueEditorMarkerPickObjective = -1;
+static int questDialogueEditorMarkerPickPlayableFloor = DEFAULT_PLAYABLE_FLOOR;
+static bool questDialogueEditorMarkerPickRestore3D = false;
+static bool questDialogueEditorPreserveModelOnOpen = false;
+static bool questDialogueEditorBeginMarkerPick(
+	QuestDialogueMarkerPickKind kind);
 static automatia::dialogue::PreviewSession questDialogueEditorSandbox;
 static automatia::dialogue::PreviewState questDialogueEditorSandboxInitialState;
 static bool questDialogueEditorSandboxActive = false;
@@ -777,6 +799,7 @@ static int questDialogueEditorWizardField = 0;
 static int questDialogueEditorWizardStep = 0;
 static bool questDialogueEditorWizardUseQuest = false;
 static bool questDialogueEditorWizardRepeatable = false;
+static int questDialogueEditorWizardScope = 0; // 0 personal, 1 party, 2 world
 static int questDialogueEditorWizardOrigin = 0; // 0 none, 1 cursor, 2 selected NPC
 static char questDialogueEditorWizardDialogueID[128] = "new_dialogue";
 static char questDialogueEditorWizardQuestID[128] = "";
@@ -930,6 +953,12 @@ static void questDialogueEditorLoadPreview(
 		questDialogueEditorPreview.error =
 			"Dialogue root is not a JSON object.";
 		return;
+	}
+	if ( document.HasMember("version")
+		&& document["version"].IsInt() )
+	{
+		questDialogueEditorPreview.schemaVersion =
+			document["version"].GetInt();
 	}
 
 	if ( document.HasMember("quest_id")
@@ -2601,7 +2630,11 @@ static rapidjson::Value* questDialogueEditorQuestValue()
 }
 
 
-static bool questDialogueEditorUseCursorTileAsQuestGiver()
+static bool questDialogueEditorSetQuestGiverTile(
+	const int tileX,
+	const int tileY,
+	const int playableFloor
+)
 {
 	rapidjson::Value* quest =
 		questDialogueEditorQuestValue();
@@ -2614,18 +2647,13 @@ static bool questDialogueEditorUseCursorTileAsQuestGiver()
 		return false;
 	}
 
-	if ( drawx < 0
-		|| drawy < 0
-		|| drawx >= static_cast<int>(map.width)
-		|| drawy >= static_cast<int>(map.height) )
+	if ( tileX < 0
+		|| tileY < 0
+		|| tileX >= static_cast<int>(map.width)
+		|| tileY >= static_cast<int>(map.height) )
 	{
-		quest->RemoveMember("origin");
-
-		questDialogueEditorSetMessage(
-			"Cursor is outside the map; giver marker turned off."
-		);
-
-		return questDialogueEditorSaveDocument();
+		questDialogueEditorSetMessage("Selected tile is outside the map.");
+		return false;
 	}
 
 	auto& allocator =
@@ -2724,8 +2752,13 @@ static bool questDialogueEditorUseCursorTileAsQuestGiver()
 		questEditorCurrentMapFilename()
 	);
 
-	setInt(origin, "x", drawx);
-	setInt(origin, "y", drawy);
+	setInt(origin, "x", tileX);
+	setInt(origin, "y", tileY);
+	setInt(origin, "playable_floor", std::max(0, playableFloor));
+	if ( !origin.HasMember("floor_visibility") )
+	{
+		setString(origin, "floor_visibility", "same_floor");
+	}
 
 	origin.RemoveMember("track_npc");
 	origin.RemoveMember("npc_persistent_id");
@@ -2736,14 +2769,56 @@ static bool questDialogueEditorUseCursorTileAsQuestGiver()
 	}
 
 	questDialogueEditorSetMessage(
-		"Static quest giver marker set to cursor tile "
-		+ std::to_string(drawx)
+		"Static quest giver marker set to tile "
+		+ std::to_string(tileX)
 		+ ", "
-		+ std::to_string(drawy)
-		+ "."
+		+ std::to_string(tileY)
+		+ " on playable floor " + std::to_string(std::max(0, playableFloor)) + "."
 	);
 
 	return true;
+}
+
+static bool questDialogueEditorBeginMarkerPick(
+	const QuestDialogueMarkerPickKind kind
+)
+{
+	if ( kind == QUEST_DIALOGUE_MARKER_PICK_ORIGIN
+		&& !questDialogueEditorQuestValue() )
+	{
+		questDialogueEditorSetMessage("This dialogue has no quest object.");
+		return false;
+	}
+	if ( kind == QUEST_DIALOGUE_MARKER_PICK_OBJECTIVE
+		&& questDialogueEditorSelectedObjective < 0 )
+	{
+		questDialogueEditorSetMessage("Select an objective first.");
+		return false;
+	}
+
+	questDialogueEditorMarkerPick = kind;
+	questDialogueEditorMarkerPickObjective =
+		kind == QUEST_DIALOGUE_MARKER_PICK_OBJECTIVE
+			? questDialogueEditorSelectedObjective : -1;
+	questDialogueEditorMarkerPickRestore3D = mode3d;
+	questDialogueEditorMarkerPickPlayableFloor =
+		map.playableFloors.hasFloor(static_cast<PlayableFloorId>(drawlayer))
+			? drawlayer : DEFAULT_PLAYABLE_FLOOR;
+	mode3d = false;
+	SDL_StopTextInput();
+	inputstr = nullptr;
+	std::snprintf(message, sizeof(message),
+		"MARKER PICK floor %d: click tile; U/P changes floor; right-click/Esc cancels.",
+		questDialogueEditorMarkerPickPlayableFloor);
+	messagetime = 1000000;
+	buttonCloseSubwindow(nullptr);
+	return true;
+}
+
+static bool questDialogueEditorUseCursorTileAsQuestGiver()
+{
+	return questDialogueEditorBeginMarkerPick(
+		QUEST_DIALOGUE_MARKER_PICK_ORIGIN);
 }
 
 static std::string questDialogueEditorGiverMarkerSummary()
@@ -3285,55 +3360,14 @@ static bool questDialogueEditorToggleObjectiveMarker()
 		return false;
 	}
 
-	auto& allocator =
-		questDialogueEditorDocument.GetAllocator();
-
 	if ( objective->HasMember("map_marker") )
 	{
 		objective->RemoveMember("map_marker");
 		return questDialogueEditorSaveDocument();
 	}
 
-	rapidjson::Value marker(
-		rapidjson::kObjectType
-	);
-
-	const std::string mapName =
-		questEditorCurrentMapFilename();
-
-	rapidjson::Value mapValue;
-	mapValue.SetString(
-		mapName.c_str(),
-		allocator
-	);
-
-	marker.AddMember(
-		"map",
-		mapValue,
-		allocator
-	);
-
-	if ( drawx < 0
-		|| drawy < 0
-		|| drawx >= static_cast<int>(map.width)
-		|| drawy >= static_cast<int>(map.height) )
-	{
-		questDialogueEditorSetMessage(
-			"Cursor is outside the map; objective marker was not created."
-		);
-		return false;
-	}
-
-	marker.AddMember("x", drawx, allocator);
-	marker.AddMember("y", drawy, allocator);
-
-	objective->AddMember(
-		"map_marker",
-		marker,
-		allocator
-	);
-
-	return questDialogueEditorSaveDocument();
+	return questDialogueEditorBeginMarkerPick(
+		QUEST_DIALOGUE_MARKER_PICK_OBJECTIVE);
 }
 
 static rapidjson::Value* questDialogueEditorSelectedChoiceValue()
@@ -4260,6 +4294,9 @@ static const char* questDialogueEditorEditableFieldName()
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
 			return "Marker Y";
 
+		case QUEST_DIALOGUE_FIELD_MARKER_FLOOR:
+			return "Marker Playable Floor";
+
 		case QUEST_DIALOGUE_FIELD_ORIGIN_LABEL:
 			return "Giver Label";
 
@@ -4271,6 +4308,9 @@ static const char* questDialogueEditorEditableFieldName()
 
 		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
 			return "Giver Tile Y";
+
+		case QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR:
+			return "Giver Playable Floor";
 
 		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
 			return "Giver Persistent NPC ID";
@@ -4816,6 +4856,7 @@ static std::string questDialogueEditorReadEditableField()
 		case QUEST_DIALOGUE_FIELD_MARKER_MAP:
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
+		case QUEST_DIALOGUE_FIELD_MARKER_FLOOR:
 		{
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
@@ -4837,11 +4878,10 @@ static std::string questDialogueEditorReadEditableField()
 					break;
 				}
 
-				const char* member =
-					questDialogueEditorEditableField
-						== QUEST_DIALOGUE_FIELD_MARKER_X
-							? "x"
-							: "y";
+				const char* member = questDialogueEditorEditableField
+					== QUEST_DIALOGUE_FIELD_MARKER_X ? "x"
+					: (questDialogueEditorEditableField
+						== QUEST_DIALOGUE_FIELD_MARKER_Y ? "y" : "playable_floor");
 
 				if ( marker.HasMember(member)
 					&& marker[member].IsInt() )
@@ -4858,6 +4898,7 @@ static std::string questDialogueEditorReadEditableField()
 		case QUEST_DIALOGUE_FIELD_ORIGIN_MAP:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_X:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
 		{
 			rapidjson::Value* quest = questDialogueEditorQuestValue();
@@ -4879,6 +4920,10 @@ static std::string questDialogueEditorReadEditableField()
 			else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y )
 			{
 				member = "y";
+			}
+			else if ( questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR )
+			{
+				member = "playable_floor";
 			}
 			else if ( questDialogueEditorEditableField
 				== QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID )
@@ -5730,6 +5775,7 @@ static bool questDialogueEditorApplyEditableField()
 		case QUEST_DIALOGUE_FIELD_MARKER_MAP:
 		case QUEST_DIALOGUE_FIELD_MARKER_X:
 		case QUEST_DIALOGUE_FIELD_MARKER_Y:
+		case QUEST_DIALOGUE_FIELD_MARKER_FLOOR:
 		{
 			rapidjson::Value* objective =
 				questDialogueEditorSelectedObjectiveValueForEdit();
@@ -5757,7 +5803,8 @@ static bool questDialogueEditorApplyEditableField()
 					success = questDialogueEditorWriteIntegerMember(
 						(*objective)["map_marker"],
 						questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_MARKER_X
-							? "x" : "y", number);
+							? "x" : (questDialogueEditorEditableField
+								== QUEST_DIALOGUE_FIELD_MARKER_Y ? "y" : "playable_floor"), number);
 				}
 			}
 			break;
@@ -5767,6 +5814,7 @@ static bool questDialogueEditorApplyEditableField()
 		case QUEST_DIALOGUE_FIELD_ORIGIN_MAP:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_X:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_Y:
+		case QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR:
 		case QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID:
 		{
 			rapidjson::Value* quest = questDialogueEditorQuestValue();
@@ -5797,7 +5845,9 @@ static bool questDialogueEditorApplyEditableField()
 				const char* member = questDialogueEditorEditableField
 					== QUEST_DIALOGUE_FIELD_ORIGIN_X ? "x"
 					: (questDialogueEditorEditableField == QUEST_DIALOGUE_FIELD_ORIGIN_Y
-						? "y" : "npc_persistent_id");
+						? "y" : (questDialogueEditorEditableField
+							== QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR
+								? "playable_floor" : "npc_persistent_id"));
 				success = questDialogueEditorWriteIntegerMember(origin, member, number);
 				if ( success && questDialogueEditorEditableField
 					== QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID )
@@ -5806,7 +5856,8 @@ static bool questDialogueEditorApplyEditableField()
 					origin.RemoveMember("x");
 					origin.RemoveMember("y");
 				}
-				else if ( success )
+				else if ( success && questDialogueEditorEditableField
+					!= QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR )
 				{
 					questDialogueEditorSetBoolMember(origin, "track_npc", false);
 					origin.RemoveMember("npc_persistent_id");
@@ -6093,6 +6144,7 @@ questDialogueEditorCategoryFields()
 				QUEST_DIALOGUE_FIELD_ORIGIN_MAP,
 				QUEST_DIALOGUE_FIELD_ORIGIN_X,
 				QUEST_DIALOGUE_FIELD_ORIGIN_Y,
+				QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR,
 				QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID
 			};
 		case QUEST_DIALOGUE_CATEGORY_TEXT:
@@ -6139,7 +6191,8 @@ questDialogueEditorCategoryFields()
 			return {
 				QUEST_DIALOGUE_FIELD_MARKER_MAP,
 				QUEST_DIALOGUE_FIELD_MARKER_X,
-				QUEST_DIALOGUE_FIELD_MARKER_Y
+				QUEST_DIALOGUE_FIELD_MARKER_Y,
+				QUEST_DIALOGUE_FIELD_MARKER_FLOOR
 			};
 		default:
 			return { QUEST_DIALOGUE_FIELD_QUEST_TITLE };
@@ -6241,10 +6294,40 @@ static bool questDialogueEditorCycleScopeDirect()
 	questDialogueEditorWriteStringMember(
 		*quest, "scope", scope
 	);
-	questDialogueEditorSetMessage(scope == "player"
-		? "Scope: player."
-		: "Scope stored as " + scope
-			+ "; current runtime clearly falls back to per-player ownership.");
+	const int schemaVersion = questDialogueEditorDocument.HasMember("version")
+		&& questDialogueEditorDocument["version"].IsInt()
+		? questDialogueEditorDocument["version"].GetInt() : 0;
+	const std::string label = scope == "player" ? "Personal"
+		: (scope == "party" ? "Party" : "World");
+	questDialogueEditorSetMessage(schemaVersion
+		>= automatia::dialogue::SharedQuestOwnershipSchemaVersion
+		? "Scope: " + label + " (server-authoritative)."
+		: "Authored scope: " + label
+			+ ". Schema 1 keeps legacy Personal ownership until UPGRADE SHARING is used.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorUpgradeSharedQuestOwnership()
+{
+	if ( !questDialogueEditorDocument.IsObject()
+		|| !questDialogueEditorDocument.HasMember("version")
+		|| !questDialogueEditorDocument["version"].IsInt() )
+	{
+		questDialogueEditorSetMessage(
+			"Cannot upgrade: the document has no valid schema version.");
+		return false;
+	}
+	if ( questDialogueEditorDocument["version"].GetInt()
+		>= automatia::dialogue::SharedQuestOwnershipSchemaVersion )
+	{
+		questDialogueEditorSetMessage(
+			"This dialogue already uses true shared quest ownership.");
+		return true;
+	}
+	questDialogueEditorDocument["version"].SetInt(
+		automatia::dialogue::SharedQuestOwnershipSchemaVersion);
+	questDialogueEditorSetMessage(
+		"Upgraded to schema 2. Authored Party/World scopes now use true shared ownership.");
 	return questDialogueEditorSaveDocument();
 }
 
@@ -9625,6 +9708,13 @@ static bool questDialogueEditorUseSelectedNPCAsQuestGiver()
 
 	origin.RemoveMember("x");
 	origin.RemoveMember("y");
+	questDialogueEditorSetIntMember(origin, "playable_floor",
+		std::max<int>(DEFAULT_PLAYABLE_FLOOR, selectedEntity[0]->playableFloor));
+	if ( !origin.HasMember("floor_visibility") )
+	{
+		questDialogueEditorSetStringMember(origin,
+			"floor_visibility", "same_floor");
+	}
 
 	if ( !questDialogueEditorSaveDocument() )
 	{
@@ -9705,6 +9795,7 @@ static void questDialogueEditorOpenWizardNow()
 	questDialogueEditorWizardStep = 0;
 	questDialogueEditorWizardUseQuest = questDialogueEditorWizardTemplate == 3;
 	questDialogueEditorWizardRepeatable = false;
+	questDialogueEditorWizardScope = 0;
 	questDialogueEditorWizardOrigin = 0;
 	std::snprintf(questDialogueEditorWizardDialogueID,
 		sizeof(questDialogueEditorWizardDialogueID), "new_dialogue");
@@ -9857,6 +9948,8 @@ static void questDialogueEditorRedo()
 
 void openQuestDialogueEditor()
 {
+	const bool preserveModel = questDialogueEditorPreserveModelOnOpen;
+	questDialogueEditorPreserveModelOnOpen = false;
 	questDialogueEditorEditingField = false;
 	SDL_StopTextInput();
 
@@ -9921,7 +10014,8 @@ void openQuestDialogueEditor()
 			std::min(questDialogueEditorSelectedFile,
 				static_cast<int>(questDialogueEditorFiles.size()) - 1));
 		questDialogueEditorLoadPreview(
-			questDialogueEditorFiles[questDialogueEditorSelectedFile]
+			questDialogueEditorFiles[questDialogueEditorSelectedFile],
+			!preserveModel
 		);
 	}
 	else
@@ -9984,7 +10078,7 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "OBJECTIVE UP", "Move the selected objective earlier in the journal order." },
 		{ "OBJECTIVE DOWN", "Move the selected objective later in the journal order." },
 		{ "OPTIONAL", "Toggle whether the selected objective is optional." },
-		{ "OBJ MARK", "Toggle a map marker for the selected objective at the current editor cursor tile." },
+		{ "OBJ MARK", "Remove an existing marker, or temporarily return to the map to pick its tile and playable floor." },
 		{ "CAT<", "Move to the previous editing category." },
 		{ "CAT>", "Move to the next editing category." },
 		{ "FIELD<", "Move to the previous editable field in the current category." },
@@ -10018,7 +10112,7 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "ACTION <", "Show the previous guided action group." },
 		{ "ACTION >", "Show the next guided action group." },
 		{ "COMPARE", "Cycle equals, not-equals, at-least, and at-most comparisons." },
-		{ "SCOPE", "Cycle quest ownership scope. Player scope is currently supported at runtime." },
+		{ "SCOPE", "Cycle Personal, Party, and World ownership. Schema 1 keeps legacy Personal behavior; use the Quest page upgrade control to opt into schema 2 sharing." },
 		{ "COND ITEM", "Cycle the item used by the selected item requirement." },
 		{ "REWARD", "Cycle the selected reward-item preset." },
 		{ "REMOVE ITEM", "Toggle or edit the selected choice item-removal action." },
@@ -10026,7 +10120,7 @@ static std::string questDialogueEditorButtonTooltip(
 		{ "RECRUIT", "Toggle the action that recruits the NPC." },
 		{ "REPEAT", "Toggle whether the quest metadata marks the quest repeatable." },
 		{ "GIVER MARKER", "Cycle marker modes: off, static at the selected entity tile, or follow a persistent NPC." },
-		{ "USE CURSOR TILE", "Place a static quest-giver marker on the current editor cursor tile." },
+		{ "PICK TILE ON MAP", "Temporarily close the dialogue window and click a map tile for a floor-aware marker." },
 		{ "USE SELECTED NPC", "Bind the quest giver to the selected NPC's real persistent ID and current map." },
 		{ "CLEAR GIVER", "Remove the dynamic quest-giver NPC binding." },
 		{ "EDIT CHOICE", "Jump directly to editing the selected choice text." },
@@ -11775,7 +11869,7 @@ static void drawQuestDialogueEditorWorkspace()
 
 	toolboxButtonPair(
 		toolboxY,
-		"USE CURSOR TILE",
+		"PICK TILE ON MAP",
 		"USE SELECTED NPC",
 		[]()
 		{
@@ -12380,12 +12474,16 @@ static void drawQuestDialogueEditorWorkspace()
 	);
 	detailY += 6;
 
+	const std::string previewScopeLabel =
+		questDialogueEditorPreview.scope == "player" ? "Personal"
+		: (questDialogueEditorPreview.scope == "party" ? "Party" : "World");
 	printTextFormatted(
 		font8x8_bmp,
 		detailX1 + 8,
 		detailY,
-		"Scope: %s",
-		questDialogueEditorPreview.scope.c_str()
+		"Scope: %s (schema %d)",
+		previewScopeLabel.c_str(),
+		questDialogueEditorPreview.schemaVersion
 	);
 	detailY += 16;
 
@@ -13598,7 +13696,20 @@ static bool questDialogueEditorCreateWizardFile()
 		if ( quest.HasMember("repeatable") )
 			quest["repeatable"].SetBool(questDialogueEditorWizardRepeatable);
 		else quest.AddMember("repeatable", questDialogueEditorWizardRepeatable, allocator);
-		if ( questDialogueEditorWizardOrigin != 0 )
+		const char* scopeNames[] = { "player", "party", "world" };
+		questDialogueEditorWizardScope = std::max(0,
+			std::min(questDialogueEditorWizardScope, 2));
+		if ( quest.HasMember("scope") && quest["scope"].IsString() )
+		{
+			quest["scope"].SetString(scopeNames[questDialogueEditorWizardScope], allocator);
+		}
+		else
+		{
+			rapidjson::Value scope;
+			scope.SetString(scopeNames[questDialogueEditorWizardScope], allocator);
+			quest.AddMember("scope", scope, allocator);
+		}
+		if ( questDialogueEditorWizardOrigin == 2 )
 		{
 			rapidjson::Value origin(rapidjson::kObjectType);
 			rapidjson::Value label;
@@ -13608,29 +13719,15 @@ static bool questDialogueEditorCreateWizardFile()
 			const std::string currentMap = questEditorCurrentMapFilename();
 			mapName.SetString(currentMap.c_str(), allocator);
 			origin.AddMember("map", mapName, allocator);
-			if ( questDialogueEditorWizardOrigin == 1 )
+			if ( !selectedEntity[0] || selectedEntity[0]->persistentID <= 0 )
 			{
-				if ( drawx < 0 || drawy < 0 || drawx >= static_cast<int>(map.width)
-					|| drawy >= static_cast<int>(map.height) )
-				{
-					questDialogueEditorSetMessage("The editor cursor is outside the map.");
-					return false;
-				}
-				origin.AddMember("x", drawx, allocator);
-				origin.AddMember("y", drawy, allocator);
+				questDialogueEditorSetMessage(
+					"Select a persistent NPC before choosing Follow Selected NPC.");
+				return false;
 			}
-			else
-			{
-				if ( !selectedEntity[0] || selectedEntity[0]->persistentID <= 0 )
-				{
-					questDialogueEditorSetMessage(
-						"Select a persistent NPC before choosing Follow Selected NPC.");
-					return false;
-				}
-				origin.AddMember("track_npc", true, allocator);
-				origin.AddMember("npc_persistent_id",
-					selectedEntity[0]->persistentID, allocator);
-			}
+			origin.AddMember("track_npc", true, allocator);
+			origin.AddMember("npc_persistent_id",
+				selectedEntity[0]->persistentID, allocator);
 			quest.AddMember("origin", origin, allocator);
 		}
 	}
@@ -13667,6 +13764,12 @@ static bool questDialogueEditorCreateWizardFile()
 	questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_CONVERSATION;
 	questDialogueEditorSetMessage("Created " + filename + " from "
 		+ questDialogueEditorWizardTemplateName() + ".");
+	if ( useQuest && questDialogueEditorWizardOrigin == 1 )
+	{
+		questDialogueEditorWorkspace = QUEST_DIALOGUE_WORKSPACE_QUEST;
+		questDialogueEditorQuestPanel = 2;
+		questDialogueEditorBeginMarkerPick(QUEST_DIALOGUE_MARKER_PICK_ORIGIN);
+	}
 	return true;
 }
 
@@ -15057,23 +15160,142 @@ static bool questDialogueEditorClearObjectiveMarker()
 	return questDialogueEditorSaveDocument();
 }
 
-static bool questDialogueEditorSetObjectiveMarkerFromCursor()
+static bool questDialogueEditorSetObjectiveMarkerTile(
+	const int tileX,
+	const int tileY,
+	const int playableFloor
+)
 {
 	rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
 	if ( !objective ) return false;
-	if ( drawx < 0 || drawy < 0 || drawx >= static_cast<int>(map.width)
-		|| drawy >= static_cast<int>(map.height) )
+	if ( tileX < 0 || tileY < 0 || tileX >= static_cast<int>(map.width)
+		|| tileY >= static_cast<int>(map.height) )
 	{
-		questDialogueEditorSetMessage("Cursor is outside the map.");
+		questDialogueEditorSetMessage("Selected tile is outside the map.");
 		return false;
 	}
 	rapidjson::Value& marker = questDialogueEditorSetObjectMember(
 		*objective, "map_marker");
 	questDialogueEditorSetStringMember(marker, "map",
 		questEditorCurrentMapFilename());
-	questDialogueEditorSetIntMember(marker, "x", drawx);
-	questDialogueEditorSetIntMember(marker, "y", drawy);
-	questDialogueEditorSetMessage("Objective marker moved to the editor cursor.");
+	questDialogueEditorSetIntMember(marker, "x", tileX);
+	questDialogueEditorSetIntMember(marker, "y", tileY);
+	questDialogueEditorSetIntMember(marker, "playable_floor",
+		std::max(0, playableFloor));
+	if ( !marker.HasMember("floor_visibility") )
+	{
+		questDialogueEditorSetStringMember(marker, "floor_visibility", "same_floor");
+	}
+	questDialogueEditorSetMessage("Objective marker set to tile "
+		+ std::to_string(tileX) + ", " + std::to_string(tileY)
+		+ " on playable floor " + std::to_string(std::max(0, playableFloor)) + ".");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorSetObjectiveMarkerFromCursor()
+{
+	return questDialogueEditorBeginMarkerPick(
+		QUEST_DIALOGUE_MARKER_PICK_OBJECTIVE);
+}
+
+static int questDialogueEditorDefaultMarkerFloor()
+{
+	return map.playableFloors.hasFloor(static_cast<PlayableFloorId>(drawlayer))
+		? drawlayer : DEFAULT_PLAYABLE_FLOOR;
+}
+
+static bool questDialogueEditorBeginManualOriginCoordinates()
+{
+	rapidjson::Value* quest = questDialogueEditorQuestValue();
+	if ( !quest ) return false;
+	if ( !quest->HasMember("origin") || !(*quest)["origin"].IsObject() )
+	{
+		if ( !questDialogueEditorSetQuestGiverTile(
+				0, 0, questDialogueEditorDefaultMarkerFloor()) )
+		{
+			return false;
+		}
+	}
+	questDialogueEditorEditableField = QUEST_DIALOGUE_FIELD_ORIGIN_X;
+	questDialogueEditorFieldCategory = QUEST_DIALOGUE_CATEGORY_FILE_QUEST;
+	questDialogueEditorBeginEditingField();
+	questDialogueEditorSetMessage(
+		"Enter tile X, press Apply, then edit tile Y and playable floor.");
+	return true;
+}
+
+static bool questDialogueEditorBeginManualObjectiveCoordinates()
+{
+	rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
+	if ( !objective ) return false;
+	if ( !objective->HasMember("map_marker")
+		|| !(*objective)["map_marker"].IsObject() )
+	{
+		if ( !questDialogueEditorSetObjectiveMarkerTile(
+				0, 0, questDialogueEditorDefaultMarkerFloor()) )
+		{
+			return false;
+		}
+	}
+	questDialogueEditorEditableField = QUEST_DIALOGUE_FIELD_MARKER_X;
+	questDialogueEditorFieldCategory = QUEST_DIALOGUE_CATEGORY_MARKER;
+	questDialogueEditorBeginEditingField();
+	questDialogueEditorSetMessage(
+		"Enter tile X, press Apply, then edit tile Y and playable floor.");
+	return true;
+}
+
+static const char* questDialogueEditorMarkerVisibility(
+	const rapidjson::Value& marker
+)
+{
+	return marker.IsObject() && marker.HasMember("floor_visibility")
+		&& marker["floor_visibility"].IsString()
+		&& std::string(marker["floor_visibility"].GetString()) == "same_floor"
+			? "same_floor" : "column";
+}
+
+static bool questDialogueEditorToggleOriginMarkerVisibility()
+{
+	rapidjson::Value* quest = questDialogueEditorQuestValue();
+	if ( !quest || !quest->HasMember("origin")
+		|| !(*quest)["origin"].IsObject() ) return false;
+	rapidjson::Value& origin = (*quest)["origin"];
+	const bool currentlySame = std::string(
+		questDialogueEditorMarkerVisibility(origin)) == "same_floor";
+	questDialogueEditorSetStringMember(origin, "floor_visibility",
+		currentlySame ? "column" : "same_floor");
+	if ( !currentlySame && (!origin.HasMember("playable_floor")
+		|| !origin["playable_floor"].IsInt()) )
+	{
+		questDialogueEditorSetIntMember(origin, "playable_floor",
+			questDialogueEditorDefaultMarkerFloor());
+	}
+	questDialogueEditorSetMessage(currentlySame
+		? "Origin marker now appears throughout the vertical column."
+		: "Origin marker now appears only on its selected playable floor.");
+	return questDialogueEditorSaveDocument();
+}
+
+static bool questDialogueEditorToggleObjectiveMarkerVisibility()
+{
+	rapidjson::Value* objective = questDialogueEditorSelectedObjectiveValueForEdit();
+	if ( !objective || !objective->HasMember("map_marker")
+		|| !(*objective)["map_marker"].IsObject() ) return false;
+	rapidjson::Value& marker = (*objective)["map_marker"];
+	const bool currentlySame = std::string(
+		questDialogueEditorMarkerVisibility(marker)) == "same_floor";
+	questDialogueEditorSetStringMember(marker, "floor_visibility",
+		currentlySame ? "column" : "same_floor");
+	if ( !currentlySame && (!marker.HasMember("playable_floor")
+		|| !marker["playable_floor"].IsInt()) )
+	{
+		questDialogueEditorSetIntMember(marker, "playable_floor",
+			questDialogueEditorDefaultMarkerFloor());
+	}
+	questDialogueEditorSetMessage(currentlySame
+		? "Objective marker now appears throughout the vertical column."
+		: "Objective marker now appears only on its selected playable floor.");
 	return questDialogueEditorSaveDocument();
 }
 
@@ -15128,7 +15350,15 @@ static void questDialogueEditorDrawQuestPage()
 			QUEST_DIALOGUE_FIELD_QUEST_FAILED_TEXT, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
 		const std::string scope = quest->HasMember("scope") && (*quest)["scope"].IsString()
 			? questEditorNormalizeID((*quest)["scope"].GetString()) : "player";
-		printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %s", "Scope", scope.c_str());
+		const std::string scopeLabel = scope == "player" ? "Personal"
+			: (scope == "party" ? "Party" : "World");
+		const int schemaVersion = questDialogueEditorDocument.HasMember("version")
+			&& questDialogueEditorDocument["version"].IsInt()
+			? questDialogueEditorDocument["version"].GetInt() : 0;
+		const bool sharedOwnership = schemaVersion
+			>= automatia::dialogue::SharedQuestOwnershipSchemaVersion;
+		printTextFormatted(font8x8_bmp, left, y + 5, "%-17s %s",
+			"Ownership", scopeLabel.c_str());
 		if ( questDialogueEditorImmediateButton(fieldRight - 72, y, 72, "CHANGE") )
 			questDialogueEditorCycleScopeDirect();
 		y += 23;
@@ -15138,13 +15368,54 @@ static void questDialogueEditorDrawQuestPage()
 			"Repeatable", repeatable ? "yes" : "no");
 		if ( questDialogueEditorImmediateButton(fieldRight - 72, y, 72, "TOGGLE") )
 			questDialogueEditorToggleRepeatable();
-		y += 31;
-		printTextFormattedColor(font8x8_bmp, left, y,
-			scope == "player" ? makeColorRGB(128, 255, 160) : makeColorRGB(255, 210, 96),
-			scope == "player"
-				? "Player scope is host-authoritative and private per player."
-				: "Party/world is preserved in JSON, but the current runtime executes it as player scope.");
-		y += 20;
+		y += 27;
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Schema %d ownership semantics", schemaVersion);
+		if ( !sharedOwnership
+			&& questDialogueEditorImmediateButton(
+				fieldRight - 128, y, 128, "UPGRADE SHARING") )
+		{
+			questDialogueEditorUpgradeSharedQuestOwnership();
+		}
+		y += 25;
+		if ( !sharedOwnership && scope != "player" )
+		{
+			printTextFormattedColor(font8x8_bmp, left, y,
+				makeColorRGB(255, 210, 96),
+				"Legacy schema: authored %s currently executes as Personal.",
+				scopeLabel.c_str());
+		}
+		else if ( scope == "player" )
+		{
+			printTextFormattedColor(font8x8_bmp, left, y,
+				makeColorRGB(128, 255, 160),
+				"Personal: private state owned by this durable player identity.");
+		}
+		else if ( scope == "party" )
+		{
+			printTextFormattedColor(font8x8_bmp, left, y,
+				makeColorRGB(128, 255, 160),
+				"Party: one state shared by the server's persistent PartyID.");
+		}
+		else
+		{
+			printTextFormattedColor(font8x8_bmp, left, y,
+				makeColorRGB(128, 255, 160),
+				"World: one state shared by every player in this world save.");
+		}
+		y += 17;
+		if ( sharedOwnership && scope == "party" )
+		{
+			printText(font8x8_bmp, left, y,
+				"Members synchronize progress; leaving immediately revokes the shared view.");
+			y += 17;
+		}
+		else if ( sharedOwnership && scope == "world" )
+		{
+			printText(font8x8_bmp, left, y,
+				"Map instances, playable floors, authored layers, and entity Z do not divide it.");
+			y += 17;
+		}
 		printText(font8x8_bmp, left, y,
 			"Quest state persists in Automatia story saves; this editor does not mutate live quest state.");
 	}
@@ -15157,17 +15428,19 @@ static void questDialogueEditorDrawQuestPage()
 			makeColorRGB(255, 230, 96), "%s",
 			questDialogueEditorGiverMarkerSummary().c_str());
 		y += 22;
-		if ( questDialogueEditorImmediateButton(left, y, 128, "USE CURSOR TILE") )
+		if ( questDialogueEditorImmediateButton(left, y, 116, "PICK TILE ON MAP") )
 			questDialogueEditorUseCursorTileAsQuestGiver();
-		if ( questDialogueEditorImmediateButton(left + 136, y, 144,
+		if ( questDialogueEditorImmediateButton(left + 124, y, 112,
+			"MANUAL COORDS") ) questDialogueEditorBeginManualOriginCoordinates();
+		if ( questDialogueEditorImmediateButton(left + 244, y, 144,
 			"FOLLOW SELECTED NPC") ) questDialogueEditorUseSelectedNPCAsQuestGiver();
-		if ( questDialogueEditorImmediateButton(left + 288, y, 96,
+		if ( questDialogueEditorImmediateButton(left + 396, y, 96,
 			"CLEAR ORIGIN") ) questDialogueEditorClearQuestGiver();
 		y += 31;
 		if ( !quest->HasMember("origin") || !(*quest)["origin"].IsObject() )
 		{
 			printText(font8x8_bmp, left, y,
-				"No origin. Use the current cursor tile or a selected persistent NPC.");
+				"No origin. Pick a map tile, enter coordinates, or select a persistent NPC.");
 			return;
 		}
 		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Label",
@@ -15178,6 +15451,8 @@ static void questDialogueEditorDrawQuestPage()
 			QUEST_DIALOGUE_FIELD_ORIGIN_X, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
 		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Static tile Y",
 			QUEST_DIALOGUE_FIELD_ORIGIN_Y, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
+		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Playable floor",
+			QUEST_DIALOGUE_FIELD_ORIGIN_FLOOR, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
 		questDialogueEditorDrawEditableRow(left, fieldRight, y, "Persistent NPC ID",
 			QUEST_DIALOGUE_FIELD_ORIGIN_NPC_ID, QUEST_DIALOGUE_CATEGORY_FILE_QUEST);
 		const rapidjson::Value& origin = (*quest)["origin"];
@@ -15190,6 +15465,17 @@ static void questDialogueEditorDrawQuestPage()
 			questDialogueEditorSetMessage(
 				"Use cursor tile for static mode or Follow Selected NPC for tracking mode.");
 		y += 28;
+		const bool sameFloor = std::string(
+			questDialogueEditorMarkerVisibility(origin)) == "same_floor";
+		printTextFormatted(font8x8_bmp, left, y + 5,
+			"Floor visibility  %s", sameFloor ? "same floor only" : "whole column");
+		if ( questDialogueEditorImmediateButton(fieldRight - 136, y, 136,
+			sameFloor ? "USE WHOLE COLUMN" : "USE SAME FLOOR") )
+			questDialogueEditorToggleOriginMarkerVisibility();
+		y += 27;
+		printText(font8x8_bmp, left, y,
+			"Same-floor compares PlayableFloorID; column ignores floor but still stays on this map/tile.");
+		y += 17;
 		printText(font8x8_bmp, left, y,
 			"Persistent NPC IDs are map-scoped. Follow mode requires a saved, persistent map entity.");
 	}
@@ -15305,9 +15591,11 @@ static void questDialogueEditorDrawQuestPage()
 			makeColorRGB(255, 230, 96), "MAP MARKER: %s",
 			hasMarker ? "configured" : "none");
 		inspectorY += 18;
-		if ( questDialogueEditorImmediateButton(inspectorLeft, inspectorY, 140,
-			"USE CURSOR TILE") ) questDialogueEditorSetObjectiveMarkerFromCursor();
-		if ( questDialogueEditorImmediateButton(inspectorLeft + 148, inspectorY, 110,
+		if ( questDialogueEditorImmediateButton(inspectorLeft, inspectorY, 112,
+			"PICK TILE ON MAP") ) questDialogueEditorSetObjectiveMarkerFromCursor();
+		if ( questDialogueEditorImmediateButton(inspectorLeft + 120, inspectorY, 108,
+			"MANUAL COORDS") ) questDialogueEditorBeginManualObjectiveCoordinates();
+		if ( questDialogueEditorImmediateButton(inspectorLeft + 236, inspectorY, 110,
 			"CLEAR MARKER") ) questDialogueEditorClearObjectiveMarker();
 		inspectorY += 26;
 		if ( hasMarker )
@@ -15321,6 +15609,19 @@ static void questDialogueEditorDrawQuestPage()
 			questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
 				"Marker tile Y", QUEST_DIALOGUE_FIELD_MARKER_Y,
 				QUEST_DIALOGUE_CATEGORY_MARKER);
+			questDialogueEditorDrawEditableRow(inspectorLeft, fieldRight, inspectorY,
+				"Playable floor", QUEST_DIALOGUE_FIELD_MARKER_FLOOR,
+				QUEST_DIALOGUE_CATEGORY_MARKER);
+			const rapidjson::Value& marker = (*objective)["map_marker"];
+			const bool sameFloor = std::string(
+				questDialogueEditorMarkerVisibility(marker)) == "same_floor";
+			printTextFormatted(font8x8_bmp, inspectorLeft, inspectorY + 5,
+				"%-17s %s", "Floor visibility",
+				sameFloor ? "same floor only" : "whole column");
+			if ( questDialogueEditorImmediateButton(fieldRight - 136, inspectorY, 136,
+				sameFloor ? "WHOLE COLUMN" : "SAME FLOOR") )
+				questDialogueEditorToggleObjectiveMarkerVisibility();
+			inspectorY += 23;
 		}
 	}
 }
@@ -15518,6 +15819,201 @@ static void questDialogueEditorDrawTutorialsPage()
 	}
 }
 
+static bool questDialogueEditorJSONOwnsTextInput()
+{
+	return newwindow == 38 && questDialogueEditorJSONEditing
+		&& inputstr == questDialogueEditorJSONBuffer;
+}
+
+static void questDialogueEditorJSONStore(const std::string& value)
+{
+	const std::size_t size = std::min(value.size(),
+		automatia::dialogue::MaximumDocumentBytes);
+	std::memcpy(questDialogueEditorJSONBuffer, value.data(), size);
+	questDialogueEditorJSONBuffer[size] = '\0';
+	questDialogueEditorJSONCaret = std::min(questDialogueEditorJSONCaret, size);
+	cursorflash = ticks;
+}
+
+static void questDialogueEditorJSONInsert(const std::string& inserted)
+{
+	std::string source = questDialogueEditorJSONSelectAll
+		? std::string{} : std::string(questDialogueEditorJSONBuffer);
+	if ( questDialogueEditorJSONSelectAll ) questDialogueEditorJSONCaret = 0;
+	questDialogueEditorJSONSelectAll = false;
+	questDialogueEditorJSONCaret = std::min(
+		questDialogueEditorJSONCaret, source.size());
+	const std::size_t available = automatia::dialogue::MaximumDocumentBytes
+		- source.size();
+	const std::size_t count = std::min(available, inserted.size());
+	source.insert(questDialogueEditorJSONCaret, inserted, 0, count);
+	questDialogueEditorJSONCaret += count;
+	questDialogueEditorJSONStore(source);
+}
+
+static std::pair<std::size_t, std::size_t>
+questDialogueEditorJSONLineBounds(
+	const std::string& source,
+	const std::size_t caret
+)
+{
+	const std::size_t clamped = std::min(caret, source.size());
+	const std::size_t previous = clamped == 0
+		? std::string::npos : source.rfind('\n', clamped - 1);
+	const std::size_t start = previous == std::string::npos ? 0 : previous + 1;
+	const std::size_t next = source.find('\n', clamped);
+	return { start, next == std::string::npos ? source.size() : next };
+}
+
+static void questDialogueEditorJSONMoveVertical(const int direction)
+{
+	const std::string source = questDialogueEditorJSONBuffer;
+	const auto bounds = questDialogueEditorJSONLineBounds(
+		source, questDialogueEditorJSONCaret);
+	const std::size_t column = questDialogueEditorJSONCaret - bounds.first;
+	if ( direction < 0 )
+	{
+		if ( bounds.first == 0 ) return;
+		const auto destination = questDialogueEditorJSONLineBounds(
+			source, bounds.first - 1);
+		questDialogueEditorJSONCaret = destination.first
+			+ std::min(column, destination.second - destination.first);
+	}
+	else
+	{
+		if ( bounds.second >= source.size() ) return;
+		const auto destination = questDialogueEditorJSONLineBounds(
+			source, bounds.second + 1);
+		questDialogueEditorJSONCaret = destination.first
+			+ std::min(column, destination.second - destination.first);
+	}
+	questDialogueEditorJSONSelectAll = false;
+	cursorflash = ticks;
+}
+
+static bool questDialogueEditorJSONHandleKey(const SDL_KeyboardEvent& key)
+{
+	const bool control = (key.keysym.mod & KMOD_CTRL) != 0;
+	std::string source = questDialogueEditorJSONBuffer;
+	if ( control && key.keysym.sym == SDLK_a )
+	{
+		questDialogueEditorJSONSelectAll = true;
+		questDialogueEditorJSONCaret = source.size();
+		return true;
+	}
+	if ( control && key.keysym.sym == SDLK_c )
+	{
+		SDL_SetClipboardText(questDialogueEditorJSONBuffer);
+		return true;
+	}
+	if ( control && key.keysym.sym == SDLK_x )
+	{
+		SDL_SetClipboardText(questDialogueEditorJSONBuffer);
+		questDialogueEditorJSONCaret = 0;
+		questDialogueEditorJSONSelectAll = false;
+		questDialogueEditorJSONStore("");
+		return true;
+	}
+	if ( control && key.keysym.sym == SDLK_v )
+	{
+		char* clipboard = SDL_GetClipboardText();
+		if ( clipboard )
+		{
+			questDialogueEditorJSONInsert(clipboard);
+			SDL_free(clipboard);
+		}
+		return true;
+	}
+
+	if ( key.keysym.sym == SDLK_BACKSPACE )
+	{
+		if ( questDialogueEditorJSONSelectAll )
+		{
+			questDialogueEditorJSONCaret = 0;
+			questDialogueEditorJSONSelectAll = false;
+			questDialogueEditorJSONStore("");
+		}
+		else if ( questDialogueEditorJSONCaret > 0 )
+		{
+			source.erase(questDialogueEditorJSONCaret - 1, 1);
+			--questDialogueEditorJSONCaret;
+			questDialogueEditorJSONStore(source);
+		}
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_DELETE )
+	{
+		if ( questDialogueEditorJSONSelectAll )
+		{
+			questDialogueEditorJSONCaret = 0;
+			questDialogueEditorJSONSelectAll = false;
+			questDialogueEditorJSONStore("");
+		}
+		else if ( questDialogueEditorJSONCaret < source.size() )
+		{
+			source.erase(questDialogueEditorJSONCaret, 1);
+			questDialogueEditorJSONStore(source);
+		}
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_RETURN || key.keysym.sym == SDLK_KP_ENTER )
+	{
+		questDialogueEditorJSONInsert("\n");
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_TAB )
+	{
+		questDialogueEditorJSONInsert("  ");
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_LEFT || key.keysym.sym == SDLK_RIGHT )
+	{
+		if ( questDialogueEditorJSONSelectAll )
+		{
+			questDialogueEditorJSONCaret = key.keysym.sym == SDLK_LEFT
+				? 0 : source.size();
+		}
+		else if ( key.keysym.sym == SDLK_LEFT && questDialogueEditorJSONCaret > 0 )
+		{
+			--questDialogueEditorJSONCaret;
+		}
+		else if ( key.keysym.sym == SDLK_RIGHT
+			&& questDialogueEditorJSONCaret < source.size() )
+		{
+			++questDialogueEditorJSONCaret;
+		}
+		questDialogueEditorJSONSelectAll = false;
+		cursorflash = ticks;
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_UP || key.keysym.sym == SDLK_DOWN )
+	{
+		questDialogueEditorJSONMoveVertical(
+			key.keysym.sym == SDLK_UP ? -1 : 1);
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_HOME || key.keysym.sym == SDLK_END )
+	{
+		const auto bounds = questDialogueEditorJSONLineBounds(
+			source, questDialogueEditorJSONCaret);
+		questDialogueEditorJSONCaret = key.keysym.sym == SDLK_HOME
+			? bounds.first : bounds.second;
+		questDialogueEditorJSONSelectAll = false;
+		cursorflash = ticks;
+		return true;
+	}
+	if ( key.keysym.sym == SDLK_ESCAPE )
+	{
+		questDialogueEditorJSONEditing = false;
+		questDialogueEditorJSONSelectAll = false;
+		SDL_StopTextInput();
+		inputstr = nullptr;
+		questDialogueEditorSetMessage("Advanced JSON edit canceled.");
+		return true;
+	}
+	return false;
+}
+
 static void questDialogueEditorLoadJSONBuffer()
 {
 	const std::string pretty = questDialogueEditorModel.serialize(true);
@@ -15525,6 +16021,38 @@ static void questDialogueEditorLoadJSONBuffer()
 		? pretty : questDialogueEditorModel.serialize(false);
 	std::snprintf(questDialogueEditorJSONBuffer,
 		sizeof(questDialogueEditorJSONBuffer), "%s", json.c_str());
+	questDialogueEditorJSONCaret = 0;
+	questDialogueEditorJSONSelectAll = false;
+	questDialogueEditorJSONHorizontalScroll = 0;
+}
+
+static bool questDialogueEditorApplyJSONBuffer(const bool saveToDisk)
+{
+	std::string error;
+	if ( !questDialogueEditorModel.replaceWithEdit(
+			questDialogueEditorJSONBuffer, "Apply Advanced JSON", error) )
+	{
+		questDialogueEditorSetMessage(error);
+		return false;
+	}
+	questDialogueEditorJSONEditing = false;
+	questDialogueEditorJSONSelectAll = false;
+	SDL_StopTextInput();
+	inputstr = nullptr;
+	const std::string filename = questDialogueEditorSelectedFile >= 0
+		? questDialogueEditorFiles[questDialogueEditorSelectedFile] : std::string{};
+	questDialogueEditorLoadPreview(filename, false);
+	if ( saveToDisk )
+	{
+		if ( !questDialogueEditorWriteDocument() ) return false;
+		questDialogueEditorSetMessage("Advanced JSON validated and saved to disk.");
+	}
+	else
+	{
+		questDialogueEditorSetMessage(
+			"Advanced JSON applied in memory. Press SAVE to write the file.");
+	}
+	return true;
 }
 
 static void questDialogueEditorDrawJSONPage()
@@ -15535,10 +16063,12 @@ static void questDialogueEditorDrawJSONPage()
 	const int right = subx2 - 8;
 	drawDepressed(mainLeft, top, right, bottom);
 	printTextFormattedColor(font8x8_bmp, mainLeft + 12, top + 9,
-		makeColorRGB(128, 210, 255), "ADVANCED JSON - LOSSLESS SOURCE VIEW");
+		makeColorRGB(128, 210, 255), "ADVANCED JSON - EDITABLE LOSSLESS SOURCE");
 	printTextFormatted(font8x8_bmp, mainLeft + 12, top + 25,
-		"%zu / %zu bytes. Unknown extension fields are preserved.",
-		questDialogueEditorModel.serialize(false).size(),
+		"%zu / %zu bytes. Click text; arrows/Home/End, Enter, Tab, Ctrl+A/C/X/V work.",
+		questDialogueEditorJSONEditing
+			? std::strlen(questDialogueEditorJSONBuffer)
+			: questDialogueEditorModel.serialize(false).size(),
 		automatia::dialogue::MaximumDocumentBytes);
 	if ( !questDialogueEditorJSONEditing )
 	{
@@ -15555,23 +16085,16 @@ static void questDialogueEditorDrawJSONPage()
 	}
 	else
 	{
-		if ( questDialogueEditorImmediateButton(right - 210, top + 7, 90, "APPLY JSON") )
+		if ( questDialogueEditorImmediateButton(right - 286, top + 7, 70, "APPLY") )
 		{
-			std::string error;
-			if ( questDialogueEditorModel.replaceWithEdit(
-					questDialogueEditorJSONBuffer, "Apply Advanced JSON", error) )
-			{
-				questDialogueEditorJSONEditing = false;
-				SDL_StopTextInput();
-				inputstr = nullptr;
-				const std::string filename = questDialogueEditorSelectedFile >= 0
-					? questDialogueEditorFiles[questDialogueEditorSelectedFile] : std::string{};
-				questDialogueEditorLoadPreview(filename, false);
-				questDialogueEditorSetMessage("Advanced JSON applied in memory.");
-			}
-			else questDialogueEditorSetMessage(error);
+			questDialogueEditorApplyJSONBuffer(false);
 		}
-		if ( questDialogueEditorImmediateButton(right - 106, top + 7, 90, "CANCEL") )
+		if ( questDialogueEditorImmediateButton(right - 210, top + 7, 106,
+			"APPLY & SAVE") )
+		{
+			questDialogueEditorApplyJSONBuffer(true);
+		}
+		if ( questDialogueEditorImmediateButton(right - 98, top + 7, 82, "CANCEL") )
 		{
 			questDialogueEditorJSONEditing = false;
 			SDL_StopTextInput();
@@ -15583,9 +16106,14 @@ static void questDialogueEditorDrawJSONPage()
 		? std::string(questDialogueEditorJSONBuffer)
 		: questDialogueEditorModel.serialize(true);
 	std::vector<std::string> lines(1);
+	std::vector<std::size_t> lineStarts(1, 0);
 	for ( const char character : source )
 	{
-		if ( character == '\n' ) lines.emplace_back();
+		if ( character == '\n' )
+		{
+			lines.emplace_back();
+			lineStarts.push_back(lineStarts.back() + lines[lines.size() - 2].size() + 1);
+		}
 		else lines.back().push_back(character);
 	}
 	const int codeTop = top + 50;
@@ -15600,14 +16128,82 @@ static void questDialogueEditorDrawJSONPage()
 	}
 	questDialogueEditorJSONScroll = std::max(0,
 		std::min(maximumScroll, questDialogueEditorJSONScroll));
+	int caretLine = 0;
+	int caretColumn = 0;
+	if ( questDialogueEditorJSONEditing )
+	{
+		questDialogueEditorJSONCaret = std::min(
+			questDialogueEditorJSONCaret, source.size());
+		auto line = std::upper_bound(lineStarts.begin(), lineStarts.end(),
+			questDialogueEditorJSONCaret);
+		caretLine = std::max(0, static_cast<int>(line - lineStarts.begin()) - 1);
+		caretColumn = static_cast<int>(questDialogueEditorJSONCaret
+			- lineStarts[caretLine]);
+		if ( caretLine < questDialogueEditorJSONScroll )
+			questDialogueEditorJSONScroll = caretLine;
+		else if ( caretLine >= questDialogueEditorJSONScroll + visible )
+			questDialogueEditorJSONScroll = caretLine - visible + 1;
+		const int visibleColumns = std::max(1, (right - mainLeft - 66) / 8);
+		if ( caretColumn < questDialogueEditorJSONHorizontalScroll )
+			questDialogueEditorJSONHorizontalScroll = caretColumn;
+		else if ( caretColumn >= questDialogueEditorJSONHorizontalScroll + visibleColumns )
+			questDialogueEditorJSONHorizontalScroll = caretColumn - visibleColumns + 1;
+		questDialogueEditorJSONHorizontalScroll = std::max(0,
+			questDialogueEditorJSONHorizontalScroll);
+
+		if ( mousestatus[SDL_BUTTON_LEFT]
+			&& omousex >= mainLeft + 50 && omousex < right
+			&& omousey >= codeTop && omousey < bottom )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			const int clickedLine = questDialogueEditorJSONScroll
+				+ (omousey - codeTop) / 13;
+			if ( clickedLine >= 0 && clickedLine < static_cast<int>(lines.size()) )
+			{
+				const int clickedColumn = questDialogueEditorJSONHorizontalScroll
+					+ std::max(0, (omousex - (mainLeft + 54)) / 8);
+				questDialogueEditorJSONCaret = lineStarts[clickedLine]
+					+ std::min<std::size_t>(clickedColumn, lines[clickedLine].size());
+				questDialogueEditorJSONSelectAll = false;
+				cursorflash = ticks;
+			}
+		}
+	}
 	for ( int row = 0; row < visible; ++row )
 	{
 		const int index = questDialogueEditorJSONScroll + row;
 		if ( index >= static_cast<int>(lines.size()) ) break;
 		printTextFormattedColor(font8x8_bmp, mainLeft + 12, codeTop + row * 13,
 			makeColorRGB(155, 175, 195), "%4d", index + 1);
+		const std::string visibleLine = lines[index].size()
+			> static_cast<std::size_t>(questDialogueEditorJSONHorizontalScroll)
+			? lines[index].substr(questDialogueEditorJSONHorizontalScroll)
+			: std::string{};
 		printTextFormatted(font8x8_bmp, mainLeft + 54, codeTop + row * 13,
-			"%s", questDialogueEditorClipText(lines[index], right - mainLeft - 66).c_str());
+			"%s", questDialogueEditorClipText(
+				visibleLine, right - mainLeft - 66).c_str());
+		if ( questDialogueEditorJSONEditing && index == caretLine
+			&& !questDialogueEditorJSONSelectAll
+			&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+		{
+			const int visibleCaretColumn = caretColumn
+				- questDialogueEditorJSONHorizontalScroll;
+			if ( visibleCaretColumn >= 0 )
+			{
+				printTextFormattedColor(font8x8_bmp,
+					mainLeft + 54 + visibleCaretColumn * 8,
+					codeTop + row * 13,
+					makeColorRGB(255, 230, 96), "|");
+			}
+		}
+	}
+	if ( questDialogueEditorJSONEditing )
+	{
+		printTextFormattedColor(font8x8_bmp, right - 230, bottom - 18,
+			questDialogueEditorJSONSelectAll
+				? makeColorRGB(255, 230, 96) : makeColorRGB(155, 175, 195),
+			questDialogueEditorJSONSelectAll ? "ALL TEXT SELECTED" : "Line %d, column %d",
+			caretLine + 1, caretColumn + 1);
 	}
 }
 
@@ -16145,9 +16741,18 @@ static void questDialogueEditorDrawWizard()
 			drawField(1);
 			drawField(4);
 			drawField(5);
-			printText(font8x8_bmp, left + 18, y + 5, "Scope");
-			printTextFormattedColor(font8x8_bmp, left + 218, y + 5,
-				makeColorRGB(128, 255, 160), "Player (host-authoritative; current runtime mode)");
+			printText(font8x8_bmp, left + 18, y + 5, "Ownership scope");
+			const char* scopeLabels[] = { "PERSONAL", "PARTY", "WORLD" };
+			int scopeX = left + 218;
+			for ( int scope = 0; scope < 3; ++scope )
+			{
+				if ( questDialogueEditorImmediateButton(scopeX, y, 76,
+					scopeLabels[scope], questDialogueEditorWizardScope == scope) )
+				{
+					questDialogueEditorWizardScope = scope;
+				}
+				scopeX += 82;
+			}
 			y += 30;
 			printText(font8x8_bmp, left + 18, y + 5, "Repeatable");
 			if ( questDialogueEditorImmediateButton(left + 218, y, 82,
@@ -16156,7 +16761,7 @@ static void questDialogueEditorDrawWizard()
 				questDialogueEditorWizardRepeatable = !questDialogueEditorWizardRepeatable;
 			y += 30;
 			printText(font8x8_bmp, left + 18, y + 5, "Quest giver");
-			const char* origins[] = { "NONE", "CURSOR TILE", "SELECTED NPC" };
+			const char* origins[] = { "NONE", "PICK AFTER CREATE", "SELECTED NPC" };
 			int originX = left + 218;
 			for ( int origin = 0; origin < 3; ++origin )
 			{
@@ -16186,7 +16791,14 @@ static void questDialogueEditorDrawWizard()
 			useQuest ? questEditorNormalizeID(questDialogueEditorWizardQuestID).c_str()
 				: "none (conversation only)");
 		y += 22;
-		const char* originNames[] = { "none", "editor cursor tile", "selected persistent NPC" };
+		if ( useQuest )
+		{
+			const char* scopeNames[] = { "Personal", "Party", "World" };
+			printTextFormatted(font8x8_bmp, left + 28, y, "Ownership: %s (schema 2)",
+				scopeNames[std::max(0, std::min(questDialogueEditorWizardScope, 2))]);
+			y += 22;
+		}
+		const char* originNames[] = { "none", "pick a map tile after creation", "selected persistent NPC" };
 		printTextFormatted(font8x8_bmp, left + 28, y, "Quest giver: %s",
 			useQuest ? originNames[questDialogueEditorWizardOrigin] : "not applicable");
 		y += 31;
@@ -16652,7 +17264,8 @@ static bool questEditorWriteStarterJSON(
 
 	output
 		<< "{\n"
-		<< "  \"version\": 1,\n"
+		<< "  \"version\": "
+		<< automatia::dialogue::SchemaVersion << ",\n"
 		<< "  \"quest_id\": \""
 		<< questEditorJsonEscape(dialogueID)
 		<< "\",\n"
@@ -18253,6 +18866,122 @@ void closeNetworkInterfaces()
 view_t camera_vel;
 view_t camera;
 
+static void questDialogueEditorFinishMarkerPick(
+	const bool canceled,
+	const bool applied
+)
+{
+	const bool restore3D = questDialogueEditorMarkerPickRestore3D;
+	questDialogueEditorMarkerPick = QUEST_DIALOGUE_MARKER_PICK_NONE;
+	questDialogueEditorMarkerPickObjective = -1;
+	questDialogueEditorMarkerPickRestore3D = false;
+	messagetime = 0;
+	mode3d = restore3D;
+	questDialogueEditorPreserveModelOnOpen = true;
+	openQuestDialogueEditor();
+	if ( canceled )
+	{
+		questDialogueEditorSetMessage("Tile picking canceled; marker was unchanged.");
+	}
+	else if ( !applied )
+	{
+		questDialogueEditorSetMessage("The selected marker target is no longer valid.");
+	}
+}
+
+static void questDialogueEditorCycleMarkerPickFloor(const int direction)
+{
+	std::vector<int> floorIDs;
+	floorIDs.reserve(map.playableFloors.floors.size());
+	for ( const PlayableFloorData& floor : map.playableFloors.floors )
+	{
+		floorIDs.push_back(floor.id);
+	}
+	if ( floorIDs.empty() )
+	{
+		floorIDs.push_back(DEFAULT_PLAYABLE_FLOOR);
+	}
+	std::sort(floorIDs.begin(), floorIDs.end());
+	floorIDs.erase(std::unique(floorIDs.begin(), floorIDs.end()), floorIDs.end());
+	auto found = std::find(floorIDs.begin(), floorIDs.end(),
+		questDialogueEditorMarkerPickPlayableFloor);
+	int index = found == floorIDs.end()
+		? 0 : static_cast<int>(std::distance(floorIDs.begin(), found));
+	index = std::max(0, std::min(static_cast<int>(floorIDs.size()) - 1,
+		index + direction));
+	questDialogueEditorMarkerPickPlayableFloor = floorIDs[index];
+	std::snprintf(message, sizeof(message),
+		"MARKER PICK floor %d: click tile; U/P changes floor; right-click/Esc cancels.",
+		questDialogueEditorMarkerPickPlayableFloor);
+	messagetime = 1000000;
+}
+
+static bool questDialogueEditorHandleMarkerPick()
+{
+	if ( questDialogueEditorMarkerPick == QUEST_DIALOGUE_MARKER_PICK_NONE )
+	{
+		return false;
+	}
+	camx += (keystatus[SDLK_RIGHT] - keystatus[SDLK_LEFT]) * TEXTURESIZE;
+	camy += (keystatus[SDLK_DOWN] - keystatus[SDLK_UP]) * TEXTURESIZE;
+	camx = std::max<long>(-xres / 2,
+		std::min<long>(((long)map.width << TEXTUREPOWER) - xres / 2, camx));
+	camy = std::max<long>(-yres / 2,
+		std::min<long>(((long)map.height << TEXTUREPOWER) - yres / 2, camy));
+
+	if ( keystatus[SDLK_ESCAPE] || mousestatus[SDL_BUTTON_RIGHT] )
+	{
+		keystatus[SDLK_ESCAPE] = 0;
+		mousestatus[SDL_BUTTON_RIGHT] = 0;
+		questDialogueEditorFinishMarkerPick(true, false);
+		return true;
+	}
+	if ( keystatus[SDLK_u] )
+	{
+		keystatus[SDLK_u] = 0;
+		questDialogueEditorCycleMarkerPickFloor(1);
+	}
+	if ( keystatus[SDLK_p] )
+	{
+		keystatus[SDLK_p] = 0;
+		questDialogueEditorCycleMarkerPickFloor(-1);
+	}
+
+	if ( mousestatus[SDL_BUTTON_LEFT] )
+	{
+		mousestatus[SDL_BUTTON_LEFT] = 0;
+		const int tileX = (mousex + camx) >> TEXTUREPOWER;
+		const int tileY = (mousey + camy) >> TEXTUREPOWER;
+		if ( mousey < 16 || mousey >= yres - 16
+			|| tileX < 0 || tileY < 0
+			|| tileX >= static_cast<int>(map.width)
+			|| tileY >= static_cast<int>(map.height) )
+		{
+			std::snprintf(message, sizeof(message),
+				"Pick a tile inside the map (floor %d); right-click/Esc cancels.",
+				questDialogueEditorMarkerPickPlayableFloor);
+			messagetime = 1000000;
+			return true;
+		}
+
+		bool applied = false;
+		if ( questDialogueEditorMarkerPick == QUEST_DIALOGUE_MARKER_PICK_ORIGIN )
+		{
+			applied = questDialogueEditorSetQuestGiverTile(
+				tileX, tileY, questDialogueEditorMarkerPickPlayableFloor);
+		}
+		else
+		{
+			questDialogueEditorSelectedObjective =
+				questDialogueEditorMarkerPickObjective;
+			applied = questDialogueEditorSetObjectiveMarkerTile(
+				tileX, tileY, questDialogueEditorMarkerPickPlayableFloor);
+		}
+		questDialogueEditorFinishMarkerPick(false, applied);
+	}
+	return true;
+}
+
 void mainLogic(void)
 {
 	// messages
@@ -18269,6 +18998,11 @@ void mainLogic(void)
 			for ( int i = 0; i < sizeof(errorArr) / sizeof(int); i++ )
 				errorArr[i] = 0;
 		}
+	}
+
+	if ( questDialogueEditorHandleMarkerPick() )
+	{
+		return;
 	}
 	
 
@@ -18661,6 +19395,12 @@ bool handleEvents(void)
 				buttonExit(NULL);
 				break;
 			case SDL_KEYDOWN: // if a key is pressed...
+				if ( questDialogueEditorJSONOwnsTextInput()
+					&& questDialogueEditorJSONHandleKey(event.key) )
+				{
+					lastkeypressed = event.key.keysym.sym;
+					break;
+				}
 				if ( SDL_IsTextInputActive() )
 				{
 #ifdef APPLE
@@ -18731,6 +19471,11 @@ bool handleEvents(void)
 				keystatus[event.key.keysym.sym] = 0; // set this key's index to 0
 				break;
 			case SDL_TEXTINPUT:
+				if ( questDialogueEditorJSONOwnsTextInput() )
+				{
+					questDialogueEditorJSONInsert(event.text.text);
+					break;
+				}
 				if ( (event.text.text[0] != 'c' && event.text.text[0] != 'C') || !(SDL_GetModState()&KMOD_CTRL) )
 				{
 					if ( (event.text.text[0] != 'v' && event.text.text[0] != 'V') || !(SDL_GetModState()&KMOD_CTRL) )

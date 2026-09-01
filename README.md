@@ -9,21 +9,30 @@ This document summarizes the features currently present in this source tree. Fea
 The primary supported development configuration is:
 
 - Linux with GCC and CMake
-- FMOD enabled
-- OpenAL disabled unless a separate compatibility build is being tested
+- FMOD or OpenAL selected explicitly at configure time
 - Both the game and editor built from the same source tree
 
-A typical existing-build command is:
+Use separate build directories when switching audio backends so dependency
+detection and generated configuration cannot leak between them:
 
 ```bash
 cd /home/conner/Barony-----Automatia
-cmake --build build-super-posix -j6
+cmake -S . -B build-fmod -DBARONY_AUDIO_BACKEND=FMOD
+cmake --build build-fmod -j5
+
+cmake -S . -B build-openal -DBARONY_AUDIO_BACKEND=OPENAL
+cmake --build build-openal -j5
 ```
 
 `build-super-posix` is the current configured Steamworks-enabled, FMOD,
-15-player development tree. The six-job limit is intentional on the current
+15-player development tree. The five-job limit is intentional on the current
 development host to avoid CPU/RAM instability from an unrestricted parallel
 build.
+
+`BARONY_AUDIO_BACKEND` accepts `FMOD`, `OPENAL`, `NONE`, or `AUTO`. `AUTO`
+keeps the legacy `FMOD_ENABLED` and `OPENAL_ENABLED` switches working for old
+scripts; new configurations should use the explicit backend name. OpenAL uses
+libogg/libvorbis by default, or Tremor when `TREMOR_ENABLED=ON`.
 
 ## Expanded maps and rendering
 
@@ -295,9 +304,30 @@ NPCs can use external JSON dialogue with:
 - Mechanism activation and movement actions
 - Quest acceptance, progression, and completion
 
-### Per-player quests
+### Player, Party, and World quests
 
-Player-scoped quests are registered for joining players and handled authoritatively by the server. Late joiners can accept and update eligible quests without inheriting another player's private quest state.
+Schema-2 quests select true server-authoritative ownership with `quest.scope`:
+
+- `player` keeps private state on the durable player identity.
+- `party` shares one state through the server's persistent PartyID.
+- `world` shares one state through the persistent world save, across map
+  instances and playable floors.
+
+Schema-1 Party/World values retain their historical Personal fallback until an
+author explicitly upgrades the file in the remastered editor. Player-affecting
+rewards still target the actor; shared quest ownership does not multiply them.
+
+The editor's tutorial library includes scoped multiplayer examples, multi-stage
+AND branches, floor-aware markers, and Defeat ID objectives. For monster death
+objectives, set the same monster-property **Defeat ID** (Squad Defeat ID) on the
+targets and use that number as the objective's `defeat_id`. The ordinary Squad
+ID controls AI coordination and does not advance the quest counter.
+
+Quest giver and objective markers can be typed manually or picked by temporarily
+returning to the map. Each marker can be restricted to one `playable_floor` or
+shown through the whole vertical column. The Advanced JSON tab is a multiline
+caret editor; **Apply** validates in memory and **Apply & Save** writes the file
+atomically.
 
 ### Quest journal
 

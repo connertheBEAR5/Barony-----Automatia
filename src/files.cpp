@@ -8069,11 +8069,15 @@ void physfsReloadSounds(bool reloadAll)
 #ifdef USE_FMOD
 				if ( !reloadAll )
 				{
-					sounds[c]->release();
+					if (sounds[c])
+					{
+						sounds[c]->release();
+					}
 					sounds[c] = nullptr;
 				}
 				FMOD_MODE flags = FMOD_DEFAULT | FMOD_3D | FMOD_LOWMEM;
-				if ( c == 133 || c == 672 || c == 135 || c == 155 || c == 149 )
+				if ( c == 133 || c == 672 || c == 135 || c == 155 || c == 149
+					|| c == 710 )
 				{
 					flags |= FMOD_LOOP_NORMAL;
 				}
@@ -8086,9 +8090,18 @@ void physfsReloadSounds(bool reloadAll)
 #ifdef USE_OPENAL
 				if ( !reloadAll )
 				{
-					OPENAL_Sound_Release(sounds[c]);
+					if (sounds[c])
+					{
+						OPENAL_Sound_Release(sounds[c]);
+					}
+					sounds[c] = nullptr;
 				}
-				OPENAL_CreateSound(soundFile.c_str(), true, &sounds[c]);
+				if (OPENAL_CreateSound(soundFile.c_str(), true, &sounds[c])
+					&& (c == 133 || c == 672 || c == 135 || c == 155
+						|| c == 149 || c == 710))
+				{
+					OPENAL_Sound_SetDefaultLoop(sounds[c], AL_TRUE);
+				}
 #endif
 				if (Mods::isLoading) {
 					updateLoadingScreen(20.f + (c / (float)numsounds) * 10.f);

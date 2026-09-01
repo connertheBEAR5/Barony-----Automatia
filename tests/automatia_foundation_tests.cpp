@@ -641,11 +641,14 @@ static bool testAtomicWorldSave()
         {"playable_floor", 0},
 		{"inventory", Json::array()}
 	});
-	document["quests"] = Json{{"foundation_quest", Json{{"stage", 2}}}};
+	document["quests"]["world"]["foundation_quest"] =
+		Json{{"stage", 2}};
+	document["quests"]["players"]["player_1:legacy_personal_quest"] =
+		Json{{"stage", 5}};
 	document["dialogue"] = Json{{"npc:7", Json{{"current_node", 3}}}};
 
     EXPECT(AutomatiaSave::validate(document).ok);
-    EXPECT(document["schema_version"] == 3);
+    EXPECT(document["schema_version"] == 4);
     EXPECT(document["party"]["next_id"] == 1);
 
     Json versionTwo = document;
@@ -705,7 +708,9 @@ static bool testAtomicWorldSave()
 		== 1);
 	EXPECT(roundTripped["map_instances"][0]["persistent_state"]["mechanisms"].size()
 		== 1);
-	EXPECT(roundTripped["quests"]["foundation_quest"]["stage"] == 2);
+	EXPECT(roundTripped["quests"]["world"]["foundation_quest"]["stage"] == 2);
+	EXPECT(roundTripped["quests"]["players"]
+		["player_1:legacy_personal_quest"]["stage"] == 5);
 	EXPECT(roundTripped["dialogue"]["npc:7"]["current_node"] == 3);
     EXPECT(roundTripped["unknown_custom_items"][0]["opaque_payload"]["nested"]
         == loaded["unknown_custom_items"][0]["opaque_payload"]["nested"]);

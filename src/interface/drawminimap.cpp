@@ -457,6 +457,10 @@ void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 		{
 			const std::string currentMap = normalizeQuestMarkerMapName(
 				map.filename[0] != '\0' ? map.filename : map.name);
+			const Sint32 currentPlayableFloor =
+				players[player] && players[player]->entity
+					? players[player]->entity->playableFloor
+					: DEFAULT_PLAYABLE_FLOOR;
 			for ( const auto& entry : questEntries )
 			{
 				if ( entry.status != CustomDialogueQuestJournalStatus::Active )
@@ -465,6 +469,8 @@ void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 				}
 				if ( entry.hasOriginMarker
 					&& normalizeQuestMarkerMapName(entry.originMap) == currentMap
+					&& (entry.originWholeColumn
+						|| entry.originPlayableFloor == currentPlayableFloor)
 					&& entry.originX >= 0 && entry.originY >= 0
 					&& entry.originX < map.width && entry.originY < map.height )
 				{
@@ -476,6 +482,8 @@ void drawMinimap(const int player, SDL_Rect rect, bool drawingSharedMap)
 					if ( !objective.visible || objective.completed
 						|| !objective.hasMapMarker
 						|| normalizeQuestMarkerMapName(objective.markerMap) != currentMap
+						|| (!objective.markerWholeColumn
+							&& objective.markerPlayableFloor != currentPlayableFloor)
 						|| objective.markerX < 0 || objective.markerY < 0
 						|| objective.markerX >= map.width || objective.markerY >= map.height )
 					{

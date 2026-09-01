@@ -43,6 +43,7 @@
 #include "player.hpp"
 #include "world_state.hpp"
 #include "party_persistence.hpp"
+#include "quest_ownership.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #include "sam/framework/sam_loader.hpp"
@@ -67,6 +68,7 @@
 #include <string>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <future>
 #include <iterator>
 #include <memory>
@@ -1051,6 +1053,11 @@ struct PersistentQuestState
     std::unordered_set<std::string> usedChoices;
 };
 
+static AutomatiaSave::Json automatiaQuestStateToJson(
+    const PersistentQuestState& quest);
+static PersistentQuestState automatiaQuestStateFromJson(
+    const AutomatiaSave::Json& saved);
+
 /*
  * Personal memory belonging to one persistent NPC.
  *
@@ -1207,6 +1214,14 @@ static bool isGeneratedMapEntityPersistentID(const Sint32 persistentID)
  */
 static PersistentWorldStoryState
     persistentWorldStoryState;
+
+/*
+ * A remote client receives only its authenticated Personal + current Party +
+ * World projection. This context lets read-only client UI resolve the same
+ * durable owner keys without trusting a locally claimed PartyID.
+ */
+static AutomatiaQuest::ActorContext
+    automatiaQuestRecipientViews[MAXPLAYERS];
 static AutomatiaSave::Json preservedAutomatiaWorldDocument;
 static AutomatiaSave::Json pendingAutomatiaWorldDocument;
 static bool automatiaMagicGrimoireGenerated = false;
@@ -2280,6 +2295,22 @@ bool savedJsonTriplet(
 bool safeSavedStoryId(const std::string& value)
 {
     if (value.empty() || value.size() > 255)
+    {
+        return false;
+    }
+    for (const unsigned char character : value)
+    {
+        if (character < 0x20 || character == 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool safeSavedStoryStorageKey(const std::string& value)
+{
+    if (value.empty() || value.size() > 1024)
     {
         return false;
     }
@@ -3880,30 +3911,129 @@ void hydratePreservedAutomatiaWorldDocument()
         "world_flags",
         persistentWorldStoryState.worldFlags
     );
-    if (preservedAutomatiaWorldDocument.contains("quests")
+    if (multiplayer != CLIENT
+        && preservedAutomatiaWorldDocument.contains("quests")
         && preservedAutomatiaWorldDocument["quests"].is_object()
         && preservedAutomatiaWorldDocument["quests"].size() <= 65536)
     {
-        for (auto member = preservedAutomatiaWorldDocument["quests"].begin();
-            member != preservedAutomatiaWorldDocument["quests"].end(); ++member)
+        const Json& savedQuests =
+            preservedAutomatiaWorldDocument["quests"];
+        const auto restoreCollection = [&savedQuests](
+            const Json& collection,
+            const AutomatiaQuest::Owner& owner)
         {
-            if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+            if (!collection.is_object() || !owner.isValid())
             {
-                continue;
+                return;
             }
-            PersistentQuestState quest;
-            savedJsonBool(member.value(), "started", quest.started);
-            savedJsonBool(member.value(), "accepted", quest.accepted);
-            savedJsonBool(member.value(), "completed", quest.completed);
-            savedJsonBool(member.value(), "failed", quest.failed);
-            savedJsonInt(member.value(), "stage", quest.stage);
-            restoreSavedVariables(member.value(), "variables", quest.variables);
-            restoreSavedStringSet(member.value(), "flags", quest.flags);
-            restoreSavedStringSet(
-                member.value(), "completed_objectives", quest.completedObjectives
-            );
-            restoreSavedStringSet(member.value(), "used_choices", quest.usedChoices);
-            persistentWorldStoryState.quests[member.key()] = std::move(quest);
+            for (auto member = collection.begin();
+                member != collection.end(); ++member)
+            {
+                if (!safeSavedStoryId(member.key())
+                    || !member.value().is_object())
+                {
+                    continue;
+                }
+                const std::string stateKey =
+                    AutomatiaQuest::makeStateKey(owner, member.key());
+                if (!stateKey.empty())
+                {
+                    persistentWorldStoryState.quests[stateKey] =
+                        automatiaQuestStateFromJson(member.value());
+                }
+            }
+        };
+
+        if (savedSchemaVersion >= 4
+            && savedQuests.contains("players")
+            && savedQuests.contains("world")
+            && savedQuests.contains("parties"))
+        {
+            if (savedQuests["players"].is_object())
+            {
+                for (auto playerQuest = savedQuests["players"].begin();
+                    playerQuest != savedQuests["players"].end();
+                    ++playerQuest)
+                {
+                    if (!safeSavedStoryStorageKey(playerQuest.key())
+                        || (playerQuest.key().rfind("player:", 0) != 0
+                            && playerQuest.key().rfind("player_", 0) != 0)
+                        || !playerQuest.value().is_object())
+                    {
+                        continue;
+                    }
+                    persistentWorldStoryState.quests[playerQuest.key()] =
+                        automatiaQuestStateFromJson(playerQuest.value());
+                }
+            }
+            AutomatiaQuest::Owner worldOwner;
+            worldOwner.scope = AutomatiaQuest::Scope::World;
+            restoreCollection(savedQuests["world"], worldOwner);
+            if (savedQuests["parties"].is_object())
+            {
+                for (auto party = savedQuests["parties"].begin();
+                    party != savedQuests["parties"].end(); ++party)
+                {
+                    AutomatiaParty::PartyID partyId = 0;
+                    const char* begin = party.key().data();
+                    const char* end = begin + party.key().size();
+                    const std::from_chars_result conversion =
+                        std::from_chars(begin, end, partyId);
+                    if (conversion.ec != std::errc{}
+                        || conversion.ptr != end
+                        || partyId == AutomatiaParty::INVALID_PARTY_ID)
+                    {
+                        continue;
+                    }
+                    AutomatiaQuest::Owner partyOwner;
+                    partyOwner.scope = AutomatiaQuest::Scope::Party;
+                    partyOwner.partyId = partyId;
+                    restoreCollection(party.value(), partyOwner);
+                }
+            }
+        }
+        else
+        {
+            /*
+             * Schema 1-3 stored one flat map. Personal slot keys are retained
+             * only long enough for lazy migration into a durable character
+             * owner. Raw legacy shared keys migrate to the World owner.
+             */
+            for (auto member = savedQuests.begin();
+                member != savedQuests.end(); ++member)
+            {
+                if (!safeSavedStoryId(member.key())
+                    || !member.value().is_object())
+                {
+                    continue;
+                }
+                if (member.key().rfind("player_", 0) == 0
+                    || member.key().rfind("player:", 0) == 0)
+                {
+                    persistentWorldStoryState.quests[member.key()] =
+                        automatiaQuestStateFromJson(member.value());
+                    continue;
+                }
+                AutomatiaQuest::Scope scope;
+                AutomatiaParty::PartyID partyId = 0;
+                std::string questID;
+                if (AutomatiaQuest::decodeSharedStateKey(
+                        member.key(), scope, partyId, questID))
+                {
+                    persistentWorldStoryState.quests[member.key()] =
+                        automatiaQuestStateFromJson(member.value());
+                    continue;
+                }
+                AutomatiaQuest::Owner worldOwner;
+                worldOwner.scope = AutomatiaQuest::Scope::World;
+                const std::string stateKey =
+                    AutomatiaQuest::makeStateKey(worldOwner, member.key());
+                if (!stateKey.empty())
+                {
+                    persistentWorldStoryState.quests[stateKey] =
+                        automatiaQuestStateFromJson(member.value());
+                }
+            }
         }
     }
     if (preservedAutomatiaWorldDocument.contains("dialogue")
@@ -5624,21 +5754,53 @@ static bool captureAutomatiaPersistentWorldDocument(
         (*mapDocument)["persistent_state"] = std::move(persistent);
     }
 
-    document["quests"] = Json::object();
+    document["quests"] = Json{
+        {"players", Json::object()},
+        {"world", Json::object()},
+        {"parties", Json::object()}
+    };
     for (const auto& entry : persistentWorldStoryState.quests)
     {
-        const PersistentQuestState& quest = entry.second;
-        document["quests"][entry.first] = Json{
-            {"started", quest.started},
-            {"accepted", quest.accepted},
-            {"completed", quest.completed},
-            {"failed", quest.failed},
-            {"stage", quest.stage},
-            {"variables", quest.variables},
-            {"flags", sortedStringSet(quest.flags)},
-            {"completed_objectives", sortedStringSet(quest.completedObjectives)},
-            {"used_choices", sortedStringSet(quest.usedChoices)}
-        };
+        AutomatiaQuest::Scope scope;
+        AutomatiaParty::PartyID partyId = 0;
+        std::string questID;
+        if (AutomatiaQuest::decodeSharedStateKey(
+                entry.first, scope, partyId, questID))
+        {
+            if (scope == AutomatiaQuest::Scope::World)
+            {
+                document["quests"]["world"][questID] =
+                    automatiaQuestStateToJson(entry.second);
+            }
+            else
+            {
+                document["quests"]["parties"]
+                    [std::to_string(partyId)][questID] =
+                        automatiaQuestStateToJson(entry.second);
+            }
+            continue;
+        }
+
+        /* Preserve the established world-save copy as well as character-save
+         * persistence. Legacy slot keys remain until their character is next
+         * authenticated and lazily migrated to a durable owner key. */
+        if (entry.first.rfind("player:", 0) == 0
+            || entry.first.rfind("player_", 0) == 0)
+        {
+            if (safeSavedStoryStorageKey(entry.first))
+            {
+                document["quests"]["players"][entry.first] =
+                    automatiaQuestStateToJson(entry.second);
+            }
+            continue;
+        }
+
+        /* Pre-scope shared keys are legacy World state. */
+        if (safeSavedStoryId(entry.first))
+        {
+            document["quests"]["world"][entry.first] =
+                automatiaQuestStateToJson(entry.second);
+        }
     }
     document["world_variables"] = persistentWorldStoryState.worldVariables;
     document["world_flags"] =
@@ -6579,6 +6741,139 @@ bool transitionAutomatiaNonPlayerEntityToPlayableFloor(
 	return true;
 }
 
+static std::size_t fallAutomatiaPlayerFollowersToLowerPlayableFloor(
+	const int playerIndex,
+	const PlayableFloorId sourceFloor,
+	const real_t sourcePlayerX,
+	const real_t sourcePlayerY,
+	const Entity& playerEntity)
+{
+	if (multiplayer == CLIENT
+		|| playerIndex < 0 || playerIndex >= MAXPLAYERS
+		|| !stats[playerIndex]
+		|| playerEntity.playableFloor >= sourceFloor
+		|| !map.playableFloors.hasFloor(playerEntity.playableFloor))
+	{
+		return 0;
+	}
+
+	static constexpr real_t followerOffsets[][2] = {
+		{ 12.0, 0.0 }, { -12.0, 0.0 }, { 0.0, 12.0 }, { 0.0, -12.0 },
+		{ 10.0, 10.0 }, { -10.0, 10.0 }, { 10.0, -10.0 }, { -10.0, -10.0 }
+	};
+	std::size_t followerOrdinal = 0;
+	std::size_t transitionedFollowers = 0;
+	for (node_t* node = stats[playerIndex]->FOLLOWERS.first;
+		node; node = node->next)
+	{
+		if (!node->element)
+		{
+			continue;
+		}
+
+		Entity* follower = uidToEntity(*static_cast<Uint32*>(node->element));
+		if (!follower
+			|| follower->behavior != &actMonster
+			|| follower->monsterAllyIndex != playerIndex
+			|| follower->playableFloor != sourceFloor)
+		{
+			continue;
+		}
+
+		const real_t relativeX = std::clamp(
+			follower->x - sourcePlayerX,
+			static_cast<real_t>(-12.0),
+			static_cast<real_t>(12.0));
+		const real_t relativeY = std::clamp(
+			follower->y - sourcePlayerY,
+			static_cast<real_t>(-12.0),
+			static_cast<real_t>(12.0));
+		std::array<std::pair<real_t, real_t>, 10> candidates{};
+		candidates[0] = {
+			playerEntity.x + relativeX,
+			playerEntity.y + relativeY
+		};
+		for (std::size_t candidate = 0; candidate < 8; ++candidate)
+		{
+			const std::size_t offsetIndex =
+				(followerOrdinal + candidate) % std::size(followerOffsets);
+			candidates[candidate + 1] = {
+				playerEntity.x + followerOffsets[offsetIndex][0],
+				playerEntity.y + followerOffsets[offsetIndex][1]
+			};
+		}
+		// A narrow landing tile may have room only at the player's resolved
+		// position. Entity overlap is preferable to leaving a follower stranded
+		// on a floor with no downward graph edge; ordinary AI separates them.
+		candidates.back() = { playerEntity.x, playerEntity.y };
+
+		real_t destinationX = 0.0;
+		real_t destinationY = 0.0;
+		bool foundSafeDestination = false;
+		for (const auto& [candidateX, candidateY] : candidates)
+		{
+			if (playableFloorPlacementFootprintIsSafe(
+					playerEntity.playableFloor,
+					*follower,
+					candidateX,
+					candidateY))
+			{
+				destinationX = candidateX;
+				destinationY = candidateY;
+				foundSafeDestination = true;
+				break;
+			}
+		}
+		if (!foundSafeDestination)
+		{
+			printlog(
+				"[Playable Z] Could not find a safe fall landing for follower UID %u on floor %d.",
+				follower->getUID(),
+				static_cast<int>(playerEntity.playableFloor));
+			++followerOrdinal;
+			continue;
+		}
+
+		const Sint32 previousState = follower->monsterState;
+		const Uint32 previousTarget = follower->monsterTarget;
+		const real_t previousVelocityX = follower->vel_x;
+		const real_t previousVelocityY = follower->vel_y;
+		const bool previousVerticalNavigationActive =
+			follower->followerVerticalNavigationActive;
+		follower->monsterState = MONSTER_STATE_WAIT;
+		follower->monsterTarget = 0;
+		follower->vel_x = 0.0;
+		follower->vel_y = 0.0;
+		follower->followerVerticalNavigationActive = false;
+		if (!transitionAutomatiaNonPlayerEntityToPlayableFloor(
+				*follower,
+				playerEntity.playableFloor,
+				destinationX,
+				destinationY,
+				follower->z))
+		{
+			follower->monsterState = previousState;
+			follower->monsterTarget = previousTarget;
+			follower->vel_x = previousVelocityX;
+			follower->vel_y = previousVelocityY;
+			follower->followerVerticalNavigationActive =
+				previousVerticalNavigationActive;
+			printlog(
+				"[Playable Z] Could not move follower UID %u with falling player %d from floor %d to %d.",
+				follower->getUID(),
+				playerIndex,
+				static_cast<int>(sourceFloor),
+				static_cast<int>(playerEntity.playableFloor));
+			++followerOrdinal;
+			continue;
+		}
+
+		++transitionedFollowers;
+		++followerOrdinal;
+	}
+	return transitionedFollowers;
+}
+
 bool applyAutomatiaPlayableFloorPlacement(
     const int playerIndex,
     const PlayableFloorId playableFloor,
@@ -6737,6 +7032,8 @@ bool fallAutomatiaPlayerToLowerPlayableFloor(
 	}
 
 	const PlayableFloorId sourceFloor = playerEntity->playableFloor;
+	const real_t sourceX = playerEntity->x;
+	const real_t sourceY = playerEntity->y;
 	real_t landingX = playerEntity->x;
 	real_t landingY = playerEntity->y;
 	if (!resolveLowerPlayableFloorLandingPosition(
@@ -6753,17 +7050,27 @@ bool fallAutomatiaPlayerToLowerPlayableFloor(
         floorsFallen = 0;
         return false;
     }
+	playerEntity = players[playerIndex]->entity;
+	const std::size_t followersFallen =
+		fallAutomatiaPlayerFollowersToLowerPlayableFloor(
+			playerIndex,
+			sourceFloor,
+			sourceX,
+			sourceY,
+			*playerEntity);
 
     broadcastAutomatiaPlayerFloorPlacement(playerIndex);
     printlog(
-		"[Playable Z] Player %d fell through authored floors: floor %d -> %d (%d floor%s), safe landing=(%.2f, %.2f).",
+		"[Playable Z] Player %d fell through authored floors: floor %d -> %d (%d floor%s), safe landing=(%.2f, %.2f); %zu follower%s followed.",
 		playerIndex,
 		static_cast<int>(sourceFloor),
 		static_cast<int>(landingFloor),
 		floorsFallen,
 		floorsFallen == 1 ? "" : "s",
 		landingX,
-		landingY);
+		landingY,
+		followersFallen,
+		followersFallen == 1 ? "" : "s");
     return true;
 }
 
@@ -7461,48 +7768,161 @@ bool persistentStoryGetWorldFlag(
         persistentWorldStoryState.worldFlags.find(key)
         != persistentWorldStoryState.worldFlags.end();
 }
-static std::string makePersistentPlayerQuestKey(const int player, const std::string& questID)
+static std::string makeLegacyPersistentPlayerQuestKey(
+    const int player,
+    const std::string& questID)
 {
-    if ( player < 0 || player >= MAXPLAYERS ) return "";
+    if (player < 0 || player >= MAXPLAYERS)
+    {
+        return {};
+    }
     const std::string normalizedQuestID = normalizePersistentStoryID(questID);
-    if ( normalizedQuestID.empty() ) return "";
-    return "player_" + std::to_string(player) + ":" + normalizedQuestID;
+    return normalizedQuestID.empty()
+        ? std::string{}
+        : "player_" + std::to_string(player) + ":" + normalizedQuestID;
+}
+
+static bool persistentQuestActorContextForPlayer(
+    const int player,
+    AutomatiaQuest::ActorContext& context)
+{
+    context = {};
+    if (player < 0 || player >= MAXPLAYERS)
+    {
+        return false;
+    }
+
+    if (multiplayer == CLIENT)
+    {
+        context = automatiaQuestRecipientViews[player];
+        return context.authenticated && context.player.isValid();
+    }
+
+    const AutomatiaParty::DurablePlayerIdentity* identity =
+        worldState.partyManager().onlineIdentityFor(player);
+    if (identity && identity->isValid())
+    {
+        context.player = *identity;
+        context.partyId =
+            worldState.partyManager().partyIdForPlayer(*identity);
+        context.authenticated = true;
+        automatiaQuestRecipientViews[player] = context;
+        return true;
+    }
+
+    /*
+     * Standalone play has no network authentication lifecycle. Its normalized
+     * character name is the existing durable local-save identity. A server
+     * never falls back to a runtime slot or an unauthenticated display name.
+     */
+    if (multiplayer != SERVER && stats[player])
+    {
+        context.player = {
+            AutomatiaParty::DurableIdentityKind::LocalName,
+            AutomatiaParty::normalizeLocalCharacterIdentity(
+                stats[player]->name)};
+        context.authenticated = context.player.isValid();
+        if (context.authenticated)
+        {
+            context.partyId =
+                worldState.partyManager().partyIdForPlayer(context.player);
+            automatiaQuestRecipientViews[player] = context;
+        }
+        return context.authenticated;
+    }
+    return false;
 }
 
 /*
- * Scope-aware quest registry keys.
- *
- * player_<slot>:<quest>  - per-player quest state (existing)
- * world:<quest>          - shared by every player on the server
- * party:<quest>          - shared by the player's party (default: all connected)
+ * Every actor-relative quest read and mutation passes through this function.
+ * The referenced quest's immutable registry record selects the owner domain;
+ * the server supplies the authenticated identity and current PartyID.
  */
-static std::string makePersistentScopedQuestKey(
-    const std::string& scope,
+static bool resolvePersistentQuestState(
     const int player,
-    const std::string& questID
-)
+    const std::string& rawQuestID,
+    AutomatiaQuest::Resolution& resolution,
+    const bool migrateLegacyPlayerState = true)
 {
-    const std::string normalizedQuestID = normalizePersistentStoryID(questID);
-    if ( normalizedQuestID.empty() ) return "";
-    if ( scope == "world" )
+    resolution = {};
+    const std::string questID = normalizePersistentStoryID(rawQuestID);
+    if (questID.empty())
     {
-        return "world:" + normalizedQuestID;
+        return false;
     }
-    if ( scope == "party" )
+
+    std::string effectiveScope;
+    std::string authoredScope;
+    bool repeatable = false;
+    int dialogueSchemaVersion = 0;
+    if (!getCustomDialogueQuestOwnershipByQuestID(
+            questID, effectiveScope, authoredScope, repeatable,
+            dialogueSchemaVersion))
     {
-        if ( player < 0 || player >= MAXPLAYERS ) return "";
-        return "party:" + normalizedQuestID;
+        return false;
     }
-    return makePersistentPlayerQuestKey(player, questID);
+
+    AutomatiaQuest::Definition definition;
+    definition.questId = questID;
+    definition.dialogueId = questID;
+    definition.title = questID;
+    definition.dialogueSchemaVersion = dialogueSchemaVersion;
+    definition.repeatable = repeatable;
+    if (!AutomatiaQuest::scopeFromName(
+            authoredScope, definition.authoredScope))
+    {
+        return false;
+    }
+
+    AutomatiaQuest::ActorContext context;
+    if (!persistentQuestActorContextForPlayer(player, context))
+    {
+        return false;
+    }
+    const AutomatiaParty::DurablePlayerIdentity* authoritativeIdentity =
+        multiplayer != CLIENT
+        ? worldState.partyManager().onlineIdentityFor(player)
+        : nullptr;
+    resolution = authoritativeIdentity
+        ? AutomatiaQuest::resolveAuthoritative(
+            definition, *authoritativeIdentity,
+            worldState.partyManager())
+        : AutomatiaQuest::resolve(definition, context);
+    if (!resolution.allowed
+        || effectiveScope != AutomatiaQuest::scopeName(
+            resolution.owner.scope))
+    {
+        resolution = {};
+        return false;
+    }
+
+    if (migrateLegacyPlayerState
+        && multiplayer != CLIENT
+        && resolution.owner.scope == AutomatiaQuest::Scope::Player)
+    {
+        const std::string legacyKey =
+            makeLegacyPersistentPlayerQuestKey(player, questID);
+        const auto legacy = persistentWorldStoryState.quests.find(legacyKey);
+        if (legacy != persistentWorldStoryState.quests.end()
+            && persistentWorldStoryState.quests.find(resolution.stateKey)
+                == persistentWorldStoryState.quests.end())
+        {
+            persistentWorldStoryState.quests.emplace(
+                resolution.stateKey, std::move(legacy->second));
+            persistentWorldStoryState.quests.erase(legacy);
+        }
+    }
+    return true;
 }
 
-static std::string makePersistentQuestKeyForDefinition(
-    const std::string& scope,
+/* Compatibility name for the existing quest API implementation below. */
+static std::string makePersistentPlayerQuestKey(
     const int player,
-    const std::string& questID
-)
+    const std::string& questID)
 {
-    return makePersistentScopedQuestKey(scope, player, questID);
+    AutomatiaQuest::Resolution resolution;
+    return resolvePersistentQuestState(player, questID, resolution)
+        ? resolution.stateKey : std::string{};
 }
 
 
@@ -7710,6 +8130,18 @@ bool persistentStoryQuestIsFailed(const int player, const std::string& questID)
     return !key.empty() && it != persistentWorldStoryState.quests.end() && it->second.failed;
 }
 
+/* Legacy actor-less APIs are explicitly World-owned. Dialogue runtime uses
+ * the actor-relative resolver above and never enters this compatibility path.
+ */
+static std::string makePersistentWorldQuestKey(
+    const std::string& questID)
+{
+    AutomatiaQuest::Owner owner;
+    owner.scope = AutomatiaQuest::Scope::World;
+    return AutomatiaQuest::makeStateKey(
+        owner, normalizePersistentStoryID(questID));
+}
+
 bool persistentStorySetQuestStage(
     const std::string& questID,
     const Sint32 stage
@@ -7721,7 +8153,7 @@ bool persistentStorySetQuestStage(
     }
 
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7743,7 +8175,7 @@ Sint32 persistentStoryGetQuestStage(
 )
 {
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7773,7 +8205,7 @@ bool persistentStorySetQuestStarted(
     }
 
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7804,7 +8236,7 @@ bool persistentStorySetQuestAccepted(
     }
 
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7831,7 +8263,7 @@ bool persistentStorySetQuestCompleted(
     }
 
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7863,7 +8295,7 @@ bool persistentStorySetQuestFailed(
     }
 
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     if ( key.empty() )
     {
@@ -7889,7 +8321,7 @@ bool persistentStoryQuestIsStarted(
 )
 {
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const auto iterator =
         persistentWorldStoryState.quests.find(key);
@@ -7906,7 +8338,7 @@ bool persistentStoryQuestIsAccepted(
 )
 {
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const auto iterator =
         persistentWorldStoryState.quests.find(key);
@@ -7923,7 +8355,7 @@ bool persistentStoryQuestIsCompleted(
 )
 {
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const auto iterator =
         persistentWorldStoryState.quests.find(key);
@@ -7940,7 +8372,7 @@ bool persistentStoryQuestIsFailed(
 )
 {
     const std::string key =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const auto iterator =
         persistentWorldStoryState.quests.find(key);
@@ -7963,7 +8395,7 @@ bool persistentStorySetQuestVariable(
     }
 
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string variableKey =
         normalizePersistentStoryID(variableID);
@@ -7990,7 +8422,7 @@ Sint32 persistentStoryGetQuestVariable(
 )
 {
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string variableKey =
         normalizePersistentStoryID(variableID);
@@ -8038,7 +8470,7 @@ bool persistentStorySetQuestFlag(
     }
 
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string flagKey =
         normalizePersistentStoryID(flagID);
@@ -8072,7 +8504,7 @@ bool persistentStoryGetQuestFlag(
 )
 {
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string flagKey =
         normalizePersistentStoryID(flagID);
@@ -8111,7 +8543,7 @@ bool persistentStorySetQuestObjectiveComplete(
     }
 
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string objectiveKey =
         normalizePersistentStoryID(objectiveID);
@@ -8149,7 +8581,7 @@ bool persistentStoryQuestObjectiveIsComplete(
 )
 {
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string objectiveKey =
         normalizePersistentStoryID(objectiveID);
@@ -8190,7 +8622,7 @@ bool persistentStorySetQuestChoiceUsed(
     }
 
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string choiceKey =
         normalizePersistentStoryID(choiceID);
@@ -8224,7 +8656,7 @@ bool persistentStoryQuestChoiceWasUsed(
 )
 {
     const std::string questKey =
-        normalizePersistentStoryID(questID);
+        makePersistentWorldQuestKey(questID);
 
     const std::string choiceKey =
         normalizePersistentStoryID(choiceID);
@@ -8351,6 +8783,19 @@ static std::unordered_set<std::string>
 
 static std::string automatiaPlayerQuestStoryPrefix(const int player)
 {
+    AutomatiaQuest::ActorContext context;
+    if (persistentQuestActorContextForPlayer(player, context))
+    {
+        AutomatiaQuest::Owner owner;
+        owner.scope = AutomatiaQuest::Scope::Player;
+        owner.player = context.player;
+        return owner.storagePrefix();
+    }
+    return "player_" + std::to_string(player) + ":";
+}
+
+static std::string automatiaLegacyPlayerQuestStoryPrefix(const int player)
+{
     return "player_" + std::to_string(player) + ":";
 }
 
@@ -8373,10 +8818,15 @@ static void clearAutomatiaPlayerStoryState(const int player)
 
     const std::string questPrefix =
         automatiaPlayerQuestStoryPrefix(player);
+    const std::string legacyQuestPrefix =
+        automatiaLegacyPlayerQuestStoryPrefix(player);
     for (auto iterator = persistentWorldStoryState.quests.begin();
         iterator != persistentWorldStoryState.quests.end(); )
     {
-        if (automatiaStringHasPrefix(iterator->first, questPrefix))
+        if ((!questPrefix.empty()
+                && automatiaStringHasPrefix(iterator->first, questPrefix))
+            || automatiaStringHasPrefix(
+                iterator->first, legacyQuestPrefix))
         {
             iterator = persistentWorldStoryState.quests.erase(iterator);
         }
@@ -8456,15 +8906,33 @@ bool exportAutomatiaPlayerStoryState(
 
     const std::string questPrefix =
         automatiaPlayerQuestStoryPrefix(player);
+    const std::string legacyQuestPrefix =
+        automatiaLegacyPlayerQuestStoryPrefix(player);
     std::size_t questCount = 0;
     for (const auto& entry : persistentWorldStoryState.quests)
     {
-        if (!automatiaStringHasPrefix(entry.first, questPrefix))
+        std::string stableKey;
+        if (!questPrefix.empty()
+            && automatiaStringHasPrefix(entry.first, questPrefix))
+        {
+            stableKey = entry.first.substr(questPrefix.size());
+        }
+        else if (automatiaStringHasPrefix(
+            entry.first, legacyQuestPrefix))
+        {
+            stableKey = entry.first.substr(legacyQuestPrefix.size());
+        }
+        else
         {
             continue;
         }
-        const std::string stableKey = entry.first.substr(questPrefix.size());
         if (!safeSavedStoryId(stableKey))
+        {
+            continue;
+        }
+        if (document["quests"].contains(stableKey)
+            && automatiaStringHasPrefix(
+                entry.first, legacyQuestPrefix))
         {
             continue;
         }
@@ -8480,7 +8948,7 @@ bool exportAutomatiaPlayerStoryState(
             {"completed_objectives", sortedStringSet(quest.completedObjectives)},
             {"used_choices", sortedStringSet(quest.usedChoices)}
         };
-        ++questCount;
+        questCount = document["quests"].size();
     }
 
     const std::string npcPrefix =
@@ -8534,6 +9002,410 @@ bool exportAutomatiaPlayerStoryState(
         questCount,
         dialogueCount,
         player);
+    return true;
+}
+
+static AutomatiaSave::Json automatiaQuestStateToJson(
+    const PersistentQuestState& quest)
+{
+    const auto sortedStringSet = [](const auto& values)
+    {
+        std::vector<std::string> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    };
+    return AutomatiaSave::Json{
+        {"started", quest.started},
+        {"accepted", quest.accepted},
+        {"completed", quest.completed},
+        {"failed", quest.failed},
+        {"stage", quest.stage},
+        {"variables", quest.variables},
+        {"flags", sortedStringSet(quest.flags)},
+        {"completed_objectives", sortedStringSet(quest.completedObjectives)},
+        {"used_choices", sortedStringSet(quest.usedChoices)}
+    };
+}
+
+static PersistentQuestState automatiaQuestStateFromJson(
+    const AutomatiaSave::Json& saved)
+{
+    PersistentQuestState quest;
+    savedJsonBool(saved, "started", quest.started);
+    savedJsonBool(saved, "accepted", quest.accepted);
+    savedJsonBool(saved, "completed", quest.completed);
+    savedJsonBool(saved, "failed", quest.failed);
+    savedJsonInt(saved, "stage", quest.stage);
+    restoreSavedVariables(saved, "variables", quest.variables);
+    restoreSavedStringSet(saved, "flags", quest.flags);
+    restoreSavedStringSet(
+        saved, "completed_objectives", quest.completedObjectives);
+    restoreSavedStringSet(saved, "used_choices", quest.usedChoices);
+    return quest;
+}
+
+bool exportAutomatiaQuestRecipientState(
+    const int player,
+    std::string& payload,
+    std::string& error)
+{
+    payload.clear();
+    error.clear();
+    if (multiplayer == CLIENT || player < 0 || player >= MAXPLAYERS)
+    {
+        error = "quest recipient export requires an authoritative player";
+        return false;
+    }
+
+    AutomatiaQuest::ActorContext context;
+    if (!persistentQuestActorContextForPlayer(player, context))
+    {
+        error = "quest recipient has no authenticated durable identity";
+        return false;
+    }
+
+    using AutomatiaSave::Json;
+    Json document = {
+        {"version", 2},
+        {"recipient", Json{
+            {"identity_kind",
+                AutomatiaParty::durableIdentityKindName(context.player.kind)},
+            {"identity", context.player.value},
+            {"party_id", context.partyId}
+        }},
+        {"scoped_quests", Json{
+            {"player", Json::object()},
+            {"party", Json::object()},
+            {"world", Json::object()}
+        }},
+        {"dialogue", Json::object()},
+        {"quest_dialogue_ids", Json::array()}
+    };
+
+    AutomatiaQuest::Owner personalOwner;
+    personalOwner.scope = AutomatiaQuest::Scope::Player;
+    personalOwner.player = context.player;
+    AutomatiaQuest::Owner partyOwner;
+    partyOwner.scope = AutomatiaQuest::Scope::Party;
+    partyOwner.partyId = context.partyId;
+    AutomatiaQuest::Owner worldOwner;
+    worldOwner.scope = AutomatiaQuest::Scope::World;
+
+    std::unordered_set<std::string> definitionIDs;
+    std::vector<std::string> liveDefinitionIDs;
+    collectCustomDialogueQuestDefinitionIDsForPlayer(
+        player, liveDefinitionIDs);
+    definitionIDs.insert(
+        liveDefinitionIDs.begin(), liveDefinitionIDs.end());
+
+    const auto appendOwnerStates = [&](
+        const AutomatiaQuest::Owner& owner,
+        const char* scopeName)
+    {
+        if (!owner.isValid())
+        {
+            return;
+        }
+        for (const auto& entry : persistentWorldStoryState.quests)
+        {
+            std::string questID;
+            if (!AutomatiaQuest::stateKeyBelongsToOwner(
+                    entry.first, owner, &questID))
+            {
+                continue;
+            }
+            document["scoped_quests"][scopeName][questID] =
+                automatiaQuestStateToJson(entry.second);
+            std::vector<std::string> questDefinitionIDs;
+            collectCustomDialogueDefinitionIDsForQuest(
+                questID, questDefinitionIDs);
+            definitionIDs.insert(
+                questDefinitionIDs.begin(), questDefinitionIDs.end());
+        }
+    };
+    appendOwnerStates(personalOwner, "player");
+    appendOwnerStates(partyOwner, "party");
+    appendOwnerStates(worldOwner, "world");
+
+    const std::string npcPrefix =
+        automatiaPlayerNPCStoryPrefix(player);
+    const auto sortedStringSet = [](const auto& values)
+    {
+        std::vector<std::string> sorted(values.begin(), values.end());
+        std::sort(sorted.begin(), sorted.end());
+        return sorted;
+    };
+    for (const auto& entry : persistentWorldStoryState.npcDialogueStates)
+    {
+        if (!automatiaStringHasPrefix(entry.first, npcPrefix))
+        {
+            continue;
+        }
+        const std::string stableKey = entry.first.substr(npcPrefix.size());
+        if (!safeSavedStoryId(stableKey))
+        {
+            continue;
+        }
+        const PersistentNPCDialogueState& dialogue = entry.second;
+        document["dialogue"][stableKey] = Json{
+            {"dialogue_id", dialogue.dialogueID},
+            {"current_node", dialogue.currentNode},
+            {"conversation_started", dialogue.conversationStarted},
+            {"reward_given", dialogue.rewardGiven},
+            {"variables", dialogue.variables},
+            {"flags", sortedStringSet(dialogue.flags)},
+            {"used_choices", sortedStringSet(dialogue.usedChoices)},
+            {"seen_nodes", sortedStringSet(dialogue.seenNodes)}
+        };
+    }
+
+    for (const std::string& definitionID : definitionIDs)
+    {
+        if (safeSavedStoryId(definitionID))
+        {
+            document["quest_dialogue_ids"].push_back(definitionID);
+        }
+    }
+    std::sort(
+        document["quest_dialogue_ids"].begin(),
+        document["quest_dialogue_ids"].end());
+
+    try
+    {
+        payload = document.dump();
+    }
+    catch (const std::exception& exception)
+    {
+        error = "could not serialize quest recipient state: "
+            + std::string(exception.what());
+        return false;
+    }
+    constexpr std::size_t maximumBytes = 1024U * 1024U;
+    if (payload.size() > maximumBytes)
+    {
+        payload.clear();
+        error = "quest recipient state exceeds the 1 MiB transfer limit";
+        return false;
+    }
+    return true;
+}
+
+bool importAutomatiaQuestRecipientState(
+    const int player,
+    const std::string& payload,
+    std::string& error)
+{
+    error.clear();
+    if (multiplayer != CLIENT || player != clientnum
+        || player < 0 || player >= MAXPLAYERS)
+    {
+        error = "quest recipient import is restricted to the owning client";
+        return false;
+    }
+    constexpr std::size_t maximumBytes = 1024U * 1024U;
+    if (payload.empty() || payload.size() > maximumBytes)
+    {
+        error = "quest recipient payload is empty or exceeds 1 MiB";
+        return false;
+    }
+
+    using AutomatiaSave::Json;
+    Json document;
+    try
+    {
+        document = Json::parse(payload);
+    }
+    catch (const std::exception& exception)
+    {
+        error = "could not parse quest recipient state: "
+            + std::string(exception.what());
+        return false;
+    }
+    if (!document.is_object()
+        || document.value("version", 0) != 2
+        || !document.contains("recipient")
+        || !document["recipient"].is_object()
+        || !document.contains("scoped_quests")
+        || !document["scoped_quests"].is_object()
+        || !document.contains("dialogue")
+        || !document["dialogue"].is_object()
+        || !document.contains("quest_dialogue_ids")
+        || !document["quest_dialogue_ids"].is_array()
+        || document["dialogue"].size() > 65536
+        || document["quest_dialogue_ids"].size() > 65536)
+    {
+        error = "quest recipient payload has an invalid structure";
+        return false;
+    }
+
+    const Json& recipient = document["recipient"];
+    if (!recipient.contains("identity_kind")
+        || !recipient["identity_kind"].is_string()
+        || !recipient.contains("identity")
+        || !recipient["identity"].is_string()
+        || !recipient.contains("party_id")
+        || !(recipient["party_id"].is_number_unsigned()
+            || recipient["party_id"].is_number_integer()))
+    {
+        error = "quest recipient identity metadata is invalid";
+        return false;
+    }
+
+    AutomatiaQuest::ActorContext context;
+    if (!AutomatiaParty::durableIdentityKindFromName(
+            recipient["identity_kind"].get<std::string>(),
+            context.player.kind))
+    {
+        error = "quest recipient identity kind is invalid";
+        return false;
+    }
+    context.player.value = recipient["identity"].get<std::string>();
+    try
+    {
+        context.partyId =
+            recipient["party_id"].get<AutomatiaParty::PartyID>();
+    }
+    catch (const std::exception&)
+    {
+        error = "quest recipient PartyID is outside the supported range";
+        return false;
+    }
+    context.authenticated = context.player.isValid();
+    if (!context.authenticated)
+    {
+        error = "quest recipient durable identity is invalid";
+        return false;
+    }
+
+    const Json& scoped = document["scoped_quests"];
+    for (const char* scopeName : {"player", "party", "world"})
+    {
+        if (!scoped.contains(scopeName)
+            || !scoped[scopeName].is_object()
+            || scoped[scopeName].size() > 65536)
+        {
+            error = std::string("quest recipient ") + scopeName
+                + " scope is invalid";
+            return false;
+        }
+    }
+    if (context.partyId == AutomatiaParty::INVALID_PARTY_ID
+        && !scoped["party"].empty())
+    {
+        error = "quest recipient payload exposes party state to a non-member";
+        return false;
+    }
+
+    std::vector<std::string> synchronizedDefinitionIDs;
+    synchronizedDefinitionIDs.reserve(
+        document["quest_dialogue_ids"].size());
+    for (const Json& definitionValue : document["quest_dialogue_ids"])
+    {
+        if (!definitionValue.is_string())
+        {
+            error = "quest recipient definition list is invalid";
+            return false;
+        }
+        const std::string definitionID =
+            definitionValue.get<std::string>();
+        if (!safeSavedStoryId(definitionID))
+        {
+            error = "quest recipient definition ID is invalid";
+            return false;
+        }
+        synchronizedDefinitionIDs.push_back(definitionID);
+    }
+
+    /* A network client owns no authoritative quest state outside this view. */
+    persistentWorldStoryState.quests.clear();
+    clearAutomatiaPlayerStoryState(player);
+    automatiaQuestRecipientViews[player] = context;
+    for (const std::string& definitionID : synchronizedDefinitionIDs)
+    {
+        automatiaPlayerQuestDialogueIDs[player].insert(definitionID);
+        if (!preloadCustomDialogueQuestDefinition(definitionID))
+        {
+            printlog(
+                "[Custom Dialogue] Synchronized quest definition '%s' is unavailable on this client.",
+                definitionID.c_str());
+        }
+    }
+
+    AutomatiaQuest::Owner personalOwner;
+    personalOwner.scope = AutomatiaQuest::Scope::Player;
+    personalOwner.player = context.player;
+    AutomatiaQuest::Owner partyOwner;
+    partyOwner.scope = AutomatiaQuest::Scope::Party;
+    partyOwner.partyId = context.partyId;
+    AutomatiaQuest::Owner worldOwner;
+    worldOwner.scope = AutomatiaQuest::Scope::World;
+
+    const auto restoreScope = [&](
+        const char* scopeName,
+        const AutomatiaQuest::Owner& owner) -> bool
+    {
+        if (!owner.isValid())
+        {
+            return scoped[scopeName].empty();
+        }
+        for (auto member = scoped[scopeName].begin();
+            member != scoped[scopeName].end(); ++member)
+        {
+            if (!safeSavedStoryId(member.key())
+                || !member.value().is_object())
+            {
+                return false;
+            }
+            const std::string stateKey =
+                AutomatiaQuest::makeStateKey(owner, member.key());
+            if (stateKey.empty())
+            {
+                return false;
+            }
+            persistentWorldStoryState.quests[stateKey] =
+                automatiaQuestStateFromJson(member.value());
+        }
+        return true;
+    };
+    if (!restoreScope("player", personalOwner)
+        || !restoreScope("party", partyOwner)
+        || !restoreScope("world", worldOwner))
+    {
+        persistentWorldStoryState.quests.clear();
+        error = "quest recipient payload contains an invalid quest state";
+        return false;
+    }
+
+    const std::string npcPrefix =
+        automatiaPlayerNPCStoryPrefix(player);
+    for (auto member = document["dialogue"].begin();
+        member != document["dialogue"].end(); ++member)
+    {
+        if (!safeSavedStoryId(member.key()) || !member.value().is_object())
+        {
+            continue;
+        }
+        PersistentNPCDialogueState dialogue;
+        if (member.value().contains("dialogue_id")
+            && member.value()["dialogue_id"].is_string()
+            && member.value()["dialogue_id"].get<std::string>().size() <= 255)
+        {
+            dialogue.dialogueID =
+                member.value()["dialogue_id"].get<std::string>();
+        }
+        savedJsonInt(member.value(), "current_node", dialogue.currentNode);
+        savedJsonBool(member.value(), "conversation_started",
+            dialogue.conversationStarted);
+        savedJsonBool(member.value(), "reward_given", dialogue.rewardGiven);
+        restoreSavedVariables(member.value(), "variables", dialogue.variables);
+        restoreSavedStringSet(member.value(), "flags", dialogue.flags);
+        restoreSavedStringSet(
+            member.value(), "used_choices", dialogue.usedChoices);
+        restoreSavedStringSet(
+            member.value(), "seen_nodes", dialogue.seenNodes);
+        persistentWorldStoryState.npcDialogueStates[npcPrefix + member.key()] =
+            std::move(dialogue);
+    }
     return true;
 }
 
@@ -21175,6 +22047,10 @@ void gameLogic(void)
 					if ( soundEnvironment_group )
 					{
 						OPENAL_ChannelGroup_Stop(soundEnvironment_group);
+					}
+					if ( soundNotification_group )
+					{
+						OPENAL_ChannelGroup_Stop(soundNotification_group);
 					}
 #endif
 					// stop combat music

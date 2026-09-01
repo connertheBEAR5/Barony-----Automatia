@@ -725,7 +725,7 @@ const std::vector<Capability>& capabilities()
 	using O = CapabilityOwner;
 	using V = CapabilityValue;
 	static const std::vector<Capability> values = {
-		{ O::Root, "version", "Schema Version", V::Integer, true, "1", "1", "File" },
+		{ O::Root, "version", "Schema Version", V::Integer, true, "2", "1|2", "File" },
 		{ O::Root, "quest_id", "Quest ID", V::String, false, "", "normalized ID", "File" },
 		{ O::Root, "quest", "Quest Metadata", V::Object, false, "", "object", "Quest" },
 		{ O::Root, "start_node", "Start Node", V::NodeReference, true, "", "existing node", "Conversation" },
@@ -744,6 +744,8 @@ const std::vector<Capability>& capabilities()
 		{ O::Origin, "map", "Map", V::String, false, "", "map ID", "Giver" },
 		{ O::Origin, "x", "Tile X", V::Integer, false, "", ">= 0", "Giver" },
 		{ O::Origin, "y", "Tile Y", V::Integer, false, "", ">= 0", "Giver" },
+		{ O::Origin, "playable_floor", "Playable Floor", V::Integer, false, "0", ">= 0", "Giver" },
+		{ O::Origin, "floor_visibility", "Floor Visibility", V::String, false, "column", "same_floor|column", "Giver" },
 		{ O::Origin, "track_npc", "Track NPC", V::Boolean, false, "false", "Boolean", "Giver" },
 		{ O::Origin, "npc_persistent_id", "Persistent NPC ID", V::Integer, false, "", "> 0", "Giver" },
 		{ O::Objective, "id", "Objective ID", V::String, true, "", "unique ID", "Objectives" },
@@ -754,7 +756,7 @@ const std::vector<Capability>& capabilities()
 		{ O::Objective, "progress_variable", "Progress Variable", V::String, false, "", "normalized ID", "Objectives" },
 		{ O::Objective, "target", "Target", V::Integer, false, "1", "> 0", "Objectives" },
 		{ O::Objective, "defeat_id", "Defeat ID", V::Integer, false, "", "> 0", "Objectives" },
-		{ O::Objective, "map_marker", "Map Marker", V::Object, false, "", "map/x/y", "Objectives" },
+		{ O::Objective, "map_marker", "Map Marker", V::Object, false, "", "map/x/y + optional floor policy", "Objectives" },
 		{ O::Node, "id", "Node ID", V::Integer, true, "", "unique integer", "Node" },
 		{ O::Node, "text", "NPC Text", V::String, true, "", "non-empty", "Node" },
 		{ O::Node, "next", "Automatic Next", V::NodeReference, false, "self", "existing node", "Node" },
@@ -811,10 +813,13 @@ std::vector<Issue> validate(const Value& document, const ValidationOptions& opti
 		{ "version", "quest_id", "quest", "start_node", "nodes", "text" },
 		atDocument("$"), "Root");
 
-	if ( !memberIsInt(document, "version") || document["version"].GetInt() != SchemaVersion )
+	const int schemaVersion = memberIsInt(document, "version")
+		? document["version"].GetInt() : 0;
+	if ( schemaVersion < LegacySchemaVersion
+		|| schemaVersion > SchemaVersion )
 	{
 		addIssue(issues, Severity::Error, "invalid_version",
-			"version must be integer 1.", atDocument("$.version"));
+			"version must be integer 1 or 2.", atDocument("$.version"));
 	}
 	validateIdentifier(issues, document, "quest_id", atDocument("$.quest_id"), false);
 
@@ -872,11 +877,13 @@ std::vector<Issue> validate(const Value& document, const ValidationOptions& opti
 						addIssue(issues, Severity::Error, "invalid_scope",
 							"Quest scope must be player, party, or world.", questLocation);
 					}
-					else if ( scope != "player" )
+					else if ( scope != "player"
+						&& schemaVersion < SharedQuestOwnershipSchemaVersion )
 					{
-						addIssue(issues, Severity::Warning, "scope_falls_back_to_player",
-							"Scope '" + scope
-							+ "' is stored but current runtime ownership falls back to player.",
+						addIssue(issues, Severity::Warning, "legacy_scope_falls_back_to_player",
+							"Schema 1 retains legacy Personal ownership for authored '"
+							+ scope + "' scope. Explicitly upgrade this file to schema 2"
+							+ " to enable shared ownership.",
 							questLocation);
 					}
 				}
@@ -907,7 +914,8 @@ std::vector<Issue> validate(const Value& document, const ValidationOptions& opti
 				else
 				{
 					reportUnknownMembers(issues, origin,
-						{ "label", "map", "x", "y", "track_npc", "npc_persistent_id" },
+						{ "label", "map", "x", "y", "playable_floor", "floor_visibility",
+						  "track_npc", "npc_persistent_id" },
 						originLocation, "Quest origin");
 					for ( const char* field : { "label", "map" } )
 					{
@@ -930,6 +938,29 @@ std::vector<Issue> validate(const Value& document, const ValidationOptions& opti
 					{
 						addIssue(issues, Severity::Error, "invalid_track_npc",
 							"Origin track_npc must be Boolean.", originLocation);
+					}
+					if ( origin.HasMember("playable_floor")
+						&& (!origin["playable_floor"].IsInt()
+							|| origin["playable_floor"].GetInt() < 0) )
+					{
+						addIssue(issues, Severity::Error, "invalid_origin_floor",
+							"Origin playable_floor must be a non-negative integer.", originLocation);
+					}
+					if ( origin.HasMember("floor_visibility") )
+					{
+						if ( !origin["floor_visibility"].IsString()
+							|| (std::string(origin["floor_visibility"].GetString()) != "same_floor"
+								&& std::string(origin["floor_visibility"].GetString()) != "column") )
+						{
+							addIssue(issues, Severity::Error, "invalid_origin_floor_visibility",
+								"Origin floor_visibility must be 'same_floor' or 'column'.", originLocation);
+						}
+						else if ( std::string(origin["floor_visibility"].GetString()) == "same_floor"
+							&& !origin.HasMember("playable_floor") )
+						{
+							addIssue(issues, Severity::Error, "missing_origin_floor",
+								"A same-floor origin requires playable_floor.", originLocation);
+						}
 					}
 					if ( jsonBool(origin, "track_npc")
 						&& (!memberIsInt(origin, "npc_persistent_id")
@@ -1037,8 +1068,32 @@ std::vector<Issue> validate(const Value& document, const ValidationOptions& opti
 							{
 								Location markerLocation = objectiveLocation;
 								markerLocation.path += ".map_marker";
-								reportUnknownMembers(issues, marker, { "map", "x", "y" },
+								reportUnknownMembers(issues, marker,
+									{ "map", "x", "y", "playable_floor", "floor_visibility" },
 									markerLocation, "Objective marker");
+								if ( marker.HasMember("playable_floor")
+									&& (!marker["playable_floor"].IsInt()
+										|| marker["playable_floor"].GetInt() < 0) )
+								{
+									addIssue(issues, Severity::Error, "invalid_marker_floor",
+										"Marker playable_floor must be a non-negative integer.", markerLocation);
+								}
+								if ( marker.HasMember("floor_visibility") )
+								{
+									if ( !marker["floor_visibility"].IsString()
+										|| (std::string(marker["floor_visibility"].GetString()) != "same_floor"
+											&& std::string(marker["floor_visibility"].GetString()) != "column") )
+									{
+										addIssue(issues, Severity::Error, "invalid_marker_floor_visibility",
+											"Marker floor_visibility must be 'same_floor' or 'column'.", markerLocation);
+									}
+									else if ( std::string(marker["floor_visibility"].GetString()) == "same_floor"
+										&& !marker.HasMember("playable_floor") )
+									{
+										addIssue(issues, Severity::Error, "missing_marker_floor",
+											"A same-floor marker requires playable_floor.", markerLocation);
+									}
+								}
 							}
 						}
 					}
@@ -2290,9 +2345,86 @@ const std::vector<TutorialRecipe>& tutorialRecipes()
 		values.push_back(recipe("mini_mimic_recruit", "Dialogue and Recruitable Mini Mimic", "NPC", "Advanced",
 			"Keep Mini Mimic dialogue, recruitment, disposition, and appearance independent.",
 			choiceExample("", "\n            \"recruit_npc\": true"), true));
-		values.push_back(recipe("player_scope_multiplayer", "Player-Scoped Multiplayer Quests", "Multiplayer", "Intermediate",
-			"Author the only currently executed ownership scope.", choiceExample("",
-			"\n            \"quest_accept\": true", false, quest), true));
+		values.push_back(recipe("player_scope_multiplayer", "Private Player Quest State", "Multiplayer", "Intermediate",
+			"Keep two players' progress private even when they share a party.",
+			R"json({"version":2,"quest_id":"private_trial","quest":{"title":"Private Trial","scope":"player","repeatable":false,"objectives":[{"id":"finish","text":"Finish your own trial."}]},"start_node":0,"nodes":[{"id":0,"text":"This trial belongs only to you.","next":0,"choices":[{"id":"accept","text":"Begin my trial.","next":0,"action":{"quest_start":true,"quest_accept":true}}]}]})json", true));
+		values.back().steps = {
+			"Use schema version 2 and select Personal on the Quest Overview panel.",
+			"Give the quest a stable quest_id and add its objectives.",
+			"Add quest_start and quest_accept to the accepting response.",
+			"Validate, save, then accept with two clients and advance only one client.",
+			"Confirm the other player remains independent even when both are in one party."
+		};
+		values.back().multiplayerNote = "The server resolves the owner from each authenticated durable player identity.";
+		values.back().commonMistake = "Never use player slot, floor, map layer, or Entity::z as persistent player identity.";
+
+		values.push_back(recipe("party_shared_quest", "One Quest Shared by a Party", "Multiplayer", "Advanced",
+			"Share exactly one quest state across the current persistent PartyID.",
+			R"json({"version":2,"quest_id":"party_relic","quest":{"title":"The Party Relic","summary":"Recover it together.","scope":"party","repeatable":false,"objectives":[{"id":"recover","text":"Recover the relic.","stage":0}]},"start_node":0,"nodes":[{"id":0,"text":"Your party may pursue this together.","next":0,"choices":[{"id":"accept","text":"We will recover it.","next":0,"action":{"quest_start":true,"quest_accept":true}}]}]})json", true));
+		values.back().steps = {
+			"Use schema version 2; schema 1 intentionally keeps legacy Personal semantics.",
+			"Select Party in Quest Overview and author normal objectives/actions.",
+			"Accept with one party member and verify another current member receives it.",
+			"Add a member after progress and verify the existing state synchronizes.",
+			"Kick or leave with one client and verify that client immediately loses the party view."
+		};
+		values.back().multiplayerNote = "The server derives the persistent PartyID; no client chooses or submits an owner ID.";
+		values.back().persistenceNote = "Party quest state stays with that durable PartyID and is never copied into personal state.";
+		values.back().commonMistake = "Shared ownership does not multiply reward_gold or reward_item; those still target the actor.";
+
+		values.push_back(recipe("world_shared_quest", "One Quest Shared by the World", "Multiplayer", "Advanced",
+			"Share progress across every player and map instance in the same persistent world save.",
+			R"json({"version":2,"quest_id":"world_beacon","quest":{"title":"Light the World Beacon","scope":"world","repeatable":true,"objectives":[{"id":"ignite","text":"Ignite the beacon.","stage":0}]},"start_node":0,"nodes":[{"id":0,"text":"Every explorer will see this progress.","next":0,"choices":[{"id":"ignite","text":"Ignite it.","next":0,"action":{"quest_start":true,"quest_accept":true,"objective_complete":"ignite","quest_complete":true}}]}]})json", true));
+		values.back().steps = {
+			"Use schema version 2 and select World in Quest Overview.",
+			"Author the quest normally; do not encode a map instance or floor into its identity.",
+			"Advance it with one client while another occupies a different MapInstance or floor.",
+			"Reconnect a client and verify the current world state arrives during late-join sync.",
+			"Test quest_reset separately because this example is repeatable."
+		};
+		values.back().multiplayerNote = "One state belongs to the persistent WorldState/world save, not to MapInstance.";
+		values.back().commonMistake = "Same X/Y, playableFloor, authoredMapLayer, and Entity::z never determine world quest ownership.";
+
+		values.push_back(recipe("floor_aware_markers", "Floor-Aware and Column Markers", "Objectives", "Advanced",
+			"Choose whether each marker appears on one playable floor or through its entire vertical column.",
+			R"json({"version":2,"quest_id":"tower_search","quest":{"title":"Search the Tower","scope":"player","origin":{"label":"Archivist","map":"tower.lmp","x":4,"y":5,"playable_floor":0,"floor_visibility":"same_floor"},"objectives":[{"id":"lower_key","text":"Find the lower key.","map_marker":{"map":"tower.lmp","x":8,"y":9,"playable_floor":0,"floor_visibility":"same_floor"}},{"id":"column_signal","text":"Investigate the signal column.","map_marker":{"map":"tower.lmp","x":12,"y":6,"floor_visibility":"column"}}]},"start_node":0,"nodes":[{"id":0,"text":"Search every floor carefully.","next":0}]})json", true));
+		values.back().steps = {
+			"On Quest Giver or Objectives, choose Pick Tile on Map or Manual Coords.",
+			"During tile pick, use U/P to select an existing PlayableFloorID, then click a tile.",
+			"Leave Same Floor enabled for a marker tied to one floor.",
+			"Toggle Whole Column when the same X/Y should be marked on every playable floor.",
+			"Test the minimap while moving between floors; map identity and X/Y still must match."
+		};
+		values.back().commonMistake = "Playable floor is a separate axis; do not substitute authoredMapLayer or local Entity::z in JSON.";
+
+		values.push_back(recipe("enemy_group_defeat", "Detect an Authored Enemy Group's Deaths", "Objectives", "Advanced",
+			"Advance a quest objective whenever monsters with one Squad Defeat ID die.",
+			R"json({"version":2,"quest_id":"clear_raiders","quest":{"title":"Clear the Raiders","scope":"party","objectives":[{"id":"raider_squad","text":"Defeat the marked raiders.","completed_text":"The raiders are defeated.","stage":0,"target":3,"progress_variable":"raiders_defeated","defeat_id":42}]},"start_node":0,"nodes":[{"id":0,"text":"Clear the raider squad.","next":0,"choices":[{"id":"accept","text":"We will handle them.","next":0,"action":{"quest_start":true,"quest_accept":true}}]}]})json", true));
+		values.back().steps = {
+			"In each target monster's editor properties, set Defeat ID (Squad Defeat ID) to the same value, such as 42.",
+			"Do not confuse Defeat ID with Squad ID: Squad ID controls AI squad behavior only.",
+			"On the quest objective, set defeat_id to that value and set a target count.",
+			"Optionally set progress_variable for a readable persistent counter; otherwise one is derived.",
+			"Accept the quest and kill marked monsters; the server credits each matching death.",
+			"Validate with multiple clients and save/reload to confirm scoped progress persists."
+		};
+		values.back().expectedResult = "Each death whose authored Squad Defeat ID is 42 advances the one Party-owned counter; ordinary Squad ID does not.";
+		values.back().multiplayerNote = "Deaths are credited server-side to the quest's authored scope; reward actions still target only their actor.";
+		values.back().persistenceNote = "Pending Defeat ID credit is reconciled even when kills occur before that definition is first opened.";
+		values.back().commonMistake = "Setting only Squad ID will coordinate the monsters but will not advance a defeat_id objective.";
+
+		values.push_back(recipe("complex_quest_interaction", "Multi-Stage Branch, Flag, Objective, and Reward", "Advanced", "Advanced",
+			"Build a staged quest whose later response requires both quest progress and a world consequence.",
+			R"json({"version":2,"quest_id":"sealed_vault","quest":{"title":"The Sealed Vault","scope":"player","objectives":[{"id":"earn_trust","text":"Earn the keeper's trust.","stage":0},{"id":"open_vault","text":"Open the vault.","stage":1}]},"start_node":0,"nodes":[{"id":0,"text":"Will you prove yourself?","next":0,"choices":[{"id":"accept","text":"I will.","next":1,"once":true,"action":{"quest_start":true,"quest_accept":true,"objective_complete":"earn_trust","quest_stage":1,"set_world_flag":{"id":"keeper_trust","value":true}}}]},{"id":1,"text":"The vault awaits.","next":1,"choices":[{"id":"open","text":"Open the vault.","next":2,"conditions":[{"type":"quest_stage","quest":"sealed_vault","stage":1,"comparison":"at_least"},{"type":"world_flag","id":"keeper_trust","value":true},{"type":"objective_completed","quest":"sealed_vault","objective":"earn_trust"}],"action":{"objective_complete":"open_vault","quest_complete":true,"reward_gold":100}},{"id":"wait","text":"Not yet.","next":1}]},{"id":2,"text":"The vault opens and you take your reward.","next":2}]})json", true));
+		values.back().steps = {
+			"Create two staged objectives and a once-only acceptance response.",
+			"In one action, accept the quest, complete stage-zero work, advance stage, and set the consequence flag.",
+			"On the later response, use the Conditions array so quest stage, flag, and objective must all pass.",
+			"Complete the final objective and quest in the same validated server action, then reward the actor.",
+			"Use Sandbox Preview to seed each missing condition and test both hidden and available paths."
+		};
+		values.back().multiplayerNote = "The host revalidates all three conditions; the 100 gold reward goes once to the actor, not every shared observer.";
+		values.back().commonMistake = "A Conditions array is logical AND; every referenced quest/objective ID must be stable and correctly scoped.";
 		values.push_back(recipe("sam_stable_item", "S.A.M. Stable Item Reference", "Items", "Advanced",
 			"Persist a custom item by stable ID, never by its session runtime number.", choiceExample(
 			"\"condition\": {\"type\":\"has_item\",\"stable_id\":\"tutorial:custom_item\",\"count\":1}",
@@ -2344,7 +2476,7 @@ std::string createStarterDocument(const std::string& templateID,
 	const bool recruit = templateID == "recruitable_npc";
 
 	std::ostringstream json;
-	json << "{\n  \"version\": 1";
+	json << "{\n  \"version\": " << SchemaVersion;
 	if ( hasQuest )
 	{
 		json << ",\n  \"quest_id\": \"" << escapeJSON(effectiveQuestID) << "\","

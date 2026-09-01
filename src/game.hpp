@@ -176,6 +176,20 @@ bool importAutomatiaPlayerStoryState(
     int player,
     const std::string& payload,
     std::string& error);
+
+/*
+ * Recipient-specific network projection: Personal + current Party + World.
+ * This deliberately reuses the existing chunked story packet transport while
+ * keeping shared quest state out of per-character save payloads.
+ */
+bool exportAutomatiaQuestRecipientState(
+    int player,
+    std::string& payload,
+    std::string& error);
+bool importAutomatiaQuestRecipientState(
+    int player,
+    const std::string& payload,
+    std::string& error);
 void resetAutomatiaPlayerStoryState(int player);
 /*
  * Custom dialogue and quest persistence.

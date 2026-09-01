@@ -1200,6 +1200,8 @@ struct CustomDialogueQuestJournalObjective
     std::string markerMap;
     Sint32 markerX = -1;
     Sint32 markerY = -1;
+    Sint32 markerPlayableFloor = 0;
+    bool markerWholeColumn = true;
     bool hasMapMarker = false;
 };
 
@@ -1220,6 +1222,8 @@ struct CustomDialogueQuestJournalEntry
     std::string originMap;
     Sint32 originX = -1;
     Sint32 originY = -1;
+    Sint32 originPlayableFloor = 0;
+    bool originWholeColumn = true;
     bool hasOriginMarker = false;
     bool originTracksNPC = false;
     Sint32 originNPCPersistentID = 0;
@@ -1286,6 +1290,24 @@ bool getCustomDialogueQuestOwnership(
     const std::string& dialogueID,
     std::string& scope,
     bool& repeatable
+);
+
+/*
+ * Central quest-definition registry lookup. Conditions/actions pass the
+ * referenced quest_id here, so ownership always follows that quest's own
+ * authored definition rather than the currently open NPC dialogue.
+ */
+bool getCustomDialogueQuestOwnershipByQuestID(
+    const std::string& questID,
+    std::string& effectiveScope,
+    std::string& authoredScope,
+    bool& repeatable,
+    int& dialogueSchemaVersion
+);
+
+void collectCustomDialogueDefinitionIDsForQuest(
+    const std::string& questID,
+    std::vector<std::string>& dialogueIDs
 );
 
 bool getCustomDialogueQuestMetadata(
