@@ -23,6 +23,9 @@
 #include "ui/MainMenu.hpp"
 #include "init.hpp"
 #include "ui/Image.hpp"
+#ifndef EDITOR
+#include "magic/illusion_magic.hpp"
+#endif
 
 static real_t getLightAtModifier = 1.0;
 static real_t getLightAtAdder = 0.0;
@@ -2910,6 +2913,18 @@ static ConsoleVariable<bool> cvar_allowChunkRebuild("/allow_chunk_rebuild", true
 void glDrawWorld(view_t* camera, int mode)
 {
     const PlayableFloorId renderFloor = getCameraPlayableFloor(camera);
+#ifndef EDITOR
+    // Mirage overlays never mutate map.tiles. Rebuild only this floor's
+    // visual cache when its bounded overlay registry changes.
+    static std::unordered_map<PlayableFloorId, std::uint64_t>
+        illusionVisualRevisions;
+    const std::uint64_t illusionRevision = IllusionMagic::visualRevision();
+    if (illusionVisualRevisions[renderFloor] != illusionRevision)
+    {
+        chunksByPlayableFloor.erase(renderFloor);
+        illusionVisualRevisions[renderFloor] = illusionRevision;
+    }
+#endif
     if (chunkCacheForFloor(renderFloor).empty())
     {
         createChunks(renderFloor);
@@ -3278,6 +3293,34 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
         buildBuffers(positions, texcoords, colors, lightLayers);
         return;
     }
+
+    const auto tileVisuallySolid = [&](const int tileX, const int tileY,
+        const int tileZ) -> bool
+    {
+        if (tileX < 0 || tileY < 0 || tileZ < 0
+            || tileX >= map.width || tileY >= map.height
+            || tileZ >= MAPLAYERS)
+        {
+            return false;
+        }
+        const int tileIndex = tileZ + tileY * MAPLAYERS
+            + tileX * map.height * MAPLAYERS;
+        if (mapTiles[tileIndex] == 0
+            || mapTiles[tileIndex] == TRANSPARENT_TILE)
+        {
+            return false;
+        }
+#ifndef EDITOR
+        if ((tileZ == FLOORLAYER
+                && IllusionMagic::hidesFloorAt(playableFloor, tileX, tileY))
+            || (tileZ == OBSTACLELAYER
+                && IllusionMagic::hidesWallAt(playableFloor, tileX, tileY)))
+        {
+            return false;
+        }
+#endif
+        return true;
+    };
     
     for (int x = startX; x < endX; ++x) {
         for (int y = startY; y < endY; ++y) {
@@ -3312,10 +3355,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                 && z == FIRST_EXTRA_LAYER
                 && !hasUpperStructure;
 
-                const bool solidMapTile =
-                    validMapLayer
-                    && mapTiles[index] != 0
-                    && mapTiles[index] != TRANSPARENT_TILE;
+                const bool solidMapTile = validMapLayer
+                    && tileVisuallySolid(x, y, z);
                 // build walls
                 if (validMapLayer)
                 {
@@ -3352,8 +3393,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
 
                     // draw east wall
-                    const int easter = index + MAPLAYERS * map.height;
-                    if (x == map.width - 1 || !mapTiles[easter] || mapTiles[easter] == TRANSPARENT_TILE) {
+                    if (!tileVisuallySolid(x + 1, y, z)) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3424,8 +3464,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
 
                     // draw south wall
-                    const int souther = index + MAPLAYERS;
-                    if (y == map.height - 1 || !mapTiles[souther] || mapTiles[souther] == TRANSPARENT_TILE) {
+                    if (!tileVisuallySolid(x, y + 1, z)) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3496,8 +3535,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
 
                     // draw west wall
-                    const int wester = index - MAPLAYERS * map.height;
-                    if (x == 0 || !mapTiles[wester] || mapTiles[wester] == TRANSPARENT_TILE) {
+                    if (!tileVisuallySolid(x - 1, y, z)) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3568,8 +3606,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     }
 
                     // draw north wall
-                    const int norther = index - MAPLAYERS;
-                    if (y == 0 || !mapTiles[norther] || mapTiles[norther] == TRANSPARENT_TILE) {
+                    if (!tileVisuallySolid(x, y - 1, z)) {
                         if (z) { // normal wall
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
@@ -3671,7 +3708,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     
                     // build floor
                     if (z < OBSTACLELAYER && solidMapTile) {
-                        if (!mapTiles[index + 1] || mapTiles[index + 1] == TRANSPARENT_TILE) {
+                        if (!tileVisuallySolid(x, y, z + 1)) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});
                             makeTexCoords(0.f, 0.f, tile);
                             texcoords.insert(texcoords.end(), &chunkTexCoords[0], &chunkTexCoords[2]);
@@ -3714,9 +3751,7 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                     if ( z >= OBSTACLELAYER && solidMapTile )
                     {
                         const bool topExposed =
-                            z == MAPLAYERS - 1
-                            || !mapTiles[index + 1]
-                            || mapTiles[index + 1] == TRANSPARENT_TILE;
+                            !tileVisuallySolid(x, y, z + 1);
                         if ( topExposed )
                         {
                             const float topHeight = z * 32.f - 16.f;
@@ -3762,14 +3797,8 @@ void Chunk::build(const map_t& map, bool ceiling, int startX, int startY, int w,
                             }
                             else if (solidMapTile && z > OBSTACLELAYER)
                             {
-                                const int belowIndex =
-                                    (z - 1)
-                                    + y * MAPLAYERS
-                                    + x * map.height * MAPLAYERS;
-
-                                drawCeilingSurface =
-                                    !mapTiles[belowIndex]
-                                    || mapTiles[belowIndex] == TRANSPARENT_TILE;
+				drawCeilingSurface =
+                                    !tileVisuallySolid(x, y, z - 1);
                             }
                             if (drawCeilingSurface) {
                             colors.insert(colors.end(), {1.f, 1.f, 1.f});

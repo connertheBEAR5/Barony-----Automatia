@@ -9592,7 +9592,8 @@ void actMonster(Entity* my)
 							}
 						}
 
-						bool hasOrb = automatiaMagicGrimoireMerchantIsUnlocked()
+						bool hasOrb = automatianModeEnabled()
+							&& automatiaMagicGrimoireMerchantIsUnlocked()
 							&& !automatiaMagicGrimoireMerchantWasPurchased();
 						for ( node_t* node = myStats->inventory.first; node; node = node->next )
 						{

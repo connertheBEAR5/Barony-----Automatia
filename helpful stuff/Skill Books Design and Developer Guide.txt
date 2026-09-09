@@ -1,0 +1,133 @@
+BARONY AUTOMATIA — SKILL BOOKS / SKILL SCROLLS
+DESIGN AND DEVELOPER GUIDE
+============================================================
+
+Feature switch
+--------------
+
+Skill Books are one part of the opt-in run-scoped Automatian Mode. The
+authoritative server flag is `SV_FLAG_AUTOMATIAN_MODE`, exposed as the single
+host-controlled “Automatian Mode” setting in Game Settings and custom-lobby
+settings. It enables Skill Books/Skill Scrolls, the Magic Grimoire, and the
+Illusion Magic school together; the former independent feature switches are no
+longer separate session choices. The mode defaults off, is synchronized by the
+existing 32-bit SVFL path, and is never derived or changed by a CLIENT process.
+
+For a headless or local host, `--automatian-mode` is the primary option.
+`--illusion-magic` and `--skill-books` remain compatibility aliases and select
+the same single mode; they do not enable only one part of it.
+
+Item architecture
+-----------------
+
+SKILL_BOOK and SKILL_SCROLL are append-only ItemType values. Their definitions
+are installed after items/items.json loads, borrowing the normal readable-book
+and blank-scroll visual metadata. They use category BOOK/SCROLL, NO_EQUIP,
+level -1, normal item persistence, inventory, shop, chest, map-entity, drop,
+and S.A.M. plumbing. `itemIsSkillManual()` is the single recognition seam;
+the shared `item_SkillManual()` behavior is dispatched by `useItem` for either
+visual variant. Manuals never reuse the ordinary book title encoded in
+appearance, so an unidentified manual cannot leak its target through a generic
+name or description.
+
+Target encoding
+---------------
+
+The fixed Item appearance field remains the item’s only target payload. The
+pure `SkillBooks` model uses marker `0x80000000` plus the low target bits. Only
+the fifteen IDs in `kEligibleSkills` decode successfully; Appraisal (ID 3,
+the current Lore-equivalent) and all invalid/internal values decode to -1.
+`newSkillManual()` is the safe constructor and refuses an ineligible target.
+The marker is not a new packet field and does not change any existing layout.
+
+Read/use flow
+-------------
+
+1. The player uses a normal inventory/hotbar item.
+2. The existing blindness and broken-item rules run first.
+3. The server checks `SV_FLAG_AUTOMATIAN_MODE`, resolves the encoded eligible
+   target,
+   reads the authenticated player's current modified PRO_APPRAISAL as Lore,
+   and derives `clamp(1 + floor(Lore / 20), 1, 5)`.
+4. Negative beatitude chooses a negative delta; zero/positive chooses a
+   positive delta. `Entity::applySkillDelta` clamps the stored proficiency via
+   Stat::setProficiency and applies the normal stat-bonus/Alchemy side effects.
+5. On success the manual is identified and consumed. At the legal floor/cap it
+   is identified but remains in inventory. The client predicts only this normal
+   use presentation; the server is authoritative for target, Lore, mutation,
+   and consumption.
+
+Remote USEI validation is intentionally strict. Before a dedicated server uses
+a manual, it matches type, status, beatitude, count, appearance, identified
+state, and the marker against the authenticated player's inventory. It then
+uses that actual inventory node, avoiding temporary-item replay/duplication.
+The existing 7-byte SKIL proficiency update is reused for remote clients.
+
+Persistence and scope
+---------------------
+
+No new account progression or sidecar save exists. The mutation is in the
+existing player Stat proficiency array, so ordinary current-run character
+save/reload, disconnect/reconnect, and dedicated-server continuation paths
+carry it. New characters/future runs start from their normal class/race
+proficiencies. Server-side map/chest/shop rolls are made only in authoritative
+generation paths; clients receive ordinary item/entity synchronization.
+
+Identification and UI
+---------------------
+
+Appraisal uses the existing appraisal tables and value/time calculation (500
+gold books, 350 gold scrolls). `Item::getName`, `Item::description`, and the
+tooltip formatter all gate target/effect details on `identified`. The
+identified tooltip shows the target skill, signed point effect, the reader's
+current Lore and bucket magnitude, and that the change lasts for this run.
+The existing spellbook Goblin restriction is not shared: Skill Manuals dispatch
+directly to their skill mutation and Goblins can read them.
+
+Generation seams
+----------------
+
+All generation is additive and Automatian-Mode-gated:
+
+* createChestInventory: independent 1% roll after the existing theme;
+* bookstore shop slots: independent 1% roll before the ordinary book/scroll
+  choice;
+* map entity type 162 with no authored text: independent 1/75 bookcase/library
+  conversion; authored text stays a normal READABLE_BOOK.
+
+Manuals are never selected by itemLevelCurve because their item level is -1.
+They use normal status/beatitude fields and start unidentified. No separate
+magic rarity, target packet, or reward/action-recipient rule was introduced.
+
+Illusion and S.A.M. interaction
+------------------------------
+
+Mirror Reflect Loot creates a temporary visual only, so it cannot fabricate a
+Skill Manual identity. Mirror Duplicate Loot copies a real source item through
+its existing server safety checks; a valid native Skill Manual may be copied
+under those same rules, with no extra party/reward multiplication. Native
+Skill Manual IDs remain before the reserved S.A.M. runtime range. S.A.M.
+stable-ID validation remains in the existing gameplay packet and item save
+adapters; a numeric custom item cannot claim the native manual marker.
+
+Testing and manual acceptance
+-----------------------------
+
+Pure deterministic tests live in `tests/skill_books_tests.cpp` and are built as
+the `skill_books` CTest. They cover the complete Lore table, normal/cursed
+floor/cap behavior, eligible-target encoding, OFF/ON contracts, unidentified
+privacy, server tuple validation, and map generation. Run:
+
+    cmake --build build-super-posix -j6
+    ctest --test-dir build-super-posix --output-on-failure
+
+For a graphical check, enable Automatian Mode in the host's Game Settings (or
+run the host with `--automatian-mode`; the older `--skill-books` alias also
+selects the mode), open a bookcase/chest or bookstore, appraise an
+unidentified manual, and read it at Lore values 0/20/40/60/80. Confirm cursed
+manuals lower the target, floor/cap manuals are not consumed, Goblins can read,
+and reconnect/save/reload retains only the current character/run change.
+For multiplayer, use one dedicated host and two real clients: verify a client
+cannot enable the flag or alter the target tuple, and that only a valid server
+mutation changes the owner's SKIL state. These graphical/network checks remain
+manual; automated tests do not claim audio, controller, or two-client behavior.

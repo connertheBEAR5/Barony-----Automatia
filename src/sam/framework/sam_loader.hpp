@@ -29,6 +29,14 @@ public:
 	static void load(const std::vector<std::pair<std::string, std::string>>& mountedPaths,
 		const std::string& baronyVersion = "", bool beginLogSection = true);
 
+	// Reuse the authoritative result of SAMWorkshop::scan() when another
+	// integration seam has already scanned the same mounted content to build a
+	// stable-id catalog. This avoids reparsing every manifest and prevents a
+	// file edited mid-load from producing different foundation/runtime views.
+	// The caller must pass the current resolved workshop result.
+	static void loadResolvedManifests(const std::vector<SAMModManifest>& manifests,
+		const std::string& baronyVersion = "", bool beginLogSection = true);
+
 	// Tear down all S.A.M state back to vanilla (called from Mods::unloadMods()).
 	static void unload();
 

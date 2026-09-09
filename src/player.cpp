@@ -14,6 +14,7 @@
 #include "main.hpp"
 #include "interface/interface.hpp"
 #include "items.hpp"
+#include "net.hpp"
 #include "shops.hpp"
 #include "menu.hpp"
 #include "collision.hpp"
@@ -769,6 +770,15 @@ float GameController::getLeftYPercentForPlayerMovement(int player)
 		y_force = std::max(y_force / y_forceMaxStrafeThreshold, -1.f);
 	}
 	return y_force;
+}
+
+float GameController::getLeftXPercentForOmnidirectionalMovement(int player)
+{
+	return std::clamp(getLeftXPercent(player), -1.f, 1.f);
+}
+float GameController::getLeftYPercentForOmnidirectionalMovement(int player)
+{
+	return std::clamp(getLeftYPercent(player), -1.f, 1.f);
 }
 
 float GameController::getLeftXPercent(int player) { return (float)getRawLeftXMove(player) / (float)maxLeftXMove(player); }
@@ -5164,7 +5174,8 @@ void Player::Hotbar_t::selectHotbarSlot(int slot)
 
 bool Player::Hotbar_t::hasEquippedMagicGrimoire() const
 {
-	return player.playernum >= 0
+	return automatianModeEnabled()
+		&& player.playernum >= 0
 		&& player.playernum < MAXPLAYERS
 		&& stats[player.playernum]
 		&& stats[player.playernum]->shield

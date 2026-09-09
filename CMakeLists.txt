@@ -109,6 +109,24 @@ if(BUILD_TESTING)
 	add_test(NAME room_group COMMAND room_group_tests)
 
 	add_executable(
+		procedural_room_generation_tests
+		tests/procedural_room_generation_tests.cpp
+		src/procedural_room.cpp
+	)
+	target_include_directories(
+		procedural_room_generation_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		procedural_room_generation_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(procedural_room_generation_tests PRIVATE cxx_std_17)
+	add_test(NAME procedural_room_generation COMMAND procedural_room_generation_tests)
+
+	add_executable(
 		vertical_navigation_tests
 		tests/vertical_navigation_tests.cpp
 		src/vertical_navigation.cpp
@@ -150,6 +168,25 @@ if(BUILD_TESTING)
 	)
 	target_compile_features(sam_room_generation_tests PRIVATE cxx_std_17)
 	add_test(NAME sam_room_generation COMMAND sam_room_generation_tests)
+
+	add_executable(
+		sam_framework_refresh_tests
+		tests/sam_framework_refresh_tests.cpp
+		src/sam/framework/sam_workshop.cpp
+		src/sam/framework/sam_logger.cpp
+		src/sam/framework/sam_errors.cpp
+		src/sam/sam_item_registry_foundation.cpp
+		src/sam/sam_class_registry_foundation.cpp
+	)
+	target_include_directories(
+		sam_framework_refresh_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+		"${PROJECT_SOURCE_DIR}/src/sam"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework"
+	)
+	target_compile_features(sam_framework_refresh_tests PRIVATE cxx_std_17)
+	add_test(NAME sam_framework_refresh COMMAND sam_framework_refresh_tests)
 
     add_executable(
         party_backend_tests
@@ -218,6 +255,58 @@ if(BUILD_TESTING)
     )
     target_compile_features(party_chat_tests PRIVATE cxx_std_17)
     add_test(NAME party_chat COMMAND party_chat_tests)
+
+	add_executable(
+		illusion_magic_tests
+		tests/illusion_magic_tests.cpp
+		src/magic/illusion_magic_model.cpp
+	)
+	target_include_directories(
+		illusion_magic_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		illusion_magic_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(illusion_magic_tests PRIVATE cxx_std_17)
+	add_test(NAME illusion_magic COMMAND illusion_magic_tests)
+
+	add_executable(
+		skill_books_tests
+		tests/skill_books_tests.cpp
+	)
+	target_include_directories(
+		skill_books_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		skill_books_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(skill_books_tests PRIVATE cxx_std_17)
+	add_test(NAME skill_books COMMAND skill_books_tests)
+
+	add_executable(
+		player_movement_math_tests
+		tests/player_movement_math_tests.cpp
+	)
+	target_include_directories(
+		player_movement_math_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src"
+	)
+	target_compile_definitions(
+		player_movement_math_tests
+		PRIVATE
+		BARONY_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+	)
+	target_compile_features(player_movement_math_tests PRIVATE cxx_std_17)
+	add_test(NAME player_movement_math COMMAND player_movement_math_tests)
 
     add_executable(
         playable_z_characterization_tests
@@ -461,16 +550,47 @@ else()
 	set (GAME_ENABLED 1)
 endif()
 
-if (DEFINED ENV{BARONY_WIN32_LIBRARIES})
-	set (BARONY_WIN32_LIBRARIES $ENV{BARONY_WIN32_LIBRARIES})
+# A CMake value is preferred so Windows builds can be configured from a preset
+# or the CMake GUI. Keep the environment variable as a backwards-compatible
+# first-configure convenience for existing Visual Studio/MinGW setups.
+set(BARONY_WIN32_LIBRARIES "${BARONY_WIN32_LIBRARIES}" CACHE PATH
+	"Additional dependency prefix (primarily for Windows builds)")
+if (DEFINED ENV{BARONY_WIN32_LIBRARIES}
+	AND "${BARONY_WIN32_LIBRARIES}" STREQUAL "")
+	set(BARONY_WIN32_LIBRARIES "$ENV{BARONY_WIN32_LIBRARIES}" CACHE PATH
+		"Additional dependency prefix (primarily for Windows builds)" FORCE)
+endif()
+
+# MSYS2 exports the active native-toolchain prefix. Use it only when the
+# caller did not supply an explicit CMake or BARONY_WIN32_LIBRARIES value.
+if (WIN32 AND MINGW
+	AND "${BARONY_WIN32_LIBRARIES}" STREQUAL ""
+	AND DEFINED ENV{MINGW_PREFIX})
+	set(BARONY_WIN32_LIBRARIES "$ENV{MINGW_PREFIX}" CACHE PATH
+		"Additional dependency prefix (primarily for Windows builds)" FORCE)
 endif()
 
 if (NOT "${BARONY_WIN32_LIBRARIES}" STREQUAL "")
-	list(APPEND CMAKE_PREFIX_PATH $ENV{BARONY_WIN32_LIBRARIES})
-endif(NOT "${BARONY_WIN32_LIBRARIES}" STREQUAL "")
+	list(APPEND CMAKE_PREFIX_PATH "${BARONY_WIN32_LIBRARIES}")
+endif()
 
-if (DEFINED ENV{BARONY_DATADIR}) # Used by visual studio to set the current working directory when debugging the barony executables.
-	set (BARONY_DATADIR $ENV{BARONY_DATADIR})
+# CPack needs the DLL directory in addition to import-library discovery. For
+# an MSYS2 build this is normally <MINGW_PREFIX>/bin; other toolchains may set
+# one or more directories explicitly as a CMake list.
+set(BARONY_WINDOWS_RUNTIME_DLL_DIRS "${BARONY_WINDOWS_RUNTIME_DLL_DIRS}" CACHE STRING
+	"Semicolon-separated Windows runtime DLL directories used by the installer")
+if (WIN32
+	AND "${BARONY_WINDOWS_RUNTIME_DLL_DIRS}" STREQUAL ""
+	AND NOT "${BARONY_WIN32_LIBRARIES}" STREQUAL ""
+	AND IS_DIRECTORY "${BARONY_WIN32_LIBRARIES}/bin")
+	set(BARONY_WINDOWS_RUNTIME_DLL_DIRS "${BARONY_WIN32_LIBRARIES}/bin" CACHE STRING
+		"Semicolon-separated Windows runtime DLL directories used by the installer" FORCE)
+endif()
+
+if (DEFINED ENV{BARONY_DATADIR} AND NOT DEFINED BARONY_DATADIR)
+	# Used by Visual Studio to set the working directory when debugging Barony.
+	set(BARONY_DATADIR "$ENV{BARONY_DATADIR}" CACHE PATH
+		"Directory containing Barony runtime data for Windows debugging")
 endif()
 
 # Select exactly one audio implementation. AUTO preserves the historical
@@ -635,14 +755,27 @@ if( NOT WIN32 )
 		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_DEBUG} -mcpu=${ARCHITECTURE}")
 	endif()
 else( NOT WIN32 )
-	# These look like mingw to me?
-	set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -pg ${OPTIMIZATION_LEVEL} -ffast-math -funroll-loops -malign-double -fstrict-aliasing -mwindows")
-	set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${OPTIMIZATION_LEVEL} -ffast-math -funroll-loops -malign-double -fstrict-aliasing -mwindows")
-	# We should be using Visual Studio flags...or better yet, providing an option to select which you'd prefer.
-	set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MP")
-	set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MP ")
-	set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
-  set (Windows 1)
+	# Windows was previously configured with GCC flags for C and Visual Studio
+	# flags for C++, which made both toolchains fail in different ways. Keep the
+	# compiler-specific flags separate and make the C++17 requirement explicit.
+	set(Windows 1)
+	if (MSVC)
+		set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MP")
+		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MP")
+		set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MP /std:c++17")
+		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MP /std:c++17")
+		set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
+	elseif (MINGW)
+		set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -ffast-math -funroll-loops -malign-double -fstrict-aliasing")
+		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${OPTIMIZATION_LEVEL} -ffast-math -funroll-loops -malign-double -fstrict-aliasing")
+		set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17")
+		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -std=c++17 ${OPTIMIZATION_LEVEL}")
+		set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -mwindows")
+	else()
+		message(WARNING
+			"Windows compiler '${CMAKE_CXX_COMPILER_ID}' has no tuned flag profile. "
+			"Use MSVC/clang-cl or the documented MSYS2 MinGW-w64 profile.")
+	endif()
 endif( NOT WIN32 )
 
 if (APPLE)
@@ -683,6 +816,28 @@ ELSE (APPLE)
 	find_package(SDL2_ttf REQUIRED)
 ENDIF (APPLE)
 find_package(PhysFS REQUIRED)
+
+# The procedural-room generation characterization also exercises the
+# production PhysFS scanner.  The test target is declared above so it can keep
+# the normal BUILD_TESTING layout, while the dependency is attached here once
+# PhysFS has been discovered.
+if (BUILD_TESTING AND TARGET procedural_room_generation_tests)
+	target_sources(
+		procedural_room_generation_tests
+		PRIVATE
+		"${PROJECT_SOURCE_DIR}/src/procedural_room_catalog_runtime.cpp"
+	)
+	target_include_directories(
+		procedural_room_generation_tests
+		PRIVATE
+		"${PHYSFS_INCLUDE_DIR}"
+	)
+	target_link_libraries(
+		procedural_room_generation_tests
+		PRIVATE
+		"${PHYSFS_LIBRARY}"
+	)
+endif()
 find_package(RapidJson REQUIRED)
 INCLUDE_DIRECTORIES(${RAPID_JSON_INCLUDE_DIR})
 
@@ -1024,8 +1179,8 @@ if (GAME_ENABLED)
 	#   target_link_libraries(barony -lsteam_api) #TODO: Fix for Windows.
 	# endif()
 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT barony) # Otherwise, hitting "debug" will default to "ALL_BUILD" :|
-	if (DEFINED BARONY_DATADIR)
-		set_target_properties(barony PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "\$(BARONY_DATADIR)/")
+	if (DEFINED BARONY_DATADIR AND NOT "${BARONY_DATADIR}" STREQUAL "")
+		set_target_properties(barony PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${BARONY_DATADIR}")
 	endif()
 	target_link_libraries(barony
 		${SDL2_LIBRARIES}
@@ -1115,9 +1270,11 @@ if (GAME_ENABLED)
   endif()
   target_link_libraries(barony ${OPENGL_LIBRARIES})
   target_link_libraries(barony ${THREADS_LIBRARIES}) # TODO: Not sure what this is doing, since it doesn't appear to be working in Linux!
-  target_link_libraries(barony -lm) # TODO: In Visual Studio, I bet this is something else, right?
-  if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
+  if (UNIX)
+	target_link_libraries(barony -lm)
+	if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
 	  target_link_libraries(barony -lc)
+	endif()
   endif()
   if (FMOD)
     target_link_libraries(barony ${FMOD_LIBRARY})
@@ -1188,7 +1345,9 @@ if (EDITOR_ENABLED)
 	if (WIN32)
 		# add_executable(${EDITOR_EXE_NAME} EXCLUDE_FROM_ALL ${EDITOR_SOURCES} ${EDITOR_RESOURCE_FILE})
 		add_executable(${EDITOR_EXE_NAME} ${EDITOR_SOURCES} ${EDITOR_RESOURCE_FILE})
-		set_target_properties(${EDITOR_EXE_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "\$(BARONY_DATADIR)/")
+		if (DEFINED BARONY_DATADIR AND NOT "${BARONY_DATADIR}" STREQUAL "")
+			set_target_properties(${EDITOR_EXE_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${BARONY_DATADIR}")
+		endif()
 	else()
 		add_executable(${EDITOR_EXE_NAME} ${EDITOR_SOURCES} ${EDITOR_RESOURCE_FILE})
 	endif()
@@ -1231,9 +1390,11 @@ if (EDITOR_ENABLED)
   endif()
   target_link_libraries(${EDITOR_EXE_NAME} ${OPENGL_LIBRARIES})
   target_link_libraries(${EDITOR_EXE_NAME} ${THREADS_LIBRARIES})
-  target_link_libraries(${EDITOR_EXE_NAME} -lm) # TODO: Only for Mingw?
-  if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
+  if (UNIX)
+	target_link_libraries(${EDITOR_EXE_NAME} -lm)
+	if (NOT CMAKE_SYSTEM_NAME MATCHES "Haiku")
 	  target_link_libraries(${EDITOR_EXE_NAME} -lc)
+	endif()
   endif()
   # We need to link to Winsock if we're on Windows
   if (FMOD)
@@ -1295,29 +1456,191 @@ if (NOT APPLE AND UNIX)
   )
 
   install(FILES
-  	${CMAKE_SOURCE_DIR}/steam_appid.txt
-  	${CMAKE_SOURCE_DIR}/gamecontrollerdb.txt
-  	${CMAKE_SOURCE_DIR}/playernames-female.txt
-  	${CMAKE_SOURCE_DIR}/playernames-male.txt
+	${CMAKE_SOURCE_DIR}/steam_appid.txt
+	${CMAKE_SOURCE_DIR}/gamecontrollerdb.txt
 	#TYPE INCLUDE # If your CMAKE is stupid like mine and it complains about "install FILES given no DESTINATION!", you can tell it to shove it by uncommenting this line.
-  	DESTINATION "${CMAKE_INSTALL_PREFIX}"
+	DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  )
+  # Some source distributions do not contain the optional player-name lists.
+  # Their absence must not make a complete runtime install/package fail.
+  install(FILES
+	${CMAKE_SOURCE_DIR}/playernames-female.txt
+	${CMAKE_SOURCE_DIR}/playernames-male.txt
+	OPTIONAL
+	DESTINATION "${CMAKE_INSTALL_PREFIX}"
   )
 endif()
-# 2) Windows install targets
+# 2) Windows development deploy and self-contained installer targets.
 if (WIN32)
-	if (DEFINED BARONY_DATADIR)
-		# THIS IS AN UTTER BODGE TO STOP VISUAL STUDIO/CMAKE FROM TRYING TO CREATE BARONY/BIN IN C:/PROGRAM FILES
-		# ...there's probably a better way to do this
-		set(CMAKE_INSTALL_PREFIX ${CMAKE_SOURCE_DIR})
-		# TODO: How to force Visual Studio to run the INSTALL target before you hit the "play" button to run the debugger?
-		# Maybe...custom commands or targets?
+	if (DEFINED BARONY_DATADIR AND NOT "${BARONY_DATADIR}" STREQUAL "")
+		# Keep the Visual Studio convenience deploy separate from the distributable
+		# Runtime component. CPack packages Runtime only, so an absolute developer
+		# data path can never leak into an installer.
+		install(FILES lang/en.txt DESTINATION "${BARONY_DATADIR}/lang"
+			CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES} COMPONENT Development)
+		if (GAME_ENABLED)
+			install(TARGETS barony DESTINATION "${BARONY_DATADIR}"
+				CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES} COMPONENT Development)
+		endif()
+		if (EDITOR_ENABLED)
+			install(TARGETS ${EDITOR_EXE_NAME} DESTINATION "${BARONY_DATADIR}"
+				CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES} COMPONENT Development)
+		endif()
+	endif()
 
-		# 2.a) Copy over lang/en.txt over to the data directory, if it exists.
-		install(FILES lang/en.txt DESTINATION ${BARONY_DATADIR}/lang/ CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
+	option(BARONY_WINDOWS_INSTALLER
+		"Enable the self-contained CPack/NSIS Windows installer target" OFF)
+	set(BARONY_AUTOMATIA_PACKAGE_VERSION "dev" CACHE STRING
+		"Version label embedded in the Windows installer filename and metadata")
 
-		# 2.b) Do the same for the executables, why not?
-		install(TARGETS barony DESTINATION ${BARONY_DATADIR}/ CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES}) # TODO: To escape or to not escape these?
-		install(TARGETS ${EDITOR_EXE_NAME} DESTINATION ${BARONY_DATADIR}/ CONFIGURATIONS ${CMAKE_CONFIGURATION_TYPES})
+	if (BARONY_WINDOWS_INSTALLER)
+		if (NOT GAME_ENABLED)
+			message(FATAL_ERROR
+				"BARONY_WINDOWS_INSTALLER requires GAME_ENABLED so the package has a launcher.")
+		endif()
+		if (CMAKE_VERSION VERSION_LESS "3.21")
+			message(FATAL_ERROR
+				"BARONY_WINDOWS_INSTALLER requires CMake 3.21+ for runtime DLL staging.")
+		endif()
+
+		# Collect only real directories. The MinGW prefix supplies the normal game
+		# DLLs, while the optional SDK roots contribute steam_api/EOS at package time.
+		set(BARONY_WINDOWS_RUNTIME_SEARCH_DIRS)
+		foreach(_barony_runtime_dir ${BARONY_WINDOWS_RUNTIME_DLL_DIRS})
+			if (IS_DIRECTORY "${_barony_runtime_dir}")
+				list(APPEND BARONY_WINDOWS_RUNTIME_SEARCH_DIRS "${_barony_runtime_dir}")
+			endif()
+		endforeach()
+		if (STEAMWORKS_ENABLED)
+			foreach(_barony_sdk_root ${STEAMWORKS_SDK_ROOTS})
+				if (NOT "${_barony_sdk_root}" STREQUAL "")
+					list(APPEND BARONY_WINDOWS_RUNTIME_SEARCH_DIRS
+						"${_barony_sdk_root}/sdk/redistributable_bin/win64")
+				endif()
+			endforeach()
+		endif()
+		if (EOS_ENABLED)
+			foreach(_barony_sdk_root ${EOS_SDK_ROOTS})
+				if (NOT "${_barony_sdk_root}" STREQUAL "")
+					list(APPEND BARONY_WINDOWS_RUNTIME_SEARCH_DIRS
+						"${_barony_sdk_root}/SDK/Bin")
+				endif()
+			endforeach()
+		endif()
+		set(_barony_runtime_dirs_existing)
+		foreach(_barony_runtime_dir ${BARONY_WINDOWS_RUNTIME_SEARCH_DIRS})
+			if (IS_DIRECTORY "${_barony_runtime_dir}")
+				list(APPEND _barony_runtime_dirs_existing "${_barony_runtime_dir}")
+			endif()
+		endforeach()
+		if ("${_barony_runtime_dirs_existing}" STREQUAL "")
+			message(FATAL_ERROR
+				"BARONY_WINDOWS_INSTALLER needs BARONY_WINDOWS_RUNTIME_DLL_DIRS. "
+				"For MSYS2 UCRT64 this is normally <MINGW_PREFIX>/bin; set "
+				"BARONY_WIN32_LIBRARIES to the matching prefix or set the DLL directory explicitly.")
+		endif()
+
+		# Package the full standalone runtime, not an in-place replacement for a
+		# Steam-managed game. That makes install, update, and uninstall reversible.
+		install(TARGETS barony
+			RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
+			RUNTIME DESTINATION "." COMPONENT Runtime)
+		if (EDITOR_ENABLED)
+			install(TARGETS ${EDITOR_EXE_NAME}
+				RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
+				RUNTIME DESTINATION "." COMPONENT Runtime)
+		endif()
+		install(DIRECTORY
+			"${CMAKE_SOURCE_DIR}/books"
+			"${CMAKE_SOURCE_DIR}/data"
+			"${CMAKE_SOURCE_DIR}/fonts"
+			"${CMAKE_SOURCE_DIR}/images"
+			"${CMAKE_SOURCE_DIR}/items"
+			"${CMAKE_SOURCE_DIR}/lang"
+			"${CMAKE_SOURCE_DIR}/maps"
+			"${CMAKE_SOURCE_DIR}/models"
+			"${CMAKE_SOURCE_DIR}/music"
+			"${CMAKE_SOURCE_DIR}/sound"
+			DESTINATION "." COMPONENT Runtime)
+		install(FILES
+			"${CMAKE_SOURCE_DIR}/steam_appid.txt"
+			"${CMAKE_SOURCE_DIR}/gamecontrollerdb.txt"
+			"${CMAKE_SOURCE_DIR}/README.md"
+			"${CMAKE_SOURCE_DIR}/EDITING.txt"
+			"${CMAKE_SOURCE_DIR}/LICENSE.txt"
+			DESTINATION "." COMPONENT Runtime)
+		install(FILES
+			"${CMAKE_SOURCE_DIR}/playernames-female.txt"
+			"${CMAKE_SOURCE_DIR}/playernames-male.txt"
+			OPTIONAL DESTINATION "." COMPONENT Runtime)
+
+		# GET_RUNTIME_DEPENDENCIES runs from the generated install script and walks
+		# transitive DLLs. An unresolved dependency is an installation error rather
+		# than a broken installer silently reaching players.
+		install(RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
+			DESTINATION "." COMPONENT Runtime
+			DIRECTORIES ${_barony_runtime_dirs_existing}
+			PRE_EXCLUDE_REGEXES
+				"^api-ms-win-.*"
+				"^ext-ms-.*"
+				"^kernel32\\.dll$"
+				"^user32\\.dll$"
+				"^gdi32\\.dll$"
+				"^advapi32\\.dll$"
+				"^shell32\\.dll$"
+				"^ole32\\.dll$"
+				"^oleaut32\\.dll$"
+				"^ws2_32\\.dll$"
+				"^winmm\\.dll$"
+				"^opengl32\\.dll$"
+				"^glu32\\.dll$"
+				"^comdlg32\\.dll$"
+				"^comctl32\\.dll$"
+				"^shlwapi\\.dll$"
+				"^version\\.dll$"
+				"^imm32\\.dll$"
+				"^bcrypt\\.dll$"
+				"^setupapi\\.dll$")
+
+		set(CPACK_GENERATOR "NSIS")
+		set(CPACK_PACKAGE_NAME "Barony Automatia")
+		set(CPACK_PACKAGE_VENDOR "Automatia")
+		set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+			"Barony Automatia with editor, OpenAL, S.A.M., and extended multiplayer support")
+		set(CPACK_PACKAGE_VERSION "${BARONY_AUTOMATIA_PACKAGE_VERSION}")
+		set(CPACK_PACKAGE_FILE_NAME
+			"Barony-Automatia-${BARONY_AUTOMATIA_PACKAGE_VERSION}-windows-x64")
+		set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/installer")
+		set(CPACK_PACKAGE_INSTALL_DIRECTORY "Barony Automatia")
+		set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE.txt")
+		set(CPACK_RESOURCE_FILE_README "${CMAKE_SOURCE_DIR}/README.md")
+		set(CPACK_COMPONENTS_ALL Runtime)
+		set(CPACK_NSIS_PACKAGE_NAME "Barony Automatia")
+		set(CPACK_NSIS_DISPLAY_NAME "Barony Automatia")
+		set(CPACK_NSIS_INSTALL_ROOT "$LOCALAPPDATA")
+		set(CPACK_NSIS_MUI_ICON "${CMAKE_SOURCE_DIR}/barony.ico")
+		set(CPACK_NSIS_MUI_UNIICON "${CMAKE_SOURCE_DIR}/barony.ico")
+		set(CPACK_NSIS_INSTALLED_ICON_NAME "barony.exe")
+		set(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
+		set(CPACK_NSIS_MUI_FINISHPAGE_RUN "barony.exe")
+		set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+		set(CPACK_NSIS_MODIFY_PATH OFF)
+		set(CPACK_PACKAGE_EXECUTABLES "barony" "Barony Automatia")
+		if (EDITOR_ENABLED)
+			list(APPEND CPACK_PACKAGE_EXECUTABLES "editor" "Barony Automatia Editor")
+		endif()
+		include(CPack)
+
+		set(_barony_windows_installer_dependencies barony)
+		if (EDITOR_ENABLED)
+			list(APPEND _barony_windows_installer_dependencies ${EDITOR_EXE_NAME})
+		endif()
+		add_custom_target(windows-installer
+			COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_BINARY_DIR}/CPackConfig.cmake" -G NSIS
+			DEPENDS ${_barony_windows_installer_dependencies}
+			WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+			COMMENT "Creating the Barony Automatia Windows NSIS installer"
+			VERBATIM)
 	endif()
 endif()
 

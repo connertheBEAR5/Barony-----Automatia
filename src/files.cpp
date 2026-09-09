@@ -123,6 +123,7 @@ void resetMapMetadata(map_t& loadedMap)
 	loadedMap.ambience = {};
 	loadedMap.ambientLight = {};
 	authoredRoomGroupsReset(loadedMap.roomGroups);
+	proceduralRoomDefinitionReset(loadedMap.proceduralRoom);
 }
 
 void appendMapMetadataU16(std::vector<std::uint8_t>& output, const std::uint16_t value)
@@ -453,6 +454,14 @@ bool saveMapMetadata(File* fp, const map_t& loadedMap)
 	payload.insert(payload.end(), {'R', 'G', 'R', 'P'});
 	appendMapMetadataU32(payload, static_cast<std::uint32_t>(roomGroups.size()));
 	payload.insert(payload.end(), roomGroups.begin(), roomGroups.end());
+	std::vector<std::uint8_t> proceduralRoom;
+	if (!serializeProceduralRoomDefinition(loadedMap.proceduralRoom, proceduralRoom))
+	{
+		return false;
+	}
+	payload.insert(payload.end(), {'P', 'G', 'R', 'M'});
+	appendMapMetadataU32(payload, static_cast<std::uint32_t>(proceduralRoom.size()));
+	payload.insert(payload.end(), proceduralRoom.begin(), proceduralRoom.end());
 	if (!appendAuthoredStableIdentityChunk(payload, loadedMap))
 	{
 		return false;
@@ -506,6 +515,7 @@ bool loadMapMetadata(File* fp, map_t& loadedMap, list_t* entities,
 	bool sawAmbience = false;
 	bool sawAmbientLight = false;
 	bool sawRoomGroups = false;
+	bool sawProceduralRoom = false;
 	bool sawStableIdentities = false;
 	while (offset < payload.size())
 	{
@@ -592,6 +602,17 @@ bool loadMapMetadata(File* fp, map_t& loadedMap, list_t* entities,
 				return false;
 			}
 			loadedMap.roomGroups = decoded;
+			offset = chunkEnd;
+		}
+		else if (std::memcmp(tag, "PGRM", 4) == 0)
+		{
+			if (sawProceduralRoom
+				|| !deserializeProceduralRoomDefinition(payload.data() + offset,
+					chunkLength, loadedMap.proceduralRoom))
+			{
+				return false;
+			}
+			sawProceduralRoom = true;
 			offset = chunkEnd;
 		}
 		else if (std::memcmp(tag, "SMID", 4) == 0)

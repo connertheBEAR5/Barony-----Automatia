@@ -23,6 +23,7 @@
 #include "../colors.hpp"
 #include "../ui/MainMenu.hpp"
 #include "magic.hpp"
+#include "illusion_magic.hpp"
 #include "../prng.hpp"
 #include "../mod_tools.hpp"
 #include <cmath>
@@ -197,7 +198,8 @@ void castSpellInit(Uint32 caster_uid, spell_t* spell, bool usingSpellbook, bool 
 		magiccost = getCostOfSpell(spell, caster);
 	}
 
-	const bool usingMagicGrimoire = usingSpellbook
+	const bool usingMagicGrimoire = automatianModeEnabled()
+		&& usingSpellbook
 		&& stat->shield
 		&& stat->shield->type == MAGIC_GRIMOIRE;
 	if ( usingMagicGrimoire )
@@ -317,7 +319,9 @@ int getSpellcastingAbilityFromUsingSpellbook(spell_t* spell, Entity* caster, Sta
 		return 0;
 	}
 
-	int spellcastingAbility = std::min(std::max(0, casterStats->getModifiedProficiency(spell->skillID) + statGetINT(casterStats, caster)), 100);
+	int spellcastingAbility = std::min(std::max(0,
+		IllusionMagic::proficiencyForSpell(caster, casterStats,
+			spell->ID, spell->skillID) + statGetINT(casterStats, caster)), 100);
 
 
 	// penalty for not knowing spellbook. e.g 40 spellcasting, 80 difficulty = 40% more chance to fumble/use mana.
@@ -382,7 +386,7 @@ bool isSpellcasterBeginnerFromSpellbook(int player, Entity* caster, Stat* stat, 
 		return false;
 	}
 
-	int spellcastingLvl = std::min(std::max(0, stat->getModifiedProficiency(spell->skillID) + statGetINT(stat, caster)), 100);
+	int spellcastingLvl = getEffectiveSpellcastingAbility(caster, stat, spell);
 	bool newbie = false;
 
 	if ( spellcastingLvl >= spell->difficulty || playerLearnedSpellbook(player, spellbookItem) )
@@ -543,7 +547,9 @@ int getEffectiveSpellcastingAbility(Entity* caster, Stat* stat, spell_t* spell) 
 	{
 		return 0;
 	}
-	return std::min(std::max(0, stat->getModifiedProficiency(spell->skillID) + statGetINT(stat, caster)), 100);
+	return std::min(std::max(0,
+		IllusionMagic::proficiencyForSpell(caster, stat, spell->ID,
+			spell->skillID) + statGetINT(stat, caster)), 100);
 }
 
 Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool trap, bool usingSpellbook, CastSpellProps_t* castSpellProps, bool usingFoci)
@@ -554,6 +560,19 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	{
 		//Need a spell and caster to cast a spell.
 		return NULL;
+	}
+	// Reject disabled Illusion content before client request transmission,
+	// animation-side mana resolution, or any authoritative mutation.
+	if ( IllusionMagic::isSpell(spell->ID) && !IllusionMagic::enabled() )
+	{
+		return nullptr;
+	}
+	const Stat* casterStats = caster->getStats();
+	if ( usingSpellbook && casterStats && casterStats->shield
+		&& casterStats->shield->type == MAGIC_GRIMOIRE
+		&& !automatianModeEnabled() )
+	{
+		return nullptr;
 	}
 
 	Entity* result = NULL; //If the spell spawns an entity (like a magic light ball or a magic missile), it gets stored here and returned.
@@ -572,8 +591,8 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			strcpy( (char*)net_packet->data, "SPEL" );
 			net_packet->data[4] = clientnum;
 			SDLNet_Write32(spell->ID, &net_packet->data[5]);
-			const Stat* casterStats = caster->getStats();
-			const bool usingMagicGrimoirePacket = usingSpellbook
+			const bool usingMagicGrimoirePacket = automatianModeEnabled()
+				&& usingSpellbook
 				&& casterStats
 				&& casterStats->shield
 				&& casterStats->shield->type == MAGIC_GRIMOIRE;
@@ -655,14 +674,16 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	bool newbie = false;
 	bool overdrewIntoHP = false;
 	bool playerCastingFromKnownSpellbook = false;
-	int spellBookBonusPercent = spell->magic_grimoire
+	int spellBookBonusPercent = automatianModeEnabled() && spell->magic_grimoire
 		? static_cast<int>(std::lround(spell->magic_grimoire_potency * 100.0)) : 0;
 	int spellBookBeatitude = 0;
 	ItemType spellbookType = WOODEN_SHIELD;
-	const bool equippedMagicGrimoire = usingSpellbook && stat && stat->shield
+	const bool equippedMagicGrimoire = automatianModeEnabled()
+		&& usingSpellbook && stat && stat->shield
 		&& stat->shield->type == MAGIC_GRIMOIRE;
-	bool usingMagicGrimoire = spell->magic_grimoire || equippedMagicGrimoire;
-	real_t magicGrimoireManaReduction = spell->magic_grimoire
+	bool usingMagicGrimoire = (automatianModeEnabled() && spell->magic_grimoire)
+		|| equippedMagicGrimoire;
+	real_t magicGrimoireManaReduction = automatianModeEnabled() && spell->magic_grimoire
 		? spell->magic_grimoire_mana_reduction : 0.0;
 	bool sustainedSpell = false;
 	auto findSpellDef = ItemTooltips.spellItems.find(spell->ID);
@@ -697,9 +718,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 		prevMP = stat->MP;
 	}
 
-	if ( !using_magicstaff && !trap && !usingFoci && stat && player >= 0 )
+	if ( !using_magicstaff && !trap && !usingFoci && stat && player >= 0
+		&& !IllusionMagic::storedReleaseInProgress() )
 	{
-		newbie = isSpellcasterBeginner(player, caster, spell->skillID);
+		newbie = caster->behavior != &actMonster
+			&& getEffectiveSpellcastingAbility(caster, stat, spell)
+				< SPELLCASTING_BEGINNER;
 
 		if ( usingMagicGrimoire )
 		{
@@ -1053,7 +1077,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	//spellElement_t *element = (spellElement_t *)spell->elements->first->element;
 	spellElement_t* const element = (spellElement_t*)node->element;
 	spellElement_t* const innerElement = element->elements.first ? (spellElement_t*)(element->elements.first->element) : nullptr;
-	if (element)
+	if ( IllusionMagic::isSpell(spell->ID) )
+	{
+		result = IllusionMagic::cast(
+			*caster, *spell, castSpellProps, channeled_spell);
+	}
+	else if (element)
 	{
 		if (!strcmp(element->element_internal_name, spellElement_missile.element_internal_name))
 		{

@@ -19,6 +19,7 @@
 #include "../net.hpp"
 #include "../player.hpp"
 #include "magic.hpp"
+#include "illusion_magic.hpp"
 #include "../mod_tools.hpp"
 #include "../ui/GameUI.hpp"
 
@@ -147,6 +148,11 @@ std::map<int, spell_t> spellMap;
 bool addSpell(int spell, int player, bool ignoreSkill)
 {
 	node_t* node = nullptr;
+
+	if (!IllusionMagic::contentAvailable(spell))
+	{
+		return false;
+	}
 
 	// this is a local function
 	if ( !players[player]->isLocalPlayer() )
@@ -413,8 +419,23 @@ bool addSpell(int spell, int player, bool ignoreSkill)
 			return false;
 		}
 	}
-	int skillLVL = stats[player]->getModifiedProficiency(new_spell->skillID) + statGetINT(stats[player], players[player]->entity);
-	if ( stats[player]->getModifiedProficiency(new_spell->skillID) >= 100 )
+	int skillLVL = stats[player]->getModifiedProficiency(new_spell->skillID)
+		+ statGetINT(stats[player], players[player]->entity);
+	if (IllusionMagic::isSpell(new_spell->ID))
+	{
+		skillLVL = IllusionMagic::effectiveProficiency(
+			stats[player]->getModifiedProficiency(PRO_SORCERY),
+			stats[player]->getModifiedProficiency(PRO_MYSTICISM),
+			stats[player]->getModifiedProficiency(PRO_THAUMATURGY))
+			+ statGetINT(stats[player], players[player]->entity);
+	}
+	if ( (IllusionMagic::isSpell(new_spell->ID)
+			&& IllusionMagic::effectiveProficiency(
+				stats[player]->getModifiedProficiency(PRO_SORCERY),
+				stats[player]->getModifiedProficiency(PRO_MYSTICISM),
+				stats[player]->getModifiedProficiency(PRO_THAUMATURGY)) >= 100)
+		|| (!IllusionMagic::isSpell(new_spell->ID)
+			&& stats[player]->getModifiedProficiency(new_spell->skillID) >= 100) )
 	{
 		skillLVL = 100;
 	}
@@ -825,7 +846,7 @@ int getSustainCostOfSpell(spell_t* spell, Entity* caster)
 		spellElement_t* spellElement = (spellElement_t*)node->element;
 		cost += spellElement->channeledMana;
 	}
-	if ( spell->magic_grimoire )
+	if ( spell->magic_grimoire && automatianModeEnabled() )
 	{
 		cost = getMagicGrimoireAdjustedManaCost(cost, spell->magic_grimoire_mana_reduction);
 	}

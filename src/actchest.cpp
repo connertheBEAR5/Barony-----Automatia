@@ -20,6 +20,7 @@
 #include "player.hpp"
 #include "prng.hpp"
 #include "mod_tools.hpp"
+#include "skill_books.hpp"
 
 /*
  * Chest theme ideas:
@@ -756,6 +757,19 @@ void createChestInventory(Entity* my, int chestType)
 		newItem(static_cast<ItemType>(0), BROKEN, 0, 1, rng.rand(), false, inventory);
 		printlog("warning: default cause in chest init theme type reached. This should never happen.");
 		break;
+	}
+
+	// Skill manuals are a rare, server-generated addition to the existing
+	// chest/general-loot tables. Their level is -1 so itemLevelCurve cannot
+	// select them accidentally when the flag is disabled.
+	if ( automatianModeEnabled() && rng.rand() % 100 == 0 )
+	{
+		const ItemType manualType = rng.rand() % 2 == 0 ? SKILL_BOOK : SKILL_SCROLL;
+		const int targetSkill = SkillBooks::kEligibleSkills[
+			rng.rand() % SkillBooks::kEligibleSkills.size()];
+		newSkillManual(manualType, targetSkill,
+			static_cast<Status>(WORN + rng.rand() % 3),
+			rng.rand() % 5 == 0 ? -1 : 0, 1, false, inventory);
 	}
 
 	if ( my->behavior == &::actChest )

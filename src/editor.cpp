@@ -22,11 +22,14 @@
 #include "mod_tools.hpp"
 #include "text_source_script_tester.hpp"
 #include "custom_dialogue_document.hpp"
+#include "procedural_room_catalog_runtime.hpp"
 #include <sys/stat.h>
 #include <cmath>
 #include <fstream>
 #include <sstream>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include "json.hpp"
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
@@ -142,6 +145,29 @@ char mapAmbienceVolumeText[4] = "100";
 char mapAmbienceLoopText[4] = "[x]";
 char mapAmbienceFadeInText[6] = "0";
 char mapAmbienceFadeOutText[6] = "0";
+char proceduralRoomEnabledText[4] = "[ ]";
+char proceduralRoomLevelsetText[PROCEDURAL_ROOM_LEVELSET_BYTES] = "";
+char proceduralRoomCustomCategoryText[PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES] = "";
+char proceduralRoomWeightText[8] = "100";
+int proceduralRoomCategorySelection = PROCEDURAL_ROOM_CATEGORY_NORMAL;
+static char proceduralRoomStatusText[160] = "";
+ProceduralRoomDefinition proceduralRoomPendingDefinition{};
+bool proceduralRoomHasPendingDefinition = false;
+
+enum class ProceduralRoomDropdown : std::uint8_t
+{
+	NONE,
+	LEVELSET,
+	CATEGORY
+};
+
+static ProceduralRoomDropdown proceduralRoomDropdown =
+	ProceduralRoomDropdown::NONE;
+static int proceduralRoomDropdownFirstVisible = 0;
+static std::vector<ProceduralRoomValidationIssue>
+	proceduralRoomValidationIssues;
+static bool proceduralRoomValidationDirty = true;
+static bool proceduralRoomCustomLevelsetMode = false;
 // function prototypes
 Uint32 timerCallback(Uint32 interval, void* param);
 bool handleEvents(void);
@@ -258,7 +284,6 @@ static std::vector<std::string> editorAmbienceResources;
 static int editorAmbienceResourceFirstVisible = 0;
 static bool editorAmbienceResourcesEnumerated = false;
 static bool editorAmbiencePickerOpen = false;
-static std::string editorMonsterItemSearchLastKey;
 static std::string editorPaletteLastFilter;
 static std::vector<int> editorPaletteMatches;
 static int editorPaletteSelectedMatch = 0;
@@ -273,6 +298,766 @@ static std::string editorPaletteLowercase(const std::string& text)
         character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
     }
     return result;
+}
+
+static void proceduralRoomSetStatus(const char* text)
+{
+	std::snprintf(proceduralRoomStatusText,
+		sizeof(proceduralRoomStatusText), "%s", text ? text : "");
+}
+
+static void editorRemoveFocusedSubwindowButtons()
+{
+	for ( node_t* node = button_l.first; node; )
+	{
+		node_t* nextNode = node->next;
+		button_t* button = static_cast<button_t*>(node->element);
+		if ( button && button->focused )
+		{
+			list_RemoveNode(node);
+		}
+		node = nextNode;
+	}
+}
+
+static void proceduralRoomStopTextFocus()
+{
+	if ( SDL_IsTextInputActive() )
+	{
+		SDL_StopTextInput();
+	}
+	inputstr = nullptr;
+	inputlen = 0;
+	editproperty = 0;
+}
+
+static void proceduralRoomFocusText(char* buffer, const int length,
+	const int property)
+{
+	inputstr = buffer;
+	inputlen = length;
+	editproperty = property;
+	cursorflash = ticks;
+	SDL_StartTextInput();
+}
+
+static std::string editorProceduralRoomVirtualPath()
+{
+	std::string name = filename[0] ? filename : map.filename;
+	if ( name.empty() )
+	{
+		return {};
+	}
+	std::replace(name.begin(), name.end(), '\\', '/');
+	while ( name.rfind("./", 0) == 0 )
+	{
+		name.erase(0, 2);
+	}
+	while ( !name.empty() && name.front() == '/' )
+	{
+		name.erase(name.begin());
+	}
+	if ( name.rfind("maps/", 0) != 0 )
+	{
+		name = "maps/" + name;
+	}
+	if ( name.size() < 4
+		|| name.compare(name.size() - 4, 4, ".lmp") != 0 )
+	{
+		name += ".lmp";
+	}
+	return name;
+}
+
+static void editorRefreshProceduralRoomValidation()
+{
+	ProceduralRoomDefinition definition;
+	proceduralRoomDefinitionReset(definition);
+	definition.enabled = !std::strncmp(proceduralRoomEnabledText, "[x]", 3);
+	definition.category = static_cast<std::uint8_t>(std::clamp(
+		proceduralRoomCategorySelection, 0,
+		static_cast<int>(PROCEDURAL_ROOM_CATEGORY_MAX) - 1));
+	if ( definition.category == PROCEDURAL_ROOM_CATEGORY_CUSTOM )
+	{
+		if ( !proceduralRoomSetCustomCategory(definition,
+			proceduralRoomCustomCategoryText) )
+		{
+			definition.customCategory[0] = '\0';
+		}
+	}
+	char* end = nullptr;
+	errno = 0;
+	const unsigned long parsedWeight = std::strtoul(
+		proceduralRoomWeightText, &end, 10);
+	if ( errno == 0 && end != proceduralRoomWeightText && end && *end == '\0'
+		&& parsedWeight <= PROCEDURAL_ROOM_MAX_WEIGHT )
+	{
+		definition.weight = static_cast<std::uint32_t>(parsedWeight);
+	}
+	else
+	{
+		definition.weight = 0;
+	}
+	const bool levelsetValid = proceduralRoomSetLevelset(
+		definition, proceduralRoomLevelsetText);
+	if ( !levelsetValid )
+	{
+		definition.levelset[0] = '\0';
+	}
+
+	ProceduralRoomValidationContext context;
+	context.mapSaved = filename[0] != '\0' || map.filename[0] != '\0';
+	const std::string virtualPath = editorProceduralRoomVirtualPath();
+	if ( context.mapSaved && PHYSFS_isInit() && !virtualPath.empty() )
+	{
+		PHYSFS_Stat stat{};
+		context.pathDiscoverable = PHYSFS_stat(virtualPath.c_str(), &stat)
+			&& stat.filetype == PHYSFS_FILETYPE_REGULAR;
+	}
+	proceduralRoomValidationIssues = proceduralRoomValidate(
+		definition, proceduralRoomLevelsetText, context);
+	proceduralRoomValidationDirty = false;
+}
+
+static bool editorProceduralRoomValidationHasError()
+{
+	for ( const auto& issue : proceduralRoomValidationIssues )
+	{
+		if ( issue.severity == ProceduralRoomValidationSeverity::ERROR )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static Uint32 editorProceduralRoomSeverityColor(
+	const ProceduralRoomValidationSeverity severity)
+{
+	switch ( severity )
+	{
+	case ProceduralRoomValidationSeverity::OK:
+		return makeColorRGB(130, 235, 150);
+	case ProceduralRoomValidationSeverity::INFO:
+		return makeColorRGB(130, 210, 255);
+	case ProceduralRoomValidationSeverity::WARNING:
+		return makeColorRGB(255, 210, 110);
+	case ProceduralRoomValidationSeverity::ERROR:
+		return makeColorRGB(255, 120, 120);
+	default:
+		return makeColorRGB(255, 255, 255);
+	}
+}
+
+static const char* editorProceduralRoomSeverityLabel(
+	const ProceduralRoomValidationSeverity severity)
+{
+	switch ( severity )
+	{
+	case ProceduralRoomValidationSeverity::OK: return "OK";
+	case ProceduralRoomValidationSeverity::INFO: return "INFO";
+	case ProceduralRoomValidationSeverity::WARNING: return "WARN";
+	case ProceduralRoomValidationSeverity::ERROR: return "ERROR";
+	default: return "INFO";
+	}
+}
+
+static void proceduralRoomCloseButton(button_t*)
+{
+	editorCancelProceduralRoomProperties();
+}
+
+bool editorReadProceduralRoomDefinition(
+	ProceduralRoomDefinition& definition,
+	char* errorText,
+	const std::size_t errorTextSize)
+{
+	proceduralRoomDefinitionReset(definition);
+	definition.enabled = !std::strncmp(proceduralRoomEnabledText, "[x]", 3);
+	definition.category = static_cast<std::uint8_t>(
+		std::clamp(proceduralRoomCategorySelection, 0,
+			static_cast<int>(PROCEDURAL_ROOM_CATEGORY_MAX) - 1));
+	if ( definition.category == PROCEDURAL_ROOM_CATEGORY_CUSTOM )
+	{
+		if ( !proceduralRoomSetCustomCategory(definition,
+			proceduralRoomCustomCategoryText) )
+		{
+			if ( definition.enabled )
+			{
+				if ( errorText && errorTextSize )
+				{
+					std::snprintf(errorText, errorTextSize,
+						"Custom Room Group must be 1-%u safe characters.",
+						static_cast<unsigned>(PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES - 1));
+				}
+				return false;
+			}
+			definition.customCategory[0] = '\0';
+		}
+	}
+	char* end = nullptr;
+	errno = 0;
+	const unsigned long parsedWeight = std::strtoul(
+		proceduralRoomWeightText, &end, 10);
+	if ( errno != 0 || end == proceduralRoomWeightText || (end && *end != '\0')
+		|| parsedWeight > PROCEDURAL_ROOM_MAX_WEIGHT )
+	{
+		if ( errorText && errorTextSize )
+		{
+			std::snprintf(errorText, errorTextSize,
+				"Weight must be an integer from 1 to %u.",
+				PROCEDURAL_ROOM_MAX_WEIGHT);
+		}
+		return false;
+	}
+	definition.weight = static_cast<std::uint32_t>(parsedWeight);
+	const bool levelsetValid = proceduralRoomSetLevelset(
+		definition, proceduralRoomLevelsetText);
+	if ( !levelsetValid && definition.enabled )
+	{
+		if ( errorText && errorTextSize )
+		{
+			std::snprintf(errorText, errorTextSize,
+				"Level Set must be a single safe generator key.");
+		}
+		return false;
+	}
+	if ( !levelsetValid )
+	{
+		/* Disabled rooms retain their visible working-copy text, but malformed
+		 * future settings must not prevent the disabled state from being saved. */
+		definition.levelset[0] = '\0';
+	}
+	if ( definition.category == PROCEDURAL_ROOM_CATEGORY_CUSTOM
+		&& definition.customCategory[0] )
+	{
+		std::snprintf(proceduralRoomCustomCategoryText,
+			PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES, "%s",
+			definition.customCategory);
+	}
+	if ( !definition.enabled
+		&& (definition.weight == 0 || definition.weight > PROCEDURAL_ROOM_MAX_WEIGHT) )
+	{
+		definition.weight = PROCEDURAL_ROOM_DEFAULT_WEIGHT;
+	}
+	if ( !proceduralRoomDefinitionIsValid(definition) && definition.enabled )
+	{
+		if ( errorText && errorTextSize )
+		{
+			std::snprintf(errorText, errorTextSize,
+				"Enable a valid level set and positive weight.");
+		}
+		return false;
+	}
+	if ( errorText && errorTextSize )
+	{
+		errorText[0] = '\0';
+	}
+	return true;
+}
+
+void editorOpenProceduralRoomProperties()
+{
+	const int proceduralWindowWidth = std::min(860, std::max(760, xres - 24));
+	const int proceduralWindowHeight = std::min(660, std::max(560, yres - 24));
+	menuVisible = 0;
+	subwindow = 1;
+	newwindow = 43;
+	openwindow = 0;
+	savewindow = 0;
+	subx1 = std::max(12, (xres - proceduralWindowWidth) / 2);
+	subx2 = std::min(xres - 12, subx1 + proceduralWindowWidth);
+	suby1 = std::max(12, (yres - proceduralWindowHeight) / 2);
+	suby2 = std::min(yres - 12, suby1 + proceduralWindowHeight);
+	std::snprintf(subtext, sizeof(subtext), "Procedural Room Setup");
+	proceduralRoomSetStatus("");
+	proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+	proceduralRoomDropdownFirstVisible = 0;
+	proceduralRoomCustomLevelsetMode =
+		!proceduralRoomLevelsetIsKnown(proceduralRoomLevelsetText);
+	proceduralRoomValidationDirty = true;
+	proceduralRoomStopTextFocus();
+	editorRefreshProceduralRoomValidation();
+	/* Map Properties' native buttons are not valid while this native subdialog
+	 * is open. They are retained for the return path and hidden here. */
+	for ( node_t* node = button_l.first; node; node = node->next )
+	{
+		button_t* button = static_cast<button_t*>(node->element);
+		if ( button && button->focused )
+		{
+			button->visible = 0;
+		}
+	}
+	button_t* closeX = newButton();
+	std::strcpy(closeX->label, "X");
+	closeX->x = subx2 - 16;
+	closeX->y = suby1;
+	closeX->sizex = 16;
+	closeX->sizey = 16;
+	closeX->action = &proceduralRoomCloseButton;
+	closeX->visible = 1;
+	closeX->focused = 1;
+}
+
+void editorApplyProceduralRoomProperties()
+{
+	proceduralRoomStopTextFocus();
+	editorRefreshProceduralRoomValidation();
+	if ( !std::strncmp(proceduralRoomEnabledText, "[x]", 3)
+		&& editorProceduralRoomValidationHasError() )
+	{
+		proceduralRoomSetStatus("Fix the highlighted validation errors before applying.");
+		return;
+	}
+	ProceduralRoomDefinition definition;
+	char errorText[160] = "";
+	if ( !editorReadProceduralRoomDefinition(definition,
+		errorText, sizeof(errorText)) )
+	{
+		proceduralRoomSetStatus(errorText);
+		return;
+	}
+	if ( std::memcmp(&map.proceduralRoom, &definition,
+		sizeof(ProceduralRoomDefinition)) != 0 )
+	{
+		makeUndo();
+		map.proceduralRoom = definition;
+	}
+	proceduralRoomPendingDefinition = ProceduralRoomDefinition{};
+	proceduralRoomHasPendingDefinition = false;
+	proceduralRoomSetStatus("");
+	editorRemoveFocusedSubwindowButtons();
+	buttonAttributes(nullptr);
+}
+
+void editorCancelProceduralRoomProperties()
+{
+	proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+	proceduralRoomStopTextFocus();
+	proceduralRoomHasPendingDefinition = false;
+	proceduralRoomSetStatus("");
+	editorRemoveFocusedSubwindowButtons();
+	buttonAttributes(nullptr);
+}
+
+static void drawProceduralRoomProperties()
+{
+	const int left = subx1 + 24;
+	const int right = subx2 - 24;
+	const int rulesTop = suby1 + 92;
+	const int rulesBottom = suby1 + 260;
+	const int previewTop = rulesBottom + 10;
+	const int previewBottom = previewTop + 112;
+	const int validationTop = previewBottom + 10;
+	const int actionY = suby2 - 38;
+	const int validationBottom = actionY - 10;
+	const int fieldX = left + 188;
+	const int fieldRight = right - 4;
+	const int fieldWidth = std::max(180, fieldRight - fieldX);
+	const int enabledY = rulesTop + 30;
+	const int levelsetY = rulesTop + 66;
+	const int categoryY = rulesTop + 102;
+	const int customCategoryY = rulesTop + 120;
+	const int weightY = rulesTop + 156;
+	const Uint32 headerColor = makeColorRGB(120, 220, 255);
+	const Uint32 accentColor = makeColorRGB(255, 210, 120);
+
+	/* Text input is delivered by the editor's shared SDL handler, so refresh
+	 * from the working copy every frame instead of trusting a stale cache. */
+	proceduralRoomCustomLevelsetMode =
+		!proceduralRoomLevelsetIsKnown(proceduralRoomLevelsetText);
+	editorRefreshProceduralRoomValidation();
+
+	drawWindow(left - 10, suby1 + 22, right + 10, suby1 + 78);
+	printTextFormattedColor(font8x8_bmp, left, suby1 + 34,
+		headerColor, "WHAT THIS SETTING DOES");
+	printText(font8x8_bmp, left, suby1 + 52,
+		"Registers this whole .lmp as a generated room candidate.");
+	printText(font8x8_bmp, left, suby1 + 66,
+		"The map filename supplies its registration path; nothing is copied.");
+	printTextFormattedColor(font8x8_bmp, left, suby1 + 82,
+		headerColor, "ROOM");
+	const std::string roomPathPreview = editorProceduralRoomVirtualPath();
+	printText(font8x8_bmp, left + 48, suby1 + 82,
+		roomPathPreview.empty() ? "Unsaved map" : roomPathPreview.c_str());
+
+	drawWindow(left - 10, rulesTop, right + 10, rulesBottom);
+	printTextFormattedColor(font8x8_bmp, left, rulesTop + 12,
+		accentColor, "GENERATION RULES");
+	printText(font8x8_bmp, left, enabledY, "Use in generated dungeons:");
+	drawWindowFancy(fieldX, enabledY - 4, fieldX + 44, enabledY + 14);
+	printText(font8x8_bmp, fieldX + 10, enabledY, proceduralRoomEnabledText);
+
+	printText(font8x8_bmp, left, levelsetY, "Level Set:");
+	drawDepressed(fieldX, levelsetY - 4, fieldRight, levelsetY + 14);
+	const char* levelsetDisplay = proceduralRoomLevelsetText[0]
+		? proceduralRoomLevelsetDisplayName(proceduralRoomLevelsetText)
+		: "Select a level set...";
+	std::string levelsetLabel = proceduralRoomCustomLevelsetMode
+		&& proceduralRoomLevelsetText[0]
+		? std::string("Custom: ") + proceduralRoomLevelsetText
+		: levelsetDisplay;
+	printText(font8x8_bmp, fieldX + 6, levelsetY, levelsetLabel.c_str());
+	printText(font8x8_bmp, fieldRight - 14, levelsetY, "v");
+
+	printText(font8x8_bmp, left, categoryY, "Room Category:");
+	drawDepressed(fieldX, categoryY - 4, fieldRight, categoryY + 14);
+	const auto* category = proceduralRoomFindCategoryDescriptor(
+		static_cast<std::uint8_t>(proceduralRoomCategorySelection));
+	printText(font8x8_bmp, fieldX + 6, categoryY,
+		category ? category->displayName : "Unavailable");
+	printText(font8x8_bmp, fieldRight - 14, categoryY, "v");
+	if ( category )
+	{
+		if ( proceduralRoomCategorySelection == PROCEDURAL_ROOM_CATEGORY_CUSTOM )
+		{
+			printText(font8x8_bmp, left, customCategoryY,
+				"Custom Group Name:");
+			drawDepressed(fieldX, customCategoryY - 4, fieldRight,
+				customCategoryY + 14);
+			printText(font8x8_bmp, fieldX + 6, customCategoryY,
+				proceduralRoomCustomCategoryText[0]
+					? proceduralRoomCustomCategoryText : "type a name...");
+		}
+		else
+		{
+			printText(font8x8_bmp, fieldX + 6, categoryY + 16,
+				category->helpText);
+		}
+	}
+	std::string categoryLabel = category
+		? category->displayName : "Unavailable";
+	if ( proceduralRoomCategorySelection == PROCEDURAL_ROOM_CATEGORY_CUSTOM
+		&& proceduralRoomCustomCategoryText[0] )
+	{
+		categoryLabel = std::string("Custom: ")
+			+ proceduralRoomCustomCategoryText;
+	}
+
+	printText(font8x8_bmp, left, weightY, "Relative Weight:");
+	const int minusX = fieldX;
+	const int weightFieldX = minusX + 22;
+	const int plusX = weightFieldX + 90;
+	drawWindowFancy(minusX, weightY - 4, weightFieldX, weightY + 14);
+	printText(font8x8_bmp, minusX + 7, weightY, "-");
+	drawDepressed(weightFieldX, weightY - 4, plusX, weightY + 14);
+	printText(font8x8_bmp, weightFieldX + 6, weightY, proceduralRoomWeightText);
+	drawWindowFancy(plusX, weightY - 4, plusX + 22, weightY + 14);
+	printText(font8x8_bmp, plusX + 7, weightY, "+");
+	printText(font8x8_bmp, plusX + 32, weightY,
+		proceduralRoomWeightDescription(static_cast<std::uint32_t>(
+			std::max(0, std::atoi(proceduralRoomWeightText)))));
+
+	drawWindow(left - 10, previewTop, right + 10, previewBottom);
+	printTextFormattedColor(font8x8_bmp, left, previewTop + 12,
+		headerColor, "REGISTRATION PREVIEW");
+	const std::string virtualPath = editorProceduralRoomVirtualPath();
+	printText(font8x8_bmp, left, previewTop + 30, "Room File:");
+	printText(font8x8_bmp, left + 96, previewTop + 30,
+		virtualPath.empty() ? "Unsaved map" : virtualPath.c_str());
+	printText(font8x8_bmp, left, previewTop + 48, "Selection:");
+	std::string selection = levelsetLabel + " -> "
+		+ categoryLabel
+		+ " -> Weight " + proceduralRoomWeightText + " ("
+		+ proceduralRoomWeightDescription(static_cast<std::uint32_t>(
+			std::max(0, std::atoi(proceduralRoomWeightText)))) + ")";
+	printText(font8x8_bmp, left + 96, previewTop + 48, selection.c_str());
+	printText(font8x8_bmp, left, previewTop + 68,
+		!std::strncmp(proceduralRoomEnabledText, "[x]", 3)
+			? "This room joins the selected compatible generator pool."
+			: "Disabled: this room will not be registered until enabled.");
+	if ( !std::strncmp(proceduralRoomEnabledText, "[x]", 3)
+		&& !editorProceduralRoomValidationHasError() )
+	{
+		printText(font8x8_bmp, left, previewTop + 88, "Ready to register.");
+	}
+
+	drawWindow(left - 10, validationTop, right + 10, validationBottom);
+	printTextFormattedColor(font8x8_bmp, left, validationTop + 12,
+		accentColor, "VALIDATION");
+	const int validationRows = std::max(1, (validationBottom - validationTop - 28) / 18);
+	if ( proceduralRoomValidationIssues.empty() )
+	{
+		printText(font8x8_bmp, left, validationTop + 32, "Press Validate Room to check registration.");
+	}
+	else
+	{
+		const int maxFirst = std::max(0,
+			static_cast<int>(proceduralRoomValidationIssues.size()) - validationRows);
+		proceduralRoomDropdownFirstVisible = std::clamp(
+			proceduralRoomDropdownFirstVisible, 0, maxFirst);
+		for ( int row = 0; row < validationRows; ++row )
+		{
+			const int index = proceduralRoomDropdownFirstVisible + row;
+			if ( index >= static_cast<int>(proceduralRoomValidationIssues.size()) )
+			{
+				break;
+			}
+			const auto& issue = proceduralRoomValidationIssues[index];
+			const int rowY = validationTop + 30 + row * 18;
+			printTextFormattedColor(font8x8_bmp, left, rowY,
+				editorProceduralRoomSeverityColor(issue.severity), "[%s]",
+				editorProceduralRoomSeverityLabel(issue.severity));
+			std::string messageText = issue.message;
+			const std::size_t maximum = 88;
+			if ( messageText.size() > maximum )
+			{
+				messageText.resize(maximum - 3);
+				messageText += "...";
+			}
+			printText(font8x8_bmp, left + 58, rowY, messageText.c_str());
+		}
+	}
+
+	const int validateWidth = 116;
+	const int applyWidth = 116;
+	const int cancelWidth = 76;
+	const int actionRight = right;
+	const int cancelX = actionRight - cancelWidth;
+	const int applyX = cancelX - 8 - applyWidth;
+	const int validateX = left;
+	drawWindowFancy(validateX, actionY, validateX + validateWidth, actionY + 18);
+	printText(font8x8_bmp, validateX + 12, actionY + 5, "VALIDATE ROOM");
+	drawWindowFancy(applyX, actionY, applyX + applyWidth, actionY + 18);
+	printText(font8x8_bmp, applyX + 15, actionY + 5, "APPLY TO MAP");
+	drawWindowFancy(cancelX, actionY, cancelX + cancelWidth, actionY + 18);
+	printText(font8x8_bmp, cancelX + 15, actionY + 5, "CANCEL");
+
+	/* Dropdowns are drawn last so their rows remain above every panel. */
+	const int dropdownX = fieldX;
+	const int dropdownWidth = fieldRight - fieldX;
+	if ( proceduralRoomDropdown != ProceduralRoomDropdown::NONE )
+	{
+		const bool levels = proceduralRoomDropdown == ProceduralRoomDropdown::LEVELSET;
+		const int count = levels
+			? static_cast<int>(proceduralRoomLevelsetDescriptorCount()) + 1
+			: static_cast<int>(proceduralRoomCategoryDescriptorCount());
+		const int visible = std::min(9, count);
+		const int rowHeight = 18;
+		const int listTop = levels ? levelsetY + 18 : categoryY + 18;
+		const int maxFirst = std::max(0, count - visible);
+		proceduralRoomDropdownFirstVisible = std::clamp(
+			proceduralRoomDropdownFirstVisible, 0, maxFirst);
+		drawWindowFancy(dropdownX, listTop, dropdownX + dropdownWidth,
+			listTop + visible * rowHeight);
+		for ( int row = 0; row < visible; ++row )
+		{
+			const int index = proceduralRoomDropdownFirstVisible + row;
+			const int rowY = listTop + row * rowHeight;
+			if ( levels )
+			{
+				if ( index < static_cast<int>(proceduralRoomLevelsetDescriptorCount()) )
+				{
+					const auto& descriptor = proceduralRoomLevelsetDescriptors()[index];
+					printText(font8x8_bmp, dropdownX + 6, rowY + 5,
+						descriptor.displayName);
+				}
+				else
+				{
+					printText(font8x8_bmp, dropdownX + 6, rowY + 5,
+						"Custom Level Set...");
+				}
+			}
+			else if ( index < static_cast<int>(proceduralRoomCategoryDescriptorCount()) )
+			{
+				printText(font8x8_bmp, dropdownX + 6, rowY + 5,
+					proceduralRoomCategoryDescriptors()[index].displayName);
+			}
+		}
+
+		if ( mousestatus[SDL_BUTTON_WHEELUP]
+			&& omousex >= dropdownX && omousex < dropdownX + dropdownWidth
+			&& omousey >= listTop && omousey < listTop + visible * rowHeight )
+		{
+			proceduralRoomDropdownFirstVisible = std::max(0,
+				proceduralRoomDropdownFirstVisible - 1);
+			mousestatus[SDL_BUTTON_WHEELUP] = 0;
+		}
+		else if ( mousestatus[SDL_BUTTON_WHEELDOWN]
+			&& omousex >= dropdownX && omousex < dropdownX + dropdownWidth
+			&& omousey >= listTop && omousey < listTop + visible * rowHeight )
+		{
+			proceduralRoomDropdownFirstVisible = std::min(maxFirst,
+				proceduralRoomDropdownFirstVisible + 1);
+			mousestatus[SDL_BUTTON_WHEELDOWN] = 0;
+		}
+	}
+
+	if ( mousestatus[SDL_BUTTON_LEFT] )
+	{
+		const bool inLevelsetList = proceduralRoomDropdown == ProceduralRoomDropdown::LEVELSET
+			&& omousex >= dropdownX && omousex < dropdownX + dropdownWidth
+			&& omousey >= levelsetY + 18;
+		const bool inCategoryList = proceduralRoomDropdown == ProceduralRoomDropdown::CATEGORY
+			&& omousex >= dropdownX && omousex < dropdownX + dropdownWidth
+			&& omousey >= categoryY + 18;
+		if ( inLevelsetList )
+		{
+			const int row = (omousey - (levelsetY + 18)) / 18;
+			const int index = proceduralRoomDropdownFirstVisible + row;
+			if ( index >= 0 && index < static_cast<int>(proceduralRoomLevelsetDescriptorCount()) )
+			{
+				std::snprintf(proceduralRoomLevelsetText,
+					PROCEDURAL_ROOM_LEVELSET_BYTES, "%s",
+					proceduralRoomLevelsetDescriptors()[index].canonicalKey);
+				proceduralRoomCustomLevelsetMode = false;
+				proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+				proceduralRoomStopTextFocus();
+			}
+			else if ( index == static_cast<int>(proceduralRoomLevelsetDescriptorCount()) )
+			{
+				proceduralRoomCustomLevelsetMode = true;
+				proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+				proceduralRoomFocusText(proceduralRoomLevelsetText,
+					static_cast<int>(PROCEDURAL_ROOM_LEVELSET_BYTES - 1), 130);
+			}
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( inCategoryList )
+		{
+			const int row = (omousey - (categoryY + 18)) / 18;
+			const int index = proceduralRoomDropdownFirstVisible + row;
+			if ( index >= 0 && index < static_cast<int>(proceduralRoomCategoryDescriptorCount()) )
+			{
+				proceduralRoomCategorySelection =
+					proceduralRoomCategoryDescriptors()[index].category;
+				proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+				proceduralRoomStopTextFocus();
+			}
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( proceduralRoomDropdown != ProceduralRoomDropdown::NONE )
+		{
+			proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= fieldX && omousex < fieldX + 44
+			&& omousey >= enabledY - 4 && omousey < enabledY + 14 )
+		{
+			std::strcpy(proceduralRoomEnabledText,
+				!std::strncmp(proceduralRoomEnabledText, "[x]", 3) ? "[ ]" : "[x]");
+			proceduralRoomValidationDirty = true;
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= fieldX && omousex < fieldRight
+			&& omousey >= levelsetY - 4 && omousey < levelsetY + 14 )
+		{
+			proceduralRoomDropdown = ProceduralRoomDropdown::LEVELSET;
+			proceduralRoomDropdownFirstVisible = 0;
+			proceduralRoomStopTextFocus();
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= fieldX && omousex < fieldRight
+			&& omousey >= categoryY - 4 && omousey < categoryY + 14 )
+		{
+			proceduralRoomDropdown = ProceduralRoomDropdown::CATEGORY;
+			proceduralRoomDropdownFirstVisible = 0;
+			proceduralRoomStopTextFocus();
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( proceduralRoomCategorySelection == PROCEDURAL_ROOM_CATEGORY_CUSTOM
+			&& omousex >= fieldX && omousex < fieldRight
+			&& omousey >= customCategoryY - 4
+			&& omousey < customCategoryY + 14 )
+		{
+			proceduralRoomFocusText(proceduralRoomCustomCategoryText,
+				static_cast<int>(PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES - 1), 132);
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= weightFieldX && omousex < plusX
+			&& omousey >= weightY - 4 && omousey < weightY + 14 )
+		{
+			proceduralRoomFocusText(proceduralRoomWeightText,
+				static_cast<int>(sizeof(proceduralRoomWeightText) - 1), 131);
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= minusX && omousex < weightFieldX
+			&& omousey >= weightY - 4 && omousey < weightY + 14 )
+		{
+			const int current = std::max(1, std::atoi(proceduralRoomWeightText));
+			std::snprintf(proceduralRoomWeightText, sizeof(proceduralRoomWeightText),
+				"%u", static_cast<unsigned>(std::max(1, current - 1)));
+			proceduralRoomValidationDirty = true;
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= plusX && omousex < plusX + 22
+			&& omousey >= weightY - 4 && omousey < weightY + 14 )
+		{
+			const unsigned long current = std::strtoul(proceduralRoomWeightText,
+				nullptr, 10);
+			const unsigned long next = std::min<unsigned long>(
+				PROCEDURAL_ROOM_MAX_WEIGHT, std::max<unsigned long>(1, current) + 1);
+			std::snprintf(proceduralRoomWeightText, sizeof(proceduralRoomWeightText),
+				"%lu", next);
+			proceduralRoomValidationDirty = true;
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= validateX && omousex < validateX + validateWidth
+			&& omousey >= actionY && omousey < actionY + 18 )
+		{
+			proceduralRoomStopTextFocus();
+			editorRefreshProceduralRoomValidation();
+			proceduralRoomSetStatus(editorProceduralRoomValidationHasError()
+				? "Validation found errors."
+				: "Validation complete; review the status rows.");
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+		}
+		else if ( omousex >= applyX && omousex < applyX + applyWidth
+			&& omousey >= actionY && omousey < actionY + 18 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			editorApplyProceduralRoomProperties();
+		}
+		else if ( omousex >= cancelX && omousex < cancelX + cancelWidth
+			&& omousey >= actionY && omousey < actionY + 18 )
+		{
+			mousestatus[SDL_BUTTON_LEFT] = 0;
+			editorCancelProceduralRoomProperties();
+		}
+	}
+
+	if ( inputstr == proceduralRoomLevelsetText )
+	{
+		inputlen = static_cast<int>(PROCEDURAL_ROOM_LEVELSET_BYTES - 1);
+	}
+	else if ( inputstr == proceduralRoomCustomCategoryText )
+	{
+		inputlen = static_cast<int>(PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES - 1);
+	}
+	else if ( inputstr == proceduralRoomWeightText )
+	{
+		inputlen = static_cast<int>(sizeof(proceduralRoomWeightText) - 1);
+	}
+	if ( inputstr == proceduralRoomLevelsetText
+		&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+	{
+		const int cursorX = std::min(fieldRight - 8,
+			fieldX + 6 + static_cast<int>(std::strlen(proceduralRoomLevelsetText)) * 8);
+		printText(font8x8_bmp, cursorX, levelsetY, "\26");
+	}
+	if ( inputstr == proceduralRoomCustomCategoryText
+		&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+	{
+		const int cursorX = std::min(fieldRight - 8,
+			fieldX + 6 + static_cast<int>(std::strlen(
+				proceduralRoomCustomCategoryText)) * 8);
+		printText(font8x8_bmp, cursorX, customCategoryY, "\26");
+	}
+	if ( inputstr == proceduralRoomWeightText
+		&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
+	{
+		const int cursorX = std::min(plusX - 8,
+			weightFieldX + 6 + static_cast<int>(std::strlen(proceduralRoomWeightText)) * 8);
+		printText(font8x8_bmp, cursorX, weightY, "\26");
+	}
+
+	if ( inputstr != proceduralRoomLevelsetText
+		&& inputstr != proceduralRoomCustomCategoryText
+		&& inputstr != proceduralRoomWeightText
+		&& SDL_IsTextInputActive() )
+	{
+		proceduralRoomStopTextFocus();
+	}
 }
 
 static bool editorIsAmbienceResource(const std::string& path)
@@ -19745,6 +20530,7 @@ void makeUndo()
 	undomap->height = map.height;
 	undomap->numLayers = map.numLayers;
 	undomap->roomGroups = map.roomGroups;
+	undomap->proceduralRoom = map.proceduralRoom;
 	for ( int c = 0; c < MAPFLAGS; c++ )
 	{
 		undomap->flags[c] = map.flags[c];
@@ -19814,6 +20600,7 @@ void undo()
 	map.height = undomap->height;
 	map.numLayers = undomap->numLayers;
 	map.roomGroups = undomap->roomGroups;
+	map.proceduralRoom = undomap->proceduralRoom;
 	map.tiles = (Sint32*) malloc(sizeof(Sint32) * map.width * map.height * MAPLAYERS);
 	camera.vismap = (bool*) malloc(sizeof(bool) * map.height * map.width);
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
@@ -19853,6 +20640,7 @@ void redo()
 	map.height = undomap->height;
 	map.numLayers = undomap->numLayers;
 	map.roomGroups = undomap->roomGroups;
+	map.proceduralRoom = undomap->proceduralRoom;
 	map.tiles = (Sint32*) malloc(sizeof(Sint32) * map.width * map.height * MAPLAYERS);
 	camera.vismap = (bool*) malloc(sizeof(bool) * map.height * map.width);
     memset(camera.vismap, 0, sizeof(bool) * map.height * map.width);
@@ -20309,6 +21097,7 @@ int main(int argc, char** argv)
 	map.height = 24;
 	map.numLayers = MAPLAYERS;
 	authoredRoomGroupsReset(map.roomGroups);
+	proceduralRoomDefinitionReset(map.proceduralRoom);
 	map.entities = (list_t*) malloc(sizeof(list_t));
 	map.creatures = nullptr;
 	map.worldUI = nullptr;
@@ -22610,6 +23399,8 @@ int main(int argc, char** argv)
 					const int fogPanelX = subx1 + 8;
 					const int fogPanelY = suby1 + 356;
 					const int fogFieldX = fogPanelX + 104;
+					const int ambientLightPanelX = fogPanelX + 220;
+					const int ambiencePanelX = fogPanelX + 440;
 
 					printTextFormattedColor(
 						font8x8_bmp,
@@ -22646,7 +23437,6 @@ int main(int argc, char** argv)
 						printText(font8x8_bmp, fogFieldX, fogY, fogValues[fogIndex]);
 					}
 
-					const int ambientLightPanelX = fogPanelX + 220;
 					const int ambientLightPanelY = fogPanelY;
 					const int ambientLightFieldX = ambientLightPanelX + 112;
 					printTextFormattedColor(
@@ -22654,7 +23444,7 @@ int main(int argc, char** argv)
 						ambientLightPanelX,
 						ambientLightPanelY,
 						makeColorRGB(255, 210, 120),
-						"Map Ambient Light"
+						"AMBIENT LIGHT"
 					);
 					printText(font8x8_bmp, ambientLightPanelX, ambientLightPanelY + 18, "Enabled:");
 					printText(font8x8_bmp, ambientLightFieldX, ambientLightPanelY + 18,
@@ -22677,7 +23467,6 @@ int main(int argc, char** argv)
 							std::clamp(atoi(mapAmbientLightBlueText), 0, 255)),
 						"Light color preview");
 
-					const int ambiencePanelX = fogPanelX + 440;
 					const int ambiencePanelY = fogPanelY;
 					const int ambienceFieldX = ambiencePanelX + 132;
 					printTextFormattedColor(
@@ -22685,7 +23474,7 @@ int main(int argc, char** argv)
 						ambiencePanelX,
 						ambiencePanelY,
 						makeColorRGB(120, 220, 255),
-						"Map Ambient Audio"
+						"AMBIENT AUDIO"
 					);
 					printText(font8x8_bmp, ambiencePanelX, ambiencePanelY + 18, "Enabled:");
 					printText(font8x8_bmp, ambienceFieldX, ambiencePanelY + 18,
@@ -23536,6 +24325,10 @@ int main(int argc, char** argv)
 								ambienceCursorY, "\26");
 						}
 					}
+				}
+				else if ( newwindow == 43 )
+				{
+					drawProceduralRoomProperties();
 				}
 				else if ( newwindow == 2 ) 
 				{
@@ -24874,38 +25667,64 @@ int main(int argc, char** argv)
 							}
 						}
 						editorNumItems = std::max(1, editorNumItems);
-						const std::string itemSearchKey = std::to_string(newwindow)
-							+ ":" + std::to_string(itemSlotSelected)
-							+ ":" + editorMonsterItemSearch;
-						if ( itemSearchKey != editorMonsterItemSearchLastKey )
+
+						/*
+						 * Keep the source index separate from the visible row.  The typed
+						 * equipment lists are compact arrays whose row number is not a
+						 * runtime item ID, so filtering must never renumber the value that
+						 * gets written back to the property field.
+						 */
+						std::vector<int> filteredItemIndices;
+						filteredItemIndices.reserve(editorNumItems);
+						const std::string loweredItemFilter =
+							editorPaletteLowercase(editorMonsterItemSearch);
+						for ( int sourceIndex = 0; sourceIndex < editorNumItems; ++sourceIndex )
 						{
-							editorMonsterItemSearchLastKey = itemSearchKey;
-							const std::string loweredFilter = editorPaletteLowercase(editorMonsterItemSearch);
-							if ( !loweredFilter.empty() )
+							const char* sourceName = nullptr;
+							if ( newwindow == 5 && itemSlotSelected >= 0 && itemSlotSelected < 10 )
 							{
-								for ( int searchIndex = 0; searchIndex < editorNumItems; ++searchIndex )
-								{
-									const char* searchName = nullptr;
-									if ( newwindow == 5 && searchIndex == 1 )
-									{
-										searchName = "default_random";
-									}
-									else if ( newwindow == 5 && itemSlotSelected >= 0 && itemSlotSelected < 10 )
-									{
-										searchName = itemStringsByType[itemSlotSelected][searchIndex];
-									}
-									else
-									{
-										searchName = itemNameStrings[searchIndex];
-									}
-									const std::string loweredName = editorPaletteLowercase(searchName != nullptr ? searchName : "");
-									if ( loweredName.find(loweredFilter) != std::string::npos
-										|| std::to_string(searchIndex).find(loweredFilter) != std::string::npos )
-									{
-										itemSelect = searchIndex;
-										break;
-									}
-								}
+								sourceName = itemStringsByType[itemSlotSelected][sourceIndex];
+							}
+							else
+							{
+								sourceName = itemNameStrings[sourceIndex];
+							}
+
+							/* The monster editor has historically displayed this row with
+							 * a clearer label than the underlying random_item token. */
+							const char* displayName = (newwindow == 5 && sourceIndex == 1)
+								? "default_random" : sourceName;
+							if ( displayName == nullptr || displayName[0] == '\0' )
+							{
+								continue;
+							}
+
+							const std::string loweredName = editorPaletteLowercase(displayName);
+							if ( loweredItemFilter.empty()
+								|| loweredName.find(loweredItemFilter) != std::string::npos
+								|| std::to_string(sourceIndex).find(loweredItemFilter) != std::string::npos )
+							{
+								filteredItemIndices.push_back(sourceIndex);
+							}
+						}
+
+						const int filteredItemCount = static_cast<int>(filteredItemIndices.size());
+						int selectedItemRow = 0;
+						if ( filteredItemCount > 0 )
+						{
+							const auto selectedSource = std::find(
+								filteredItemIndices.begin(), filteredItemIndices.end(), itemSelect);
+							if ( selectedSource != filteredItemIndices.end() )
+							{
+								selectedItemRow = static_cast<int>(
+									selectedSource - filteredItemIndices.begin());
+							}
+							else
+							{
+								/* The current item is not in the filtered result. Start the
+								 * new result at its first row instead of retaining a stale
+								 * offset from the previous filter. */
+								y2 = 0;
 							}
 						}
 						auto safeGlobalItemIndex = [totalNumItems](int value)
@@ -25150,87 +25969,119 @@ int main(int argc, char** argv)
 						drawDepressed(pad_x1, pad_y1, subx2 - 20, pad_y2);
 						drawDepressed(subx2 - 20, pad_y1, subx2 - 4, pad_y2);
 						const int visibleItemRows = std::max(1, (pad_y2 - (pad_y1 + 4)) / 8);
-						slidersize = std::min<int>(((pad_y2 - 1) - (pad_y1 + 1)), ((pad_y2 - 1) - (pad_y1 + 1)) / ((real_t)(editorNumItems + 1) / visibleItemRows));
-						slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
-						drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
-
-						// directory list offset from slider
-						y2 = ((real_t)(slidery - (pad_y1)) / (pad_y2 - (pad_y1))) * editorNumItems;
-						y2 = std::max(0, std::min(y2, editorNumItems - 1));
-						itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
+						const int listTrackHeight = std::max(1, (pad_y2 - 1) - (pad_y1 + 1));
+						const int maxFirstVisibleItem = std::max(0, filteredItemCount - visibleItemRows);
+						if ( filteredItemCount <= visibleItemRows )
+						{
+							slidersize = listTrackHeight;
+						}
+						else
+						{
+							slidersize = std::max(8,
+								listTrackHeight * visibleItemRows / filteredItemCount);
+						}
+						const int sliderTravel = std::max(0, listTrackHeight - slidersize);
+						if ( maxFirstVisibleItem > 0 )
+						{
+							y2 = std::max(0, std::min(y2, maxFirstVisibleItem));
+							slidery = pad_y1 + 1 + sliderTravel * y2 / maxFirstVisibleItem;
+						}
+						else
+						{
+							y2 = 0;
+							slidery = pad_y1 + 1;
+						}
 						if ( scroll )
 						{
-							slidery -= 8 * scroll;
-							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
-							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
-							y2 = std::max(0, std::min(y2, editorNumItems - 1));
-							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
+							y2 = std::max(0, std::min(maxFirstVisibleItem, y2 - scroll));
+							slidery = pad_y1 + 1
+								+ (maxFirstVisibleItem > 0 ? sliderTravel * y2 / maxFirstVisibleItem : 0);
+							selectedItemRow = std::max(y2,
+								std::min(selectedItemRow, y2 + visibleItemRows - 1));
+							itemSelect = filteredItemIndices[selectedItemRow];
 							scroll = 0;
 						}
-						if ( mousestatus[SDL_BUTTON_LEFT] && omousex >= subx2 - 20 && omousex < subx2 - 4 && omousey >= (pad_y1) && omousey < pad_y2 )
+						if ( mousestatus[SDL_BUTTON_LEFT] && filteredItemCount > 0
+							&& omousex >= subx2 - 20 && omousex < subx2 - 4
+							&& omousey >= pad_y1 && omousey < pad_y2 )
 						{
 							slidery = oslidery + mousey - omousey;
-							slidery = std::min(std::max(pad_y1, slidery), pad_y2 - 1 - slidersize);
-							y2 = ((real_t)(slidery - (pad_y1)) / ((pad_y2) - (pad_y1))) * editorNumItems;
-							y2 = std::max(0, std::min(y2, editorNumItems - 1));
+							slidery = std::min(std::max(pad_y1 + 1, slidery),
+								pad_y1 + 1 + sliderTravel);
+							y2 = sliderTravel > 0
+								? (slidery - (pad_y1 + 1)) * maxFirstVisibleItem / sliderTravel
+								: 0;
 							mclick = 1;
-							itemSelect = std::max(y2, std::min(itemSelect, std::min(editorNumItems - 1, y2 + visibleItemRows - 1)));
+							selectedItemRow = std::max(y2,
+								std::min(selectedItemRow, y2 + visibleItemRows - 1));
+							itemSelect = filteredItemIndices[selectedItemRow];
 						}
 						else
 						{
 							oslidery = slidery;
 						}
 
-						pos.x = pad_x1 ;
-						pos.y = pad_y1 + 4 + (itemSelect - y2) * 8;
-						pos.w = subx2 - pad_x1 - 24;
-						pos.h = 8;
-						drawRect(&pos, makeColorRGB(64, 64, 64), 255);
+						if ( filteredItemCount > 0 )
+						{
+							selectedItemRow = std::max(0, std::min(selectedItemRow, filteredItemCount - 1));
+							pos.x = pad_x1;
+							pos.y = pad_y1 + 4 + (selectedItemRow - y2) * 8;
+							pos.w = subx2 - pad_x1 - 24;
+							pos.h = 8;
+							drawRect(&pos, makeColorRGB(64, 64, 64), 255);
+						}
 
-						// print all the items
+						if ( filteredItemCount > 0 )
+						{
+							drawWindowFancy(subx2 - 19, slidery, subx2 - 5, slidery + slidersize);
+						}
+
+						// Print only the rows that match the search filter.
 						x = pad_x1;
 						y = pad_y1 + 4;
-						c = std::min(editorNumItems, y2 + visibleItemRows);
-						for ( z = y2; z < c; z++ )
+						c = std::min(filteredItemCount, y2 + visibleItemRows);
+						for ( int visibleRow = y2; visibleRow < c; ++visibleRow )
 						{
-							if ( newwindow == 5 && z == 1 )
+							const int sourceIndex = filteredItemIndices[visibleRow];
+							if ( newwindow == 5 && sourceIndex == 1 )
 							{
 								printText(font8x8_bmp, x, y, "default_random");
 							}
+							else if ( itemSlotSelected >= 0 && itemSlotSelected < 10 )
+							{
+								printText(font8x8_bmp, x, y,
+									itemStringsByType[itemSlotSelected][sourceIndex]);
+							}
 							else
 							{
-								itemSelect = std::max(0, std::min(itemSelect, editorNumItems - 1));
-								switch ( itemSlotSelected )
-								{
-									case -1:
-										printText(font8x8_bmp, x, y, itemNameStrings[z]);
-										break;
-									default:
-										if ( itemSlotSelected < 10 )
-										{
-											printText(font8x8_bmp, x, y, itemStringsByType[itemSlotSelected][z]);
-										}
-										else
-										{
-											printText(font8x8_bmp, x, y, itemNameStrings[z]);
-										}
-										break;
-								}
-									
+								printText(font8x8_bmp, x, y, itemNameStrings[sourceIndex]);
 							}
 							y += 8;
+						}
+						if ( filteredItemCount == 0 )
+						{
+							printText(font8x8_bmp, pad_x1, pad_y1 + 4, "No matching items.");
 						}
 
 						// Search field underneath the selectable item list.
 						const int itemSearchY = pad_y2 + 16;
+						const int itemSearchBoxX1 = pad_x1 + 56;
+						const int itemSearchClearX1 = subx2 - 40;
+						const int itemSearchClearX2 = subx2 - 24;
+						const int itemSearchBoxX2 = itemSearchClearX1 - 2;
 						printText(font8x8_bmp, pad_x1, itemSearchY, "Search:");
-						drawDepressed(pad_x1 + 56, itemSearchY - 4, subx2 - 24, itemSearchY + 12);
-						printText(font8x8_bmp, pad_x1 + 60, itemSearchY, editorMonsterItemSearch);
+						drawDepressed(itemSearchBoxX1, itemSearchY - 4,
+							itemSearchBoxX2, itemSearchY + 12);
+						printText(font8x8_bmp, itemSearchBoxX1 + 4, itemSearchY, editorMonsterItemSearch);
+						drawWindowFancy(itemSearchClearX1, itemSearchY - 4,
+							itemSearchClearX2, itemSearchY + 12);
+						printText(font8x8_bmp, itemSearchClearX1 + 4, itemSearchY, "X");
 						if ( inputstr == editorMonsterItemSearch
 							&& (ticks - cursorflash) % TICKS_PER_SECOND < TICKS_PER_SECOND / 2 )
 						{
 							printText(font8x8_bmp,
-								pad_x1 + 60 + strlen(editorMonsterItemSearch) * 8,
+								std::min(itemSearchBoxX2 - 4,
+									itemSearchBoxX1 + 4 + static_cast<int>(strlen(editorMonsterItemSearch)) * 8),
 								itemSearchY, "\26");
 						}
 
@@ -25267,7 +26118,22 @@ int main(int argc, char** argv)
 						// select a file
 						if ( mousestatus[SDL_BUTTON_LEFT] )
 						{
-							if ( omousex >= pad_x1 + 56 && omousex < subx2 - 24
+							if ( omousex >= itemSearchClearX1 && omousex < itemSearchClearX2
+								&& omousey >= itemSearchY - 4 && omousey < itemSearchY + 12 )
+							{
+								editorMonsterItemSearch[0] = '\0';
+								y2 = 0;
+								scroll = 0;
+								cursorflash = ticks;
+								inputstr = editorMonsterItemSearch;
+								editproperty = numProperties;
+								if ( !SDL_IsTextInputActive() )
+								{
+									SDL_StartTextInput();
+								}
+								mousestatus[SDL_BUTTON_LEFT] = 0;
+							}
+							else if ( omousex >= itemSearchBoxX1 && omousex < itemSearchBoxX2
 								&& omousey >= itemSearchY - 4 && omousey < itemSearchY + 12 )
 							{
 								if ( !SDL_IsTextInputActive() )
@@ -25279,17 +26145,15 @@ int main(int argc, char** argv)
 								editproperty = numProperties;
 								cursorflash = ticks;
 							}
-							else if ( omousex >= pad_x1 && omousex < subx2 - 24 && omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
+							else if ( filteredItemCount > 0
+								&& omousex >= pad_x1 && omousex < subx2 - 24
+								&& omousey >= pad_y1 + 4 && omousey < pad_y2 - 4 )
 							{
-								itemSelect = y2 + ((omousey - (pad_y1 + 4)) >> 3);
-								if ( newwindow == 4 )
-								{
-									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
-								}
-								else
-								{
-									itemSelect = std::max(y2, std::min(itemSelect, std::min(std::max(0, editorNumItems - 2), y2 + visibleItemRows - 1)));
-								}
+								const int clickedItemRow = std::max(y2,
+									std::min(filteredItemCount - 1,
+										y2 + ((omousey - (pad_y1 + 4)) >> 3)));
+								selectedItemRow = clickedItemRow;
+								itemSelect = filteredItemIndices[clickedItemRow];
 								switch ( itemSlotSelected )
 								{
 									case -1:
@@ -30703,7 +31567,22 @@ int main(int argc, char** argv)
 				if ( keystatus[SDLK_ESCAPE] )
 				{
 					keystatus[SDLK_ESCAPE] = 0;
-					if ( newwindow > 1 )
+					if ( newwindow == 43 )
+					{
+						if ( proceduralRoomDropdown != ProceduralRoomDropdown::NONE )
+						{
+							proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+						}
+						else if ( SDL_IsTextInputActive() )
+						{
+							proceduralRoomStopTextFocus();
+						}
+						else
+						{
+							editorCancelProceduralRoomProperties();
+						}
+					}
+					else if ( newwindow > 1 )
 					{
 						//buttonCloseSpriteSubwindow(NULL);
 					}
@@ -30720,7 +31599,18 @@ int main(int argc, char** argv)
 				if ( keystatus[SDLK_RETURN] )
 				{
 					keystatus[SDLK_RETURN] = 0;
-					if ( newwindow > 1 )
+					if ( newwindow == 43 )
+					{
+						if ( proceduralRoomDropdown != ProceduralRoomDropdown::NONE )
+						{
+							proceduralRoomDropdown = ProceduralRoomDropdown::NONE;
+						}
+						else
+						{
+							editorApplyProceduralRoomProperties();
+						}
+					}
+					else if ( newwindow > 1 )
 					{
 						//buttonSpritePropertiesConfirm(NULL);
 					}

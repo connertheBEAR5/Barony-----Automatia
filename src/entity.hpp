@@ -1027,6 +1027,9 @@ public:
 
 	void effectTimes();
 	bool increaseSkill(int skill, bool notify = true);
+	// Authoritative bounded mutation used by run-scoped skill manuals. Unlike
+	// training, this may apply a negative delta and emits the normal SKIL sync.
+	bool applySkillDelta(int skill, int delta, bool notify = false);
 
 	Stat* getStats() const;
 
@@ -1652,7 +1655,8 @@ void actTextSource(Entity* my);
 //checks if a sprite falls in certain sprite ranges
 
 static const int NUM_ITEM_STRINGS = ITEM_ENUM_MAX + 3;
-static const int NUM_ITEM_STRINGS_BY_TYPE = 236;
+// The weapon/magic typed list also contains the appended Illusion spellbooks.
+static const int NUM_ITEM_STRINGS_BY_TYPE = 249;
 static const int NUM_EDITOR_TILES = 350;
 
 // furniture types.

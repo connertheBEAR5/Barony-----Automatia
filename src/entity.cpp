@@ -21,6 +21,7 @@ See LICENSE for details.
 #include "monster.hpp"
 #include "engine/audio/sound.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "interface/interface.hpp"
 #include "net.hpp"
 #include "collision.hpp"
@@ -1625,6 +1626,16 @@ void Entity::effectTimes()
 					node = temp;
 				}
 				break;
+			case SPELL_STORE_MAGIC:
+				sustainedSpell_hijacked[EFF_STORE_MAGIC] = spell;
+				if ( !myStats->getEffectActive(EFF_STORE_MAGIC) )
+				{
+					node_t* temp = node->prev ? node->prev : node->next;
+					unsustain = true;
+					list_RemoveNode(node);
+					node = temp;
+				}
+				break;
 			default:
 				//Unknown spell, undefined effect. Like, say, a fireball spell wound up in here for some reason. That's a nono.
 				printlog("[entityEffectTimes] Warning: magic_effects spell that's not relevant. Should not be in the magic_effects list!\n");
@@ -2165,6 +2176,17 @@ void Entity::effectTimes()
 						if ( dissipate )
 						{
 							messagePlayer(player, MESSAGE_STATUS, Language::get(6859));
+							updateClient = true;
+						}
+						break;
+					case EFF_STORE_MAGIC:
+						dissipate = true;
+						sustainedSpellProcess(*this, *myStats, c,
+							sustainedSpell_hijacked, dissipate, unsustainSpell);
+						if ( dissipate )
+						{
+							messagePlayer(player, MESSAGE_STATUS,
+								"Store Magic dissipates.");
 							updateClient = true;
 						}
 						break;
@@ -2902,6 +2924,89 @@ bool Entity::increaseSkill(int skill, bool notify)
 	}
 
 	return increased;
+}
+
+bool Entity::applySkillDelta(const int skill, const int delta, const bool notify)
+{
+	Stat* myStats = getStats();
+	if (!myStats || skill < 0 || skill >= NUMPROFICIENCIES || delta == 0)
+	{
+		return false;
+	}
+
+	int player = -1;
+	if ( behavior == &actPlayer )
+	{
+		player = this->skill[2];
+		if ( gameModeManager.currentSession.challengeRun.isActive()
+			&& gameModeManager.currentSession.challengeRun.eventType
+				== GameModeManager_t::CurrentSession_t::ChallengeRun_t::CHEVENT_NOSKILLS )
+		{
+			return false;
+		}
+	}
+
+	const int oldValue = myStats->getProficiency(skill);
+	const int nextValue = std::min(100, std::max(0, oldValue + delta));
+	if ( nextValue == oldValue )
+	{
+		return false;
+	}
+	myStats->setProficiency(skill, nextValue);
+	if ( delta > 0 && player >= 0 && players[player]
+		&& players[player]->isLocalPlayer() )
+	{
+		skillUpAnimation[player].addSkillUp(skill, oldValue, nextValue - oldValue);
+	}
+	if ( delta > 0 && player >= 0 )
+	{
+		const Uint32 color = makeColorRGB(255, 255, 0);
+		for ( int value = oldValue + 1; value <= nextValue; ++value )
+		{
+			Uint32 languageId = 0;
+			switch ( value )
+			{
+				case 20: languageId = 616; break;
+				case 40: languageId = 617; break;
+				case 60: languageId = 618; break;
+				case 80: languageId = 619; break;
+				case 100: languageId = 620; break;
+				default: break;
+			}
+			if ( languageId != 0 )
+			{
+				messagePlayerColor(player, MESSAGE_PROGRESSION, color,
+					Language::get(languageId), getSkillLangEntry(skill));
+			}
+			if ( skill == PRO_ALCHEMY && players[player]
+				&& players[player]->isLocalPlayer() )
+			{
+				// A Lore-scaled manual can cross several recipe thresholds at
+				// once; replay the existing per-level recipe hook for each one.
+				GenericGUI[player].alchemyLearnRecipeOnLevelUp(value);
+			}
+		}
+	}
+
+	const int statBonusSkill = getStatForProficiency(skill);
+	if ( statBonusSkill >= STAT_STR )
+	{
+		myStats->PLAYER_LVL_STAT_BONUS[statBonusSkill] = skill;
+	}
+	if ( player > 0 && multiplayer == SERVER )
+	{
+		serverUpdatePlayerProficiency(player, skill, notify);
+	}
+	if ( notify && player >= 0 )
+	{
+		const Uint32 color = makeColorRGB(255, 255, 0);
+		if ( delta > 0 )
+		{
+			messagePlayerColor(player, MESSAGE_SPAM_MISC, color,
+				Language::get(615), getSkillLangEntry(skill));
+		}
+	}
+	return true;
 }
 
 /*-------------------------------------------------------------------------------
@@ -19052,6 +19157,10 @@ bool Entity::checkEnemy(Entity* your)
 	{
 		return false;
 	}
+	if ( IllusionMagic::treatsTargetAsNeutral(*this, *your) )
+	{
+		return false;
+	}
 
 	if ( yourStats->getEffectActive(EFF_PENANCE) >= 1 && yourStats->getEffectActive(EFF_PENANCE) < 1 + MAXPLAYERS
 		&& behavior == &actPlayer && your->behavior == &actMonster )
@@ -25206,7 +25315,7 @@ bool Entity::monsterAddNearbyItemToInventory(Stat* myStats, int rangeToFind, int
 						}
 					}
 					playSoundEntity(this, 35 + local_rng.rand() % 3, 64);
-					if ( item->type == ARTIFACT_ORB_PURPLE )
+					if ( item->type == ARTIFACT_ORB_PURPLE && automatianModeEnabled() )
 					{
 						if ( !automatiaUnlockMagicGrimoireMerchant() )
 						{
@@ -25632,7 +25741,7 @@ bool Entity::monsterWantsItem(const Item& item, Item**& shouldEquip, node_t*& re
 		case SHOPKEEPER:
 			if ( myStats->MISC_FLAGS[STAT_FLAG_MYSTERIOUS_SHOPKEEP] > 0 )
 			{
-				if ( item.type == ARTIFACT_ORB_PURPLE )
+				if ( item.type == ARTIFACT_ORB_PURPLE && automatianModeEnabled() )
 				{
 					return !automatiaMagicGrimoireMerchantIsUnlocked();
 				}

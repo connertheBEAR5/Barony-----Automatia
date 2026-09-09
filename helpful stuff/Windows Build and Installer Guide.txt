@@ -1,0 +1,219 @@
+BARONY AUTOMATIA -- WINDOWS BUILD AND INSTALLER GUIDE
+=====================================================
+
+Purpose
+-------
+
+This guide is the Windows counterpart to the normal Automatia development
+profile. It keeps the requested regular `build` directory, Release mode,
+OpenAL, S.A.M., tests, 15-player multiplayer, and six build jobs.
+
+The repository now contains CMake presets for that profile and optional
+self-contained NSIS installer builds:
+
+    windows-mingw64-openal-super
+    windows-mingw64-openal-super-online
+    windows-mingw64-openal-super-installer
+    windows-mingw64-openal-super-online-installer
+
+The first and third presets are offline with respect to Steamworks/EOS. The
+two `online` presets require the real SDKs and the existing EOS environment
+values. They deliberately fail when those prerequisites are missing rather
+than silently building a different feature set.
+
+
+Current validation boundary
+---------------------------
+
+The CMake code, source includes, SDK discovery paths, install rules, presets,
+and installer design have been audited. The normal Linux OpenAL profile still
+configures successfully after these changes.
+
+This checkout does NOT contain a Windows compiler, MSVC, MinGW cross compiler,
+or Wine. Therefore a Windows executable and the NSIS `.exe` have not been
+compiled or launched from this machine. Build and graphical acceptance on a
+real Windows machine remain required.
+
+
+Supported Windows route: MSYS2 UCRT64 / MinGW-w64
+---------------------------------------------------
+
+Use the MSYS2 UCRT64 shell, not the plain MSYS shell. It supplies the native
+MinGW-w64 GCC runtime and the POSIX-compatibility headers used by the current
+Barony source tree (notably dirent.h and unistd.h).
+
+The CMake Windows branch now separates MSVC/clang-cl flags from MinGW flags,
+but native MSVC alone is not a supported build route yet: the wider legacy
+source still requires a compatible dirent/POSIX layer. Do not mistake the
+cleaner MSVC flag handling for a claim that Visual Studio-only builds have
+been accepted.
+
+In an updated UCRT64 shell, install the baseline dependencies:
+
+    pacman -S --needed \
+      mingw-w64-ucrt-x86_64-gcc \
+      mingw-w64-ucrt-x86_64-cmake \
+      mingw-w64-ucrt-x86_64-ninja \
+      mingw-w64-ucrt-x86_64-SDL2 \
+      mingw-w64-ucrt-x86_64-SDL2_image \
+      mingw-w64-ucrt-x86_64-SDL2_net \
+      mingw-w64-ucrt-x86_64-SDL2_ttf \
+      mingw-w64-ucrt-x86_64-physfs \
+      mingw-w64-ucrt-x86_64-rapidjson \
+      mingw-w64-ucrt-x86_64-libpng \
+      mingw-w64-ucrt-x86_64-openal \
+      mingw-w64-ucrt-x86_64-libvorbis
+
+For the NSIS installer target, also install:
+
+    pacman -S --needed mingw-w64-ucrt-x86_64-nsis
+
+`libvorbis` pulls the matching Ogg library. If a package name changes in a
+future MSYS2 release, search its current name with `pacman -Ss <name>` rather
+than installing a library from a different MSYS2 architecture.
+
+
+Normal Windows build
+--------------------
+
+Start the UCRT64 shell, enter the repository, and point CMake at the active
+native prefix. The CMake project automatically uses MINGW_PREFIX when it is
+present, but passing it explicitly makes a custom MSYS2 installation obvious:
+
+    cd /c/path/to/Barony-----Automatia
+    cmake --preset windows-mingw64-openal-super \
+      -DBARONY_WIN32_LIBRARIES="$MINGW_PREFIX"
+    cmake --build --preset windows-mingw64-openal-super
+    ctest --preset windows-mingw64-openal-super
+
+The build preset declares six jobs. It therefore preserves the `-j6` profile
+without needing a separate `--parallel 6` argument.
+
+The resulting executables are in the regular `build` directory:
+
+    build/barony.exe
+    build/editor.exe
+
+For a manual deterministic smoke check after the regular test suite:
+
+    ./build/barony.exe --automatia-stage4d-z3-transition-characterization
+
+Run the graphical game and editor from the UCRT64 shell first. That puts the
+matching DLL directory on PATH, which is useful while diagnosing a missing
+runtime dependency.
+
+
+Steamworks and EOS profile
+--------------------------
+
+The `online` preset enables both Steamworks and EOS. Before configuring it,
+provide real SDK roots and the existing EOS credentials through the shell
+environment. Do not place production EOS values in CMakePresets.json or source
+files.
+
+Example in the UCRT64 shell:
+
+    export STEAMWORKS_ROOT='C:/SDKs/steamworks_sdk'
+    export NFD_DIR='C:/SDKs/nativefiledialog-release'
+    export EOS_ROOT='C:/SDKs/EOSSDK'
+    export BUILD_ENV_PR='...'
+    export BUILD_ENV_SA='...'
+    export BUILD_ENV_DE='...'
+    export BUILD_ENV_CC='...'
+    export BUILD_ENV_CS='...'
+    export BUILD_ENV_GSE='...'
+
+    cmake --preset windows-mingw64-openal-super-online \
+      -DBARONY_WIN32_LIBRARIES="$MINGW_PREFIX"
+    cmake --build --preset windows-mingw64-openal-super-online
+    ctest --preset windows-mingw64-openal-super-online
+
+The discovery modules accept CMake variables as well as these environment
+aliases:
+
+    STEAMWORKS_ROOT / STEAMWORKS_DIR / STEAMWORKSROOT
+    EOS_ROOT / EOS_DIR / EOSROOT
+
+They choose steam_api versus steam_api64 and EOSSDK-Win32-Shipping versus
+EOSSDK-Win64-Shipping from CMAKE_SIZEOF_VOID_P, not from a stale BIT_32 flag.
+
+
+Making the installer EXE
+------------------------
+
+The installer is generated by CPack's NSIS backend. It is intentionally a
+complete, side-by-side Automatia installation -- not a patcher that replaces
+the Steam-managed vanilla executable. This gives it a standard uninstaller and
+prevents a failed update from damaging an existing Steam install.
+
+Build it with:
+
+    cd /c/path/to/Barony-----Automatia
+    cmake --preset windows-mingw64-openal-super-installer \
+      -DBARONY_WIN32_LIBRARIES="$MINGW_PREFIX"
+    cmake --build --preset windows-mingw64-openal-super-installer \
+      --target windows-installer
+
+For a Steamworks + EOS installer, use the online environment setup above and
+replace the preset name with:
+
+    windows-mingw64-openal-super-online-installer
+
+Set a real release label when producing a distributable artifact:
+
+    cmake --preset windows-mingw64-openal-super-installer \
+      -DBARONY_WIN32_LIBRARIES="$MINGW_PREFIX" \
+      -DBARONY_AUTOMATIA_PACKAGE_VERSION=1.0.0
+
+The installer appears at:
+
+    build/installer/Barony-Automatia-<version>-windows-x64.exe
+
+What it contains and does:
+
+* barony.exe and editor.exe when both targets are enabled;
+* books, data, fonts, images, items, lang, maps, models, music, and sound;
+* gamecontrollerdb.txt, steam_appid.txt, README.md, EDITING.txt, and LICENSE.txt;
+* all transitively resolved non-system DLLs, including OpenAL and the selected
+  Steamworks/EOS runtime DLLs when those features are enabled;
+* Start Menu entries for the game and editor, a finish-page launch option, and
+  normal Windows uninstallation; and
+* a default per-user location under %LOCALAPPDATA%\Barony Automatia.
+
+Packaging fails if no valid runtime DLL search directory exists or if CMake
+cannot resolve a required transitive DLL. That failure is intentional: fix the
+dependency root before distributing the installer. Set this explicitly when
+your dependencies do not live beneath BARONY_WIN32_LIBRARIES/bin:
+
+    -DBARONY_WINDOWS_RUNTIME_DLL_DIRS='C:/custom/runtime/bin'
+
+Use a semicolon-separated CMake list for more than one directory. Steamworks
+and EOS SDK runtime directories are automatically added when their features are
+enabled and their SDK roots were supplied.
+
+
+Pre-release acceptance checklist
+--------------------------------
+
+Do this on a clean Windows test account, VM, or disposable directory before
+publishing an installer:
+
+1. Run the installer and confirm it does not alter a Steam Barony directory.
+2. Launch Barony from the installed Start Menu entry.
+3. Confirm OpenAL initializes and produces audible menu/game audio.
+4. Launch the editor and load/save a map.
+5. Run the complete CTest preset and the Stage 4D/Z3 command above.
+6. With the online profile, verify Steam initialization and EOS initialization
+   using non-production test credentials where possible.
+7. Host and join a real 15-player-capable session; do not infer network
+   acceptance solely from a successful package build.
+8. Uninstall and verify only the selected Automatia install directory is
+   removed.
+
+If the installer cannot launch outside the UCRT64 shell, inspect it before
+adding DLLs by guesswork:
+
+    objdump -p build/barony.exe | grep 'DLL Name'
+
+Then correct BARONY_WINDOWS_RUNTIME_DLL_DIRS, rebuild `windows-installer`, and
+repeat the clean-machine test.

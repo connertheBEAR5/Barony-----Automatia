@@ -16,6 +16,7 @@
 #include "../messages.hpp"
 #include "../entity.hpp"
 #include "../magic/magic.hpp"
+#include "../magic/illusion_magic.hpp"
 #include "interface.hpp"
 #include "../monster.hpp"
 #include "../items.hpp"
@@ -6388,6 +6389,13 @@ bool GenericGUIMenu::shouldDisplayItemInGUI(Item* item)
 		{
 			return isItemScepterChargeable(item);
 		}
+		else if ( itemfxGUI.currentMode
+				== ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_FAKE_LOOT
+			|| itemfxGUI.currentMode
+				== ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_REAL_DUPLICATE )
+		{
+			return itemCategory(item) != SPELL_CAT;
+		}
 		return false;
 	}
 	else if ( guiType == GUI_TYPE_ALCHEMY )
@@ -7686,6 +7694,16 @@ void GenericGUIMenu::openGUI(int type, Item* effectItem, int effectBeatitude, in
 		{
 			itemfxGUI.currentMode = ItemEffectGUI_t::ITEMFX_MODE_ADORCISE_INSTRUMENT;
 		}
+		else if ( usingSpellID == SPELL_MIRROR_REFLECT_LOOT )
+		{
+			itemfxGUI.currentMode =
+				ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_FAKE_LOOT;
+		}
+		else if ( usingSpellID == SPELL_MIRROR_DUPLICATE_LOOT )
+		{
+			itemfxGUI.currentMode =
+				ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_REAL_DUPLICATE;
+		}
 		else if ( itemEffectItemType == SCROLL_CHARGING )
 		{
 			itemfxGUI.currentMode = ItemEffectGUI_t::ITEMFX_MODE_SCROLL_CHARGING;
@@ -8259,6 +8277,21 @@ bool GenericGUIMenu::executeOnItemClick(Item* item)
 		{
 			rechargeScepterUsingItem(item);
 			return true;
+		}
+		else if ( itemfxGUI.currentMode
+				== ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_FAKE_LOOT
+			|| itemfxGUI.currentMode
+				== ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_REAL_DUPLICATE )
+		{
+			const bool realDuplicate = itemfxGUI.currentMode
+				== ItemEffectGUI_t::ITEMFX_MODE_ILLUSION_REAL_DUPLICATE;
+			if ( IllusionMagic::selectLootItem(gui_player, *item,
+				realDuplicate) )
+			{
+				closeGUI();
+				return true;
+			}
+			return false;
 		}
 		else if ( itemfxGUI.currentMode == ItemEffectGUI_t::ITEMFX_MODE_SCROLL_ENCHANT_WEAPON
 			|| itemfxGUI.currentMode == ItemEffectGUI_t::ITEMFX_MODE_SCROLL_ENCHANT_ARMOR )
@@ -24665,6 +24698,31 @@ GenericGUIMenu::ItemEffectGUI_t::ItemEffectActions_t GenericGUIMenu::ItemEffectG
 				result = ITEMFX_ACTION_INVALID_ITEM;
 			}
 		}
+		else if ( currentMode == ITEMFX_MODE_ILLUSION_FAKE_LOOT
+			|| currentMode == ITEMFX_MODE_ILLUSION_REAL_DUPLICATE )
+		{
+			if ( itemCategory(item) == SPELL_CAT )
+			{
+				result = ITEMFX_ACTION_INVALID_ITEM;
+			}
+			else if ( currentMode == ITEMFX_MODE_ILLUSION_REAL_DUPLICATE
+				&& !IllusionMagic::canCreateRealDuplicate(*item) )
+			{
+				result = ITEMFX_ACTION_UNSAFE_DUPLICATE;
+			}
+			else
+			{
+				result = ITEMFX_ACTION_OK;
+			}
+			if ( !checkResultOnly )
+			{
+				// The spell cast already paid its full mana cost before this
+				// source-item picker opened.  Charging here would reject a
+				// caster who started with exactly 100 MP and would double-pay
+				// everyone else.
+				costEffectMPAmount = 0;
+			}
+		}
 		else if ( currentMode == ITEMFX_MODE_SCROLL_ENCHANT_ARMOR )
 		{
 			if ( itemCategory(item) == SPELL_CAT )
@@ -25121,11 +25179,23 @@ GenericGUIMenu::ItemEffectGUI_t::ItemEffectActions_t GenericGUIMenu::ItemEffectG
 					snprintf(buf, sizeof(buf), "%s %s (%+d)", ItemTooltips.getItemStatusAdjective(item->type, item->status).c_str(), item->getName(), item->beatitude);
 				}
 			}
-			if ( itemDesc != buf )
+			std::string displayDescription = buf;
+			if ( currentMode == ITEMFX_MODE_ILLUSION_FAKE_LOOT )
+			{
+				displayDescription =
+					"FAKE / ILLUSORY - no value: " + displayDescription;
+			}
+			else if ( currentMode == ITEMFX_MODE_ILLUSION_REAL_DUPLICATE )
+			{
+				displayDescription =
+					"REAL DUPLICATE - 100 MP paid on cast; mirrored curse, quantity 1: "
+					+ displayDescription;
+			}
+			if ( itemDesc != displayDescription )
 			{
 				itemRequiresTitleReflow = true;
 			}
-			itemDesc = buf;
+			itemDesc = std::move(displayDescription);
 
 			if ( itemEffectFrame )
 			{
@@ -26426,6 +26496,14 @@ void GenericGUIMenu::ItemEffectGUI_t::updateItemEffectMenu()
 							actionPromptTxt->setText(buf);
 						}
 						break;
+					case ITEMFX_MODE_ILLUSION_FAKE_LOOT:
+						actionPromptTxt->setText(
+							"Create FAKE / ILLUSORY loot");
+						break;
+					case ITEMFX_MODE_ILLUSION_REAL_DUPLICATE:
+						actionPromptTxt->setText(
+							"Create one REAL duplicate (100 MP paid on cast)");
+						break;
 					default:
 						actionPromptTxt->setText("");
 						break;
@@ -26509,6 +26587,10 @@ void GenericGUIMenu::ItemEffectGUI_t::updateItemEffectMenu()
 							{
 								actionPromptTxt->setText(Language::get(6805));
 							}
+							break;
+						case ITEMFX_ACTION_UNSAFE_DUPLICATE:
+							actionPromptTxt->setText(
+								"Quest, key, artifact, container, or progression item is protected");
 							break;
 						default:
 							actionPromptTxt->setText("-");
@@ -26725,6 +26807,14 @@ void GenericGUIMenu::ItemEffectGUI_t::updateItemEffectMenu()
 				break;
 			case ITEMFX_MODE_SCEPTER_CHARGE:
 				actionPromptUnselectedTxt->setText(Language::get(6832));
+				break;
+			case ITEMFX_MODE_ILLUSION_FAKE_LOOT:
+				actionPromptUnselectedTxt->setText(
+					"Select a source item for a FAKE illusion");
+				break;
+			case ITEMFX_MODE_ILLUSION_REAL_DUPLICATE:
+				actionPromptUnselectedTxt->setText(
+					"Select an eligible source for one REAL duplicate (100 MP paid on cast)");
 				break;
 			default:
 				actionPromptUnselectedTxt->setText("");

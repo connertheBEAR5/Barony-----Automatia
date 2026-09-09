@@ -19,6 +19,7 @@
 #include "../player.hpp"
 #include "../draw.hpp"
 #include "../items.hpp"
+#include "../magic/illusion_magic.hpp"
 #include "../mod_tools.hpp"
 #include "../input.hpp"
 #include "../collision.hpp"
@@ -6307,6 +6308,46 @@ void StatusEffectQueue_t::loadStatusEffectsJSON()
             }
         }
     }
+
+    // Feature definitions are code-owned because the base data package must
+    // stay backward compatible. They remain inert while the synchronized flag
+    // is off because no corresponding effect can be applied or displayed.
+    const auto addIllusionEffect = [](const int effectId, const int spellId,
+        const char* internalName, const char* name, const char* desc,
+        const bool neverDisplay = false)
+    {
+        EffectDefinitionEntry_t entry;
+        entry.effect_id = effectId;
+        entry.internal_name = internalName;
+        entry.name = name;
+        entry.desc = std::string("\x1E ") + desc;
+        entry.useSpellIDForImg = spellId;
+        entry.neverDisplay = neverDisplay;
+        entry.tooltipWidth = 260;
+        StatusEffectDefinitions_t::allEffects[effectId] = std::move(entry);
+    };
+    addIllusionEffect(EFF_MIRROR_OTHER, SPELL_MIRROR_OTHER,
+        "EFF_MIRROR_OTHER", "Mirror Other",
+        "Appearance is disguised; identity, faction, inventory, and ownership are unchanged.");
+    addIllusionEffect(EFF_MIRROR_MIMIC, SPELL_MIRROR_MIMIC,
+        "EFF_MIRROR_MIMIC", "Mirror Mimic",
+        "Eligible hostile perception is fooled; bosses and real faction identity are unchanged.");
+    addIllusionEffect(EFF_MIRROR_REFLECT, SPELL_MIRROR_REFLECT,
+        "EFF_MIRROR_REFLECT", "Mirror Reflect",
+        "Distinct illusion ward. Eligible hostile magic reflects only after ordinary Reflection does not.");
+    addIllusionEffect(EFF_STORE_MAGIC, SPELL_STORE_MAGIC,
+        "EFF_STORE_MAGIC", "Store Magic", "Displayed by its sustained-spell entry.", true);
+
+    EffectDefinitionEntry_t store;
+    store.effect_id = -1;
+    store.spell_id = SPELL_STORE_MAGIC;
+    store.internal_name = "SPELL_STORE_MAGIC";
+    store.name = "Store Magic";
+    store.desc = "\x1E Sustained finite spell vault.";
+    store.useSpellIDForImg = SPELL_STORE_MAGIC;
+    store.tooltipWidth = 330;
+    StatusEffectDefinitions_t::allSustainedSpells[SPELL_STORE_MAGIC]
+        = std::move(store);
 }
 
 int StatusEffectQueue_t::getBaseEffectPosX()
@@ -6579,13 +6620,54 @@ void draw_status_effect_numbers_fn(const Widget& widget, SDL_Rect pos) {
                 || stats[player]->getEffectActive(EFF_SANCTUARY)
                 || (cast_animation[player].overcharge > 0 || cast_animation[player].overcharge_init > 0)
                 || (players[player]->mechanics.gremlinBreakableCounter > 0 && stats[player]->type == GREMLIN)
-                || players[player]->mechanics.getWealthTier() > 0 )
+                || players[player]->mechanics.getWealthTier() > 0
+                || stats[player]->getEffectActive(EFF_STORE_MAGIC) )
             {
                 for ( auto img : frame->getImages() )
                 {
                     bool alignRight = *cvar_statusfx_align_text_right;
                     if ( !img->disabled )
                     {
+                        bool drewStoreVaultCount = false;
+                        if ( players[player] && players[player]->entity
+                            && stats[player]->getEffectActive(EFF_STORE_MAGIC)
+                            && StatusEffectQueue_t::StatusEffectDefinitions_t::
+                                sustainedSpellDefinitionExists(SPELL_STORE_MAGIC) )
+                        {
+                            auto& storeDefinition = StatusEffectQueue_t::
+                                StatusEffectDefinitions_t::getSustainedSpell(
+                                    SPELL_STORE_MAGIC);
+                            const std::string storePath = StatusEffectQueue_t::
+                                StatusEffectDefinitions_t::getEffectImgPath(
+                                    storeDefinition);
+                            if ( img->path == storePath )
+                            {
+                                const std::string value = std::to_string(
+                                    IllusionMagic::vaultSize(
+                                        *players[player]->entity)) + "/"
+                                    + std::to_string(IllusionMagic::vaultLimit(
+                                        *players[player]->entity));
+                                if ( auto text = Text::get(value.c_str(),
+                                    "fonts/pixel_maz_multiline.ttf#16#2",
+                                    0xFFFFFFFF, 0) )
+                                {
+                                    text->drawColor(SDL_Rect{ 0,0,0,0 },
+                                        SDL_Rect{ pos.x + img->pos.x + img->pos.w
+                                                - static_cast<int>(text->getWidth()),
+                                            pos.y + img->pos.y + img->pos.h
+                                                - static_cast<int>(text->getHeight()),
+                                            0, 0 },
+                                        SDL_Rect{ 0, 0, Frame::virtualScreenX,
+                                            Frame::virtualScreenY },
+                                        makeColor(255, 255, 255, 255));
+                                }
+                                drewStoreVaultCount = true;
+                            }
+                        }
+                        if ( drewStoreVaultCount )
+                        {
+                            continue;
+                        }
                         if ( img->path.find("assistance.png") != std::string::npos )
                         {
                             if ( auto text = Text::get(std::to_string(stats[player]->MISC_FLAGS[STAT_FLAG_ASSISTANCE_PLAYER_PTS]).c_str(), 
@@ -7809,13 +7891,82 @@ void Player::HUD_t::updateStatusEffectFocusedWindow()
             }
         }
 
-        if ( inputs.hasController(player.playernum) )
+		if ( inputs.hasController(player.playernum)
+			|| inputs.bPlayerUsingKeyboardControl(player.playernum) )
         {
-            if ( Input::inputs[player.playernum].binaryToggle("MenuCancel")
-                || Input::inputs[player.playernum].binaryToggle("MenuConfirm") )
+            auto& queue = StatusEffectQueue[player.playernum];
+            StatusEffectQueueEntry_t* selected = nullptr;
+            for ( auto& entry : queue.effectQueue )
             {
-                Input::inputs[player.playernum].consumeBinaryToggle("MenuCancel");
-                Input::inputs[player.playernum].consumeBinaryToggle("MenuConfirm");
+                if ( entry.index == static_cast<std::size_t>(
+                    std::max(0, queue.selectedElement)) )
+                {
+                    selected = &entry;
+                    break;
+                }
+            }
+            const bool selectedStore = selected && selected->effect
+                == StatusEffectQueue_t::kSpellEffectOffset + SPELL_STORE_MAGIC;
+            if ( Input::inputs[player.playernum].consumeBinaryToggle("MenuCancel") )
+            {
+                closeStatusFxWindow();
+                Player::soundCancel();
+                return;
+            }
+            if ( selectedStore && player.entity )
+            {
+                const auto entries = IllusionMagic::vaultEntries(*player.entity);
+                const int proficiency =
+                    IllusionMagic::effectiveProficiency(player.entity);
+                if ( !entries.empty()
+                    && Input::inputs[player.playernum].consumeBinaryToggle(
+                        "MenuPageRightAlt") )
+                {
+                    if ( proficiency >= 60 )
+                    {
+                        queue.storeVaultSelectedIndex =
+                            (queue.storeVaultSelectedIndex + 1) % entries.size();
+                    }
+                    else if ( proficiency >= 40 )
+                    {
+                        queue.storeVaultPreferNewest =
+                            !queue.storeVaultPreferNewest;
+                    }
+                    Player::soundMovement();
+                }
+                if ( proficiency >= 60 && !entries.empty()
+                    && Input::inputs[player.playernum].consumeBinaryToggle(
+                        "MenuAlt2") )
+                {
+                    IllusionMagic::requestVaultAction(player.playernum, true,
+                        IllusionMagic::VaultSelection::Exact,
+                        queue.storeVaultSelectedIndex);
+                    Player::soundActivate();
+                }
+                if ( !entries.empty()
+                    && Input::inputs[player.playernum].consumeBinaryToggle(
+                        "MenuConfirm") )
+                {
+                    IllusionMagic::VaultSelection selection =
+                        IllusionMagic::VaultSelection::Random;
+                    if ( proficiency >= 60 )
+                    {
+                        selection = IllusionMagic::VaultSelection::Exact;
+                    }
+                    else if ( proficiency >= 40 )
+                    {
+                        selection = queue.storeVaultPreferNewest
+                            ? IllusionMagic::VaultSelection::Newest
+                            : IllusionMagic::VaultSelection::Oldest;
+                    }
+                    IllusionMagic::requestVaultAction(player.playernum, false,
+                        selection, queue.storeVaultSelectedIndex);
+                    Player::soundActivate();
+                }
+            }
+            else if ( Input::inputs[player.playernum].consumeBinaryToggle(
+                "MenuConfirm") )
+            {
                 closeStatusFxWindow();
                 Player::soundCancel();
                 return;
@@ -7953,7 +8104,11 @@ bool StatusEffectQueue_t::doStatusEffectTooltip(StatusEffectQueueEntry_t& entry,
     int fontHeight = Font::get(tooltipDesc->getFont())->height(true);
     int tooltipInnerWidth = 200;
 
-    bool refreshTooltip = (tooltipShowingEffectID != entry.effect) || (tooltipShowingEffectVariable != entry.customVariable);
+    const bool storeMagicEntry = entry.effect
+        == StatusEffectQueue_t::kSpellEffectOffset + SPELL_STORE_MAGIC;
+    bool refreshTooltip = storeMagicEntry
+        || (tooltipShowingEffectID != entry.effect)
+        || (tooltipShowingEffectVariable != entry.customVariable);
     if ( refreshTooltip )
     {
         if ( entry.effect >= StatusEffectQueue_t::kSpellEffectOffset )
@@ -7962,7 +8117,74 @@ bool StatusEffectQueue_t::doStatusEffectTooltip(StatusEffectQueueEntry_t& entry,
             if ( StatusEffectQueue_t::StatusEffectDefinitions_t::sustainedSpellDefinitionExists(effectID) )
             {
                 auto& definition = StatusEffectQueue_t::StatusEffectDefinitions_t::getSustainedSpell(effectID);
-                if ( effectID == SPELL_SHADOW_TAG )
+                if ( effectID == SPELL_STORE_MAGIC
+                    && players[player] && players[player]->entity )
+                {
+                    Entity& owner = *players[player]->entity;
+                    const auto entries = IllusionMagic::vaultEntries(owner);
+                    const std::size_t capacity = IllusionMagic::vaultLimit(owner);
+                    storeVaultSelectedIndex = entries.empty() ? 0
+                        : std::min(storeVaultSelectedIndex, entries.size() - 1);
+                    char header[128];
+                    snprintf(header, sizeof(header), "STORE MAGIC - VAULT %zu/%zu",
+                        entries.size(), capacity);
+                    tooltipHeader->setText(header);
+
+                    std::string desc = "Slots: ";
+                    for ( std::size_t slot = 0; slot < capacity; ++slot )
+                    {
+                        desc += slot < entries.size() ? "[X]" : "[ ]";
+                    }
+                    const int proficiency =
+                        IllusionMagic::effectiveProficiency(&owner);
+                    desc += "\nTier: ";
+                    desc += IllusionMagic::proficiencyTierName(
+                        IllusionMagic::proficiencyTier(proficiency));
+                    desc += "\n";
+                    for ( std::size_t index = 0; index < entries.size(); ++index )
+                    {
+                        const auto& vaultEntry = entries[index];
+                        desc += index == storeVaultSelectedIndex ? "> " : "  ";
+                        desc += std::to_string(index + 1);
+                        desc += ". ";
+                        desc += proficiency < 40
+                            ? "Stored pattern" : vaultEntry.spellName;
+                        desc += " | ";
+                        desc += std::to_string(vaultEntry.releaseMana);
+                        desc += " MP | potency ";
+                        desc += std::to_string(vaultEntry.capturedPower);
+                        if ( IllusionMagic::vaultAllowsStudy(proficiency) )
+                        {
+                            const std::uint32_t required =
+                                5U * 60U * TICKS_PER_SECOND;
+                            const unsigned percent = std::min(100U,
+                                vaultEntry.studyTicks * 100U / required);
+                            desc += " | study ";
+                            desc += std::to_string(percent);
+                            desc += "%";
+                        }
+                        desc += "\n";
+                    }
+                    if ( proficiency < 40 )
+                    {
+                        desc += "Release: Random";
+                    }
+                    else if ( proficiency < 60 )
+                    {
+                        desc += "Release: ";
+                        desc += storeVaultPreferNewest ? "Newest" : "Oldest";
+                        desc += " (right-click/page cycles)";
+                    }
+                    else
+                    {
+                        desc += "Release: Exact selected slot (right-click/page cycles)";
+						desc += "\nDiscard: middle-click or Alt action";
+                    }
+                    desc += "\nConfirm/left-click releases. Vault is runtime-only.";
+                    tooltipDesc->setText(desc.c_str());
+                    tooltipInnerWidth = definition.tooltipWidth;
+                }
+                else if ( effectID == SPELL_SHADOW_TAG )
                 {
                     int variation = 2;
                     if ( players[player] && players[player]->entity )
@@ -8423,7 +8645,7 @@ bool StatusEffectQueue_t::doStatusEffectTooltip(StatusEffectQueueEntry_t& entry,
                     tooltipInnerWidth = definition.tooltipWidth;
                 }
 
-                if ( effectID != StatusEffectQueue_t::kEffectAutomatonHunger
+				if ( effectID != StatusEffectQueue_t::kEffectAutomatonHunger
                     && effectID != StatusEffectQueue_t::kEffectWanted
                     && effectID != StatusEffectQueue_t::kEffectWantedInShop
                     && effectID != StatusEffectQueue_t::kEffectBountyTarget
@@ -8442,8 +8664,24 @@ bool StatusEffectQueue_t::doStatusEffectTooltip(StatusEffectQueueEntry_t& entry,
                     uppercaseString(newHeader);
                     tooltipHeader->setText(newHeader.c_str());
                     tooltipDesc->setText(definition.getDesc(variation).c_str());
-                    tooltipInnerWidth = definition.tooltipWidth;
-                }
+					tooltipInnerWidth = definition.tooltipWidth;
+				}
+				if ( (effectID == EFF_MIRROR_OTHER
+						|| effectID == EFF_MIRROR_MIMIC)
+					&& players[player] && players[player]->entity )
+				{
+					const std::string appearance =
+						IllusionMagic::disguiseAppearanceName(
+							*players[player]->entity);
+					if ( !appearance.empty() )
+					{
+						std::string newHeader = definition.getName(-1);
+						newHeader += ": ";
+						newHeader += appearance;
+						uppercaseString(newHeader);
+						tooltipHeader->setText(newHeader.c_str());
+					}
+				}
             }
         }
     }
@@ -9729,6 +9967,8 @@ void StatusEffectQueue_t::updateAllQueuedEffects()
                 size.h = frameImg->pos.h + (mouseDetectionPadding * 2);
                 if ( rectContainsPoint(size, mousex, mousey) )
                 {
+                    const bool moduleWasActive = players[player]->GUI.activeModule
+                        == Player::GUI_t::MODULE_STATUS_EFFECTS;
                     if ( players[player]->GUI.activeModule == Player::GUI_t::MODULE_STATUS_EFFECTS )
                     {
                         tooltipShowing = doStatusEffectTooltip(q, size);
@@ -9742,6 +9982,61 @@ void StatusEffectQueue_t::updateAllQueuedEffects()
 
                     players[player]->hud.updateCursorAnimation(size.x - 1, size.y - 1, 
                         frameImg->pos.w + mouseDetectionPadding * 2, frameImg->pos.h + mouseDetectionPadding * 2, inputs.getVirtualMouse(player)->draw_cursor);
+
+                    if ( moduleWasActive && players[player]->entity
+                        && q.effect == kSpellEffectOffset + SPELL_STORE_MAGIC )
+                    {
+                        const auto entries = IllusionMagic::vaultEntries(
+                            *players[player]->entity);
+                        const int proficiency =
+                            IllusionMagic::effectiveProficiency(
+                                players[player]->entity);
+                        if ( !entries.empty()
+                            && Input::inputs[player].consumeBinaryToggle(
+                                "MenuRightClick") )
+                        {
+                            if ( proficiency >= 60 )
+                            {
+                                storeVaultSelectedIndex =
+                                    (storeVaultSelectedIndex + 1) % entries.size();
+                            }
+                            else if ( proficiency >= 40 )
+                            {
+                                storeVaultPreferNewest =
+                                    !storeVaultPreferNewest;
+                            }
+                            Player::soundMovement();
+                        }
+                        if ( !entries.empty()
+                            && Input::inputs[player].consumeBinaryToggle(
+                                "MenuLeftClick") )
+                        {
+                            IllusionMagic::VaultSelection selection =
+                                IllusionMagic::VaultSelection::Random;
+                            if ( proficiency >= 60 )
+                            {
+                                selection = IllusionMagic::VaultSelection::Exact;
+                            }
+                            else if ( proficiency >= 40 )
+                            {
+                                selection = storeVaultPreferNewest
+                                    ? IllusionMagic::VaultSelection::Newest
+                                    : IllusionMagic::VaultSelection::Oldest;
+                            }
+                            IllusionMagic::requestVaultAction(player, false,
+                                selection, storeVaultSelectedIndex);
+                            Player::soundActivate();
+                        }
+						if ( proficiency >= 60 && !entries.empty()
+							&& Input::inputs[player].consumeBinaryToggle(
+								"MenuMiddleClick") )
+						{
+							IllusionMagic::requestVaultAction(player, true,
+								IllusionMagic::VaultSelection::Exact,
+								storeVaultSelectedIndex);
+							Player::soundActivate();
+						}
+                    }
                 }
             }
         }
@@ -23234,6 +23529,17 @@ void updateSlotFrameFromItem(Frame* slotFrame, void* itemPtr, bool forceUnusable
 
     Item* item = (Item*)itemPtr;
 
+    const int featureSpellId = item->type == SPELL_ITEM
+		? static_cast<int>(item->appearance)
+		: (itemCategory(item) == SPELLBOOK
+			? getSpellIDFromSpellbook(item->type) : SPELL_NONE);
+    if ( IllusionMagic::isSpell(featureSpellId)
+		&& !IllusionMagic::enabled() )
+    {
+        slotFrame->setDisabled(true);
+        return;
+    }
+
     int player = slotFrame->getOwner();
 
     bool hiddenItemInGUI = false;
@@ -27780,6 +28086,10 @@ void createPlayerSpellList(const int player)
             if ( val == 0 ) { val = PRO_SORCERY; }
             else if ( val == PRO_SORCERY ) { val = PRO_MYSTICISM; }
             else if ( val == PRO_MYSTICISM ) { val = PRO_THAUMATURGY; }
+			else if ( val == PRO_THAUMATURGY && IllusionMagic::enabled() )
+			{
+				val = NUMPROFICIENCIES;
+			}
             else
             {
                 val = 0;
@@ -39797,6 +40107,10 @@ std::string formatSkillSheetEffects(int playernum, int proficiency, std::string&
                 {
                     if ( spell_t* spell = (spell_t*)node->element )
                     {
+                        if (!IllusionMagic::contentAvailable(spell->ID))
+                        {
+                            continue;
+                        }
                         if ( spell->skillID != proficiency )
                         {
                             continue;
@@ -39876,6 +40190,10 @@ std::string formatSkillSheetEffects(int playernum, int proficiency, std::string&
                 {
                     auto spellEntry = find->second;
                     if ( !spellEntry )
+                    {
+                        continue;
+                    }
+                    if (!IllusionMagic::contentAvailable(spellEntry->ID))
                     {
                         continue;
                     }
@@ -42459,13 +42777,37 @@ void Player::Inventory_t::SpellPanel_t::updateSpellPanel()
     filterText->setDisabled(true);
     auto filterTooltipImg = filterFrame->findImage("spell filter tooltip img");
     filterTooltipImg->disabled = true;
+	if ( spellFilterBySkill == NUMPROFICIENCIES
+		&& !IllusionMagic::enabled() )
+	{
+		spellFilterBySkill = 0;
+	}
     if ( spellFilterBySkill > 0 )
     {
         skillIcon->pos.x = filterBtn->getSize().x + 4;
         skillIcon->pos.y = filterBtn->getSize().y + 4;
         skillIcon->pos.w = 24;
         skillIcon->pos.h = 24;
-        for ( auto& skillEntry : Player::SkillSheet_t::skillSheetData.skillEntries )
+		if ( spellFilterBySkill == NUMPROFICIENCIES )
+		{
+			for ( auto& skillEntry : Player::SkillSheet_t::skillSheetData.skillEntries )
+			{
+				if ( skillEntry.skillId == PRO_MYSTICISM )
+				{
+					skillIcon->path = skillEntry.skillIconPath.c_str();
+					break;
+				}
+			}
+			filterText->setText("Filtering: Illusion");
+			filterText->setDisabled(false);
+			filterTooltipImg->disabled = false;
+			filterFrame->setDisabled(false);
+			real_t opacity = filterFrame->getOpacity() / 100.0;
+			const real_t opacityChange = .05 * getFPSScale(144.0);
+			opacity = std::min(opacity + opacityChange, 1.0);
+			filterFrame->setOpacity(opacity * 100.0);
+		}
+		else for ( auto& skillEntry : Player::SkillSheet_t::skillSheetData.skillEntries )
         {
             if ( skillEntry.skillId == spellFilterBySkill )
             {

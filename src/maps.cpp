@@ -26,8 +26,10 @@
 #include "player.hpp"
 #include "scores.hpp"
 #include "mod_tools.hpp"
+#include "skill_books.hpp"
 #include "menu.hpp"
 #include "ui/MainMenu.hpp"
+#include "procedural_room_catalog_runtime.hpp"
 #include <cstdint>
 #include <limits>
 #ifndef EDITOR
@@ -43,6 +45,19 @@ bool secretDoorwayOnThisFloor = false;
 void actSecretAutomatiaExit(Entity* my);
 // ==================== END SECRET DOORWAY GLOBALS ====================
 static constexpr Uint8 MAP_FOG_STORAGE_MARKER = 0xA5;
+
+namespace
+{
+std::string proceduralRoomRuntimePathKey(std::string path)
+{
+	std::replace(path.begin(), path.end(), '\\', '/');
+	while ( path.size() > 1 && path.back() == '/' )
+	{
+		path.pop_back();
+	}
+	return path;
+}
+}
 
 int startfloor = 0;
 BaronyRNG map_rng;
@@ -1282,6 +1297,10 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 	map_t shopmap;
 	map_t secretlevelmap;
 	int secretlevelexit = 0;
+	std::vector<std::uint32_t> ordinaryRoomWeights;
+	std::set<std::string> ordinaryRoomPathKeys;
+	int numberedRoomCount = 0;
+	bool ordinaryRoomHasNonDefaultWeight = false;
 
 	if ( map.trapexcludelocations )
 	{
@@ -1502,7 +1521,6 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 			minotaurlevel = false;
 		}
 	}
-
 	mapList.first = nullptr;
 	mapList.last = nullptr;
 	doorList.first = nullptr;
@@ -1513,6 +1531,8 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 		std::string rootMapFileName = "";
 		int count = 0;
 		std::vector<bool> possibleRooms;
+		std::vector<std::uint32_t> weights;
+		bool hasNonDefaultWeight = false;
 		list_t list;
 		std::map<int, GroupSubRooms_t> innerSubRooms;
 		GroupSubRooms_t()
@@ -1533,6 +1553,57 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 	GroupSubRooms_t treasureRooms[TREASURE_ROOM_MAX];
 	GroupSubRooms_t specialMapRooms;
 	GroupSubRooms_t* treasureRoomLevel = nullptr;
+	GroupSubRooms_t proceduralShopRooms;
+	bool specialRoomGeneratorAvailable = false;
+	auto groupPickIndex = [](GroupSubRooms_t& pool,
+		const std::uint32_t randomValue) -> int
+	{
+		if ( pool.count <= 0 || pool.possibleRooms.empty() )
+		{
+			return -1;
+		}
+		if ( pool.weights.size() < pool.possibleRooms.size() )
+		{
+			pool.weights.resize(pool.possibleRooms.size(),
+				PROCEDURAL_ROOM_DEFAULT_WEIGHT);
+		}
+		std::size_t selected = 0;
+		if ( pool.hasNonDefaultWeight
+			&& ProceduralRoomCatalog::chooseWeightedIndex(
+				pool.weights, pool.possibleRooms, randomValue, selected) )
+		{
+			return static_cast<int>(selected);
+		}
+		const int availableCount = static_cast<int>(std::count(
+			pool.possibleRooms.begin(), pool.possibleRooms.end(), true));
+		if ( availableCount <= 0 )
+		{
+			return -1;
+		}
+		int ordinal = static_cast<int>(randomValue
+			% static_cast<std::uint32_t>(availableCount));
+		for ( int index = 0; index < static_cast<int>(pool.possibleRooms.size()); ++index )
+		{
+			if ( !pool.possibleRooms[index] )
+			{
+				continue;
+			}
+			if ( ordinal-- == 0 )
+			{
+				return index;
+			}
+		}
+		return -1;
+	};
+	auto groupNodeAt = [](GroupSubRooms_t& pool, const int index) -> node_t*
+	{
+		node_t* current = pool.list.first;
+		for ( int i = 0; current && i < index; ++i )
+		{
+			current = current->next;
+		}
+		return current;
+	};
 
 	// load shop room
 	if ( shoplevel )
@@ -1596,12 +1667,15 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 		}
 	}
 
-	// a maximum of 100 (0-99 inclusive) sublevels can be added to the pool
-	for ( numlevels = 0; numlevels < 100; ++numlevels )
+	// A maximum of 100 (0-99 inclusive) numbered sublevels can be added to the
+	// pool. Metadata-enabled rooms are additive and do not depend on this gap-
+	// sensitive naming convention.
+	numlevels = 0;
+	for ( int numberedIndex = 0; numberedIndex < 100; ++numberedIndex )
 	{
 		char sublevelname[128] = "";
 		strcpy(sublevelname, levelset);
-		snprintf(sublevelnum, 3, "%02d", numlevels);
+		snprintf(sublevelnum, 3, "%02d", numberedIndex);
 		strcat(sublevelname, sublevelnum);
 
 		std::string fullMapPath = physfsFormatMapName(sublevelname);
@@ -1610,7 +1684,13 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 			break;    // no more levels to load
 		}
 
-		loadSubRoomData(fullMapPath, &mapList);
+		if ( loadSubRoomData(fullMapPath, &mapList) )
+		{
+			++numlevels;
+			++numberedRoomCount;
+			ordinaryRoomWeights.push_back(PROCEDURAL_ROOM_DEFAULT_WEIGHT);
+			ordinaryRoomPathKeys.insert(proceduralRoomRuntimePathKey(fullMapPath));
+		}
 	}
 #if defined(SAM_FRAMEWORK_ENABLED) && !defined(EDITOR)
 	// S.A.M rooms append to the existing Automatia/vanilla room pool. The entrance
@@ -1620,9 +1700,16 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 	// RNG index space on every peer with the same catalog.
 	for ( const std::string& injectedRoom : SAMRooms::roomsFor(levelset) )
 	{
+		const std::string pathKey = proceduralRoomRuntimePathKey(injectedRoom);
+		if ( ordinaryRoomPathKeys.find(pathKey) != ordinaryRoomPathKeys.end() )
+		{
+			continue;
+		}
 		if ( loadSubRoomData(injectedRoom, &mapList) )
 		{
 			++numlevels;
+			ordinaryRoomWeights.push_back(PROCEDURAL_ROOM_DEFAULT_WEIGHT);
+			ordinaryRoomPathKeys.insert(pathKey);
 		}
 		else
 		{
@@ -1631,40 +1718,104 @@ int generateDungeon(char* levelset, Uint32 seed, std::tuple<int, int, int, int> 
 		}
 	}
 #endif
-	// ==================== SECRET DOORWAY BIOME GROUPS (NO GENERIC) ====================
-GroupSubRooms_t minesSecretDoorways;
-GroupSubRooms_t swampSecretDoorways;
-GroupSubRooms_t labyrinthSecretDoorways;
-
-for (int i = 0; i < 100; ++i)
-{
-    char name[128];
-    snprintf(name, sizeof(name), "secret_doorway%02d", i);
-
-    std::string fullPath = physfsFormatMapName(name);
-    if (fullPath.empty()) break;
-
-    if (strstr(name, "mines_"))
-    {
-        if (loadSubRoomData(fullPath, &minesSecretDoorways.list))
-            ++minesSecretDoorways.count;
-    }
-    else if (strstr(name, "swamp_"))
-    {
-        if (loadSubRoomData(fullPath, &swampSecretDoorways.list))
-            ++swampSecretDoorways.count;
-    }
-    else if (strstr(name, "labyrinth_"))
-    {
-        if (loadSubRoomData(fullPath, &labyrinthSecretDoorways.list))
-            ++labyrinthSecretDoorways.count;
-    }
-}
-
-minesSecretDoorways.possibleRooms.resize(minesSecretDoorways.count, true);
-swampSecretDoorways.possibleRooms.resize(swampSecretDoorways.count, true);
-labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true);
-// ==================== END SECRET DOORWAY GROUPS ====================
+	/* Build the metadata catalog once for this generation. The runtime catalog
+	 * is PhysFS-backed, sorted, cached, and independent of editor/UI state.
+	 * Every category is appended to its source-backed pool below. */
+	const ProceduralRoomCatalog& proceduralRoomCatalog =
+		ProceduralRoomCatalogRuntime::current();
+	auto appendProceduralGroupCandidates =
+		[&](const std::uint8_t category, GroupSubRooms_t& pool)
+	{
+		for ( const ProceduralRoomCandidate* candidate :
+			proceduralRoomCatalog.matching(levelset, category) )
+		{
+			if ( !candidate || candidate->resolvedPath.empty()
+				|| !loadSubRoomData(candidate->resolvedPath, &pool.list) )
+			{
+				continue;
+			}
+			++pool.count;
+			pool.weights.push_back(candidate->definition.weight);
+			if ( candidate->definition.weight != PROCEDURAL_ROOM_DEFAULT_WEIGHT )
+			{
+				pool.hasNonDefaultWeight = true;
+			}
+			printlog("[Procedural Rooms] Added '%s' to levelset '%s' category %s weight %u.\n",
+				candidate->canonicalVirtualPath.c_str(), levelset,
+				proceduralRoomCategoryName(category), candidate->definition.weight);
+		}
+		pool.possibleRooms.resize(pool.count, true);
+	};
+	std::vector<const ProceduralRoomCandidate*> proceduralNormalRooms =
+		proceduralRoomCatalog.matching(levelset,
+			PROCEDURAL_ROOM_CATEGORY_NORMAL);
+	const std::vector<const ProceduralRoomCandidate*> customRoomGroups =
+		proceduralRoomCatalog.matching(levelset,
+			PROCEDURAL_ROOM_CATEGORY_CUSTOM);
+	/* Named custom groups intentionally share the ordinary-room spawn chance.
+	 * Their names organize candidates and remain available to future
+	 * category-specific consumers without inventing a new global chance rule. */
+	proceduralNormalRooms.insert(proceduralNormalRooms.end(),
+		customRoomGroups.begin(), customRoomGroups.end());
+	for ( const ProceduralRoomCandidate* candidate : proceduralNormalRooms )
+	{
+		if ( !candidate || candidate->resolvedPath.empty() )
+		{
+			continue;
+		}
+		const std::string pathKey =
+			proceduralRoomRuntimePathKey(candidate->resolvedPath);
+		if ( ordinaryRoomPathKeys.find(pathKey) != ordinaryRoomPathKeys.end() )
+		{
+			continue;
+		}
+		if ( loadSubRoomData(candidate->resolvedPath, &mapList) )
+		{
+			++numlevels;
+			ordinaryRoomWeights.push_back(candidate->definition.weight);
+			ordinaryRoomPathKeys.insert(pathKey);
+			if ( candidate->definition.weight != PROCEDURAL_ROOM_DEFAULT_WEIGHT )
+			{
+				ordinaryRoomHasNonDefaultWeight = true;
+			}
+			printlog("[Procedural Rooms] Added '%s' to levelset '%s' category %s weight %u.\n",
+				candidate->canonicalVirtualPath.c_str(), levelset,
+				proceduralRoomCategoryDisplayName(candidate->definition).c_str(),
+				candidate->definition.weight);
+		}
+		else
+		{
+			printlog("[Procedural Rooms] Skipping '%s': map could not be loaded.\n",
+				candidate->canonicalVirtualPath.c_str());
+		}
+	}
+	if ( !proceduralNormalRooms.empty() )
+	{
+		printlog("[Procedural Rooms] Catalog: %zu enabled ordinary/custom room(s) matched levelset '%s'.\n",
+			proceduralNormalRooms.size(), levelset);
+	}
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_SHOP,
+		proceduralShopRooms);
+	// Secret doorway candidates are selected from the authored level-set pool;
+	// the existing biome chance rules below remain unchanged.
+	GroupSubRooms_t minesSecretDoorways;
+	GroupSubRooms_t swampSecretDoorways;
+	GroupSubRooms_t labyrinthSecretDoorways;
+	if ( !std::strcmp(levelset, "mine") )
+	{
+		appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_SECRET_DOORWAY,
+			minesSecretDoorways);
+	}
+	else if ( !std::strcmp(levelset, "swamp") )
+	{
+		appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_SECRET_DOORWAY,
+			swampSecretDoorways);
+	}
+	else if ( !std::strcmp(levelset, "labyrinth") )
+	{
+		appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_SECRET_DOORWAY,
+			labyrinthSecretDoorways);
+	}
 	if ( !secretlevel )
 	{
 		if ( treasure_room_generator.orb_floors.find(currentlevel) != treasure_room_generator.orb_floors.end() )
@@ -1676,6 +1827,8 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 				if ( loadSubRoomData(fullMapPath, &specialMapRooms.list) )
 				{
 					++specialMapRooms.count;
+					specialRoomGeneratorAvailable = true;
+					specialMapRooms.weights.push_back(PROCEDURAL_ROOM_DEFAULT_WEIGHT);
 
 					// load subrooms if found
 					for ( char letter = 'a'; letter <= 'z'; letter++ )
@@ -1700,9 +1853,11 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					}
 				}
 			}
-			specialMapRooms.possibleRooms.resize(specialMapRooms.count, true);
+			 specialMapRooms.possibleRooms.resize(specialMapRooms.count, true);
 		}
 	}
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_SPECIAL,
+		specialMapRooms);
 
 	static ConsoleVariable<std::string> cvar_treasure_room_spawn("/treasure_room_spawn", "");
 	static ConsoleVariable<std::string> cvar_treasure_room_spawn_subroom("/treasure_room_spawn_subroom", "");
@@ -1784,6 +1939,8 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			}
 
 			++treasureRooms[treasureRoomType].count;
+			treasureRooms[treasureRoomType].weights.push_back(
+				PROCEDURAL_ROOM_DEFAULT_WEIGHT);
 
 			// load subrooms if found
 			for ( char letter = 'a'; letter <= 'z'; letter++ )
@@ -1825,6 +1982,14 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			break;
 		}
 	}
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_TREASURE_BRONZE,
+		treasureRooms[TREASURE_TYPE_BRONZE]);
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_TREASURE_IRON,
+		treasureRooms[TREASURE_TYPE_IRON]);
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_TREASURE_GOLD,
+		treasureRooms[TREASURE_TYPE_GOLD]);
+	appendProceduralGroupCandidates(PROCEDURAL_ROOM_CATEGORY_TREASURE_SILVER,
+		treasureRooms[TREASURE_TYPE_SILVER]);
 
 	{
 		bool doTreasureRoom = false;
@@ -1887,7 +2052,9 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 	int subroomCount[100] = {0};
 
 	// a maximum of 100 (0-99 inclusive) sublevels can be added to the pool
-	for ( int subRoomNumLevels = 0; subRoomNumLevels <= numlevels; subRoomNumLevels++ )
+	for ( int subRoomNumLevels = 0;
+		subRoomNumLevels <= numberedRoomCount && subRoomNumLevels < 100;
+		subRoomNumLevels++ )
 	{
 		for ( char letter = 'a'; letter <= 'z'; letter++ )
 		{
@@ -2004,6 +2171,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 
 			int levelnum = 0;
 			int levelnum2 = 0;
+			GroupSubRooms_t* selectedSecretDoorwayPool = nullptr;
 
 			// pick the room to be used
 			if ( c == 0 )
@@ -2086,26 +2254,14 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 				levelnum = 0;
 				levelnum2 = -1;
 
-				levelnum = map_rng.rand() % (treasureRoomLevel->count); // draw randomly from the pool
-
-				// traverse the map list to the picked level
-				node = treasureRoomLevel->list.first;
-				i = 0;
-				j = -1;
-				while ( 1 )
+				levelnum = 0;
+				levelnum2 = groupPickIndex(*treasureRoomLevel, map_rng.rand());
+				if ( levelnum2 < 0 )
 				{
-					if ( treasureRoomLevel->possibleRooms[i] )
-					{
-						++j;
-						if ( j == levelnum )
-						{
-							break;
-						}
-					}
-					node = node->next;
-					++i;
+					--c;
+					continue;
 				}
-				levelnum2 = i;
+				node = groupNodeAt(*treasureRoomLevel, levelnum2);
 				node = ((list_t*)node->element)->first;
 				doorNode = node->next;
 				tempMap = (map_t*)node->element;
@@ -2115,34 +2271,60 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 				// generate a shop
 				levelnum = 0;
 				levelnum2 = -1;
-				tempMap = &shopmap;
+				bool useProceduralShop = false;
+				if ( proceduralShopRooms.count > 0 )
+				{
+					std::uint64_t metadataWeight = 0;
+					for ( std::size_t weightIndex = 0;
+						weightIndex < proceduralShopRooms.weights.size(); ++weightIndex )
+					{
+						if ( weightIndex < proceduralShopRooms.possibleRooms.size()
+							&& proceduralShopRooms.possibleRooms[weightIndex] )
+						{
+							metadataWeight += proceduralShopRooms.weights[weightIndex];
+						}
+					}
+					const std::uint64_t totalWeight = 100 + metadataWeight;
+					useProceduralShop = shoplevel && totalWeight > 0
+						&& (static_cast<std::uint64_t>(map_rng.rand())
+							% totalWeight) >= 100;
+				}
+				if ( useProceduralShop )
+				{
+					const int selected = groupPickIndex(proceduralShopRooms,
+						map_rng.rand());
+					if ( selected >= 0 )
+					{
+						node = groupNodeAt(proceduralShopRooms, selected);
+						node = ((list_t*)node->element)->first;
+						doorNode = node->next;
+						tempMap = (map_t*)node->element;
+					}
+					else
+					{
+						useProceduralShop = false;
+					}
+				}
+				if ( !useProceduralShop )
+				{
+					tempMap = &shopmap;
+				}
 			}
-			else if ( c == 4 && specialMapRooms.count > 0 )
+			else if ( c == 4 && specialRoomGeneratorAvailable
+				&& specialMapRooms.count > 0 )
 			{
 				// generate a special room
 				levelnum = 0;
 				levelnum2 = -1;
 
-				levelnum = map_rng.rand() % (specialMapRooms.count); // draw randomly from the pool
-
-				// traverse the map list to the picked level
-				node = specialMapRooms.list.first;
-				i = 0;
-				j = -1;
-				while ( 1 )
+				levelnum = 0;
+				levelnum2 = groupPickIndex(specialMapRooms, map_rng.rand());
+				if ( levelnum2 < 0 )
 				{
-					if ( specialMapRooms.possibleRooms[i] )
-					{
-						++j;
-						if ( j == levelnum )
-						{
-							break;
-						}
-					}
-					node = node->next;
-					++i;
+					--c;
+					continue;
 				}
-				levelnum2 = i;
+				node = groupNodeAt(specialMapRooms, levelnum2);
 				node = ((list_t*)node->element)->first;
 				doorNode = node->next;
 				tempMap = (map_t*)node->element;
@@ -2157,27 +2339,30 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 
 				if (!secretDoorwayHasSpawned)
 				{
-					if (!strncmp(map.name, "The Mines", 9))
+					if (!std::strcmp(levelset, "mine")
+						|| !strncmp(map.name, "The Mines", 9))
 					{
 						if (minesSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
 						{
-							chosenPool = &minesSecretDoorways;
+								chosenPool = &minesSecretDoorways;
 							useSecretDoorway = true;
 						}
 					}
-					else if (!strncmp(map.name, "The Swamp", 9))
+					else if (!std::strcmp(levelset, "swamp")
+						|| !strncmp(map.name, "The Swamp", 9))
 					{
 						if (swampSecretDoorways.count > 0 && map_rng.rand() % 100 < 5)   // 5%
 						{
-							chosenPool = &swampSecretDoorways;
+								chosenPool = &swampSecretDoorways;
 							useSecretDoorway = true;
 						}
 					}
-					else if (!strncmp(map.name, "The Labyrinth", 13))
+					else if (!std::strcmp(levelset, "labyrinth")
+						|| !strncmp(map.name, "The Labyrinth", 13))
 					{
 						if (labyrinthSecretDoorways.count > 0 && map_rng.rand() % 100 < 3)   // 3%
 						{
-							chosenPool = &labyrinthSecretDoorways;
+								chosenPool = &labyrinthSecretDoorways;
 							useSecretDoorway = true;
 						}
 					}
@@ -2186,49 +2371,76 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 
 				if (useSecretDoorway && chosenPool)
 				{
-					// Pick random variant from the chosen biome pool
-					int pick = map_rng.rand() % chosenPool->count;
-
-					node = chosenPool->list.first;
-					int j = -1;
-					int i = 0;
-					while (1)
+					// Pick a variant using authored relative weights inside the
+					// existing biome chance gate.
+					levelnum2 = groupPickIndex(*chosenPool, map_rng.rand());
+					if ( levelnum2 < 0 )
 					{
-						if (chosenPool->possibleRooms[i])
-						{
-							++j;
-							if (j == pick) break;
-						}
-						node = node->next;
-						++i;
+						--c;
+						continue;
 					}
-
-					levelnum2 = i;
+					node = groupNodeAt(*chosenPool, levelnum2);
 					node = ((list_t*)node->element)->first;
 					doorNode = node->next;
 					tempMap = (map_t*)node->element;
+					selectedSecretDoorwayPool = chosenPool;
 					secretDoorwayOnThisFloor = true;
 					secretDoorwayHasSpawned = true;
 				}
 				else
 				{
-					// Normal room selection
-					levelnum = map_rng.rand() % (numlevels);
-
-					node = mapList.first;
-					i = 0;
-					j = -1;
-					while (1)
+					// Normal room selection.  Keep the legacy uniform path when no
+					// enabled metadata room changes a weight; weighted selection uses
+					// the same seeded map_rng stream and the same list order.
+					if ( ordinaryRoomHasNonDefaultWeight )
 					{
-						if (possiblerooms[i])
+						std::vector<bool> available(ordinaryRoomWeights.size(), false);
+						for ( std::size_t roomIndex = 0;
+							roomIndex < available.size(); ++roomIndex )
 						{
-							++j;
-							if (j == levelnum) break;
+							available[roomIndex] = possiblerooms[roomIndex];
 						}
-						node = node->next;
-						++i;
+						std::size_t selectedIndex = 0;
+						if ( !ProceduralRoomCatalog::chooseWeightedIndex(
+							ordinaryRoomWeights, available, map_rng.rand(), selectedIndex) )
+						{
+							break;
+						}
+						levelnum2 = static_cast<int>(selectedIndex);
+						levelnum = 0;
+						for ( std::size_t roomIndex = 0;
+							roomIndex < selectedIndex; ++roomIndex )
+						{
+							if ( available[roomIndex] )
+							{
+								++levelnum;
+							}
+						}
+						node = mapList.first;
+						for ( int roomIndex = 0; roomIndex < levelnum2 && node;
+							++roomIndex )
+						{
+							node = node->next;
+						}
 					}
-					levelnum2 = i;
+					else
+					{
+						levelnum = map_rng.rand() % (numlevels);
+						node = mapList.first;
+						i = 0;
+						j = -1;
+						while (1)
+						{
+							if (possiblerooms[i])
+							{
+								++j;
+								if (j == levelnum) break;
+							}
+							node = node->next;
+							++i;
+						}
+						levelnum2 = i;
+					}
 					node = ((list_t*)node->element)->first;
 					doorNode = node->next;
 					tempMap = (map_t*)node->element;
@@ -2279,7 +2491,20 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					continue;
 				}
 			}
-			else if ( c == 4 && specialMapRooms.count > 0 )
+			else if ( selectedSecretDoorwayPool && numpossiblelocations <= 0 )
+			{
+				if ( levelnum2 >= 0
+					&& levelnum2 < static_cast<int>(selectedSecretDoorwayPool->possibleRooms.size()) )
+				{
+					selectedSecretDoorwayPool->possibleRooms[levelnum2] = false;
+				}
+				selectedSecretDoorwayPool->count = std::max(0,
+					selectedSecretDoorwayPool->count - 1);
+				--c;
+				continue;
+			}
+			else if ( c == 4 && specialRoomGeneratorAvailable
+				&& specialMapRooms.count > 0 )
 			{
 				if ( numpossiblelocations <= 0 )
 				{
@@ -2294,7 +2519,8 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			}
 			else if ( numpossiblelocations <= 0 )
 			{
-				if ( levelnum2 >= 0 && levelnum2 < numlevels )
+				if ( levelnum2 >= 0
+					&& levelnum2 < static_cast<int>(ordinaryRoomWeights.size()) )
 				{
 					possiblerooms[levelnum2] = false;
 				}
@@ -2324,6 +2550,10 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					free(secretlevelexittile);
 					list_FreeAll(&subRoomMapList);
 					list_FreeAll(&mapList);
+					list_FreeAll(&proceduralShopRooms.list);
+					list_FreeAll(&minesSecretDoorways.list);
+					list_FreeAll(&swampSecretDoorways.list);
+					list_FreeAll(&labyrinthSecretDoorways.list);
 					for ( int i = 0; i < TreasureRoomTypes::TREASURE_ROOM_MAX; ++i )
 					{
 						list_FreeAll(&treasureRooms[i].list);
@@ -2562,7 +2792,8 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 				snprintf(submapLogMsg, sizeof(submapLogMsg),
 					"Picked level: %d from %d possible rooms in submap %s at x:%d y:%d", pickSubRoom + 1, subroomLogCount, tempMap->filename, x, y);
 			}
-			else if ( c == 4 && specialMapRooms.count > 0
+			else if ( c == 4 && specialRoomGeneratorAvailable
+				&& specialMapRooms.count > 0
 				&& specialMapRooms.innerSubRooms.find(levelnum2) != specialMapRooms.innerSubRooms.end()
 				&& specialMapRooms.innerSubRooms[levelnum2].count > 0 )
 			{
@@ -2613,7 +2844,9 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			}
 			else
 			{
-				if ( ((levelnum2 - levelnum) > 1) && (c > 0) && (subroomCount[levelnum2] > 0) )
+				if ( levelnum2 < numberedRoomCount
+					&& ((levelnum2 - levelnum) > 1) && (c > 0)
+					&& (subroomCount[levelnum2] > 0) )
 				{
 					// levelnum is the start of map search, levelnum2 is jumps required to get to a suitable map.
 					// normal operation is levelnum2 - levelnum == 1. if a levelnum map is unavailable, 
@@ -2623,7 +2856,9 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					levelnum = levelnum2 - 1;
 				}
 				//printlog("(%d | %d), possible: (%d, %d) x: %d y: %d", levelnum, levelnum2, possiblerooms[1], possiblerooms[2], x, y);
-				if ( subroomCount[levelnum + 1] > 0 )
+				if ( levelnum2 < numberedRoomCount
+					&& levelnum + 1 >= 0 && levelnum + 1 < 100
+					&& subroomCount[levelnum + 1] > 0 )
 				{
 					int jumps = 0;
 					pickSubRoom = map_rng.rand() % subroomCount[levelnum + 1];
@@ -2655,7 +2890,9 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					subRoomDoorNode = subRoomNode->next;
 				}
 
-				subroomLogCount = subroomCount[levelnum + 1];
+				subroomLogCount = ( levelnum2 < numberedRoomCount
+					&& levelnum + 1 >= 0 && levelnum + 1 < 100 )
+					? subroomCount[levelnum + 1] : 0;
 
 				snprintf(submapLogMsg, sizeof(submapLogMsg),
 					"Picked level: %d from %d possible rooms in submap %s at x:%d y:%d", pickSubRoom + 1, subroomLogCount, tempMap->filename, x, y);
@@ -2757,7 +2994,8 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 								treasureRoomLocations[x0 + y0 * map.width] = true;
 								map.tileAttributes[(y0)*MAPLAYERS + (x0)*MAPLAYERS * map.height] |= map_t::TILE_ATTRIBUTE_TREASURE_ROOM;
 							}
-							if ( c == 4 && specialMapRooms.count > 0 )
+							if ( c == 4 && specialRoomGeneratorAvailable
+								&& specialMapRooms.count > 0 )
 							{
 								decorationexcludelocations[x0 + y0 * map.width] = true;
 								treasureRoomLocations[x0 + y0 * map.width] = true;
@@ -2807,7 +3045,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 
 				if ( entity->behavior == &actMonster || entity->behavior == &actPlayer )
 				{
-					entity->addToCreatureList(map.creatures);
+					childEntity->addToCreatureList(map.creatures);
 				}
 			}
 
@@ -2834,7 +3072,7 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 					childEntity->mapGenerationRoomY = subRoom_tileStarty;
 					if ( entity->behavior == &actMonster || entity->behavior == &actPlayer )
 					{
-						entity->addToCreatureList(map.creatures);
+						childEntity->addToCreatureList(map.creatures);
 					}
 
 					//messagePlayer(0, "1 Generated entity. Sprite: %d X: %.2f Y: %.2f", childEntity->sprite, childEntity->x / 16, childEntity->y / 16);
@@ -2900,6 +3138,10 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			++roomcount;
 		}
 		list_FreeAll(&shopSubRooms.list);
+		list_FreeAll(&proceduralShopRooms.list);
+		list_FreeAll(&minesSecretDoorways.list);
+		list_FreeAll(&swampSecretDoorways.list);
+		list_FreeAll(&labyrinthSecretDoorways.list);
 		for ( int i = 0; i < TreasureRoomTypes::TREASURE_ROOM_MAX; ++i )
 		{
 			list_FreeAll(&treasureRooms[i].list);
@@ -2932,6 +3174,10 @@ labyrinthSecretDoorways.possibleRooms.resize(labyrinthSecretDoorways.count, true
 			list_FreeAll(&r.second.list);
 		}
 		list_FreeAll(&shopSubRooms.list);
+		list_FreeAll(&proceduralShopRooms.list);
+		list_FreeAll(&minesSecretDoorways.list);
+		list_FreeAll(&swampSecretDoorways.list);
+		list_FreeAll(&labyrinthSecretDoorways.list);
 		list_FreeAll(&subRoomMapList);
 		list_FreeAll(&mapList);
 		list_FreeAll(&doorList);
@@ -10445,6 +10691,7 @@ void assignActions(
 				entity->flags[PASSABLE] = true;
 				entity->behavior = &actItem;
 				entity->skill[10] = READABLE_BOOK;
+				bool generatedSkillManual = false;
 				if ( entity->skill[11] == 0 ) //random
 				{
 					entity->skill[11] = 1 + map_rng.rand() % 4; // status
@@ -10484,6 +10731,21 @@ void assignActions(
 						}
 					}
 				}
+				// Empty authored book props are the map-side bookcase/library
+				// source for the rare, server-gated skill manual roll. Books with
+				// authored text keep their existing identity and behavior.
+				if ( totalChars == 0 && automatianModeEnabled()
+					&& map_rng.rand() % 75 == 0 )
+				{
+					generatedSkillManual = true;
+					entity->skill[10] = (map_rng.rand() % 2 == 0)
+						? SKILL_BOOK : SKILL_SCROLL;
+					const int targetIndex = map_rng.rand()
+						% static_cast<int>(SkillBooks::kEligibleSkills.size());
+					entity->skill[14] = static_cast<Sint32>(
+						SkillBooks::encodeSkill(SkillBooks::kEligibleSkills[targetIndex]));
+					entity->skill[15] = 0; // rare manuals start unidentified
+				}
 				if ( buf[totalChars] != '\0' )
 				{
 					buf[totalChars] = '\0';
@@ -10498,21 +10760,24 @@ void assignActions(
 				}
 				strcpy(buf, output.c_str());
 
-				int index = -1;
-				bool foundBook = false;
-				for ( auto& book : allBooks )
+				if ( !generatedSkillManual )
 				{
-					++index;
-					if ( book.default_name == buf )
+					int index = -1;
+					bool foundBook = false;
+					for ( auto& book : allBooks )
 					{
-						foundBook = true;
-						entity->skill[14] = getBook(buf);
-						break;
+						++index;
+						if ( book.default_name == buf )
+						{
+							foundBook = true;
+							entity->skill[14] = getBook(buf);
+							break;
+						}
 					}
-				}
-				if ( !foundBook && allBooks.size() > 0 )
-				{
-					entity->skill[14] = map_rng.rand() % allBooks.size();
+					if ( !foundBook && allBooks.size() > 0 )
+					{
+						entity->skill[14] = map_rng.rand() % allBooks.size();
+					}
 				}
 					
 				if ( entity->skill[15] == 1 ) // editor set as identified
@@ -11505,6 +11770,7 @@ void assignActions(
 		&& currentlevel > 0
 		&& gameModeManager.getMode() != GameModeManager_t::GAME_MODE_TUTORIAL
 		&& gameModeManager.getMode() != GameModeManager_t::GAME_MODE_TUTORIAL_INIT
+		&& automatianModeEnabled()
 		&& !automatiaMagicGrimoireHasGenerated()
 		&& !chests.empty())
 	{

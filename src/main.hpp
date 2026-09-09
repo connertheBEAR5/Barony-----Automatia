@@ -31,6 +31,7 @@ typedef double real_t;
 #include <algorithm>
 #include "playable_z.hpp"
 #include "room_group.hpp"
+#include "procedural_room.hpp"
 
 // the following functions are safe variants of C's string library.
 // they include the buffer length of each input as secondary parameters to
@@ -499,6 +500,10 @@ typedef struct map_t
 	 * gameplay-floor membership and local model Z remain independent fields.
 	 */
 	AuthoredRoomGroupCollection roomGroups;
+	// Optional V4.10 map metadata. This describes the entire .lmp as a
+	// procedural-generation candidate; customCategory names user-defined
+	// ordinary-room groups and is independent from roomGroups.
+	ProceduralRoomDefinition proceduralRoom = {};
 	// Optional V4.10 map metadata. This is environmental audio, not music.
 	AmbienceProperties ambience;
 	// Optional V4.10 map metadata. This is visual ambient light, not fog.

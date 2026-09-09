@@ -79,7 +79,9 @@ static std::string hashString(const std::string& fp)
 	return std::string(buf);
 }
 
-// Parse "ns@version;ns@version;..." into a ns -> version map.
+// Parse "ns@version+digest;..." into a ns -> opaque version token map. The
+// catalog pseudo-entry intentionally uses the same envelope, while regular
+// manifests may carry a 16-hex declared-content digest after their version.
 static std::map<std::string, std::string> parseFingerprint(const std::string& fp)
 {
 	std::map<std::string, std::string> mods;
@@ -102,6 +104,66 @@ static std::map<std::string, std::string> parseFingerprint(const std::string& fp
 	return mods;
 }
 
+struct FingerprintVersion
+{
+	std::string version;
+	std::string contentDigest;
+};
+
+static bool looksLikeContentDigest(const std::string& value)
+{
+	if ( value.size() != 16 )
+	{
+		return false;
+	}
+	for ( const char character : value )
+	{
+		if ( !(character >= '0' && character <= '9')
+			&& !(character >= 'a' && character <= 'f')
+			&& !(character >= 'A' && character <= 'F') )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static FingerprintVersion splitFingerprintVersion(const std::string& value)
+{
+	FingerprintVersion result;
+	const std::size_t separator = value.rfind('+');
+	if ( separator != std::string::npos )
+	{
+		const std::string candidate = value.substr(separator + 1);
+		if ( looksLikeContentDigest(candidate) )
+		{
+			result.version = value.substr(0, separator);
+			result.contentDigest = candidate;
+			return result;
+		}
+	}
+	result.version = value;
+	return result;
+}
+
+static int manifestEntryCount(const std::map<std::string, std::string>& entries)
+{
+	return static_cast<int>(entries.size())
+		- (entries.count("__sam_content_catalog__") ? 1 : 0);
+}
+
+static std::string fingerprintEntryDescription(const std::string& namespaceId,
+	const std::string& value)
+{
+	const FingerprintVersion parsed = splitFingerprintVersion(value);
+	std::string result = namespaceId + " v" + parsed.version;
+	if ( !parsed.contentDigest.empty() )
+	{
+		result += " content " + parsed.contentDigest;
+	}
+	return result;
+}
+
 // Compare the received host fingerprint against our own; fill the mismatch
 // state and log the outcome.
 static void compareFingerprints()
@@ -114,11 +176,7 @@ static void compareFingerprints()
 	if ( !s_mismatch )
 	{
 		const auto parsed = parseFingerprint(local);
-		int n = static_cast<int>(parsed.size());
-		if ( parsed.find("__sam_content_catalog__") != parsed.end() )
-		{
-			--n;
-		}
+		const int n = manifestEntryCount(parsed);
 		SAM_INFO(MOD, "Mod and content fingerprints MATCH host ("
 			+ std::to_string(n)
 			+ " mod(s), catalog "
@@ -138,7 +196,8 @@ static void compareFingerprints()
 		auto it = localMods.find(kv.first);
 		if ( it == localMods.end() )
 		{
-			issues.push_back("missing [" + kv.first + " v" + kv.second + "]");
+			issues.push_back("missing ["
+				+ fingerprintEntryDescription(kv.first, kv.second) + "]");
 		}
 		else if ( it->second != kv.second )
 		{
@@ -154,8 +213,21 @@ static void compareFingerprints()
 			}
 			else
 			{
-				issues.push_back("version [" + kv.first + ": host v" + kv.second
-					+ ", you v" + it->second + "]");
+				const FingerprintVersion host = splitFingerprintVersion(kv.second);
+				const FingerprintVersion local = splitFingerprintVersion(it->second);
+				if ( host.version != local.version )
+				{
+					issues.push_back("version [" + kv.first + ": host v"
+						+ host.version + ", you v" + local.version + "]");
+				}
+				else
+				{
+					issues.push_back("content [" + kv.first + ": host "
+						+ (host.contentDigest.empty() ? std::string("none") : host.contentDigest)
+						+ ", you "
+						+ (local.contentDigest.empty() ? std::string("none") : local.contentDigest)
+						+ "]");
+				}
 			}
 		}
 	}
@@ -163,7 +235,8 @@ static void compareFingerprints()
 	{
 		if ( hostMods.find(kv.first) == hostMods.end() )
 		{
-			issues.push_back("extra [" + kv.first + " v" + kv.second + "]");
+			issues.push_back("extra ["
+				+ fingerprintEntryDescription(kv.first, kv.second) + "]");
 		}
 	}
 
@@ -176,8 +249,8 @@ static void compareFingerprints()
 	}
 
 	SAM_WARN(MOD, "S.A.M mod MISMATCH with host — host hash " + hashString(s_hostFingerprint)
-		+ " (" + std::to_string(hostMods.size()) + " mod(s)), local hash " + hashString(local)
-		+ " (" + std::to_string(localMods.size()) + " mod(s)), " + std::to_string(issues.size())
+		+ " (" + std::to_string(manifestEntryCount(hostMods)) + " mod(s)), local hash " + hashString(local)
+		+ " (" + std::to_string(manifestEntryCount(localMods)) + " mod(s)), " + std::to_string(issues.size())
 		+ " issue(s):");
 	for ( size_t i = 0; i < issues.size(); ++i )
 	{
@@ -199,7 +272,8 @@ std::string SAMSync::generateFingerprint()
 	std::vector<std::string> entries;
 	for ( const SAMModManifest& m : SAMWorkshop::manifests() )
 	{
-		entries.push_back(m.ns + "@" + m.version);
+		entries.push_back(m.ns + "@" + m.version
+			+ (m.contentDigest.empty() ? std::string() : "+" + m.contentDigest));
 	}
 
 	// Stage SAM-1Q1: temporary runtime IDs are safe across multiplayer
@@ -242,7 +316,7 @@ void SAMSync::sendFingerprint(int player)
 
 	std::string fp = generateFingerprint();
 	const std::string hash = hashString(fp);
-	const int numMods = static_cast<int>(parseFingerprint(fp).size());
+	const int numMods = manifestEntryCount(parseFingerprint(fp));
 
 	int numchunks = fp.empty() ? 0 : (1 + static_cast<int>((fp.size() - 1) / CHUNK_SIZE));
 	if ( numchunks > MAX_CHUNKS )

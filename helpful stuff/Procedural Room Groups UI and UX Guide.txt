@@ -1,0 +1,83 @@
+BARONY AUTOMATIA — PROCEDURAL ROOM GROUPS
+UI AND UX GUIDE
+============================================================
+
+The Procedural Room Setup dialog edits a working copy of one map's procedural
+registration. It does not modify the map while typing. Apply to Map commits the
+working copy and creates an undo point when a value changed; Cancel, Escape,
+and the window X discard it.
+
+WHAT THIS SETTING DOES
+----------------------
+
+The setting registers the entire saved .lmp as a candidate for dungeon
+generation. The current virtual maps/ path is discovered from PhysFS and is
+shown in the dialog; it is not stored as self-referential metadata.
+
+ROOM
+----
+
+The Room line shows the current virtual file or “Unsaved map”. An enabled
+unsaved map is intentionally reported as an error because the runtime needs a
+stable discoverable path. Disabled rooms can still be edited and applied while
+retaining their future settings.
+
+GENERATION RULES
+----------------
+
+Level Set is a human-readable dropdown. Select Custom Level Set... to type a
+safe, single-component generator key. Room Category is shared with runtime:
+
+    Normal             ordinary room pool
+    Shop               shop pool; weight is inside the shop pool
+    Treasure - Bronze  Bronze treasure-room pool
+    Treasure - Iron    Iron treasure-room pool
+    Treasure - Gold    Gold treasure-room pool
+    Treasure - Silver  Silver treasure-room pool
+    Special            special-room pool
+    Secret Doorway     compatible Mines/Swamp/Labyrinth secret pool
+    Custom Room Group  named candidates in the ordinary room pool
+
+The existing global chance for shops, treasure, special rooms, and secret
+doorways is preserved. A category's weight only chooses between eligible rooms
+after that category has been selected. Weight ranges from 1 to 100000. The
+description beside the field gives a readable rarity band; +/- clamps at the
+runtime limits.
+
+Selecting Custom Room Group... reveals Custom Group Name. Enter a safe name;
+the name is normalized and persisted in the PGRM metadata. Maps with the same
+name are grouped for authoring and all participate in ordinary generation for
+the selected level set. The custom name does not create a new global category
+chance, because the existing generator has no separate chance rule for it.
+
+REGISTRATION PREVIEW
+--------------------
+
+Preview shows the path, selected level set/category, relative weight, and
+whether the room is currently disabled. It is informational and never changes
+the map.
+
+VALIDATION
+----------
+
+Validate Room reruns the same metadata/category/level-set checks used by the
+editor and runtime catalog. Rows use [OK], [INFO], [WARN], and [ERROR]. Errors
+block Apply while enabled. Safe duplicate registrations are warnings because
+the catalog deduplicates them; unsafe S.A.M. conflicts are errors. Disabled
+rooms report an informational disabled row and stale future settings do not
+block Apply.
+
+AUTHORING CHECKLIST
+-------------------
+
+1. Save the room map first.
+2. Open Map Properties -> Procedural Room Setup.
+3. Select the level set and category from the dropdowns.
+4. Set a relative weight and read the preview/help text.
+5. Validate Room, fix any [ERROR] rows, then Apply to Map.
+6. Save the map and test several fixed dungeon seeds.
+
+The dialog remains usable at small resolutions: list selectors scroll with the
+wheel, text fields use normal SDL text input, and the action bar remains at the
+bottom. Opening a second selector closes the first; clicking outside a list
+closes it without applying anything.

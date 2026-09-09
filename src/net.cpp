@@ -20,6 +20,7 @@
 #include "monster.hpp"
 #include "interface/interface.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "engine/audio/sound.hpp"
 #include "items.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
@@ -5619,6 +5620,31 @@ void serverUpdateEntitySkill(Entity* entity, int skill)
 		net_packet->len = 13;
 		sendPacketSafe(net_sock, -1, net_packet, c - 1);
 	}
+}
+
+void serverUpdatePlayerProficiency(const int player, const int skill,
+	const bool notify)
+{
+	if ( multiplayer != SERVER || player <= 0 || player >= MAXPLAYERS
+		|| !players[player] || players[player]->isLocalPlayer()
+		|| !stats[player] || skill < 0 || skill >= NUMPROFICIENCIES )
+	{
+		return;
+	}
+	strcpy((char*)net_packet->data, "SKIL");
+	// The client handler authenticates this packet by its connected channel;
+	// retaining the player byte keeps the established packet shape.
+	net_packet->data[4] = static_cast<Uint8>(player);
+	net_packet->data[5] = static_cast<Uint8>(skill);
+	net_packet->data[6] = static_cast<Uint8>(stats[player]->getProficiency(skill));
+	if ( notify )
+	{
+		net_packet->data[6] |= (1 << 7);
+	}
+	net_packet->address.host = net_clients[player - 1].host;
+	net_packet->address.port = net_clients[player - 1].port;
+	net_packet->len = 7;
+	sendPacketSafe(net_sock, -1, net_packet, player - 1);
 }
 
 /*-------------------------------------------------------------------------------
@@ -12089,8 +12115,9 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 	// update skill
 	{'SKIL', [](){
 	    const int pro = std::min(net_packet->data[5], (Uint8)(NUMPROFICIENCIES - 1));
-		int oldSkill = stats[clientnum]->getProficiency(pro);
-		stats[clientnum]->setProficiency(pro, (net_packet->data[6] & 0x7F));
+			int oldSkill = stats[clientnum]->getProficiency(pro);
+			stats[clientnum]->setProficiency(pro, (net_packet->data[6] & 0x7F));
+			const int newSkill = stats[clientnum]->getProficiency(pro);
 		bool notify = (net_packet->data[6] & (1 << 7)) != 0;
 
 		int statBonusSkill = getStatForProficiency(pro);
@@ -12102,10 +12129,15 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 			stats[clientnum]->PLAYER_LVL_STAT_BONUS[statBonusSkill] = pro;
 		}
 
-		if ( pro == PRO_ALCHEMY )
-		{
-			GenericGUI[clientnum].alchemyLearnRecipeOnLevelUp(stats[clientnum]->getProficiency(pro));
-		}
+			if ( pro == PRO_ALCHEMY && newSkill > oldSkill )
+			{
+				for ( int value = oldSkill + 1; value <= newSkill; ++value )
+				{
+					// A single SKIL packet may represent a Lore-scaled manual
+					// crossing multiple recipe thresholds.
+					GenericGUI[clientnum].alchemyLearnRecipeOnLevelUp(value);
+				}
+			}
 		if ( oldSkill < 100 )
 		{
 			if ( notify )
@@ -14023,6 +14055,122 @@ static std::unordered_map<Uint32, void(*)()> clientPacketHandlers = {
 		{
 			GenericGUI[clientnum].openGUI(GUI_TYPE_ITEMFX, nullptr, 0, SPELL_ITEM, spellID);
 		}
+	}},
+
+	// Bounded, map-scoped server snapshot for temporary Illusion overlays.
+	{'ILOV', []() {
+		if ( multiplayer != CLIENT || net_packet->len < 21 )
+		{
+			return;
+		}
+		const Uint8 tileCount = net_packet->data[19];
+		const Uint8 actorCount = net_packet->data[20];
+		if ( tileCount == 0
+			|| tileCount > IllusionMagic::OverlayRegistry::kMaximumTilesPerOverlay
+			|| actorCount > IllusionMagic::OverlayRegistry::kMaximumAuthorizedActors
+			|| net_packet->len != 21 + tileCount * 4 + actorCount * 4 )
+		{
+			return;
+		}
+		std::vector<IllusionMagic::TileCoord> tiles;
+		std::vector<std::uint32_t> actors;
+		tiles.reserve(tileCount);
+		actors.reserve(actorCount);
+		int offset = 21;
+		for ( Uint8 index = 0; index < tileCount; ++index )
+		{
+			tiles.push_back({
+				static_cast<Sint16>(SDLNet_Read16(&net_packet->data[offset])),
+				static_cast<Sint16>(SDLNet_Read16(&net_packet->data[offset + 2]))
+			});
+			offset += 4;
+		}
+		for ( Uint8 index = 0; index < actorCount; ++index )
+		{
+			actors.push_back(SDLNet_Read32(&net_packet->data[offset]));
+			offset += 4;
+		}
+		IllusionMagic::receiveOverlaySnapshot(
+			SDLNet_Read32(&net_packet->data[4]),
+			static_cast<IllusionMagic::OverlayKind>(net_packet->data[8]),
+			static_cast<Sint16>(SDLNet_Read16(&net_packet->data[9])),
+			SDLNet_Read32(&net_packet->data[11]),
+			SDLNet_Read32(&net_packet->data[15]), actors, tiles);
+	}},
+
+	// Authenticated client selection for a pending loot-illusion cast. The
+	// transmitted descriptor is resolved against the server's real inventory.
+	{'ILIT', []() {
+		if ( multiplayer != SERVER || net_packet->len < 27 ) { return; }
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[26]);
+		if ( player < 0 || !players[player] || !players[player]->entity )
+		{
+			return;
+		}
+		int runtimeType = static_cast<int>(
+			SDLNet_Read32(&net_packet->data[5]));
+#ifdef SAM_FRAMEWORK_ENABLED
+		if ( !resolveSAMItemTypeFromPacket(
+			runtimeType, 27, "ILIT", runtimeType) )
+		{
+			return;
+		}
+#endif
+		IllusionMagic::resolveLootSelection(*players[player]->entity,
+			net_packet->data[4] != 0, runtimeType,
+			static_cast<Sint32>(SDLNet_Read32(&net_packet->data[9])),
+			static_cast<Sint32>(SDLNet_Read32(&net_packet->data[13])),
+			static_cast<Sint32>(SDLNet_Read32(&net_packet->data[17])),
+			SDLNet_Read32(&net_packet->data[21]),
+			net_packet->data[25] != 0);
+	}},
+
+	// Owner-only Store Magic vault display snapshot.
+	{'ILVA', []() {
+		if ( multiplayer != CLIENT || net_packet->len < 11 ) { return; }
+		const std::size_t capacity = net_packet->data[8];
+		const std::size_t count = net_packet->data[10];
+		if ( capacity > 5 || count > capacity
+			|| net_packet->len != 11 + static_cast<int>(count * 13) )
+		{
+			return;
+		}
+		std::vector<IllusionMagic::StoredSpellSnapshot> entries;
+		entries.reserve(count);
+		int offset = 11;
+		for ( std::size_t index = 0; index < count; ++index )
+		{
+			IllusionMagic::StoredSpellSnapshot entry;
+			entry.spellId = SDLNet_Read16(&net_packet->data[offset]);
+			entry.originalEffectiveMana =
+				SDLNet_Read16(&net_packet->data[offset + 2]);
+			entry.originalPower =
+				SDLNet_Read16(&net_packet->data[offset + 4]);
+			entry.originalCasterProficiency =
+				SDLNet_Read16(&net_packet->data[offset + 6]);
+			entry.studyTicks = SDLNet_Read32(&net_packet->data[offset + 8]);
+			entry.playerLearnable = net_packet->data[offset + 12] != 0;
+			entries.push_back(entry);
+			offset += 13;
+		}
+		IllusionMagic::receiveVaultSnapshot(
+			SDLNet_Read32(&net_packet->data[4]), capacity,
+			net_packet->data[9], entries);
+	}},
+
+	// Authenticated owner request; proficiency rules are re-derived server-side.
+	{'ILVR', []() {
+		if ( multiplayer != SERVER || net_packet->len != 8 ) { return; }
+		const int player = decodeGameplayPacketPlayerIndex(net_packet->data[7]);
+		if ( player < 0 || net_packet->data[5]
+			> static_cast<Uint8>(IllusionMagic::VaultSelection::Exact) )
+		{
+			return;
+		}
+		IllusionMagic::requestVaultAction(player,
+			net_packet->data[4] != 0,
+			static_cast<IllusionMagic::VaultSelection>(net_packet->data[5]),
+			net_packet->data[6]);
 	}},
 
 	//Add a spell to the channeled spells list.
@@ -17928,7 +18076,6 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
             );
         }
 #endif
-
         auto item = newItem(
             static_cast<ItemType>(resolvedType),
             static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
@@ -18142,7 +18289,8 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 				printlog("[Shops]: client %d bought item from shop (uid=%d)\n", client, uidnum);
 				if ( shopIsMysteriousShopkeeper(entity) )
 				{
-					if ( item2->type == MAGIC_GRIMOIRE && !item2->playerSoldItemToShop )
+					if ( automatianModeEnabled()
+						&& item2->type == MAGIC_GRIMOIRE && !item2->playerSoldItemToShop )
 					{
 						automatiaMarkMagicGrimoireMerchantPurchased();
 						printlog("[Magic Grimoire] The Mysterious Merchant's Grimoire was purchased by remote player %d.", client);
@@ -18410,6 +18558,52 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
             return;
         }
 #endif
+		// Skill manuals carry their immutable target in appearance. Validate the
+		// complete item tuple against the authenticated player's inventory before
+		// constructing the temporary server-use item; a client cannot forge a
+		// different target by editing the USEI payload.
+		if ( resolvedType == SKILL_BOOK || resolvedType == SKILL_SCROLL )
+		{
+			if ( !stats[client] )
+			{
+				return;
+			}
+			const Status requestedStatus =
+				static_cast<Status>(SDLNet_Read32(&net_packet->data[8]));
+			const Sint16 requestedBeatitude =
+				static_cast<Sint16>(SDLNet_Read32(&net_packet->data[12]));
+			const Sint16 requestedCount =
+				static_cast<Sint16>(SDLNet_Read32(&net_packet->data[16]));
+			const Uint32 requestedAppearance =
+				SDLNet_Read32(&net_packet->data[20]);
+			const bool requestedIdentified = net_packet->data[24] != 0;
+			Item* serverManualItem = nullptr;
+			for ( node_t* node = stats[client]->inventory.first; node; node = node->next )
+			{
+				Item* candidate = static_cast<Item*>(node->element);
+				if ( candidate && candidate->type == static_cast<ItemType>(resolvedType)
+					&& candidate->status == requestedStatus
+					&& candidate->beatitude == requestedBeatitude
+					&& candidate->count == requestedCount
+					&& candidate->appearance == requestedAppearance
+					&& candidate->identified == requestedIdentified
+					&& itemIsSkillManual(candidate) )
+				{
+					serverManualItem = candidate;
+					break;
+				}
+			}
+			if ( !serverManualItem )
+			{
+				printlog("[Skill Books] refused forged USEI manual payload from client %d.\n", client);
+				return;
+			}
+			// Use the authenticated inventory node itself. Constructing a temporary
+			// item here would consume only that temporary and leave the real manual
+			// in the server inventory, allowing a replay to duplicate the effect.
+			useItem(serverManualItem, client, nullptr, false, true);
+			return;
+		}
 
         auto item = newItem(
             static_cast<ItemType>(resolvedType),
@@ -18472,6 +18666,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
             return;
         }
 #endif
+		if ( resolvedType == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+		{
+			printlog("[Automatian Mode] Rejected disabled Magic Grimoire equip request from player %d.", client);
+			return;
+		}
 
         auto item = newItem(
             static_cast<ItemType>(resolvedType),
@@ -18530,6 +18729,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
             return;
         }
 #endif
+		if ( resolvedType == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+		{
+			printlog("[Automatian Mode] Rejected disabled Magic Grimoire equip request from player %d.", client);
+			return;
+		}
 
         auto item = newItem(
             static_cast<ItemType>(resolvedType),
@@ -18567,8 +18771,15 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 		{
 			return;
 		}
+		const ItemType requestedType =
+			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4]));
+		if ( requestedType == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+		{
+			printlog("[Automatian Mode] Rejected disabled Magic Grimoire shield request from player %d.", client);
+			return;
+		}
 		auto item = newItem(
-			static_cast<ItemType>(SDLNet_Read32(&net_packet->data[4])),
+			requestedType,
 			static_cast<Status>(SDLNet_Read32(&net_packet->data[8])),
 			SDLNet_Read32(&net_packet->data[12]),
 			SDLNet_Read32(&net_packet->data[16]),
@@ -18639,6 +18850,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
             return;
         }
 #endif
+		if ( resolvedType == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+		{
+			printlog("[Automatian Mode] Rejected disabled Magic Grimoire equip request from player %d.", client);
+			return;
+		}
 
         auto item = newItem(
             static_cast<ItemType>(resolvedType),
@@ -19211,10 +19427,11 @@ static std::unordered_map<Uint32, void(*)()> serverPacketHandlers = {
 			bool spellbookCast = false;
 			if ( requestedSpellSource == 2 )
 			{
-				if ( !stats[player] || !stats[player]->shield
+				if ( !automatianModeEnabled()
+					|| !stats[player] || !stats[player]->shield
 					|| stats[player]->shield->type != MAGIC_GRIMOIRE )
 				{
-					printlog("[Magic Grimoire] Rejected invalid Grimoire spell request from player %d.", player);
+					printlog("[Automatian Mode] Rejected invalid or disabled Grimoire spell request from player %d.", player);
 					return;
 				}
 				spellbookCast = true;

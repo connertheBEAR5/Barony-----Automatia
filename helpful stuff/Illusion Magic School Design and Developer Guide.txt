@@ -1,0 +1,359 @@
+Barony Automatia - Illusion Magic School Design and Developer Guide
+==================================================================
+
+Status
+------
+
+Illusion Magic is one part of the optional, server-authoritative Automatian
+Mode gameplay group. Automatian Mode is OFF in the normal default `svFlags`
+value and jointly enables the Illusion school and its spellbooks, Skill
+Books/Skill Scrolls, and the Magic Grimoire. Start a host, dedicated server,
+or local test with:
+
+    ./build-super-posix/barony --automatian-mode
+
+The host's synchronized `SV_FLAG_AUTOMATIAN_MODE` bit is authoritative. A
+client cannot turn the mode on locally for an off session. The old
+`--illusion-magic` and `--skill-books` command-line options remain
+compatibility aliases for `--automatian-mode`; none of them enables only a
+single component. Treat the mode as a startup/session option; changing it in
+the middle of a live game is not a supported content migration.
+
+When the flag is off, the Illusion filter is absent, Illusion spell and
+spellbook slots are disabled/hidden, books do not enter ordinary random item
+generation, books refuse to teach or consume, `addSpell()` refuses new
+Illusion learning, and every Illusion cast/runtime hook returns without an
+effect. Existing saves may retain a previously learned append-only spell ID;
+it remains hidden and inert until an enabled session loads it.
+
+
+Registry and compatibility architecture
+---------------------------------------
+
+Existing spell IDs 0 through 224 are unchanged. The new IDs are append-only:
+
+| ID | Spell | MP | Required rank | Target | Fixed duration |
+|---:|---|---:|---:|---|---:|
+| 225 | Mirror Other | 8 | 0 Novice | nearby actor | 500 ticks / 10 s |
+| 226 | Mirror Copy | 14 | 40 Skilled | nearby enemy | 300 ticks / 6 s |
+| 227 | Mirror Wall | 8 | 20 Basic | floor tile | 400 ticks / 8 s |
+| 228 | Mirror Reflect | 24 | 60 Expert | self | 300 ticks / 6 s |
+| 229 | Mirror Mimic | 20 | 60 Expert | nearby enemy | 500 ticks / 10 s |
+| 230 | Mirror Reflect Loot | 18 | 60 Expert | owned inventory item | 300 ticks / 6 s visual |
+| 231 | Phantasm Path | 20 | 60 Expert | floor/gap endpoint | 400 ticks / 8 s |
+| 232 | Mirror Duplicate Loot | 100 | 100 Legendary | owned inventory item | instant after selection |
+| 233 | Mirage Wall | 10 | 20 Basic | real wall tile | 400 ticks / 8 s |
+| 234 | Paranoia | 25 | 60 Expert | nearby hostile area | 250 ticks / 5 s |
+| 235 | Vertical Mirage | 12 | 40 Skilled | real floor tile | 300 ticks / 6 s |
+| 236 | Shadow Step | 12 | 40 Skilled | self/exact backward tile | 100-tick / 2 s decoy |
+| 237 | Store Magic | 12 + 1 sustain | 80 Master | self | sustained |
+
+There is one real `SPELLBOOK_*` item for every row, appended after every
+pre-existing item and Magic Grimoire. The books use the existing spellbook
+inventory, equip, reading, learning, hotbar, tooltip, editor lookup, and random
+generation paths. Their definitions and names are installed after base JSON is
+loaded so the shipped legacy JSON remains readable. They borrow established
+Barony spellbook/icon assets; no parallel item registry exists.
+
+Illusion is a first-class derived school rather than a fourth serialized
+`PROFICIENCIES[]` member. Adding a fourth fixed member would change existing
+character save and packet layouts. Effective Illusion proficiency is therefore:
+
+    max(modified Sorcery, modified Mysticism, modified Thaumaturgy), clamped 0..100
+
+All learning checks, spellbook failure/extra-mana chances, casting animation,
+tooltips, and Store Magic progression call the same resolver. Each registry
+spell retains Mysticism as its internal compatibility skill so old generic
+spell structures remain valid, while UI labels and decisions use Illusion.
+
+
+Spell behavior
+--------------
+
+Mirror Other
+    Copies a selected actor's rendered appearance onto a hologram proxy that
+    follows the caster. The caster remains the real target/collision/identity
+    entity. No name authority, faction, party, owner, inventory, stats, quest,
+    dialogue, persistence, or player identity is copied. Mirror Mimic is
+    cleared when this effect begins.
+
+Mirror Copy
+    Creates a temporary HOLOGRAM shadow at the target. It is harmless,
+    non-recruitable, cannot own inventory/state, and produces no real loot or
+    XP. The normal authoritative entity path replicates the visual, while the
+    bounded Illusion runtime retires it at expiry.
+
+Mirror Wall
+    Requires open supported ground. It creates a passable wall visual plus a
+    `FakeWall` navigation overlay. Eligible hostiles route around the perceived
+    wall. The real floor/obstacle map bytes and collision are never changed.
+
+Mirror Reflect
+    Applies its own named ward, distinct from normal Reflection. At projectile
+    impact it may reflect eligible hostile magic only if normal Reflection did
+    not already resolve it. The reflected payload receives a modest 20 percent
+    damage bonus (minimum one). Existing reflection counters plus the dedicated
+    Mirror-reflected guard prevent loops. Reflection, Absorb, Seize, Store, and
+    Mirror Reflect payloads are excluded.
+
+Mirror Mimic
+    Refuses bosses. It creates an appearance proxy like Mirror Other and adds a
+    temporary perception query: eligible hostile AI may treat the caster as
+    neutral. It never rewrites faction, allegiance, party, recruitment,
+    persistent identity, inventory, or quest state. Overt behavior and normal
+    engine checks can still reveal/attack the caster. Mirror Other is cleared
+    when this effect begins.
+
+Mirror Reflect Loot
+    Opens the normal item-effect inventory selector for an item the authenticated
+    caster currently owns. The result is only a bounded, non-interactable visual
+    entity. It has no `Item`, quantity, stable ID, value, pickup, equipment,
+    crafting, quest, shop, or persistence identity. The picker and result say
+    `FAKE / ILLUSORY` explicitly.
+
+Phantasm Path
+    Builds at most four valid unsupported/liquid tiles between caster and the
+    selected endpoint. The overlay supplies ground only to its owner and the
+    bounded server-derived authorized follower/allied actor set. It is not a
+    global solid bridge and unauthorized hostiles receive no support. Visuals
+    do not mutate floor, lava, water, obstacle, or structural data.
+
+Mirror Duplicate Loot
+    Charges the full 100 MP once in the normal cast pipeline, then opens the
+    owned-item selector for 20 seconds without a second charge. On successful
+    server revalidation it creates exactly one real item preserving type,
+    status, appearance, and identified state. Quantity is forced to one.
+    Positive beatitude becomes equally cursed, zero becomes -1, and an already
+    cursed item stays cursed; duplication never improves curse state.
+
+    The safety resolver rejects spell pseudo-items; all keys; artifact equipment
+    and orbs; Magic Grimoire; quest/progression-tagged items; loot bags,
+    backpacks, and container-tagged items; and S.A.M. runtime items without a
+    currently registered non-empty stable ID. The server finds a matching item
+    in the authenticated player's live inventory and repeats every check. The
+    successful copy enters the normal pickup/inventory path and therefore uses
+    normal real-item persistence.
+
+Mirage Wall
+    Requires a real obstacle tile. A renderer overlay suppresses only that
+    wall's visual faces. Real tile data, collision, pathing, line-of-world
+    geometry, persistence, and structural layers remain unchanged.
+
+Paranoia
+    Applies temporary confusion-style target perception to eligible hostile
+    non-boss monsters within 48 world units on the caster's exact playable
+    floor. It does not permanently change factions or player ownership.
+
+Vertical Mirage
+    Requires a real supported floor. The renderer hides that floor as a false
+    pit and eligible hostile path maps avoid the perceived drop. Players and
+    physics retain the real floor support; map data is unchanged.
+
+Shadow Step
+    Computes exactly four tiles (64 world units) backward from current facing.
+    The destination must be in bounds, have real floor on the caster's exact
+    playable floor, and have no obstacle. The normal authoritative teleport
+    helper must then succeed. It never shortens the distance or searches past a
+    wall/void. Success leaves a harmless two-second hologram at the old point;
+    failure retires the provisional clone.
+
+Store Magic
+    Applies the existing sustained-spell model and owns a finite server vault
+    keyed to the runtime owner UID. Only a hostile projectile with an ordinary
+    player-learnable spellbook mapping is eligible. Reflection (26), Amplify
+    Magic (44), Overcharge (100), Absorb Magic (155), Seize Magic (156), Mirror
+    Reflect (228), Mirror Duplicate Loot (232), and Store Magic (237) are
+    explicitly excluded. Touch, self, area, trap, hidden NPC/debug, custom
+    no-book, and bespoke Illusion casts are excluded rather than guessed safe.
+
+
+Store Magic deterministic rules
+-------------------------------
+
+Capacity uses the real derived proficiency thresholds:
+
+| Proficiency | Tier | Slots | Release choice | Study |
+|---:|---|---:|---|---|
+| 0-19 | Novice | 1 | deterministic random | no |
+| 20-39 | Basic | 2 | deterministic random | no |
+| 40-59 | Skilled | 3 | oldest or newest | no |
+| 60-79 | Expert | 4 | exact slot; exact discard | no |
+| 80-99 | Master | 5 | exact slot; exact discard | yes |
+| 100 | Legendary | 5 | exact slot; exact discard | yes |
+
+Random selection is deterministic from authoritative tick and owner UID. A
+capture stores pointer-free values only: spell ID, original effective mana,
+captured power, original caster proficiency, capture tick, study ticks, and
+whether a normal book makes it player-learnable. A full vault refuses capture
+and lets projectile resolution continue to later defenses/impact.
+
+Release mana:
+
+    base = max(1, ceil(original_effective_mana / 4))
+    deficit = original_caster_proficiency - current_illusion_proficiency
+    if deficit >= 20:
+        base += ceil(deficit / 20)
+
+Release power:
+
+    delta = current_illusion_proficiency - original_caster_proficiency
+    if delta < 0: percent = max(50, 100 + delta / 2)
+    else:         percent = min(115, 100 + delta / 4)
+    result = max(1, captured_power * percent / 100)
+    if native_power > 1: result = min(result, native_power - 1)
+
+The server validates the selected tier/action, spell definition, current
+sustained state, vault contents, and MP before it removes the entry. The stored
+spell is copied and released through the normal cast system under a guarded
+release context, so Store does not recapture or re-charge its activation cost.
+
+At proficiency 80+, each player-learnable entry accrues study only while Store
+Magic is sustained. At 15,000 ticks (five minutes at 50 Hz), it is removed and
+taught through the normal `addSpell` path, producing normal learning feedback
+and known-spell persistence. The vault itself is deliberately runtime-only: it
+is cleared on feature shutdown, MapInstance activation, owner disappearance,
+and process/session restart.
+
+Incoming projectile resolution is exclusive and ordered:
+
+    spell immunity
+      -> Store Magic
+      -> ordinary Reflection
+      -> Mirror Reflect
+      -> Absorb Magic
+      -> normal impact
+
+One successful branch consumes the projectile outcome. The client never sends
+a stored spell ID, power, owner UID, MapInstance, or playable floor mutation.
+
+
+Playable-Z, MapInstance, AI, and rendering
+------------------------------------------
+
+Every navigation/visual overlay has one `SpatialScope` containing the current
+authoritative `WorldInstanceIdentity::key()` and one explicit `playableFloor`.
+Queries must match both. Same X/Y on another floor, `authoredMapLayer`, local
+`Entity::z`, camera Z, and a coincident map name are never substitutes.
+
+The registry permits at most 32 simultaneous overlays, eight tiles per overlay,
+and 32 authorized actor UIDs per overlay. Phantasm Path currently creates at
+most four tiles. Holograms are bounded to 32 and fake-loot visuals to 16; an old
+visual is retired before a new one exceeds its bound. Runtime vault owners are
+bounded to `MAXPLAYERS + 32` and each vault is independently tier-capped. Expiry removes overlays
+and increments the renderer revision. A MapInstance activation clears all
+runtime UID associations before reused UIDs can bind to unrelated entities.
+
+`paths.cpp` applies FakeWall/FakePit perception to the requesting eligible
+actor's temporary path map. Phantasm support is actor-aware in player falling,
+pit, and swimming/ground checks. `opengl.cpp` consults HiddenWall/FakePit only
+for the rendered floor and invalidates cached chunks when the overlay revision
+changes. No illusion writes map tile bytes or becomes Z4/Z5 structural state.
+
+
+Networking and headless authority
+----------------------------------
+
+Normal spell requests, entity replication, feature flags, and known-spell
+packets remain in use. Four bounded Illusion messages supplement recipient
+views without changing legacy packet layouts:
+
+* `ILOV`: server-to-client overlay snapshot, filtered to the client's current
+  active MapInstance; includes authoritative floor, expiry, bounded tiles, and
+  bounded authorized actor UIDs.
+* `ILIT`: client-to-server item-selection request. The packet's player byte is
+  authenticated by the existing sender decoder; the server ignores claimed
+  ownership and searches the authenticated inventory. S.A.M. requests append a
+  stable string ID and are rejected if its runtime mapping does not match.
+* `ILVA`: server-to-owning-client vault snapshot. Other players do not receive
+  private vault contents.
+* `ILVR`: client-to-server release/discard request. The authenticated server
+  derives owner, proficiency, permitted selection mode, current vault, effect,
+  MP, and spell definition.
+
+Packet handlers enforce direction. Host/headless execution owns casts,
+projectile defenses, AI perception, overlays, item creation, teleport, vault,
+study, and learning. Late/reconnecting clients derive the feature bit from the
+session and receive fresh relevant overlay/vault snapshots during normal ticks.
+
+
+Persistence and S.A.M. 2.1
+--------------------------
+
+* Known Illusion spells: normal existing player known-spell save path.
+* Illusion spellbooks: normal items; ordinary generation only while enabled.
+* A legitimate real duplicate: normal item persistence.
+* Holograms, disguise proxies, fake loot, wall/pit/path overlays: never saved.
+* Stored Magic Vault: explicitly runtime-only and never serialized.
+
+Existing item IDs stay stable because all books were appended. S.A.M. keeps its
+reserved custom runtime-ID space and stable IDs remain persistence/network
+authority. Fake loot never receives a stable ID. A real custom duplicate is
+allowed only when the active S.A.M. registry proves a stable ID; the `ILIT`
+request carries that ID so a stale/different runtime mapping cannot be used.
+
+
+UI and authoring integration
+----------------------------
+
+With the flag on, the normal spell panel adds an Illusion filter after
+Thaumaturgy, all known Illusion spells use normal hotbar behavior, each spell
+and book receives a code-owned detailed tooltip, and effect entries distinguish
+Mirror Other, Mirror Mimic, Mirror Reflect, and Store Magic. The Store status
+icon displays `used/capacity` and opens an embedded vault view. The loot spells
+reuse the established item-effect selector with unmistakable fake/real labels.
+
+The code-owned definitions give the editor and generic spell/item lookups the
+new names and fixed numeric IDs without editing legacy JSON. An explicit map or
+debug tool can retain a numeric book reference even with the runtime flag off,
+but ordinary gameplay cannot use the book until enabled.
+
+For exact screen behavior, input, focus, low-resolution constraints, and manual
+checks, see `helpful stuff/Illusion Magic School UI and UX Guide.txt`.
+
+
+Developer extension rules
+-------------------------
+
+1. Append IDs; never insert into an old numeric range.
+2. Add immutable metadata to `illusion_magic_model.*`, then route gameplay
+   through the normal `castSpell` authority boundary.
+3. Use `proficiencyForSpell()` / `getEffectiveSpellcastingAbility()` for every
+   Illusion requirement, fumble, and display decision.
+4. Scope any spatial state with active MapInstance plus explicit
+   `playableFloor`. Never infer either from `Entity::z`.
+5. Keep temporary perception in bounded overlays/effects; do not mutate tiles,
+   permanent factions, identity, parties, or persistence.
+6. Treat item appearance as presentation, never identity. Revalidate live
+   server inventory and S.A.M. stable definitions before real creation.
+7. Insert new projectile defenses into the one exclusive impact decision,
+   with loop guards and deterministic tests.
+8. Keep the off path inert in registry consumers, generation, learning, UI,
+   casting, networking, AI, and tick logic.
+9. Extend the comparison audit and deterministic model/source contracts before
+   claiming a new behavior supported.
+
+
+Validation and manual acceptance boundary
+-----------------------------------------
+
+`tests/illusion_magic_tests.cpp` deterministically covers registry values and
+IDs, proficiency tiers, vault selection/capacity/full/discard/study behavior,
+mana/power formulas, store and duplicate safety, every overlay kind,
+MapInstance/floor isolation, bounds, and source contracts for all 13 spells,
+books, flag, UI, packets, lifecycle, and defense order.
+
+Automated source/model coverage is not a substitute for rendered gameplay.
+Before release, run one headless host with `--automatian-mode` and two real
+clients. Give both clients books, learn and hotbar all spells, observe every
+effect on two playable floors, put the clients at equal X/Y on different
+floors, then put them in divergent MapInstances. Confirm no overlay, disguise,
+support, path avoidance, vault identity, or renderer state leaks. Reconnect one
+client and confirm the authoritative flag plus relevant overlay/vault snapshot.
+Confirm fake loot cannot be picked up and a permitted real duplicate survives
+a normal save/reload. Repeat with a registered S.A.M. item and a rejected
+unregistered/stale mapping. Exercise Store capture/release/full/learning and
+the full defense order. Finally disable Automatian Mode and verify the normal
+UI, generation, learning, and runtime are unchanged. Also confirm that the
+Magic Grimoire and Skill Manual paths are unavailable in that off session.
+
+This implementation does not begin Z5 or Z6.

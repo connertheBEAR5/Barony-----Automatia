@@ -4198,7 +4198,8 @@ void actHudShield(Entity* my)
 	}
 
 	const bool magicGrimoire =
-		stats[HUDSHIELD_PLAYERNUM]->shield
+		automatianModeEnabled()
+		&& stats[HUDSHIELD_PLAYERNUM]->shield
 		&& stats[HUDSHIELD_PLAYERNUM]->shield->type == MAGIC_GRIMOIRE;
 	bool spellbook = false;
 	bool quiver = false;
@@ -5430,7 +5431,8 @@ void actHudAdditional2(Entity* my)
 void actHudAdditional(Entity* my)
 {
 	const bool magicGrimoire =
-		stats[HUDSHIELD_PLAYERNUM]->shield
+		automatianModeEnabled()
+		&& stats[HUDSHIELD_PLAYERNUM]->shield
 		&& stats[HUDSHIELD_PLAYERNUM]->shield->type == MAGIC_GRIMOIRE;
 	bool spellbook = false;
 	if ( stats[HUDSHIELD_PLAYERNUM]->shield

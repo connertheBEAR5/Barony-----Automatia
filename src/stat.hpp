@@ -158,6 +158,13 @@ static const int EFF_HOLY_FIRE = 131;
 static const int EFF_SIGIL = 132;
 static const int EFF_SANCTUARY = 133;
 static const int EFF_DUCKED = 134;
+// Automatia Illusion Magic occupies previously reserved effect slots. Keeping
+// these below the established NUMEFFECTS boundary preserves the existing
+// effect packet/save widths while giving each visible state a distinct ID.
+static const int EFF_MIRROR_OTHER = 135;
+static const int EFF_MIRROR_MIMIC = 136;
+static const int EFF_MIRROR_REFLECT = 137;
+static const int EFF_STORE_MAGIC = 138;
 static const int NUMEFFECTS = 160;
 
 // stats

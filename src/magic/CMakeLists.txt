@@ -5,8 +5,11 @@ list(APPEND GAME_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/setupSpells.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/act_HandMagic.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/castSpell.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/illusion_magic.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/illusion_magic_model.cpp"
 )
 list(APPEND EDITOR_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/illusion_magic_model.cpp"
 )
 
 set(GAME_SOURCES ${GAME_SOURCES} PARENT_SCOPE)

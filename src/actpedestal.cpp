@@ -214,7 +214,7 @@ void Entity::actPedestalBase()
 
 	if ( baronHerxDefeated )
 	{
-		if ( !automatiaHerxPurpleOrbRewardHasGenerated() )
+		if ( automatianModeEnabled() && !automatiaHerxPurpleOrbRewardHasGenerated() )
 		{
 			/*
 			 * Older broken saves can contain an emerged Purple pedestal whose
@@ -639,4 +639,3 @@ void Entity::pedestalOrbInit()
 		}
 	}
 }
-

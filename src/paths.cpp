@@ -19,6 +19,7 @@
 #include "items.hpp"
 #include "net.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "mod_tools.hpp"
 
 int* pathMapFlying = NULL;
@@ -613,10 +614,19 @@ static list_t* generatePathOnPlayableFloorInternal(
 		}
 	}
 
+	// Illusion navigation is an actor-specific view over the copied path map;
+	// authoritative map tiles and shared Playable-Z path caches stay untouched.
+	const bool illusionSupportChangedConnectivity =
+		IllusionMagic::applyNavigationOverlays(pathMap, map.width, map.height,
+			*my, playableFloor);
 	int myPathMap = pathMap[y1 + x1 * map.height];
 	if ( !loading )
 	{
-		if ( !myPathMap || myPathMap != pathMap[y2 + x2 * map.height] || !pathMap[y2 + x2 * map.height] || (x1 == x2 && y1 == y2) )
+		if ( !myPathMap
+			|| (!illusionSupportChangedConnectivity
+				&& myPathMap != pathMap[y2 + x2 * map.height])
+			|| !pathMap[y2 + x2 * map.height]
+			|| (x1 == x2 && y1 == y2) )
 		{
 			free(pathMap);
 			if ( *cvar_pathing_debug )

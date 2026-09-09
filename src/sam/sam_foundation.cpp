@@ -183,9 +183,10 @@ void SAMFoundation::onModLoad(
     SAMItems::setRuntimeIdResolver([](const std::string& stableId) {
         return SAMItemRegistryFoundation::runtimeIdForStableId(stableId);
     });
-    // The foundation opened the load section before validating manifests and
-    // building the stable-id catalog. Keep the 2.1 runtime in that same section.
-    SAMLoader::load(mountedPaths, baronyVersion, false);
+    // The foundation already scanned these mounted paths to establish stable
+    // identity and the content catalog. Reuse that exact resolved result so
+    // the rich runtime cannot observe a second, divergent manifest scan.
+    SAMLoader::loadResolvedManifests(manifests, baronyVersion, false);
 #endif
 
     SAM_INFO(

@@ -15,6 +15,8 @@
 #include "../stat.hpp"
 
 #include <fstream>
+#include <cstdint>
+#include <limits>
 #include <set>
 #include <sstream>
 
@@ -95,6 +97,88 @@ namespace
         return stableId.substr(0, separator)
             == expectedNamespace;
     }
+
+    void warnInvalidField(
+        const std::string& path,
+        const char* field,
+        const char* expected
+    )
+    {
+        SAM_WARN(
+            "CLASSES",
+            "Ignoring invalid '" + std::string(field)
+            + "' in " + path + "; expected " + expected
+        );
+    }
+
+    bool readStringField(
+        const json& declaration,
+        const char* field,
+        const std::string& path,
+        std::string& output
+    )
+    {
+        output.clear();
+        const auto it = declaration.find(field);
+        if ( it == declaration.end() )
+        {
+            return true;
+        }
+        if ( !it->is_string() )
+        {
+            warnInvalidField(path, field, "a string");
+            return false;
+        }
+        output = it->get<std::string>();
+        return true;
+    }
+
+    bool readIntField(
+        const json& declaration,
+        const char* field,
+        const std::string& path,
+        const int defaultValue,
+        int& output
+    )
+    {
+        output = defaultValue;
+        const auto it = declaration.find(field);
+        if ( it == declaration.end() )
+        {
+            return true;
+        }
+        try
+        {
+            if ( it->is_number_unsigned() )
+            {
+                const std::uint64_t value = it->get<std::uint64_t>();
+                if ( value <= static_cast<std::uint64_t>(
+                    std::numeric_limits<int>::max()) )
+                {
+                    output = static_cast<int>(value);
+                    return true;
+                }
+            }
+            else if ( it->is_number_integer() )
+            {
+                const std::int64_t value = it->get<std::int64_t>();
+                if ( value >= static_cast<std::int64_t>(
+                    std::numeric_limits<int>::min())
+                    && value <= static_cast<std::int64_t>(
+                        std::numeric_limits<int>::max()) )
+                {
+                    output = static_cast<int>(value);
+                    return true;
+                }
+            }
+        }
+        catch ( const std::exception& )
+        {
+            // Use the shared diagnostic below for nlohmann conversion failure.
+        }
+        warnInvalidField(path, field, "a 32-bit integer");
+        return false;
+    }
 }
 
 std::vector<SAMFoundationClassDef>
@@ -137,16 +221,13 @@ void SAMClassRegistryFoundation::loadFromManifest(
             continue;
         }
 
-        const std::string stableId =
-            declaration.value(
-                "id",
-                std::string()
-            );
-        const std::string name =
-            declaration.value(
-                "name",
-                std::string()
-            );
+        std::string stableId;
+        std::string name;
+        if ( !readStringField(declaration, "id", fullPath, stableId)
+            || !readStringField(declaration, "name", fullPath, name) )
+        {
+            continue;
+        }
 
         if ( !isValidStableId(stableId, manifest.ns) )
         {
@@ -192,26 +273,37 @@ void SAMClassRegistryFoundation::loadFromManifest(
         definition.stableId = stableId;
         definition.modNamespace = manifest.ns;
         definition.name = name;
-        definition.description =
-            declaration.value(
-                "description",
-                std::string()
-            );
+        readStringField(declaration, "description", fullPath,
+            definition.description);
 
-        if ( declaration.contains("stats")
-            && declaration["stats"].is_object() )
+        if ( declaration.contains("stats") )
         {
             const json& stats = declaration["stats"];
-
-            definition.str = stats.value("STR", 0);
-            definition.dex = stats.value("DEX", 0);
-            definition.con = stats.value("CON", 0);
-            definition.intel = stats.value("INT", 0);
-            definition.per = stats.value("PER", 0);
-            definition.chr = stats.value("CHR", 0);
-            definition.hp = stats.value("HP", 0);
-            definition.mp = stats.value("MP", 0);
-            definition.gold = stats.value("GOLD", 0);
+            if ( !stats.is_object() )
+            {
+                warnInvalidField(fullPath, "stats", "an object of integer bonuses");
+            }
+            else
+            {
+                readIntField(stats, "STR", fullPath + "/stats", 0,
+                    definition.str);
+                readIntField(stats, "DEX", fullPath + "/stats", 0,
+                    definition.dex);
+                readIntField(stats, "CON", fullPath + "/stats", 0,
+                    definition.con);
+                readIntField(stats, "INT", fullPath + "/stats", 0,
+                    definition.intel);
+                readIntField(stats, "PER", fullPath + "/stats", 0,
+                    definition.per);
+                readIntField(stats, "CHR", fullPath + "/stats", 0,
+                    definition.chr);
+                readIntField(stats, "HP", fullPath + "/stats", 0,
+                    definition.hp);
+                readIntField(stats, "MP", fullPath + "/stats", 0,
+                    definition.mp);
+                readIntField(stats, "GOLD", fullPath + "/stats", 0,
+                    definition.gold);
+            }
         }
 
         definition.sourcePath = fullPath;

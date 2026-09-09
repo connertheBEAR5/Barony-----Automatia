@@ -15,6 +15,7 @@
 #include "../stat.hpp"
 #include "../items.hpp"
 #include "../shops.hpp"
+#include "../net.hpp"
 #include "../player.hpp"
 #include "interface.hpp"
 #include "../colors.hpp"
@@ -28,6 +29,10 @@
 
 bool hideItemFromShopView(Item& item)
 {
+	if ( item.type == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+	{
+		return true;
+	}
 	if ( item.type == ARTIFACT_ORB_GREEN || item.type == ARTIFACT_ORB_RED || item.type == ARTIFACT_ORB_BLUE )
 	{
 		return true;
@@ -1248,6 +1253,7 @@ void Player::ShopGUI_t::updateShop()
 					if ( buyItemFromShop(player.playernum, item, consumedEntireStack) )
 					{
 						if ( multiplayer != CLIENT
+							&& automatianModeEnabled()
 							&& purchasedType == MAGIC_GRIMOIRE
 							&& !purchasedWasPlayerSold
 							&& shopkeepertype[player.playernum] == 10 )

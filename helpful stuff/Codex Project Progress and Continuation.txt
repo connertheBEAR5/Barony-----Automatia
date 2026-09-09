@@ -1760,3 +1760,185 @@ The supplied screenshot verifies the failure and the log verifies that stale
 cached geometry was used. A fresh graphical launch with this rebuilt executable
 is still required to confirm the final colors/shape after the automatic cache
 rebuild; that post-fix visual result is not claimed here yet.
+
+
+2026-09-02 OPTIONAL ILLUSION MAGIC SCHOOL
+==========================================
+
+Status: implementation and automated validation complete. Real graphical,
+audio-output, controller-hardware, and headless-host plus two-real-client
+acceptance remain explicitly manual. No Z5/Z6 work was started.
+
+The former standalone Illusion switch has been consolidated into the
+OFF-by-default `SV_FLAG_AUTOMATIAN_MODE` session feature. The one
+host-controlled “Automatian Mode” setting jointly enables Illusion Magic and
+its spellbooks, Skill Books/Skill Scrolls, and the Magic Grimoire. Use
+`--automatian-mode` as the primary command-line option; `--illusion-magic` and
+`--skill-books` remain compatibility aliases for the same whole mode. The
+command-line request is re-applied after settings load, and the existing
+32-bit server-flags synchronization makes the host authoritative. Mode-off
+gates cover ordinary generation, learning, spell/spellbook frames, school
+filter, casting, runtime effects, Skill Manuals, and Magic Grimoire access.
+
+Existing spell IDs 0..224 remain unchanged. IDs 225..237 and thirteen matching
+append-only spellbook items implement Mirror Other, Mirror Copy, Mirror Wall,
+Mirror Reflect, Mirror Mimic, Mirror Reflect Loot, Phantasm Path, Mirror
+Duplicate Loot, Mirage Wall, Paranoia, Vertical Mirage, Shadow Step, and Store
+Magic. The books use the existing item/spellbook/read/learn/hotbar/editor paths.
+Base items/spells JSON was left backward compatible; code-owned definitions,
+names, icons, and detailed tooltips are installed after it loads.
+
+Illusion rank is centrally derived as the highest modified Sorcery, Mysticism,
+or Thaumaturgy, avoiding a save/packet-width change. Learning, book requirements,
+fumble/extra-MP calculations, casting animation, UI, and Store Magic all use the
+same resolver.
+
+The authoritative runtime is split into a deterministic pointer-free model and
+engine adapter. Temporary actor, navigation, and renderer effects are bounded
+and keyed to active MapInstance plus exact playableFloor; map bytes are never
+mutated. MapInstance changes clear UID associations before reuse. Holograms,
+fake loot, navigation overlays, and Store vaults are not serialized. Learned
+spells and permitted real duplicates use normal persistence.
+
+Store Magic uses a runtime-only finite vault. Capacity is 1/2/3/4/5 at derived
+rank 0/20/40/60/80; selection progresses from deterministic random, to
+oldest/newest, to exact slot/discard, then five-minute study/normal learning.
+Only hostile ordinary player-learnable projectiles are captured. Release uses
+quarter effective MP (minimum one), a bounded deficit surcharge, 50..115 percent
+proficiency-relative power scaling, and a hard cap below the current native
+spell. Projectile resolution is one exclusive path: immunity, Store, ordinary
+Reflection, Mirror Reflect, Absorb, normal hit.
+
+Loot safety distinguishes a non-interactable fake visual from a real quantity-1
+duplicate. The latter is charged once at cast and revalidated against the
+authenticated live inventory. Keys, artifacts/orbs, quest/progression items,
+containers, pseudo spell items, and custom items without a valid current S.A.M.
+stable ID are rejected. A valid result preserves type/status/appearance/
+identified state and mirrors beatitude without improving a curse.
+
+Additive bounded packets provide map-scoped overlays, authenticated item
+selection, owner-only vault snapshots, and authenticated vault actions. Clients
+never choose effect owner, MapInstance, playable floor, spell power, or vault
+contents. Existing packet layouts remain unchanged.
+
+UI integration adds the enabled-only Illusion filter, detailed spell and book
+tooltips, fake/real item-picker modes, named disguise/reflect effects, Store
+capacity badge, and a tier-aware Store vault embedded in the existing status
+tooltip with mouse, keyboard, and controller actions. Phantasm Path now has
+four bounded local tile markers: cyan identifies selective support, green
+identifies existing ground, and red identifies blocked/invalid route tiles.
+The same route resolver drives the preview and the authoritative bridge, so the
+pre-cast tile set matches the accepted multi-tile visual after cast.
+
+Maintained documents added/updated:
+
+* `helpful stuff/Illusion Magic School Design and Developer Guide.txt`
+* `helpful stuff/Illusion Magic Spell Comparison and Compatibility Audit.txt`
+* `helpful stuff/Illusion Magic School UI and UX Guide.txt`
+* `helpful stuff/Barony Automatia Complete Features Guide.txt`
+* this continuation entry
+
+Validation on the authoritative Steamworks/FMOD/15-player build:
+
+* `cmake --build build-super-posix -j6`: PASS.
+* `ctest --test-dir build-super-posix --output-on-failure`: PASS, 17/17.
+* `illusion_magic`: PASS within CTest.
+* `./build-super-posix/barony --automatia-stage4d-z3-transition-characterization`: PASS.
+* `git diff --check`: PASS.
+
+Automated Illusion coverage includes exact registry values/IDs, spellbook and
+off-flag contracts, all thirteen runtime dispatch cases, effective rank tiers,
+vault capacity/selection/full/discard/study, release mana/power/caps, eligibility
+and duplication safety, every overlay kind, MapInstance/floor isolation,
+bounds/lifecycle, UI hooks, packet direction/authentication seams, and defense
+order. This does not claim visual quality, audible sound, actual controller
+input, real socket behavior, or two-client/headless observation.
+
+Manual continuation checklist:
+
+1. Start one dedicated/headless server with `--automatian-mode` and connect two
+   real graphical clients.
+2. Obtain/read/hotbar all thirteen books/spells and inspect all tooltips at the
+   minimum supported resolution using mouse, keyboard, and controller.
+3. Observe every world effect on two playable floors, equal X/Y on different
+   floors, and divergent MapInstances; verify no visual/path/support leak.
+4. Exercise Store at rank 0/20/40/60/80/100, all selection modes, full vault,
+   release, discard, five-minute study, reconnect, and defense precedence.
+5. Verify fake loot never highlights/picks up/persists and valid real duplicate
+   save/reload plus registered/stale S.A.M. cases.
+6. Repeat launch without the flag and confirm normal generation/UI/learning/
+   casts are unchanged.
+
+======================================================================
+SKILL BOOKS / SKILL SCROLLS — IMPLEMENTED
+======================================================================
+
+The optional run-scoped Skill Books feature is implemented under the shared,
+authoritative `SV_FLAG_AUTOMATIAN_MODE` Game Settings/lobby flag, labelled
+“Automatian Mode.” It also controls Illusion Magic and the Magic Grimoire.
+`--automatian-mode` is the primary host argument; `--skill-books` and
+`--illusion-magic` remain compatibility aliases for that same mode. Two
+append-only code-defined item variants use one shared manual behavior, normal
+inventory/drop/save/S.A.M. seams, existing appraisal, and the existing SKIL
+synchronization packet.
+
+The target table covers every normal player proficiency except Appraisal (the
+current Lore-equivalent). Lore buckets 0/20/40/60/80 yield 1/2/3/4/5 points;
+negative beatitude subtracts and all mutations clamp 0..100. The host validates
+the complete USEI tuple against the authenticated inventory and mutates the
+actual item/stat node, preventing client-selected targets, replayed temporary
+items, or duplicated consumption. Goblins can read manuals because the
+spellbook-only restriction is not reused. Unidentified names and descriptions
+hide target/effect metadata; identified tooltips explain target, sign,
+magnitude, Lore, and current-run permanence.
+
+Rare gated generation is present for general/chest loot, bookstore slots, and
+empty map-side readable-book props. Existing authored readable books, ordinary
+scrolls, Illusion fake loot, real duplicate-loot safety, player persistence, and
+future-run isolation remain unchanged.
+
+Maintained Skill Books documents:
+
+* `helpful stuff/Skill Books Skill Compatibility and Balance Audit.txt`
+* `helpful stuff/Skill Books Design and Developer Guide.txt`
+
+Validation target:
+
+    cmake --build build-super-posix -j6
+    ctest --test-dir build-super-posix --output-on-failure
+
+The deterministic `skill_books` CTest covers Lore buckets, normal/cursed
+floor/cap behavior, all eligible targets, marker encoding, flag/UI contracts,
+unidentified privacy, server tuple validation, and map generation. Visual
+appraisal, controller/audio output, and a two-real-client dedicated-server
+session remain manual acceptance boundaries.
+
+======================================================================
+2026-09-07 — PROCEDURAL ROOM GROUPS IMPLEMENTED
+======================================================================
+
+The attached full procedural-room brief is implemented end to end in the
+authoritative Steamworks/FMOD/15-player tree. A new fixed-size
+`ProceduralRoomDefinition` is independent from `AuthoredRoomGroup`; Map
+Properties edits it through a native Procedural Generation subdialog, and
+`files.cpp` persists it as version-1 `PGRM` metadata inside the existing MPMD
+envelope. Missing metadata remains disabled and all RGRP cuboid data is kept
+unchanged.
+
+The game/headless path recursively scans mounted virtual `maps/` content with
+PhysFS, parses enabled arbitrary-filename rooms into one sorted/deduplicated
+catalog, fingerprints their map bytes through the existing S.A.M. content
+catalog, and merges matching Normal rooms additively with numbered and S.A.M.
+rooms. Default-weight pools preserve the legacy uniform seeded selection path;
+non-default weights use uint64 cumulative selection. Existing 32-layer
+placement and generic entity-copy metadata remain in use, source prefab IDs are
+still reset for generated copies, and the existing generated-ID save pass
+assigns deterministic identities. The source-vs-child creature-list defect was
+fixed in both ordinary and nested room copy branches.
+
+Only Normal is exposed because the current shop/treasure/special/secret pools
+have additional eligibility semantics that are not safe for arbitrary metadata
+injection. Room rotation, vertical-port matching, and Z5/Z6 multi-floor
+procedural assembly remain explicitly out of scope. See the authoring/developer
+guide for exact keys, schema, tests, and the manual graphical/headless/
+multiplayer acceptance steps.

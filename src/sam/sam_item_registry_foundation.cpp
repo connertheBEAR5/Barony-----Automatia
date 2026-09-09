@@ -7,14 +7,14 @@
 -------------------------------------------------------------------------------*/
 
 #include "sam_item_registry_foundation.hpp"
-#include "sam_runtime_id_allocator.hpp"
 
 #include "framework/sam_logger.hpp"
 #include "framework/sam_workshop.hpp"
 #include "framework/nlohmann/json.hpp"
 
 #include <fstream>
-#include <set>
+#include <cstdint>
+#include <limits>
 
 using nlohmann::json;
 
@@ -94,62 +94,140 @@ namespace
             == expectedNamespace;
     }
 
-    bool runtimeIdInUse(
-        const std::vector<SAMFoundationItemDef>& registry,
-        const int runtimeId
+    void warnInvalidField(
+        const std::string& path,
+        const char* field,
+        const char* expected
     )
     {
-        for ( const SAMFoundationItemDef& item : registry )
+        SAM_WARN(
+            "ITEMS",
+            "Ignoring invalid '" + std::string(field)
+            + "' in " + path + "; expected " + expected
+        );
+    }
+
+    bool readStringField(
+        const json& declaration,
+        const char* field,
+        const std::string& path,
+        std::string& output
+    )
+    {
+        output.clear();
+        const auto it = declaration.find(field);
+        if ( it == declaration.end() )
         {
-            if ( item.runtimeId == runtimeId )
+            return true;
+        }
+        if ( !it->is_string() )
+        {
+            warnInvalidField(path, field, "a string");
+            return false;
+        }
+        output = it->get<std::string>();
+        return true;
+    }
+
+    bool readIntField(
+        const json& declaration,
+        const char* field,
+        const std::string& path,
+        const int defaultValue,
+        int& output
+    )
+    {
+        output = defaultValue;
+        const auto it = declaration.find(field);
+        if ( it == declaration.end() )
+        {
+            return true;
+        }
+        try
+        {
+            if ( it->is_number_unsigned() )
             {
+                const std::uint64_t value = it->get<std::uint64_t>();
+                if ( value > static_cast<std::uint64_t>(
+                    std::numeric_limits<int>::max()) )
+                {
+                    warnInvalidField(path, field, "a 32-bit integer");
+                    return false;
+                }
+                output = static_cast<int>(value);
+                return true;
+            }
+            if ( it->is_number_integer() )
+            {
+                const std::int64_t value = it->get<std::int64_t>();
+                if ( value < static_cast<std::int64_t>(
+                    std::numeric_limits<int>::min())
+                    || value > static_cast<std::int64_t>(
+                        std::numeric_limits<int>::max()) )
+                {
+                    warnInvalidField(path, field, "a 32-bit integer");
+                    return false;
+                }
+                output = static_cast<int>(value);
                 return true;
             }
         }
+        catch ( const std::exception& )
+        {
+            // Fall through to the common diagnostic. nlohmann can throw when
+            // a hostile numeric value cannot fit its requested C++ type.
+        }
+        warnInvalidField(path, field, "a 32-bit integer");
         return false;
     }
 
-    int nextAvailableRuntimeId(
-        const std::vector<SAMFoundationItemDef>& registry
+    bool readBoolField(
+        const json& declaration,
+        const char* field,
+        const std::string& path,
+        const bool defaultValue,
+        bool& output
     )
     {
-        return firstAvailableSAMRuntimeItemId(
-            [&](const int id) { return runtimeIdInUse(registry, id); });
+        output = defaultValue;
+        const auto it = declaration.find(field);
+        if ( it == declaration.end() )
+        {
+            return true;
+        }
+        if ( !it->is_boolean() )
+        {
+            warnInvalidField(path, field, "true or false");
+            return false;
+        }
+        output = it->get<bool>();
+        return true;
     }
 }
 
 std::vector<SAMFoundationItemDef>
     SAMItemRegistryFoundation::registry;
+std::unordered_map<int, std::size_t>
+    SAMItemRegistryFoundation::runtimeIdIndex;
+std::unordered_map<std::string, std::size_t>
+    SAMItemRegistryFoundation::stableIdIndex;
+int SAMItemRegistryFoundation::nextRuntimeId =
+    SAMItemRegistryFoundation::RuntimeIdBase;
 
 void SAMItemRegistryFoundation::clear()
 {
     registry.clear();
+    runtimeIdIndex.clear();
+    stableIdIndex.clear();
+    nextRuntimeId = RuntimeIdBase;
 }
 
 void SAMItemRegistryFoundation::loadFromManifest(
     const SAMModManifest& manifest
 )
 {
-    std::set<std::string> knownIds;
-
-    for ( const SAMFoundationItemDef& existing : registry )
-    {
-        knownIds.insert(existing.stableId);
-    }
-
     for ( const std::string& relativePath : manifest.items )
     {
-        const int runtimeId = nextAvailableRuntimeId(registry);
-        if ( runtimeId < 0 )
-        {
-            SAM_ERROR(
-                "ITEMS",
-                "Item registry capacity reached at runtime id "
-                + std::to_string(SAMItemRegistryFoundation::RuntimeIdLimit)
-            );
-            return;
-        }
-
         const std::string fullPath =
             joinPath(manifest.modPath, relativePath);
 
@@ -169,21 +247,16 @@ void SAMItemRegistryFoundation::loadFromManifest(
             continue;
         }
 
-        const std::string stableId =
-            declaration.value(
-                "id",
-                std::string()
-            );
-        const std::string nameIdentified =
-            declaration.value(
-                "name_identified",
-                std::string()
-            );
-        const std::string category =
-            declaration.value(
-                "category",
-                std::string()
-            );
+        std::string stableId;
+        std::string nameIdentified;
+        std::string category;
+        if ( !readStringField(declaration, "id", fullPath, stableId)
+            || !readStringField(declaration, "name_identified", fullPath,
+                nameIdentified)
+            || !readStringField(declaration, "category", fullPath, category) )
+        {
+            continue;
+        }
 
         if ( !isValidStableId(stableId, manifest.ns) )
         {
@@ -225,7 +298,7 @@ void SAMItemRegistryFoundation::loadFromManifest(
             continue;
         }
 
-        if ( knownIds.find(stableId) != knownIds.end() )
+        if ( stableIdIndex.find(stableId) != stableIdIndex.end() )
         {
             SAM_ERROR(
                 "ITEMS",
@@ -240,46 +313,61 @@ void SAMItemRegistryFoundation::loadFromManifest(
         definition.stableId = stableId;
         definition.modNamespace = manifest.ns;
         definition.nameIdentified = nameIdentified;
-        definition.nameUnidentified =
-            declaration.value(
-                "name_unidentified",
-                std::string()
-            );
-        definition.description =
-            declaration.value(
-                "description",
-                std::string()
-            );
+        readStringField(declaration, "name_unidentified", fullPath,
+            definition.nameUnidentified);
+        readStringField(declaration, "description", fullPath,
+            definition.description);
         definition.category = category;
-        definition.slot =
-            declaration.value(
-                "slot",
-                std::string("NO_EQUIP")
-            );
-        definition.weight =
-            declaration.value("weight", 0);
-        definition.goldValue =
-            declaration.value("gold_value", 0);
-        definition.level =
-            declaration.value("level", -1);
-        definition.stackable =
-            declaration.value("stackable", false);
+        definition.slot = "NO_EQUIP";
+        std::string slot;
+        if ( readStringField(declaration, "slot", fullPath, slot)
+            && !slot.empty() )
+        {
+            definition.slot = slot;
+        }
+        readIntField(declaration, "weight", fullPath, 0, definition.weight);
+        readIntField(declaration, "gold_value", fullPath, 0,
+            definition.goldValue);
+        readIntField(declaration, "level", fullPath, -1, definition.level);
+        readBoolField(declaration, "stackable", fullPath, false,
+            definition.stackable);
         definition.sourcePath = fullPath;
-        definition.runtimeId = runtimeId;
 
-        registry.push_back(definition);
-        knownIds.insert(stableId);
+        int runtimeId = nextRuntimeId;
+        while ( runtimeId < RuntimeIdLimit
+            && runtimeIdIndex.find(runtimeId) != runtimeIdIndex.end() )
+        {
+            ++runtimeId;
+        }
+        if ( runtimeId >= RuntimeIdLimit )
+        {
+            SAM_ERROR(
+                "ITEMS",
+                "Item registry capacity reached at runtime id "
+                + std::to_string(RuntimeIdLimit)
+            );
+            return;
+        }
+
+        definition.runtimeId = runtimeId;
+        const std::size_t catalogIndex = registry.size();
+        registry.push_back(std::move(definition));
+        runtimeIdIndex.emplace(runtimeId, catalogIndex);
+        stableIdIndex.emplace(stableId, catalogIndex);
+        nextRuntimeId = runtimeId + 1;
+
+        const SAMFoundationItemDef& registered = registry.back();
 
         SAM_INFO(
             "ITEMS",
             "Registered item ["
-            + definition.stableId
+            + registered.stableId
             + "] as runtime id "
-            + std::to_string(definition.runtimeId)
+            + std::to_string(registered.runtimeId)
             + " ("
-            + definition.nameIdentified
+            + registered.nameIdentified
             + ", "
-            + definition.category
+            + registered.category
             + ")"
         );
     }
@@ -295,8 +383,8 @@ bool SAMItemRegistryFoundation::registerFrameworkBuiltin(
     if ( stableId.empty()
         || runtimeId < RuntimeIdBase
         || runtimeId >= RuntimeIdLimit
-        || runtimeIdInUse(registry, runtimeId)
-        || runtimeIdForStableId(stableId) >= 0 )
+        || runtimeIdIndex.find(runtimeId) != runtimeIdIndex.end()
+        || stableIdIndex.find(stableId) != stableIdIndex.end() )
     {
         SAM_ERROR(
             "ITEMS",
@@ -314,7 +402,10 @@ bool SAMItemRegistryFoundation::registerFrameworkBuiltin(
     definition.category = category;
     definition.slot = "NO_EQUIP";
     definition.runtimeId = runtimeId;
+    const std::size_t catalogIndex = registry.size();
     registry.push_back(std::move(definition));
+    runtimeIdIndex.emplace(runtimeId, catalogIndex);
+    stableIdIndex.emplace(stableId, catalogIndex);
 
     SAM_INFO(
         "ITEMS",
@@ -334,30 +425,26 @@ SAMItemRegistryFoundation::getItem(
     const int runtimeId
 )
 {
-    for ( const SAMFoundationItemDef& definition : registry )
+    const auto found = runtimeIdIndex.find(runtimeId);
+    if ( found == runtimeIdIndex.end()
+        || found->second >= registry.size() )
     {
-        if ( definition.runtimeId == runtimeId )
-        {
-            return &definition;
-        }
+        return nullptr;
     }
-
-    return nullptr;
+    return &registry[found->second];
 }
 
 int SAMItemRegistryFoundation::runtimeIdForStableId(
     const std::string& stableId
 )
 {
-    for ( const SAMFoundationItemDef& definition : registry )
+    const auto found = stableIdIndex.find(stableId);
+    if ( found == stableIdIndex.end()
+        || found->second >= registry.size() )
     {
-        if ( definition.stableId == stableId )
-        {
-            return definition.runtimeId;
-        }
+        return -1;
     }
-
-    return -1;
+    return registry[found->second].runtimeId;
 }
 
 const std::string&

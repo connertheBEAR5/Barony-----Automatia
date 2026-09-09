@@ -295,10 +295,17 @@ public:
 	float getRightXPercent(int player);
 	float getRightYPercent(int player);
 
-	//Gets the percentage of the left stick for player movement, 100% input is multiplied by :
+	//Legacy axis-shaped percentage retained for ghost/camera movement, where
+	//100% input is multiplied by:
 	// x_forceMaxForwardThreshold, x_forceMaxBackwardThreshold, y_forceMaxStrafeThreshold
 	float getLeftXPercentForPlayerMovement(int player);
 	float getLeftYPercentForPlayerMovement(int player);
+
+	//Gets the signed, deadzone-adjusted percentage used by ordinary player
+	// walking. Partial analog input is preserved; the walking path normalizes
+	// only the combined vector when its magnitude exceeds one.
+	float getLeftXPercentForOmnidirectionalMovement(int player);
+	float getLeftYPercentForOmnidirectionalMovement(int player);
 
 	float getLeftTriggerPercent();
 	float getRightTriggerPercent();

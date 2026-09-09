@@ -1434,6 +1434,7 @@ void buttonNew(button_t* my)
 	button->action = &buttonCloseSubwindow;
 	button->visible = 1;
 	button->focused = 1;
+
 }
 
 void buttonNewConfirm(button_t* my)
@@ -1446,6 +1447,7 @@ void buttonNewConfirm(button_t* my)
 	map.numLayers = MAPLAYERS;
 	map.playableFloors.resetToDefault();
 	authoredRoomGroupsReset(map.roomGroups);
+	proceduralRoomDefinitionReset(map.proceduralRoom);
 	roomSelectResetSelection();
 	strcpy(map.name, nametext);
 	strcpy(map.author, authortext);
@@ -2238,6 +2240,39 @@ void buttonAttributes(button_t* my)
 	}
 	loadMapAmbientLightEditorFields();
 	loadMapAmbienceEditorFields();
+	if ( proceduralRoomHasPendingDefinition )
+	{
+		/* The procedural subdialog stages its edit until Map Properties is
+		 * confirmed, so a return from that dialog must not discard the fields. */
+		strcpy(proceduralRoomEnabledText,
+			proceduralRoomPendingDefinition.enabled ? "[x]" : "[ ]");
+		std::snprintf(proceduralRoomLevelsetText,
+			PROCEDURAL_ROOM_LEVELSET_BYTES, "%s",
+			proceduralRoomPendingDefinition.levelset);
+		std::snprintf(proceduralRoomCustomCategoryText,
+			PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES, "%s",
+			proceduralRoomPendingDefinition.customCategory);
+		std::snprintf(proceduralRoomWeightText,
+			8, "%u", proceduralRoomPendingDefinition.weight);
+		proceduralRoomCategorySelection = proceduralRoomPendingDefinition.category;
+		proceduralRoomHasPendingDefinition = false;
+	}
+	else
+	{
+		strcpy(proceduralRoomEnabledText, map.proceduralRoom.enabled ? "[x]" : "[ ]");
+		std::snprintf(proceduralRoomLevelsetText,
+			PROCEDURAL_ROOM_LEVELSET_BYTES, "%s", map.proceduralRoom.levelset);
+		std::snprintf(proceduralRoomCustomCategoryText,
+			PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES, "%s",
+			map.proceduralRoom.customCategory);
+		const std::uint32_t displayWeight =
+			map.proceduralRoom.weight >= 1
+			&& map.proceduralRoom.weight <= PROCEDURAL_ROOM_MAX_WEIGHT
+			? map.proceduralRoom.weight : PROCEDURAL_ROOM_DEFAULT_WEIGHT;
+		std::snprintf(proceduralRoomWeightText,
+			8, "%u", displayWeight);
+		proceduralRoomCategorySelection = map.proceduralRoom.category;
+	}
 	if ( (map.flags[MAP_FLAG_GENBYTES3] >> 24) & static_cast<int>(0xFF) )
 	{
 		strcpy(mapflagtext[MAP_FLAG_DISABLEDIGGING], "[x]");
@@ -2362,11 +2397,37 @@ void buttonAttributes(button_t* my)
 	button->action = &buttonCloseSubwindow;
 	button->visible = 1;
 	button->focused = 1;
+
+	button = newButton();
+	strcpy(button->label, "Procedural Room Setup");
+	button->x = subx1 + 220;
+	button->y = suby2 - 72;
+	button->sizex = 184;
+	button->sizey = 16;
+	button->action = &buttonProceduralRoomProperties;
+	button->visible = 1;
+	button->focused = 1;
+}
+
+void buttonProceduralRoomProperties(button_t* my)
+{
+	(void)my;
+	editorOpenProceduralRoomProperties();
 }
 
 void buttonAttributesConfirm(button_t* my)
 {
 	int x, y, z, c;
+	ProceduralRoomDefinition proceduralDefinition;
+	char proceduralError[160] = "";
+	if ( !editorReadProceduralRoomDefinition(proceduralDefinition,
+		proceduralError, sizeof(proceduralError)) )
+	{
+		std::snprintf(message, sizeof(message), "Procedural room: %s",
+			proceduralError);
+		messagetime = 120;
+		return;
+	}
 	map_t mapcopy;
 	makeUndo();
 
@@ -2502,6 +2563,7 @@ void buttonAttributesConfirm(button_t* my)
 	}
 	saveMapAmbientLightEditorFields();
 	saveMapAmbienceEditorFields();
+	map.proceduralRoom = proceduralDefinition;
 
 	if ( !strncmp(mapflagtext[MAP_FLAG_DISABLETRAPS], "[x]", 3) )
 	{

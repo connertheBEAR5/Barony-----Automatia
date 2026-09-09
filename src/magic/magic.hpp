@@ -244,7 +244,22 @@ static const int SPELL_HOLY_FIRE = 221;
 static const int SPELL_SIGIL = 222;
 static const int SPELL_SANCTUARY = 223;
 static const int SPELL_HOLY_BEAM = 224;
-static const int NUM_SPELLS = 225;
+// Automatia Illusion Magic appends IDs only. Existing spell IDs are save and
+// S.A.M. compatibility contracts and must never be renumbered.
+static const int SPELL_MIRROR_OTHER = 225;
+static const int SPELL_MIRROR_COPY = 226;
+static const int SPELL_MIRROR_WALL = 227;
+static const int SPELL_MIRROR_REFLECT = 228;
+static const int SPELL_MIRROR_MIMIC = 229;
+static const int SPELL_MIRROR_REFLECT_LOOT = 230;
+static const int SPELL_PHANTASM_PATH = 231;
+static const int SPELL_MIRROR_DUPLICATE_LOOT = 232;
+static const int SPELL_MIRAGE_WALL = 233;
+static const int SPELL_PARANOIA = 234;
+static const int SPELL_VERTICAL_MIRAGE = 235;
+static const int SPELL_SHADOW_STEP = 236;
+static const int SPELL_STORE_MAGIC = 237;
+static const int NUM_SPELLS = 238;
 
 #define SPELLELEMENT_CONFUSE_BASE_DURATION 2//In seconds.
 #define SPELLELEMENT_BLEED_BASE_DURATION 10//In seconds.
@@ -980,6 +995,8 @@ bool applyGenericMagicDamage(Entity* caster, Entity* hitentity, Entity& damageSo
 	bool monsterCollisionOnly = false, int usingSpellbookID = 0);
 #endif
 bool isSpellcasterBeginner(int player, Entity* caster, int skillID);
+int getEffectiveSpellcastingAbility(Entity* caster, Stat* stat,
+	spell_t* spell);
 void actMagicTrap(Entity* my);
 void actMagicStatusEffect(Entity* my);
 void actMagicMissile(Entity* my);

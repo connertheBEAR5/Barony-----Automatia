@@ -16,6 +16,7 @@
 #include "messages.hpp"
 #include "interface/interface.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "engine/audio/sound.hpp"
 #include "book.hpp"
 #include "scrolls.hpp"
@@ -26,6 +27,7 @@
 #include "player.hpp"
 #include "mod_tools.hpp"
 #include "player_slot_map.hpp"
+#include "skill_books.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
 #include "sam/framework/sam_items.hpp"
@@ -35,6 +37,20 @@
 
 Uint32 itemuids = 1;
 ItemGeneric items[NUM_ITEM_SLOTS];
+
+bool itemIsSkillManual(const Item* const item)
+{
+	if (!item || (item->type != SKILL_BOOK && item->type != SKILL_SCROLL))
+	{
+		return false;
+	}
+	return SkillBooks::hasEncodedSkill(item->appearance);
+}
+
+int itemSkillManualSkill(const Item* const item)
+{
+	return itemIsSkillManual(item) ? SkillBooks::decodeSkill(item->appearance) : -1;
+}
 
 int itemVisualTemplateType(const int runtimeItemType)
 {
@@ -549,6 +565,19 @@ Item* newItem(const ItemType type, const Status status, const Sint16 beatitude, 
 	return item;
 }
 
+Item* newSkillManual(const ItemType type, const int skill, const Status status,
+	const Sint16 beatitude, const Sint16 count, const bool identified,
+	list_t* const inventory)
+{
+	if ((type != SKILL_BOOK && type != SKILL_SCROLL)
+		|| !SkillBooks::isEligibleSkill(skill))
+	{
+		return nullptr;
+	}
+	return newItem(type, status, beatitude, count,
+		SkillBooks::encodeSkill(skill), identified, inventory);
+}
+
 /*-------------------------------------------------------------------------------
 
 	uidToItem
@@ -703,7 +732,9 @@ bool itemLevelCurvePostProcess(Entity* my, Item* item, BaronyRNG& rng, int itemL
 					{
 						if ( auto spell = find->second )
 						{
-							if ( spell->ID != SPELL_NONE && !spell->hide_from_ui && itemLevel >= spell->drop_table )
+							if ( spell->ID != SPELL_NONE && !spell->hide_from_ui
+								&& IllusionMagic::contentAvailable(spell->ID)
+								&& itemLevel >= spell->drop_table )
 							{
 								if ( (spell->difficulty / 20) <= (1 + (itemLevel / 5))
 									/*&& (spell->difficulty >= minDifficulty)*/ )
@@ -1074,6 +1105,30 @@ ItemType itemLevelCurve(const Category cat, const int minLevel, const int maxLev
 
 char* Item::description() const
 {
+	// Skill manuals deliberately keep their target hidden until identified.
+	// They use the ordinary item description path for inventory messaging, but
+	// do not expose the encoded appearance or a normal-book title.
+	if ( itemIsSkillManual(this) )
+	{
+		const char* baseName = identified
+			? items[type].getIdentifiedName()
+			: items[type].getUnidentifiedName();
+		if ( identified )
+		{
+			snprintf(tempstr, sizeof(tempstr), "%s of %s",
+				baseName, getSkillLangEntry(itemSkillManualSkill(this)));
+		}
+		else if ( count > 1 )
+		{
+			snprintf(tempstr, sizeof(tempstr), "%d %s", count, baseName);
+		}
+		else
+		{
+			snprintf(tempstr, sizeof(tempstr), "%s", baseName);
+		}
+		return tempstr;
+	}
+
 	int c = 0;
 
 	if ( identified == true )
@@ -1437,6 +1492,20 @@ char* Item::getName() const
 		static_cast<int>(type)
 	) )
 	{
+		if ( itemIsSkillManual(this) )
+		{
+			if ( identified )
+			{
+				snprintf(tempstr, sizeof(tempstr), "%s of %s",
+					items[type].getIdentifiedName(),
+					getSkillLangEntry(itemSkillManualSkill(this)));
+			}
+			else
+			{
+				strcpy(tempstr, items[type].getUnidentifiedName());
+			}
+			return tempstr;
+		}
 		if ( identified )
 		{
 			if ( itemCategory(this) == BOOK )
@@ -1848,7 +1917,9 @@ int itemCompare(const Item* const item1, const Item* const item2, bool checkAppe
 	{
 		return 1;
 	}
-	else if ( item1->type == SCROLL_MAIL || item1->type == READABLE_BOOK || items[item1->type].category == SPELL_CAT
+	else if ( item1->type == SCROLL_MAIL || item1->type == READABLE_BOOK
+		|| item1->type == SKILL_BOOK || item1->type == SKILL_SCROLL
+		|| items[item1->type].category == SPELL_CAT
 		|| items[item1->type].category == TOME_SPELL
 		|| item1->type == TOOL_PLAYER_LOOT_BAG )
 	{
@@ -3022,6 +3093,17 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 		// assume used by the player unless otherwise (a fountain potion effect e.g)
 		usedBy = players[player]->entity;
 	}
+	if ( item->type == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+	{
+		if ( player >= 0 && player < MAXPLAYERS && players[player]
+			&& players[player]->isLocalPlayer() )
+		{
+			messagePlayer(player, MESSAGE_HINT,
+				"Automatian Mode is disabled for this game.");
+			playSoundPlayer(player, 90, 64);
+		}
+		return;
+	}
 
 
 	if ( item->status == BROKEN && player >= 0 && players[player]->isLocalPlayer() )
@@ -3739,6 +3821,19 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 		case SPELLBOOK_SANCTUARY:
 		case SPELLBOOK_HOLY_BEAM:
 		case SPELLBOOK_DOMINATE:
+		case SPELLBOOK_MIRROR_OTHER:
+		case SPELLBOOK_MIRROR_COPY:
+		case SPELLBOOK_MIRROR_WALL:
+		case SPELLBOOK_MIRROR_REFLECT:
+		case SPELLBOOK_MIRROR_MIMIC:
+		case SPELLBOOK_MIRROR_REFLECT_LOOT:
+		case SPELLBOOK_PHANTASM_PATH:
+		case SPELLBOOK_MIRROR_DUPLICATE_LOOT:
+		case SPELLBOOK_MIRAGE_WALL:
+		case SPELLBOOK_PARANOIA:
+		case SPELLBOOK_VERTICAL_MIRAGE:
+		case SPELLBOOK_SHADOW_STEP:
+		case SPELLBOOK_STORE_MAGIC:
 			item_Spellbook(item, player);
 			break;
 		case TOME_SORCERY:
@@ -3940,6 +4035,10 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 			{
 				consumeItem(item, player);
 			}
+			break;
+		case SKILL_BOOK:
+		case SKILL_SCROLL:
+			item_SkillManual(item, player);
 			break;
 		case READABLE_BOOK:
 			if (numbooks && players[player]->isLocalPlayer() )
@@ -4245,7 +4344,10 @@ void useItem(Item* item, const int player, Entity* usedBy, bool unequipForDroppi
 		}
 	}
 
-	if ( serverCheckUse )
+	// Consumable server-side handlers may remove the authenticated inventory
+	// node themselves (for example Skill Manuals).  In that case consumeItem()
+	// clears the local pointer and the generic cleanup must not inspect it again.
+	if ( serverCheckUse && item )
 	{
 		if ( equipItemResult == EQUIP_ITEM_SUCCESS_UPDATE_QTY
 			|| equipItemResult == EQUIP_ITEM_FAIL_CANT_UNEQUIP )
@@ -8058,6 +8160,17 @@ void playerTryEquipItemAndUpdateServer(const int player, Item* const item, bool 
 {
 	if ( !item )
 	{
+		return;
+	}
+	if ( item->type == MAGIC_GRIMOIRE && !automatianModeEnabled() )
+	{
+		if ( player >= 0 && player < MAXPLAYERS && players[player]
+			&& players[player]->isLocalPlayer() )
+		{
+			messagePlayer(player, MESSAGE_HINT,
+				"Automatian Mode is disabled for this game.");
+			playSoundPlayer(player, 90, 64);
+		}
 		return;
 	}
 

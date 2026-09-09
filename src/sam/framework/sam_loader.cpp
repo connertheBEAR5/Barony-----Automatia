@@ -55,10 +55,23 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 	{
 		SAMLogger::beginModLoad(); // opens the MOD LOAD section + starts the load-time clock
 	}
-	SAM_INFO("CORE", "S.A.M initializing..." + (baronyVersion.empty() ? std::string() : (" (Barony " + baronyVersion + ")")));
 	SAM_INFO("CORE", "Scanning " + std::to_string(mountedPaths.size()) + " mounted mod path(s) for mod.json...");
 
-	const std::vector<SAMModManifest> mods = SAMWorkshop::scan(mountedPaths, baronyVersion);
+	const std::vector<SAMModManifest> manifests =
+		SAMWorkshop::scan(mountedPaths, baronyVersion);
+	loadResolvedManifests(manifests, baronyVersion, false);
+}
+
+void SAMLoader::loadResolvedManifests(const std::vector<SAMModManifest>& mods,
+	const std::string& baronyVersion, bool beginLogSection)
+{
+	if ( beginLogSection )
+	{
+		SAMLogger::beginModLoad();
+	}
+	SAM_INFO("CORE", "S.A.M initializing..."
+		+ (baronyVersion.empty() ? std::string()
+			: (" (Barony " + baronyVersion + ")")));
 
 	// Fully rebuild the class + item registries every load (loadMods fires on
 	// every Play, so appending would double-register).
@@ -67,6 +80,10 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 #ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
 	SAMEffects::clear(); // drop custom status effects -> vanilla
 	SAMRaces::clear(); // drop custom playable races -> vanilla
+	// Body entries cache resolved model indices per entity. A reload may reuse
+	// those slots for different .vox files, so retaining this cache would make
+	// a live monster render with an unrelated model until it respawned.
+	SAMBodies::clear();
 	SAMSounds::clear(); // drop staged custom sounds (engine table reset on next append)
 	SAMRecipes::clear(); // drop tinkering recipes -> vanilla craftable grid
 	SAMWorkbench::clear(); // and the built-in bench, so it re-installs this cycle

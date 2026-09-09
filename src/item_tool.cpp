@@ -1039,6 +1039,13 @@ void Item::applyOrb(int player, ItemType type, Entity& entity)
 				return;
 			}
 
+			if ( this->type == ARTIFACT_ORB_PURPLE && !automatianModeEnabled() )
+			{
+				messagePlayer(player, MESSAGE_HINT,
+					"Automatian Mode is disabled for this game.");
+				return;
+			}
+
 			if ( this->type == ARTIFACT_ORB_PURPLE )
 			{
 				if ( !automatiaUnlockMagicGrimoireMerchant() )

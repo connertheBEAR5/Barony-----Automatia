@@ -5,6 +5,14 @@
 #  STEAMWORKS_INCLUDE_DIR - the Steamworks include directory
 #  STEAMWORKS_LIBRARIES - The libraries needed to use Steamworks
 
+set(STEAMWORKS_SDK_ROOTS
+	"${STEAMWORKS_ROOT}"
+	"${STEAMWORKS_DIR}"
+	"$ENV{STEAMWORKSROOT}"
+	"$ENV{STEAMWORKS_ROOT}"
+	"$ENV{STEAMWORKS_DIR}"
+)
+
 if (NOT STEAMWORKS_INCLUDE_DIR OR NOT STEAMWORKS_LIBRARIES)
 	set(LIB_SEARCH_PATHS
 		~/Library/Frameworks
@@ -16,40 +24,41 @@ if (NOT STEAMWORKS_INCLUDE_DIR OR NOT STEAMWORKS_LIBRARIES)
 		$ENV{STEAMWORKSROOT}/sdk/redistributable_bin/linux64 #I don't like this. TODO: Make it determine 64/32 bit automatically.
 		$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin/linux64
 		$ENV{STEAMWORKS_DIR}/sdk/redistributable_bin/linux64
+		${STEAMWORKS_ROOT}/sdk/redistributable_bin/linux64
+		${STEAMWORKS_DIR}/sdk/redistributable_bin/linux64
 		#$ENV{STEAMWORKSROOT}/sdk/redistributable_bin/linux32
 		#$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin/linux32
 		#$ENV{STEAMWORKS_DIR}/sdk/redistributable_bin/linux32
 	)
 	FIND_PATH(STEAMWORKS_INCLUDE_DIR steam/steam_api.h
+		HINTS ${STEAMWORKS_SDK_ROOTS}
+		PATH_SUFFIXES sdk/public
+		PATHS
 		/usr/include
 		/usr/local/include
-		$ENV{STEAMWORKSROOT}/sdk/public/
-		$ENV{STEAMWORKS_ROOT}/sdk/public/
-		$ENV{STEAMWORKS_DIR}/sdk/public/
 		DOC "Include path for Steamworks"
 	)
 
-	if (Windows)
-		if (BIT_32) #Need a better way of determining bits needed. Maybe have (LIBRARIES_32_BIT and LIBRARIES_64_BIT)?
+	if (WIN32)
+		if (CMAKE_SIZEOF_VOID_P EQUAL 4)
 			FIND_LIBRARY(STEAMWORKS_LIBRARY NAMES steam_api
-				PATHS
-				$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin
+				HINTS ${STEAMWORKS_SDK_ROOTS}
+				PATH_SUFFIXES sdk/redistributable_bin
 				DOC "Steamworks library name"
 			)
-			MESSAGE("32 bit steam")
+			MESSAGE(STATUS "Steamworks: selecting 32-bit Windows library")
 		else ()
 			FIND_LIBRARY(STEAMWORKS_LIBRARY NAMES steam_api64
-				PATHS
-				$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin/win64
+				HINTS ${STEAMWORKS_SDK_ROOTS}
+				PATH_SUFFIXES sdk/redistributable_bin/win64
 				DOC "Steamworks library name"
 			)
-			MESSAGE("64 bit steam")
+			MESSAGE(STATUS "Steamworks: selecting 64-bit Windows library")
 		endif()
 	elseif (APPLE)
 		FIND_LIBRARY(STEAMWORKS_LIBRARY NAMES steam_api
-			PATHS
-			$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin
-			$ENV{STEAMWORKS_ROOT}/sdk/redistributable_bin/osx32
+			HINTS ${STEAMWORKS_SDK_ROOTS}
+			PATH_SUFFIXES sdk/redistributable_bin sdk/redistributable_bin/osx32
 			DOC "Steamworks library name"
 		)
 	else ()

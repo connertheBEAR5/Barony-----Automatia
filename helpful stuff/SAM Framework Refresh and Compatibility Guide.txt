@@ -1,0 +1,179 @@
+S.A.M. FRAMEWORK REFRESH AND COMPATIBILITY GUIDE
+
+Working repository: /home/conner/Barony-----Automatia
+Reference archive reviewed: /home/conner/Downloads/SAM-Framework-main.zip
+Reference source marker: S.A.M Framework 2.7.3
+Automatia runtime line: adapted S.A.M. 2.1 compatibility integration
+Refresh date: 2026-09-08
+
+
+1. PURPOSE AND COMPATIBILITY POSITION
+======================================
+
+The supplied S.A.M archive was used as a source reference and bug-finding aid.
+It was not copied wholesale over Automatia.
+
+Automatia already owns durable S.A.M item identity, map-instance boundaries,
+Playable-Z context, save compatibility, and its existing multiplayer authority
+rules. Replacing those systems with upstream assumptions would risk raw runtime
+IDs entering saves or packets, global-map behavior crossing MapInstances, and
+duplicate runtime registries.
+
+This refresh selectively hardens and improves the adapted S.A.M 2.1 runtime.
+It does NOT claim that every API or gameplay feature from the upstream 2.7.3
+reference archive is now implemented. Mod authors should continue to target
+the documented Automatia S.A.M surface, not infer support solely from an
+upstream archive version number.
+
+
+2. WHAT CHANGED
+===============
+
+One authoritative manifest scan
+-------------------------------
+
+Automatia's foundation builds stable identity and the S.A.M runtime from the
+same resolved manifest list. The runtime no longer rescans mod.json after the
+foundation has already scanned it. This removes needless parsing and prevents
+an edit made during loading from giving the persistent catalog and runtime two
+different views of the mounted mod set.
+
+Content-aware multiplayer compatibility
+----------------------------------------
+
+Each accepted manifest now carries a deterministic 64-bit FNV content digest.
+The digest covers mod.json, each payload/resource explicitly declared by the
+manifest, and the class/item/race companion scripts plus main.{ts,js,lua} that
+the loader can execute. Paths and file bytes are both included; missing declared
+files are represented explicitly.
+
+SAMF continues to use the existing reliable chunk transport and packet layout.
+The per-mod entry now carries the digest after its version, for example:
+
+    example_mod@1.4.0+0123456789abcdef
+
+The host remains authoritative. A client cannot choose a mod identity or bypass
+the comparison. If a mod changes its JSON, model, room, sound, script, or other
+declared payload without changing its version, the session detects the content
+difference and reports the namespace and both digests. The digest is a
+compatibility diagnostic, not a security signature or a persistent identifier.
+
+Duplicate namespaces are rejected
+---------------------------------
+
+Only one mounted mod may claim a namespace. The first discovered valid claimant
+is retained; every later claimant is rejected with a clear error that names the
+other folder. Do not depend on this selection rule. Give every mod a unique
+namespace, because a duplicate can otherwise create different stable IDs or
+different content on host and client.
+
+Safer mod data handling
+-----------------------
+
+The manifest reader now reports malformed declared arrays, room groups, room
+paths, and unknown mod.json keys instead of silently treating them as empty.
+Unsafe paths that escape the mod directory continue to be ignored.
+
+The item and class foundation loaders now validate strings, booleans, and
+32-bit integer fields before converting them. A malformed optional field is
+warned about and receives its documented default. A malformed required ID/name
+declaration is skipped instead of allowing an exception to interrupt mod load.
+
+Faster item registry lookup and allocation
+------------------------------------------
+
+The item foundation now maintains stable-ID and runtime-ID indexes. Lookup is
+constant-time on the normal path, and runtime IDs are allocated with a cursor
+that skips only known occupied slots. This replaces repeated scans across the
+20,000-slot S.A.M range while preserving the same ordered vector API and the
+same stable/runtime identity rules.
+
+Reload cleanup fixes
+--------------------
+
+The live item-definition bridge now records exactly which item slots it
+installed. A later reload clears those recorded slots even though the new
+registry has already been rebuilt, preventing a removed mod's old definition
+from lingering in items[].
+
+Creature body entries cache resolved model indices. They are now cleared before
+a new runtime load, so a model-table slot reused after a reload cannot make a
+custom creature render with an unrelated old body model.
+
+
+3. IDENTITY, PERSISTENCE, AND AUTHORITY THAT DID NOT CHANGE
+===========================================================
+
+* A stable S.A.M ID such as `example_mod:crystal_blade` remains the durable,
+  cross-session item identity.
+* A numeric S.A.M runtime ID remains a current-session lookup only. It must not
+  be newly authored into persistent data when a stable ID is available.
+* The existing catalog, editor SMID metadata, save migration, and packet
+  validation paths remain the authority for stable-ID handling.
+* S.A.M does not replace Automatia's WorldState, Party, dialogue, quest,
+  MapInstance, playableFloor, authoredMapLayer, or local Entity::z rules.
+* This refresh does not add a new custom packet layout. Existing SAMF
+  recipient/handshake behavior is retained.
+
+
+4. MOD AUTHOR CHECKLIST
+=======================
+
+Before publishing or joining a multiplayer session:
+
+1. Use a unique lowercase namespace and stable IDs under that namespace.
+2. Keep `mod.json` accurate. Every declared resource and companion script is
+   part of compatibility, even if the manifest version did not change.
+3. Do not use `..`, absolute paths, or drive-prefixed paths in manifest content
+   declarations.
+4. Fix every S.A.M log warning for a malformed field rather than relying on a
+   fallback value.
+5. If content changes, distribute the exact same mod folder to the host and
+   every client. Bumping the human-facing version is still good release
+   practice, but the content digest now catches accidental same-version drift.
+6. Do not persist a raw runtime ID in external data. Store the stable ID and
+   resolve it through the existing catalog at load time.
+
+
+5. VALIDATION AND MANUAL ACCEPTANCE
+===================================
+
+Automated coverage:
+
+    cmake --build build --target sam_framework_refresh_tests -j6
+    ctest --test-dir build --output-on-failure -R '^sam_framework_refresh$'
+
+The refresh test deterministically verifies:
+
+* duplicate namespace rejection;
+* normalization of a leading version `v`;
+* a same-version declared payload or companion script changing the digest;
+* malformed manifest arrays/room declarations remaining safe;
+* malformed item/class fields receiving safe defaults or being rejected; and
+* indexed S.A.M runtime-ID allocation, lookup, clear, and reuse behavior.
+
+Run the full project regression suite and normal build as well:
+
+    cmake --build build -j6
+    ctest --test-dir build --output-on-failure
+    ./build/barony --automatia-stage4d-z3-transition-characterization
+    git diff --check
+
+The regular build profile is expected to use OpenAL with 15-player multiplayer
+and Steamworks when their dependencies are available. EOS is separately
+optional and is not implied by this guide.
+
+Manual acceptance is still required for behavior an automated source-level
+test cannot observe:
+
+1. Start a server and two real graphical clients with byte-identical custom
+   S.A.M content; confirm the join succeeds and SAMF reports a match.
+2. Change one declared JSON/script/resource on only one client without changing
+   the manifest version; confirm the join is rejected/warned with a content
+   mismatch identifying that namespace.
+3. Unload and reload a mod that changes/removes custom items and models; verify
+   removed item definitions do not remain usable and custom creature bodies use
+   the current model set.
+4. Test a real saved custom item, an editor-authored SMID item, a divergent
+   MapInstance/floor scenario, reconnect, and a headless-host session. These
+   retain the existing Automatia authority boundaries and need live acceptance.

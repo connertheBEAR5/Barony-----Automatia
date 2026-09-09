@@ -1347,11 +1347,14 @@ existing extension API instead of inventing a second command language.
 
 
 ======================================================================
-40. S.A.M. FRAMEWORK 2.1 INTEGRATION
+40. S.A.M. FRAMEWORK 2.1 INTEGRATION AND REFRESH SAFEGUARDS
 ======================================================================
 
 Status: Integrated at the supported identity, persistence, hook, and handshake
-seams; real mod-content acceptance remains manual.
+seams. The 2026-09-08 refresh adds single-scan loading, content-aware SAMF
+compatibility, duplicate-namespace rejection, hardened declaration parsing,
+indexed item lookups, and reload cleanup. Real mod-content acceptance remains
+manual.
 
 S.A.M. stable IDs are cross-session item identity. Numeric runtime item IDs are
 assigned for the current loaded catalog and must never be written as durable
@@ -1360,16 +1363,22 @@ identity when a stable ID exists. Zed's historical concrete item fields use
 ground items, containers, monster inventory, and equipment.
 
 The effective item/catalog and deterministic room-provider selection contribute
-to SAMF. Late join hard-rejects an incompatible fingerprint; the current lobby
-path warns and should be treated as a failed acceptance rather than ignored.
-Duplicate logical room declarations are resolved deterministically before both
-generation and fingerprinting. Server generation remains authoritative and
-MapInstances do not share generation state.
+to SAMF. A per-manifest digest now covers mod.json, declared payloads/resources,
+and loader-discovered companion scripts, so changed same-version content does
+not look compatible. The transport packet layout is unchanged. Late join
+hard-rejects an incompatible fingerprint; the current lobby path warns and
+should be treated as a failed acceptance rather than ignored. Duplicate mod
+namespaces are rejected and duplicate logical room declarations are resolved
+deterministically before generation and fingerprinting. Server generation
+remains authoritative and MapInstances do not share generation state.
 
 S.A.M. hooks extend existing item/entity/room behavior. They do not replace
 Automatia persistence, Room Groups, Text Source, Mini Mimic, party, networking,
-or Playable-Z authority. See the dedicated S.A.M. compatibility audit for the
-full overlap matrix and deferred surfaces.
+or Playable-Z authority. The supplied newer S.A.M source was used as a reference
+for this refresh; Automatia remains an adapted 2.1 compatibility runtime rather
+than claiming every upstream feature. See the dedicated S.A.M. compatibility
+audit and `SAM Framework Refresh and Compatibility Guide.txt` for the full
+overlap matrix, author guidance, and deferred/manual surfaces.
 
 
 ======================================================================
@@ -1397,15 +1406,16 @@ complete manual cross-feature scenario remain acceptance work.
 
 Current automated commands:
 
-    cmake --build build-super-posix -j6
-    ctest --test-dir build-super-posix --output-on-failure
-    ./build-super-posix/barony --automatia-stage4d-z3-transition-characterization
+    cmake --build build -j6
+    ctest --test-dir build --output-on-failure
+    ./build/barony --automatia-stage4d-z3-transition-characterization
     git diff --check
 
-CTest currently registers 13 targets: foundation, S.A.M. 2.1 contract, Text
-Source, Mini Mimic, Room Group, vertical navigation, cross-floor path routing,
-S.A.M. room generation, party backend, party UI, party chat, Playable-Z
-characterization, and Playable-Z runtime characterization.
+CTest currently registers 21 targets, including the focused S.A.M. framework
+refresh coverage alongside foundation, S.A.M. 2.1 contract, Text Source, Mini
+Mimic, Room Group/procedural generation, vertical navigation, cross-floor path
+routing, party/quest behavior, Illusion/skill-book behavior, audio configuration,
+and Playable-Z characterization.
 
 The remaining real-multiplayer acceptance gate is the exact one-headless plus
 two-real-graphical-client run in "Automatia Cross-Feature Compatibility and Z4
@@ -1551,3 +1561,161 @@ a hostile and passive Mini Mimic, stationary dialogue NPC, recruited Mini
 Mimic, a S.A.M.-compatible normal monster, MapInstance rejection, client
 authority rejection and headless execution. It does not replace a real
 dedicated-server plus graphical-client observation of movement and replication.
+
+
+======================================================================
+47. OPTIONAL AUTOMATIAN MODE — ILLUSION MAGIC / MAGIC GRIMOIRE
+======================================================================
+
+Status: Implemented behind the OFF-by-default, authoritative
+`SV_FLAG_AUTOMATIAN_MODE` session flag. The one host-controlled Game
+Settings/lobby choice is named “Automatian Mode.” It jointly gates Illusion
+Magic, the Magic Grimoire, and the Skill Books/Skill Scrolls described in the
+following section.
+Automated model/source-contract validation is present. Real graphical,
+controller, audible, headless-host plus two-client acceptance remains manual.
+
+Launch a test session with `--automatian-mode`. `--illusion-magic` and
+`--skill-books` remain compatibility aliases for that same mode; neither is an
+independent partial switch. With Automatian Mode off, the school filter, spell
+and book slots, ordinary book generation, learning, casts, AI/perception
+hooks, navigation overlays, vault, and Illusion runtime tick are hidden or
+inert. Magic Grimoire generation, Purple-Orb merchant exchange, equip/hotbar,
+and spell-scaling behavior are likewise unavailable. Definitions remain
+decodable so old saves and explicit authored numeric values do not become
+corrupt.
+
+Illusion appends spell IDs 225 through 237 without renumbering existing spells:
+Mirror Other, Mirror Copy, Mirror Wall, Mirror Reflect, Mirror Mimic, Mirror
+Reflect Loot, Phantasm Path, Mirror Duplicate Loot, Mirage Wall, Paranoia,
+Vertical Mirage, Shadow Step, and Store Magic. Each has a real append-only
+spellbook item using normal inventory, reading, known-spell save, hotbar,
+tooltip, editor lookup, and feature-gated generation paths.
+
+The school uses one central derived rank: the highest current modified Sorcery,
+Mysticism, or Thaumaturgy, clamped 0..100. This gives all learning, fumble,
+extra-mana, animation, tooltip, and Store decisions a first-class Illusion
+value without changing the fixed proficiency save/packet array.
+
+The school changes temporary perception rather than permanent world identity.
+Mirror Other is cosmetic; Mirror Mimic adds temporary eligible-hostile neutral
+perception without changing faction; Mirror Copy and Shadow Step use harmless
+no-drop/no-XP holograms; Paranoia uses temporary target confusion. Mirror Wall
+is passable but avoided by fooled hostiles, Mirage Wall only hides a real wall,
+Vertical Mirage only hides a real floor, and Phantasm Path gives selective
+support to its caster and server-authorized allies. No spell changes map tile
+bytes or turns an illusion into structural Z state.
+
+Mirror Reflect enters the existing projectile-impact decision once, after
+ordinary Reflection and before Absorb, with loop guards. Store Magic enters
+earlier and captures only hostile ordinary player-learnable projectiles. Its
+runtime-only vault holds 1/2/3/4/5 entries at rank 0/20/40/60/80. Release moves
+from deterministic random, to oldest/newest, to exact selection; exact discard
+unlocks at 60 and five-minute study/normal learning at 80. Release costs about
+one quarter original effective MP with a bounded proficiency-deficit surcharge,
+and power is capped below the caster's native version.
+
+Mirror Reflect Loot creates only a bounded non-interactable visual with no Item
+or stable identity. Mirror Duplicate Loot costs 100 MP once and can create one
+real quantity-one item only after live server inventory and progression safety
+checks. It rejects keys, artifacts/orbs, quest/progression items, containers,
+spell pseudo-items, and unregistered/stale custom mappings. A valid S.A.M. item
+must carry a matching stable ID; a successful real copy uses normal item
+persistence.
+
+All overlays use active MapInstance identity plus exact `playableFloor`. Same
+X/Y, local `Entity::z`, and `authoredMapLayer` never broaden their scope.
+Collections are bounded: 32 overlays, eight tiles per overlay, 32 authorized
+actors per overlay, four generated Phantasm tiles, 32 holograms, 16 fake-loot
+visuals, at most `MAXPLAYERS + 32` vault owners, and at most five entries per
+vault. MapInstance changes clear pointer-free UID associations before UID reuse.
+
+The headless/server process owns all effects, item creation, target/tile checks,
+teleports, AI changes, capture/release/study, and learning. Additive bounded
+packets replicate relevant overlays, authenticate item/vault requests, and send
+vault details only to the owner. Existing feature, spell, entity, item, and
+known-spell packet layouts remain unchanged.
+
+Detailed balance, architecture, UI controls, caveats, and manual acceptance are
+maintained in:
+
+* `helpful stuff/Illusion Magic School Design and Developer Guide.txt`
+* `helpful stuff/Illusion Magic Spell Comparison and Compatibility Audit.txt`
+* `helpful stuff/Illusion Magic School UI and UX Guide.txt`
+
+Illusion Magic is the end of this feature scope; it does not begin Z5 or Z6.
+
+======================================================================
+48. OPTIONAL SKILL BOOKS / SKILL SCROLLS (AUTOMATIAN MODE)
+======================================================================
+
+Skill Books and Skill Scrolls are rare, server-authoritative run consumables
+inside the shared, OFF-by-default Automatian Mode. The one Game
+Settings/lobby flag is named “Automatian Mode” and may be enabled for a
+headless host with `--automatian-mode`; `--skill-books` remains a compatibility
+alias for the same whole mode. It is not an account progression system: a
+successful read changes the current player's existing 0..100 proficiency save
+value and is carried by the normal current-run save/reconnect path only.
+
+The target is one of the fifteen normal player skills. Appraisal is the
+current Lore-equivalent and is deliberately not a target. Lore 0/20/40/60/80
+produces 1/2/3/4/5 points; negative beatitude reverses the sign and all results
+use the normal 0..100 clamp. Unidentified manuals remain generic until the
+normal appraisal/identification flow; identified tooltips show the target,
+signed effect, Lore magnitude, and current-run permanence. Goblins use the
+manual path and are not blocked by the spellbook memorization restriction.
+
+Generation is additive and rare: a gated roll is available in general/chest
+loot, bookstore slots, and empty map-side readable-book props used by
+bookcases/libraries. Existing authored books, ordinary scrolls, Illusion fake
+loot visuals, and real duplicate-loot safety rules remain unchanged. A server
+validates the complete authenticated item tuple and mutates the actual player
+inventory/proficiency node; clients cannot select a different target or enable
+the flag locally. The established SKIL packet and player Stat persistence are
+reused.
+
+Design, skill compatibility, balance, and manual acceptance details are in:
+
+* `helpful stuff/Skill Books Skill Compatibility and Balance Audit.txt`
+* `helpful stuff/Skill Books Design and Developer Guide.txt`
+
+======================================================================
+49. PROCEDURAL ROOM GROUPS (2026-09-07)
+======================================================================
+
+Procedural Room Groups are now a real map-level authoring path, distinct from
+the existing AuthoredRoomGroup cuboid editor feature. Map Properties exposes a
+working-copy Procedural Room Setup dialog where a mapper can enable an
+arbitrary .lmp, choose a human-readable level set and source-backed category,
+and assign a positive relative weight (default 100). The metadata is stored in
+the version-2 PGRM chunk inside the existing MPMD envelope; version-1 PGRM
+payloads remain readable, old maps without PGRM remain disabled, and RGRP data
+is unchanged. The dialog's Validate Room,
+preview, and severity rows share the same descriptors and compatibility rules
+used by the runtime.
+
+The headless runtime recursively scans the mounted virtual maps/ namespace via
+PhysFS, parses enabled metadata once into a deterministic sorted/deduplicated
+catalog, and appends matching rooms to the ordinary numbered and S.A.M. room
+pool plus the matching shop, treasure, special, and compatible secret-doorway
+pools. Existing global category chance rules are unchanged; metadata weights
+are applied only inside a selected pool. Default-weight pools retain the legacy
+uniform map_rng path; non-default weights use wide cumulative deterministic
+selection. Existing loadSubRoomData,
+32-layer tile copying, generic entity properties, S.A.M. stable IDs, and the
+existing generated persistent-ID save pass remain authoritative. Both ordinary
+room-copy branches now register generated child entities (not source prefab
+entities) in the creature list.
+
+The complete mapper/developer trace, validation rules, content fingerprint
+behavior, Playable-Z boundary, limitations, and manual acceptance checklist
+are in:
+
+* `helpful stuff/Procedural Room Groups Authoring and Developer Guide.txt`
+* `helpful stuff/Procedural Room Groups UI and UX Guide.txt`
+
+The dialog also supports a persisted **Custom Room Group** name. Custom groups
+are real PGRM/runtime candidates and are merged into the selected level set's
+ordinary room pool; their names organize/fingerprint related maps, while their
+weights compete with ordinary candidates rather than creating a new global
+spawn chance.

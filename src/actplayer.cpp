@@ -18,6 +18,7 @@
 #include "engine/audio/sound.hpp"
 #include "items.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "menu.hpp"
 #include "scores.hpp"
 #include "monster.hpp"
@@ -31,6 +32,7 @@
 #include "player_slot_map.hpp"
 #include "status_effect_owner_encoding.hpp"
 #include "world_packet_scope.hpp"
+#include "player_movement_math.hpp"
 #include "ui/MainMenu.hpp"
 #include "interface/consolecommand.hpp"
 #ifdef USE_PLAYFAB
@@ -3669,6 +3671,10 @@ bool Player::PlayerMovement_t::isPlayerSwimming()
 		int x = std::min(std::max<unsigned int>(0, floor(my->x / 16)), map.width - 1);
 		int y = std::min(std::max<unsigned int>(0, floor(my->y / 16)), map.height - 1);
 		const Sint32 floorTile = map.tileAt(x, y, FLOORLAYER, my->playableFloor);
+		if ( IllusionMagic::supportsActorAt(*my, x, y) )
+		{
+			return false;
+		}
 		if ( swimmingtiles[floorTile]
 			|| lavatiles[floorTile] )
 		{
@@ -4664,22 +4670,48 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 		}
 		else
 		{
-			double backpedalMultiplier = 0.25;
+			// The remastered movement mode is a server-owned game flag.  Keep the
+			// legacy movement path intact when the flag is absent so existing saves,
+			// maps, and multiplayer sessions retain their historical behavior.
+			const bool omnidirectionalMovement =
+				(svFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT) != 0;
+			double backpedalMultiplier = omnidirectionalMovement ? 1.0 : 0.25;
 			double lateralMultiplier = 1.0;
 			if ( stats[PLAYER_NUM]->helmet && stats[PLAYER_NUM]->helmet->type == HAT_BANDANA )
 			{
-				if ( stats[PLAYER_NUM]->helmet->beatitude >= 0 || shouldInvertEquipmentBeatitude(stats[PLAYER_NUM]) )
+				if ( omnidirectionalMovement )
 				{
-					backpedalMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
-					backpedalMultiplier = std::min(0.75, backpedalMultiplier);
-					lateralMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
-					lateralMultiplier = std::min(1.5, lateralMultiplier);
+					const double bandanaDirectionalBonus =
+						0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
+					if ( stats[PLAYER_NUM]->helmet->beatitude >= 0 || shouldInvertEquipmentBeatitude(stats[PLAYER_NUM]) )
+					{
+						backpedalMultiplier += bandanaDirectionalBonus;
+						backpedalMultiplier = std::min(1.5, backpedalMultiplier);
+						lateralMultiplier += bandanaDirectionalBonus;
+						lateralMultiplier = std::min(1.5, lateralMultiplier);
+					}
+					else
+					{
+						backpedalMultiplier += bandanaDirectionalBonus;
+						backpedalMultiplier = std::min(1.5, backpedalMultiplier);
+						lateralMultiplier = 0.0;
+					}
 				}
 				else
 				{
-					backpedalMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
-					backpedalMultiplier = std::min(0.75, backpedalMultiplier);
-					lateralMultiplier = 0.0;
+					if ( stats[PLAYER_NUM]->helmet->beatitude >= 0 || shouldInvertEquipmentBeatitude(stats[PLAYER_NUM]) )
+					{
+						backpedalMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
+						backpedalMultiplier = std::min(0.75, backpedalMultiplier);
+						lateralMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
+						lateralMultiplier = std::min(1.5, lateralMultiplier);
+					}
+					else
+					{
+						backpedalMultiplier += 0.5 * (1 + abs(stats[PLAYER_NUM]->helmet->beatitude)) * 0.25;
+						backpedalMultiplier = std::min(0.75, backpedalMultiplier);
+						lateralMultiplier = 0.0;
+					}
 				}
 			}
 			if ( stats[PLAYER_NUM]->getEffectActive(EFF_DASH) )
@@ -4715,7 +4747,9 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 
 				if ( inputs.hasController(PLAYER_NUM) /*&& !input.binary("Move Left") && !input.binary("Move Right")*/ )
 				{
-					x_force = inputs.getController(PLAYER_NUM)->getLeftXPercentForPlayerMovement(PLAYER_NUM);
+					x_force = omnidirectionalMovement
+						? inputs.getController(PLAYER_NUM)->getLeftXPercentForOmnidirectionalMovement(PLAYER_NUM)
+						: inputs.getController(PLAYER_NUM)->getLeftXPercentForPlayerMovement(PLAYER_NUM);
 
 					if ( stats[PLAYER_NUM]->getEffectActive(EFF_CONFUSED) )
 					{
@@ -4724,7 +4758,9 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 				}
 				if ( inputs.hasController(PLAYER_NUM) /*&& !input.binary("Move Forward") && !input.binary("Move Backward")*/ )
 				{
-					y_force = inputs.getController(PLAYER_NUM)->getLeftYPercentForPlayerMovement(PLAYER_NUM);
+					y_force = omnidirectionalMovement
+						? inputs.getController(PLAYER_NUM)->getLeftYPercentForOmnidirectionalMovement(PLAYER_NUM)
+						: inputs.getController(PLAYER_NUM)->getLeftYPercentForPlayerMovement(PLAYER_NUM);
 
 					if ( stats[PLAYER_NUM]->getEffectActive(EFF_CONFUSED) )
 					{
@@ -4733,10 +4769,20 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 
 					if ( y_force < 0 )
 					{
-						y_force *= backpedalMultiplier;    //Move backwards more slowly.
+						y_force *= backpedalMultiplier;    //Apply explicit directional modifiers.
 					}
 				}
 				x_force *= lateralMultiplier;
+
+				if ( omnidirectionalMovement )
+				{
+					const auto normalizedInput = PlayerMovementMath::normalize({
+						x_force,
+						y_force
+					});
+					x_force = normalizedInput.strafe;
+					y_force = normalizedInput.forward;
+				}
 			}
 		}
 
@@ -4850,8 +4896,9 @@ void Player::PlayerMovement_t::handlePlayerMovement(bool useRefreshRateDelta)
 		real_t defendSpeed = (1.0 + defendPenalty);
 		PLAYER_VELX += y_force * cos(my->yaw) * .045 * speedFactor / (defendSpeed);
 		PLAYER_VELY += y_force * sin(my->yaw) * .045 * speedFactor / (defendSpeed);
-		PLAYER_VELX += x_force * cos(my->yaw + PI / 2) * .0225 * speedFactor / (defendSpeed);
-		PLAYER_VELY += x_force * sin(my->yaw + PI / 2) * .0225 * speedFactor / (defendSpeed);
+		const real_t lateralSpeed = (svFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT) ? .045 : .0225;
+		PLAYER_VELX += x_force * cos(my->yaw + PI / 2) * lateralSpeed * speedFactor / (defendSpeed);
+		PLAYER_VELY += x_force * sin(my->yaw + PI / 2) * lateralSpeed * speedFactor / (defendSpeed);
 
 	}
 
@@ -6338,7 +6385,8 @@ static bool playerMovementWouldEnterMissingFloor(
 			const int floorTile =
 				map.tileAt(x, y, FLOORLAYER, player->playableFloor);
 
-			if ( !floorTile )
+			if ( !floorTile
+				&& !IllusionMagic::supportsActorAt(*player, x, y) )
 			{
 				return true;
 			}
@@ -7702,6 +7750,31 @@ void actPlayer(Entity* my)
 			entity->behavior = &actMagicRangefinder;
 			players[PLAYER_NUM]->hud.magicRangefinder = entity;
 			my->bodyparts.push_back(entity);
+
+			// Phantasm Path previews at most four route tiles. These local-only
+			// rangefinder siblings deliberately stay out of bodyparts so legacy
+			// limb indices remain unchanged; they retire themselves with this
+			// exact player UID and never consume authoritative entity UIDs.
+			for ( std::size_t previewIndex = 0;
+				previewIndex < IllusionMagic::PhantasmPathPreview::kMaximumTiles;
+				++previewIndex )
+			{
+				Entity* pathPreview = newEntityWithSpatialContext(
+					-1, 1, map.entities, nullptr, my);
+				pathPreview->flags[PASSABLE] = true;
+				pathPreview->flags[OVERDRAW] = false;
+				pathPreview->flags[NOUPDATE] = true;
+				pathPreview->flags[INVISIBLE] = true;
+				pathPreview->skill[2] = PLAYER_NUM;
+				pathPreview->skill[12] = static_cast<int>(previewIndex) + 1;
+				pathPreview->behavior = &actMagicRangefinder;
+				pathPreview->parent = my->getUID();
+				if ( multiplayer != CLIENT )
+				{
+					--entity_uids;
+				}
+				pathPreview->setUID(-3);
+			}
 
 			// hud additional 2 limb
 			entity = newEntityWithSpatialContext(-1, 1, map.entities, nullptr, my); //HUD entity.
@@ -9477,7 +9550,8 @@ void actPlayer(Entity* my)
 			const int floorTile =
 				map.tileAt(pitX, pitY, FLOORLAYER, my->playableFloor);
 
-			if ( !floorTile )
+			if ( !floorTile
+				&& !IllusionMagic::supportsActorAt(*my, pitX, pitY) )
 			{
 				PlayableFloorId lowerLandingFloor = DEFAULT_PLAYABLE_FLOOR;
 				int previewFloorsFallen = 0;
@@ -13530,7 +13604,8 @@ void actPlayer(Entity* my)
 						if ( stats[PLAYER_NUM]->shield != NULL )
 						{
 							if ( itemCategory(stats[PLAYER_NUM]->shield) == SPELLBOOK
-								|| stats[PLAYER_NUM]->shield->type == MAGIC_GRIMOIRE )
+								|| (automatianModeEnabled()
+									&& stats[PLAYER_NUM]->shield->type == MAGIC_GRIMOIRE) )
 							{
 								bendArm = false;
 							}

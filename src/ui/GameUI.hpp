@@ -207,6 +207,8 @@ struct StatusEffectQueue_t
 	bool bCompactHeight = false;
 	SDL_Rect effectsBoundingBox{ 0, 0, 0, 0 };
 	int selectedElement = -1;
+	std::size_t storeVaultSelectedIndex = 0;
+	bool storeVaultPreferNewest = false;
 	void updateAllQueuedEffects();
 	void animateStatusEffectTooltip(bool showTooltip);
 	bool doStatusEffectTooltip(StatusEffectQueueEntry_t& entry, SDL_Rect pos);

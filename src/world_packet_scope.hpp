@@ -221,6 +221,8 @@ inline bool packetUsesActiveMapScope(const std::uint8_t* data, std::size_t lengt
 		{'B', 'L', 'E', 'S'}, {'B', 'L', 'E', '1'},
 		{'C', 'H', 'A', 'N'}, {'M', 'F', 'O', 'D'},
 		{'T', 'K', 'I', 'T'}, {'M', 'I', 'D', 'G'},
+		{'I', 'L', 'O', 'V'}, {'I', 'L', 'I', 'T'},
+		{'I', 'L', 'V', 'A'}, {'I', 'L', 'V', 'R'},
 		{'D', 'A', 'S', 'H'}, {'I', 'T', 'E', 'Q'},
 		{'S', 'C', 'R', 'U'}, {'E', 'Q', 'U', 'I'},
 		{'E', 'Q', 'U', 'S'}, {'E', 'Q', 'U', 'M'},

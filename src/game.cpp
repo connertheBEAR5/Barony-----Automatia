@@ -22,6 +22,7 @@
 #include "interface/interface.hpp"
 #include "interface/consolecommand.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "engine/audio/sound.hpp"
 #include "items.hpp"
 #include "init.hpp"
@@ -1233,27 +1234,30 @@ static Uint32 automatiaInfiniteDungeonCycleSeed = 0;
 
 bool automatiaMagicGrimoireHasGenerated()
 {
-	return automatiaMagicGrimoireGenerated;
+	return automatianModeEnabled() && automatiaMagicGrimoireGenerated;
 }
 
 void automatiaMarkMagicGrimoireGenerated()
 {
-	automatiaMagicGrimoireGenerated = true;
+	if ( automatianModeEnabled() )
+	{
+		automatiaMagicGrimoireGenerated = true;
+	}
 }
 
 bool automatiaMagicGrimoireMerchantIsUnlocked()
 {
-	return automatiaMagicGrimoireMerchantUnlocked;
+	return automatianModeEnabled() && automatiaMagicGrimoireMerchantUnlocked;
 }
 
 bool automatiaMagicGrimoireMerchantWasPurchased()
 {
-	return automatiaMagicGrimoireMerchantPurchased;
+	return automatianModeEnabled() && automatiaMagicGrimoireMerchantPurchased;
 }
 
 bool automatiaUnlockMagicGrimoireMerchant()
 {
-	if ( automatiaMagicGrimoireMerchantUnlocked )
+	if ( !automatianModeEnabled() || automatiaMagicGrimoireMerchantUnlocked )
 	{
 		return false;
 	}
@@ -1264,6 +1268,10 @@ bool automatiaUnlockMagicGrimoireMerchant()
 
 void automatiaMarkMagicGrimoireMerchantPurchased()
 {
+	if ( !automatianModeEnabled() )
+	{
+		return;
+	}
 	automatiaMagicGrimoireMerchantUnlocked = true;
 	automatiaMagicGrimoireMerchantPurchased = true;
 }
@@ -1627,7 +1635,8 @@ void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant)
 		{
 			continue;
 		}
-		if ( !automatiaMagicGrimoireMerchantUnlocked
+		if ( !automatianModeEnabled()
+			|| !automatiaMagicGrimoireMerchantUnlocked
 			|| automatiaMagicGrimoireMerchantPurchased
 			|| existingGrimoire )
 		{
@@ -1637,7 +1646,8 @@ void automatiaEnsureMagicGrimoireMerchantStock(Entity* merchant)
 		existingGrimoire = item;
 	}
 
-	if ( !automatiaMagicGrimoireMerchantUnlocked
+	if ( !automatianModeEnabled()
+		|| !automatiaMagicGrimoireMerchantUnlocked
 		|| automatiaMagicGrimoireMerchantPurchased
 		|| existingGrimoire )
 	{
@@ -20956,6 +20966,11 @@ void gameLogic(void)
 	Uint32 i = 0, j;
 	bool entitydeletedself;
 
+	if ( !gamePaused && !loading )
+	{
+		IllusionMagic::tick();
+	}
+
 #ifdef SAM_FRAMEWORK_ENABLED
 	// Script simulation is host-authoritative and renderer-independent. Networked
 	// input/action forwarding remains disabled until its additive packet family is
@@ -27450,6 +27465,7 @@ int main(int argc, char** argv)
 		SDL_Rect pos, src;
 		int c;
 		bool commandLineInfiniteDungeonRequested = false;
+		bool commandLineAutomatianModeRequested = false;
 		//int tilesreceived=0;
 		//Mix_Music **music, *intromusic, *splashmusic, *creditsmusic;
 		node_t* node;
@@ -27545,6 +27561,14 @@ int main(int argc, char** argv)
                         svFlags |= SV_FLAG_INFINITE_DUNGEON;
                         printlog("Infinite Dungeon mode requested from the command line.");
                     }
+					else if ( !strcmp(argv[c], "--automatian-mode")
+						|| !strcmp(argv[c], "--illusion-magic")
+						|| !strcmp(argv[c], "--skill-books") )
+					{
+						commandLineAutomatianModeRequested = true;
+						svFlags |= SV_FLAG_AUTOMATIAN_MODE;
+						printlog("Automatian Mode requested from the command line.");
+					}
                     else if ( !strcmp(argv[c], "--autostart") )
                     {
                         headlessAutoStart = true;
@@ -27813,6 +27837,11 @@ int main(int argc, char** argv)
 		{
 			svFlags |= SV_FLAG_INFINITE_DUNGEON;
 			printlog("Infinite Dungeon mode enabled after loading saved settings.");
+		}
+		if ( commandLineAutomatianModeRequested )
+		{
+			svFlags |= SV_FLAG_AUTOMATIAN_MODE;
+			printlog("Automatian Mode enabled after loading saved settings.");
 		}
 
 		// initialize map

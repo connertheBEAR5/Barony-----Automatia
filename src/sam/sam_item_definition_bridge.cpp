@@ -128,15 +128,16 @@ namespace
 }
 
 int SAMItemDefinitionBridge::installedCount = 0;
+std::vector<int> SAMItemDefinitionBridge::installedRuntimeIds;
 
 void SAMItemDefinitionBridge::clearInstalledDefinitions()
 {
-    for ( const SAMFoundationItemDef& source :
-        SAMItemRegistryFoundation::items() )
+    for ( const int runtimeId : installedRuntimeIds )
     {
-        resetDefinitionSlot(source.runtimeId);
+        resetDefinitionSlot(runtimeId);
     }
 
+    installedRuntimeIds.clear();
     installedCount = 0;
 }
 
@@ -208,6 +209,7 @@ int SAMItemDefinitionBridge::installRegisteredDefinitions()
         ] = source.stackable ? 0 : 1;
         destination.tooltip = "tooltip_default";
 
+        installedRuntimeIds.push_back(source.runtimeId);
         ++installedCount;
 
         SAM_INFO(

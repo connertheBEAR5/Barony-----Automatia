@@ -12,6 +12,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct SAMModManifest;
@@ -119,4 +120,10 @@ public:
 
 private:
     static std::vector<SAMFoundationItemDef> registry;
+    // Indexes deliberately store vector offsets, never raw pointers: registry
+    // can grow while loading a mod and callers still receive the same public
+    // pointer lifetime they had before this optimization.
+    static std::unordered_map<int, std::size_t> runtimeIdIndex;
+    static std::unordered_map<std::string, std::size_t> stableIdIndex;
+    static int nextRuntimeId;
 };

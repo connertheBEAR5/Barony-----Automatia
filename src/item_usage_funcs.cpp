@@ -17,6 +17,7 @@
 #include "engine/audio/sound.hpp"
 #include "entity.hpp"
 #include "magic/magic.hpp"
+#include "magic/illusion_magic.hpp"
 #include "interface/interface.hpp"
 #include "scores.hpp"
 #include "net.hpp"
@@ -27,6 +28,7 @@
 #include "prng.hpp"
 #include "mod_tools.hpp"
 #include "scrolls.hpp"
+#include "skill_books.hpp"
 
 bool potionUseAbundanceEffect(Item* item, Entity* entity, Entity* usedBy)
 {
@@ -5987,9 +5989,101 @@ void item_AmuletSexChange(Item*& item, int player)
 	messagePlayer(player, MESSAGE_INVENTORY, Language::get(969));
 }
 
+void item_SkillManual(Item*& item, const int player)
+{
+	if (!item || player < 0 || player >= MAXPLAYERS || !players[player]
+		|| !players[player]->entity || !stats[player]
+		|| !itemIsSkillManual(item))
+	{
+		return;
+	}
+	if (!automatianModeEnabled())
+	{
+		if (players[player]->isLocalPlayer())
+		{
+			messagePlayer(player, MESSAGE_HINT,
+				"Automatian Mode is disabled for this game.");
+		}
+		return;
+	}
+	if (players[player]->entity->isBlind())
+	{
+		if (players[player]->isLocalPlayer())
+		{
+			messagePlayer(player, MESSAGE_HINT, Language::get(970));
+			playSoundPlayer(player, 90, 64);
+		}
+		return;
+	}
+
+	const int skill = itemSkillManualSkill(item);
+	if (!SkillBooks::isEligibleSkill(skill))
+	{
+		return;
+	}
+	const bool cursed = item->beatitude < 0;
+	const int lore = stats[player]->getModifiedProficiency(PRO_APPRAISAL);
+	const int magnitude = SkillBooks::loreMagnitude(lore);
+	const int signedDelta = cursed ? -magnitude : magnitude;
+	const int oldValue = stats[player]->getProficiency(skill);
+	const int expectedValue = SkillBooks::applyDelta(oldValue, lore, cursed);
+
+	// Clients predict only the consumable/UI portion. The authoritative server
+	// performs the mutation and sends the established SKIL update packet.
+	if (multiplayer == CLIENT)
+	{
+		if (expectedValue == oldValue)
+		{
+			item->identified = true;
+			messagePlayer(player, MESSAGE_HINT,
+				cursed ? "The cursed manual cannot lower this skill further."
+					: "This skill is already at its maximum.");
+			return;
+		}
+		item->identified = true;
+		conductIlliterate = false;
+		messagePlayer(player, MESSAGE_STATUS,
+			cursed ? "The cursed manual weakens your skill."
+				: "The manual permanently improves your skill for this run.");
+		consumeItem(item, player);
+		return;
+	}
+
+	if (!players[player]->entity->applySkillDelta(skill, signedDelta, false))
+	{
+		if (players[player]->isLocalPlayer())
+		{
+			messagePlayer(player, MESSAGE_HINT,
+				cursed ? "The cursed manual cannot lower this skill further."
+					: "This skill is already at its maximum.");
+		}
+		return;
+	}
+
+	item->identified = true;
+	if (players[player]->isLocalPlayer())
+	{
+		conductIlliterate = false;
+		messagePlayer(player, MESSAGE_STATUS,
+			cursed ? "The cursed manual weakens your skill."
+				: "The manual permanently improves your skill for this run.");
+	}
+	consumeItem(item, player);
+}
+
 void item_Spellbook(Item*& item, int player)
 {
 	node_t* node, *nextnode;
+	const int taughtSpell = item ? getSpellIDFromSpellbook(item->type)
+		: SPELL_NONE;
+	if ( IllusionMagic::isSpell(taughtSpell)
+		&& !IllusionMagic::enabled() )
+	{
+		messagePlayer(player, MESSAGE_HINT,
+			"Illusion Magic is disabled for this game.");
+		playSoundPlayer(player, 90, 64);
+		return;
+	}
 
 	if ( players[player] && !players[player]->isLocalPlayer() )
 	{

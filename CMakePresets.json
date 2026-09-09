@@ -1,0 +1,108 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-mingw64-openal-super",
+      "displayName": "Windows MSYS2 MinGW-w64 - OpenAL / 15-player",
+      "description": "Regular build directory, OpenAL audio, S.A.M., tests, and 15-player multiplayer support.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON",
+        "BARONY_AUDIO_BACKEND": "OPENAL",
+        "FMOD_ENABLED": "OFF",
+        "OPENAL_ENABLED": "ON",
+        "BARONY_SUPER_MULTIPLAYER": "ON",
+        "SAM_FRAMEWORK_ENABLED": "ON",
+        "STEAMWORKS": "OFF",
+        "EOS": "OFF"
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-online",
+      "displayName": "Windows MSYS2 MinGW-w64 - OpenAL / 15-player / Steam + EOS",
+      "description": "Requires the Steamworks and EOS SDK roots plus the EOS build environment values described in the Windows build guide.",
+      "inherits": "windows-mingw64-openal-super",
+      "cacheVariables": {
+        "STEAMWORKS": "ON",
+        "EOS": "ON"
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-installer",
+      "displayName": "Windows MSYS2 MinGW-w64 - OpenAL / 15-player installer",
+      "description": "Builds the regular profile plus the self-contained NSIS installer target.",
+      "inherits": "windows-mingw64-openal-super",
+      "cacheVariables": {
+        "BARONY_WINDOWS_INSTALLER": "ON"
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-online-installer",
+      "displayName": "Windows MSYS2 MinGW-w64 - Steam + EOS installer",
+      "description": "Requires the online SDK prerequisites and builds a self-contained NSIS installer.",
+      "inherits": "windows-mingw64-openal-super-online",
+      "cacheVariables": {
+        "BARONY_WINDOWS_INSTALLER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-mingw64-openal-super",
+      "configurePreset": "windows-mingw64-openal-super",
+      "jobs": 6
+    },
+    {
+      "name": "windows-mingw64-openal-super-online",
+      "configurePreset": "windows-mingw64-openal-super-online",
+      "jobs": 6
+    },
+    {
+      "name": "windows-mingw64-openal-super-installer",
+      "configurePreset": "windows-mingw64-openal-super-installer",
+      "jobs": 6
+    },
+    {
+      "name": "windows-mingw64-openal-super-online-installer",
+      "configurePreset": "windows-mingw64-openal-super-online-installer",
+      "jobs": 6
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-mingw64-openal-super",
+      "configurePreset": "windows-mingw64-openal-super",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-online",
+      "configurePreset": "windows-mingw64-openal-super-online",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-installer",
+      "configurePreset": "windows-mingw64-openal-super-installer",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-mingw64-openal-super-online-installer",
+      "configurePreset": "windows-mingw64-openal-super-online-installer",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

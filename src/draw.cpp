@@ -26,6 +26,9 @@
 #include "colors.hpp"
 #include "ui/Text.hpp"
 #include "ui/GameUI.hpp"
+#ifndef EDITOR
+#include "magic/illusion_magic.hpp"
+#endif
 #include <cmath>
 #include <cassert>
 #include <algorithm>
@@ -2757,6 +2760,16 @@ void drawEntities3D(view_t* camera, int mode)
 					continue;
 				}
 			}
+		}
+#endif
+		// Mirror Other/Mimic replace appearance, not identity. Keep the real
+		// actor in ENTITYUIDS so targeting remains authoritative, but suppress
+		// its body and directly parented limbs in the visible render pass.
+#ifndef EDITOR
+		if ( mode == REALCOLORS
+			&& IllusionMagic::shouldHideDisguisedBody(*entity) )
+		{
+			continue;
 		}
 #endif
         if ( entity->flags[INVISIBLE] && !entity->flags[INVISIBLE_DITHER] )

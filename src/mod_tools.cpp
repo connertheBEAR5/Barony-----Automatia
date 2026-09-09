@@ -10,6 +10,8 @@ See LICENSE for details.
 -------------------------------------------------------------------------------*/
 #include "items.hpp"
 #include "mod_tools.hpp"
+#include "magic/illusion_magic.hpp"
+#include "skill_books.hpp"
 #include "menu.hpp"
 #include "classdescriptions.hpp"
 #include "draw.hpp"
@@ -941,6 +943,138 @@ static void initializeMagicGrimoireItemDefinition()
 	}
 }
 
+static void copyItemImageList(ItemGeneric& destination,
+	const ItemGeneric& source)
+{
+	list_FreeAll(&destination.images);
+	destination.images.first = nullptr;
+	destination.images.last = nullptr;
+	for (node_t* sourceNode = source.images.first;
+		sourceNode; sourceNode = sourceNode->next)
+	{
+		const string_t* sourceImage =
+			static_cast<const string_t*>(sourceNode->element);
+		if (!sourceImage || !sourceImage->data)
+		{
+			continue;
+		}
+		string_t* destinationImage =
+			static_cast<string_t*>(malloc(sizeof(string_t)));
+		const size_t length = strlen(sourceImage->data) + 1;
+		destinationImage->data =
+			static_cast<char*>(malloc(sizeof(char) * length));
+		memcpy(destinationImage->data, sourceImage->data, length);
+		destinationImage->lines = sourceImage->lines;
+		node_t* destinationNode = list_AddNodeLast(&destination.images);
+		destinationNode->element = destinationImage;
+		destinationNode->deconstructor = &stringDeconstructor;
+		destinationNode->size = sizeof(string_t);
+		destinationImage->node = destinationNode;
+	}
+}
+
+static std::string illusionSpellbookInternalName(
+	const IllusionMagic::SpellDefinition& definition)
+{
+	std::string result = definition.internalName;
+	const std::string prefix = "spell_";
+	if (result.compare(0, prefix.size(), prefix) == 0)
+	{
+		result.replace(0, prefix.size(), "spellbook_");
+	}
+	return result;
+}
+
+static void appendIllusionSpellIcon(const int sourceSpellId)
+{
+	node_t* sourceNode = list_Node(
+		&items[SPELL_ITEM].images, sourceSpellId);
+	if (!sourceNode || !sourceNode->element)
+	{
+		return;
+	}
+	const string_t* source =
+		static_cast<const string_t*>(sourceNode->element);
+	if (!source || !source->data)
+	{
+		return;
+	}
+	string_t* destination =
+		static_cast<string_t*>(malloc(sizeof(string_t)));
+	const size_t length = strlen(source->data) + 1;
+	destination->data = static_cast<char*>(malloc(length));
+	memcpy(destination->data, source->data, length);
+	destination->lines = source->lines;
+	node_t* destinationNode = list_AddNodeLast(&items[SPELL_ITEM].images);
+	destinationNode->element = destination;
+	destinationNode->deconstructor = &stringDeconstructor;
+	destinationNode->size = sizeof(string_t);
+	destination->node = destinationNode;
+}
+
+static void initializeIllusionSpellbookItemDefinitions()
+{
+	const ItemGeneric& visualSource = items[SPELLBOOK_CONFUSE];
+	for (const auto& definition : IllusionMagic::definitions())
+	{
+		const int offset = IllusionMagic::spellbookOffset(definition.id);
+		ItemGeneric& book = items[SPELLBOOK_MIRROR_OTHER + offset];
+		book.index = visualSource.index;
+		book.indexShort = visualSource.indexShort;
+		book.fpindex = visualSource.fpindex;
+		book.variations = visualSource.variations;
+		book.weight = 20;
+		book.gold_value = definition.goldValue;
+		book.category = SPELLBOOK;
+		book.level = definition.itemLevel;
+		book.item_slot = ItemEquippableSlot::EQUIPPABLE_IN_SLOT_SHIELD;
+		book.attributes.clear();
+		book.attributes["spellbook_spell"] = definition.id;
+		book.attributes["illusion_magic"] = 1;
+		book.tooltip = "tooltip_spellbook";
+		copyItemImageList(book, visualSource);
+		appendIllusionSpellIcon(definition.iconSourceSpell);
+	}
+}
+
+static void initializeSkillManualItemDefinitions()
+{
+	const struct ManualDefinition
+	{
+		ItemType type;
+		Category category;
+		ItemType visualSource;
+		const char* identifiedName;
+		const char* unidentifiedName;
+	} definitions[] = {
+		{SKILL_BOOK, BOOK, READABLE_BOOK,
+			"Skill Book", "Unknown skill book"},
+		{SKILL_SCROLL, SCROLL, SCROLL_BLANK,
+			"Skill Scroll", "Unknown skill scroll"}
+	};
+
+	for (const auto& definition : definitions)
+	{
+		ItemGeneric& manual = items[definition.type];
+		const ItemGeneric& visualSource = items[definition.visualSource];
+		manual.index = visualSource.index;
+		manual.indexShort = visualSource.indexShort;
+		manual.fpindex = visualSource.fpindex;
+		manual.variations = std::max(1, visualSource.variations);
+		manual.weight = visualSource.weight;
+		manual.gold_value = definition.type == SKILL_BOOK ? 500 : 350;
+		manual.category = definition.category;
+		manual.level = -1; // generated only by the rare, gated source rolls
+		manual.item_slot = ItemEquippableSlot::NO_EQUIP;
+		manual.attributes.clear();
+		manual.attributes["skill_manual"] = 1;
+		manual.tooltip = visualSource.tooltip;
+		manual.setIdentifiedName(definition.identifiedName);
+		manual.setUnidentifiedName(definition.unidentifiedName);
+		copyItemImageList(manual, visualSource);
+	}
+}
+
 void ItemTooltips_t::readItemsFromFile()
 {
 	printlog("loading items...\n");
@@ -1208,6 +1342,8 @@ void ItemTooltips_t::readItemsFromFile()
 	// Keep every existing JSON item ID stable. The Grimoire is the final
 	// code-defined vanilla item and borrows the existing tome assets.
 	initializeMagicGrimoireItemDefinition();
+	initializeIllusionSpellbookItemDefinitions();
+	initializeSkillManualItemDefinitions();
 
 	// The unmodified items.json ends immediately before MAGIC_GRIMOIRE.
 	// Append matching tooltip metadata so legacy code may continue indexing
@@ -1231,6 +1367,71 @@ void ItemTooltips_t::readItemsFromFile()
 			tmpItems.resize(static_cast<std::size_t>(MAGIC_GRIMOIRE) + 1);
 		}
 		tmpItems[MAGIC_GRIMOIRE] = std::move(grimoireTooltip);
+	}
+
+	// The feature's books are code-defined so checked-in/runtime base JSON is
+	// untouched. Matching tmp metadata keeps every generic inventory, tooltip,
+	// spellbook and editor lookup on the normal item path.
+	if ( static_cast<std::size_t>(SPELLBOOK_CONFUSE) < tmpItems.size() )
+	{
+		for (const auto& definition : IllusionMagic::definitions())
+		{
+			const int itemId = SPELLBOOK_MIRROR_OTHER
+				+ IllusionMagic::spellbookOffset(definition.id);
+			tmpItem_t bookTooltip = tmpItems[SPELLBOOK_CONFUSE];
+			bookTooltip.internalName =
+				illusionSpellbookInternalName(definition);
+			bookTooltip.itemId = itemId;
+			bookTooltip.gold = items[itemId].gold_value;
+			bookTooltip.weight = items[itemId].weight;
+			bookTooltip.itemLevel = items[itemId].level;
+			bookTooltip.category = "SPELLBOOK";
+			bookTooltip.equipSlot = "offhand";
+			bookTooltip.attributes = items[itemId].attributes;
+			bookTooltip.tooltip = items[itemId].tooltip;
+			bookTooltip.iconLabelPath.clear();
+			if (tmpItems.size() <= static_cast<std::size_t>(itemId))
+			{
+				tmpItems.resize(static_cast<std::size_t>(itemId) + 1);
+			}
+			tmpItems[itemId] = std::move(bookTooltip);
+		}
+	}
+	// Skill manuals are code-defined so the checked-in base JSON remains
+	// stable. Add their metadata to the normal item registry after JSON has
+	// been parsed, preserving the existing tmpItems lookup contract.
+	if ( static_cast<std::size_t>(READABLE_BOOK) < tmpItems.size()
+		&& static_cast<std::size_t>(SCROLL_BLANK) < tmpItems.size() )
+	{
+		const struct ManualMetadata
+		{
+			ItemType type;
+			ItemType visualSource;
+			const char* internalName;
+			const char* category;
+		} definitions[] = {
+			{SKILL_BOOK, READABLE_BOOK, "skill_book", "BOOK"},
+			{SKILL_SCROLL, SCROLL_BLANK, "skill_scroll", "SCROLL"}
+		};
+		for ( const auto& definition : definitions )
+		{
+			tmpItem_t metadata = tmpItems[definition.visualSource];
+			metadata.internalName = definition.internalName;
+			metadata.itemId = definition.type;
+			metadata.gold = items[definition.type].gold_value;
+			metadata.weight = items[definition.type].weight;
+			metadata.itemLevel = items[definition.type].level;
+			metadata.category = definition.category;
+			metadata.equipSlot = "none";
+			metadata.attributes = items[definition.type].attributes;
+			metadata.tooltip = items[definition.type].tooltip;
+			metadata.iconLabelPath.clear();
+			if ( tmpItems.size() <= static_cast<std::size_t>(definition.type) )
+			{
+				tmpItems.resize(static_cast<std::size_t>(definition.type) + 1);
+			}
+			tmpItems[definition.type] = std::move(metadata);
+		}
 	}
 
 	spellItems.clear();
@@ -1485,10 +1686,97 @@ void ItemTooltips_t::readItemsFromFile()
 		spellItems.insert(std::make_pair(t.id, t));
 		++spellsRead;
 	}
+
+	for (const auto& definition : IllusionMagic::definitions())
+	{
+		spellItem_t t;
+		t.id = definition.id;
+		t.internalName = definition.internalName;
+		t.name = definition.displayName;
+		t.name_lowercase = t.name;
+		lowercaseString(t.name_lowercase);
+		t.spellType = SPELL_TYPE_SELF;
+		switch (definition.target)
+		{
+			case IllusionMagic::TargetType::TouchActor:
+				t.spellTypeStr = "TOUCH_ENTITY";
+				t.spellType = SPELL_TYPE_TOUCH_ENTITY;
+				break;
+			case IllusionMagic::TargetType::TouchEnemy:
+				t.spellTypeStr = "TOUCH_ENEMY";
+				t.spellType = SPELL_TYPE_TOUCH_ENEMY;
+				break;
+			case IllusionMagic::TargetType::TouchFloor:
+				t.spellTypeStr = "TOUCH_FLOOR";
+				t.spellType = SPELL_TYPE_TOUCH_FLOOR;
+				break;
+			case IllusionMagic::TargetType::TouchWall:
+				t.spellTypeStr = "TOUCH_WALL";
+				t.spellType = SPELL_TYPE_TOUCH_WALL;
+				break;
+			case IllusionMagic::TargetType::Area:
+				t.spellTypeStr = "AREA";
+				t.spellType = SPELL_TYPE_AREA;
+				break;
+			default:
+				t.spellTypeStr = definition.sustainMana > 0
+					? "SELF_SUSTAIN" : "SELF";
+				t.spellType = definition.sustainMana > 0
+					? SPELL_TYPE_SELF_SUSTAIN : SPELL_TYPE_SELF;
+				break;
+		}
+		t.spellbookInternalName =
+			illusionSpellbookInternalName(definition);
+		t.magicstaffInternalName.clear();
+		t.fociInternalName.clear();
+		t.spellbookId = SPELLBOOK_MIRROR_OTHER
+			+ IllusionMagic::spellbookOffset(definition.id);
+		t.magicstaffId = -1;
+		t.fociId = -1;
+		t.spellTagsStr = {"UTILITY", "SPELL_LEVEL_ASSIST"};
+		t.spellTags.insert(SPELL_TAG_UTILITY);
+		t.spellLevelTags.insert(spell_t::SPELL_LEVEL_EVENT_ASSIST);
+		if (definition.target == IllusionMagic::TargetType::Self
+			|| definition.id == IllusionMagic::MIRROR_MIMIC)
+		{
+			t.spellTagsStr.push_back("BUFF");
+			t.spellTags.insert(SPELL_TAG_BUFF);
+		}
+		if (definition.id == IllusionMagic::PARANOIA)
+		{
+			t.spellTagsStr.push_back("STATUS");
+			t.spellTags.insert(SPELL_TAG_STATUS_EFFECT);
+		}
+		t.hasExpandedJSON = true;
+		t.mana = definition.mana;
+		t.duration = definition.durationTicks;
+		t.distance = definition.rangeWorldUnits;
+		t.radius = definition.radiusWorldUnits;
+		t.life_time = definition.durationTicks;
+		t.cast_time = 1.0;
+		t.skillID = PRO_MYSTICISM;
+		t.difficulty = definition.difficulty;
+		t.sustain_mana = definition.sustainMana;
+		t.sustain_duration = definition.sustainMana > 0
+			? std::max(1, definition.durationTicks) : 0;
+		t.drop_table = 0;
+		items[t.spellbookId].attributes["spellbook_spell"] =
+			definition.id;
+		spellNameStringToSpellID[t.internalName] = t.id;
+		assert(spellItems.find(t.id) == spellItems.end());
+		spellItems.insert(std::make_pair(t.id, std::move(t)));
+		++spellsRead;
+	}
 	printlog("[JSON]: Successfully read %d spells from '%s'", spellsRead, inputPath.c_str());
 
 	for ( int i = 0; i < NUM_SPELLS; ++i )
 	{
+		// Preserve the verified hash of the authoritative unmodified base JSON.
+		// Code-defined feature metadata is covered by deterministic tests.
+		if (IllusionMagic::isSpell(i))
+		{
+			continue;
+		}
 		auto find = spellItems.find(i);
 		if ( find != spellItems.end() )
 		{
@@ -1687,8 +1975,10 @@ void ItemTooltips_t::readItemLocalizationsFromFile(bool forceLoadBaseDirectory)
 	}
 
 	printlog("[JSON]: Successfully read %d item names, %d spell names from '%s'", itemNameLocalizations.size(), spellNameLocalizations.size(), inputPath.c_str());
-	// MAGIC_GRIMOIRE is intentionally absent from the unmodified JSON.
-	assert(itemNameLocalizations.size() >= (NUMITEMS - 1));
+	// MAGIC_GRIMOIRE and appended feature books are intentionally absent from
+	// the unmodified JSON.
+	assert(itemNameLocalizations.size() >=
+		static_cast<std::size_t>(MAGIC_GRIMOIRE));
 #ifndef NDEBUG
 	//assert(spellNameLocalizations.size() == (NUM_SPELLS - 1)); // ignore SPELL_NONE
 #endif
@@ -1709,10 +1999,27 @@ void ItemTooltips_t::readItemLocalizationsFromFile(bool forceLoadBaseDirectory)
 	}
 	items[MAGIC_GRIMOIRE].setIdentifiedName("Magic Grimoire");
 	items[MAGIC_GRIMOIRE].setUnidentifiedName("Magic Grimoire");
+	for (const auto& definition : IllusionMagic::definitions())
+	{
+		const int itemId = SPELLBOOK_MIRROR_OTHER
+			+ IllusionMagic::spellbookOffset(definition.id);
+		const std::string name =
+			std::string("Spellbook of ") + definition.displayName;
+		items[itemId].setIdentifiedName(name);
+		items[itemId].setUnidentifiedName("Flickering Spellbook");
+	}
+	items[SKILL_BOOK].setIdentifiedName("Skill Book");
+	items[SKILL_BOOK].setUnidentifiedName("Unknown skill book");
+	items[SKILL_SCROLL].setIdentifiedName("Skill Scroll");
+	items[SKILL_SCROLL].setUnidentifiedName("Unknown skill scroll");
 
 	for ( auto& spell : spellItems )
 	{
-		spell.second.name = spellNameLocalizations[spell.second.internalName];
+		if (!IllusionMagic::isSpell(spell.first))
+		{
+			spell.second.name =
+				spellNameLocalizations[spell.second.internalName];
+		}
 		spell.second.name_lowercase = spell.second.name;
 		lowercaseString(spell.second.name_lowercase);
 	}
@@ -3995,21 +4302,26 @@ void ItemTooltips_t::formatItemIcon(const int player, std::string tooltipType, I
 			}
 			else if ( conditionalAttribute == "EFF_STRAFE" )
 			{
-				double backpedalMultiplier = 0.25;
+				// Keep the Bandana tooltip aligned with the selected server movement
+				// mode.  The legacy flag-off path retains the original 25% backpedal
+				// baseline; the remastered flag uses full-speed directional movement.
+				const bool omnidirectionalMovement =
+					(svFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT) != 0;
+				double backpedalMultiplier = omnidirectionalMovement ? 1.0 : 0.25;
 				if ( item.type == HAT_BANDANA )
 				{
 					if ( item.beatitude >= 0 || shouldInvertEquipmentBeatitude(stats[player]) )
 					{
 						backpedalMultiplier += 0.5 * (1 + abs(item.beatitude)) * 0.25;
-						backpedalMultiplier = std::min(0.75, backpedalMultiplier);
+						backpedalMultiplier = std::min(omnidirectionalMovement ? 1.5 : 0.75, backpedalMultiplier);
 					}
 					else
 					{
 						backpedalMultiplier += 0.5 * (1 + abs(item.beatitude)) * 0.25;
-						backpedalMultiplier = std::min(0.75, backpedalMultiplier);
+						backpedalMultiplier = std::min(omnidirectionalMovement ? 1.5 : 0.75, backpedalMultiplier);
 					}
 				}
-				int multBackpedal = 100 * (backpedalMultiplier - 0.25);
+				int multBackpedal = 100 * (backpedalMultiplier - 1.0);
 				snprintf(buf, sizeof(buf), str.c_str(), multBackpedal);
 			}
 			else if ( conditionalAttribute == "EFF_MASK_GOLDEN" )
@@ -5002,6 +5314,83 @@ void ItemTooltips_t::formatItemIcon(const int player, std::string tooltipType, I
 #endif
 }
 
+static const char* illusionTargetDescription(
+	const IllusionMagic::TargetType target)
+{
+	switch ( target )
+	{
+		case IllusionMagic::TargetType::Self: return "Self";
+		case IllusionMagic::TargetType::TouchActor: return "Nearby actor";
+		case IllusionMagic::TargetType::TouchEnemy: return "Nearby creature";
+		case IllusionMagic::TargetType::TouchFloor: return "Floor tile";
+		case IllusionMagic::TargetType::TouchWall: return "Real wall tile";
+		case IllusionMagic::TargetType::SelectedInventoryItem:
+			return "Owned inventory item";
+		case IllusionMagic::TargetType::Area: return "Nearby enemies";
+	}
+	return "Self";
+}
+
+static const char* illusionCaveat(const int spellId)
+{
+	switch ( spellId )
+	{
+		case IllusionMagic::MIRROR_OTHER:
+			return "Appearance only; identity, party, faction and inventory stay real.";
+		case IllusionMagic::MIRROR_COPY:
+			return "The decoy deals no damage and grants no loot or XP.";
+		case IllusionMagic::MIRROR_WALL:
+			return "Fake wall: no collision; fooled hostiles route around it.";
+		case IllusionMagic::MIRROR_REFLECT:
+			return "A distinct ward; each incoming spell resolves through one defense only.";
+		case IllusionMagic::MIRROR_MIMIC:
+			return "AI disguise only; overt hostility and resistant foes still reveal you.";
+		case IllusionMagic::MIRROR_REFLECT_LOOT:
+			return "FAKE / ILLUSORY: no sale, quest, crafting or equipment value.";
+		case IllusionMagic::PHANTASM_PATH:
+			return "Support exists only for the caster and authorized allies.";
+		case IllusionMagic::MIRROR_DUPLICATE_LOOT:
+			return "REAL duplicate, quantity 1, mirrored curse; protected items are rejected.";
+		case IllusionMagic::MIRAGE_WALL:
+			return "The wall only looks absent; its collision and path blocking remain.";
+		case IllusionMagic::PARANOIA:
+			return "Only eligible non-boss hostiles on this floor are affected.";
+		case IllusionMagic::VERTICAL_MIRAGE:
+			return "The pit is fake; the original floor and collision remain.";
+		case IllusionMagic::SHADOW_STEP:
+			return "Moves exactly four tiles backward or fails safely if blocked.";
+		case IllusionMagic::STORE_MAGIC:
+			return "Captures hostile ordinary player-learnable projectiles only; runtime-only vault and tiered controls.";
+		default:
+			return "Illusion effects remain local to the current world instance and floor.";
+	}
+}
+
+static std::string illusionTooltipDescription(
+	const IllusionMagic::SpellDefinition& definition)
+{
+	std::string text = "School: Illusion\nMP: "
+		+ std::to_string(definition.mana)
+		+ "  |  Requirement: " + std::to_string(definition.difficulty)
+		+ "  |  Target: " + illusionTargetDescription(definition.target);
+	if ( definition.durationTicks > 0 )
+	{
+		text += "\nDuration: "
+			+ std::to_string(definition.durationTicks / TICKS_PER_SECOND)
+			+ " sec";
+		if ( definition.sustainMana > 0 )
+		{
+			text += " (sustained)";
+		}
+	}
+	text += "\n";
+	text += definition.conciseEffect;
+	text += "\n";
+	text += illusionCaveat(definition.id);
+	text += "\nProgression uses your highest Sorcery, Mysticism or Thaumaturgy.";
+	return text;
+}
+
 void ItemTooltips_t::formatItemDescription(const int player, std::string tooltipType, Item& item, std::string& str)
 {
 	if ( tooltipType.find("tooltip_spell_") != std::string::npos )
@@ -5022,6 +5411,72 @@ void ItemTooltips_t::formatItemDescription(const int player, std::string tooltip
 				{
 					str += '\n';
 				}
+			}
+		}
+	}
+	if ( itemIsSkillManual(&item) )
+	{
+		// Identification gates all target/effect metadata. The generic
+		// unidentified text remains the only description until appraisal (or
+		// another normal identification path) has identified the manual.
+		if ( !item.identified || player < 0 || player >= MAXPLAYERS
+			|| !stats[player] )
+		{
+			return;
+		}
+		const int targetSkill = itemSkillManualSkill(&item);
+		const int lore = stats[player]->getModifiedProficiency(PRO_APPRAISAL);
+		const int magnitude = SkillBooks::loreMagnitude(lore);
+		const bool cursed = item.beatitude < 0;
+		std::string details = "Skill: ";
+		details += getSkillLangEntry(targetSkill);
+		details += "\nEffect: ";
+		details += cursed ? "-" : "+";
+		details += std::to_string(magnitude);
+		details += " proficiency (Lore ";
+		details += std::to_string(lore);
+		details += ")\nPermanent for this run.";
+		if ( str.empty() )
+		{
+			str = details;
+		}
+		else
+		{
+			str += "\n\n";
+			str += details;
+		}
+		return;
+	}
+
+	int illusionSpellId = -1;
+	if ( item.type == SPELL_ITEM
+		&& IllusionMagic::isSpell(static_cast<int>(item.appearance)) )
+	{
+		illusionSpellId = static_cast<int>(item.appearance);
+	}
+	else if ( item.type >= SPELLBOOK_MIRROR_OTHER
+		&& item.type <= SPELLBOOK_STORE_MAGIC )
+	{
+		illusionSpellId = IllusionMagic::kFirstSpellId
+			+ static_cast<int>(item.type - SPELLBOOK_MIRROR_OTHER);
+	}
+	// An unidentified spellbook must not reveal any spell-specific metadata.
+	// The caller has already selected the generic tooltip_unidentified template;
+	// keep the school, cost, target, duration, and effect text hidden until the
+	// item has been identified through appraisal or another supported action.
+	if ( item.identified )
+	{
+		if ( const auto* definition = IllusionMagic::definition(illusionSpellId) )
+		{
+			const std::string details = illusionTooltipDescription(*definition);
+			if ( str.empty() )
+			{
+				str = details;
+			}
+			else
+			{
+				str += "\n\n";
+				str += details;
 			}
 		}
 	}
@@ -6332,7 +6787,8 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 			}
 			if ( !spell ) { return; }
 
-			int skillLVL = std::min(100, stats[player]->getModifiedProficiency(spell->skillID) + statGetINT(stats[player], players[player]->entity));
+			int skillLVL = getEffectiveSpellcastingAbility(
+				players[player]->entity, stats[player], spell);
 			if ( !playerLearnedSpellbook(player, &item) && (spell && spell->difficulty > skillLVL) )
 			{
 				str.insert((size_t)0, 1, '^'); // red line character
@@ -6360,21 +6816,29 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 			}
 			if ( !spell ) { return; }
 
-			int skillLVL = std::min(100, stats[player]->getModifiedProficiency(spell->skillID) + statGetINT(stats[player], players[player]->entity));
+			int skillLVL = getEffectiveSpellcastingAbility(
+				players[player]->entity, stats[player], spell);
 			if ( !playerLearnedSpellbook(player, &item) && (spell && spell->difficulty > skillLVL) )
 			{
 				str.insert((size_t)0, 1, '^'); // red line character
 			}
 			Sint32 INT = stats[player] ? statGetINT(stats[player], players[player]->entity) : 0;
-			Sint32 skill = stats[player] ? stats[player]->getModifiedProficiency(spell->skillID) : 0;
+			Sint32 skill = stats[player] ? IllusionMagic::proficiencyForSpell(
+				players[player]->entity, stats[player], spell->ID,
+				spell->skillID) : 0;
 			Sint32 total = std::min(SKILL_LEVEL_LEGENDARY, INT + skill);
 			if ( str.find("%s") != std::string::npos )
 			{
-				snprintf(buf, sizeof(buf), str.c_str(), Player::SkillSheet_t::getSkillNameFromID(spell->skillID, true).c_str(), INT + skill, getProficiencyLevelName(INT + skill).c_str());
+				const std::string school = IllusionMagic::isSpell(spell->ID)
+					? "Illusion" : Player::SkillSheet_t::getSkillNameFromID(
+						spell->skillID, true);
+				snprintf(buf, sizeof(buf), str.c_str(), school.c_str(), total,
+					getProficiencyLevelName(total).c_str());
 			}
 			else
 			{
-				snprintf(buf, sizeof(buf), str.c_str(), INT + skill, getProficiencyLevelName(INT + skill).c_str());
+				snprintf(buf, sizeof(buf), str.c_str(), total,
+					getProficiencyLevelName(total).c_str());
 			}
 		}
 		else
@@ -6499,12 +6963,15 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 			spell_t* spell = getSpellFromItem(player, &item, false);
 			if ( !spell ) { return; }
 
-			int spellcastingAbility = std::min(std::max(0, stats[player]->getModifiedProficiency(spell->skillID)
-				+ statGetINT(stats[player], players[player]->entity)), 100);
+			int spellcastingAbility = getEffectiveSpellcastingAbility(
+				players[player]->entity, stats[player], spell);
 			int chance = ((100 - (spellcastingAbility)) / 3.0); // 33% after rolling to fizzle, 66% success
 			if ( str.find("%s") != std::string::npos )
 			{
-				snprintf(buf, sizeof(buf), str.c_str(), Player::SkillSheet_t::getSkillNameFromID(spell->skillID, true).c_str(), chance);
+				const std::string school = IllusionMagic::isSpell(spell->ID)
+					? "Illusion" : Player::SkillSheet_t::getSkillNameFromID(
+						spell->skillID, true);
+				snprintf(buf, sizeof(buf), str.c_str(), school.c_str(), chance);
 			}
 			else
 			{
@@ -6518,7 +6985,10 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 
 			if ( str.find("%s") != std::string::npos )
 			{
-				snprintf(buf, sizeof(buf), str.c_str(), Player::SkillSheet_t::getSkillNameFromID(spell->skillID, true).c_str());
+				const std::string school = IllusionMagic::isSpell(spell->ID)
+					? "Illusion" : Player::SkillSheet_t::getSkillNameFromID(
+						spell->skillID, true);
+				snprintf(buf, sizeof(buf), str.c_str(), school.c_str());
 			}
 		}
 		else if ( detailTag.compare("spell_cast_success2") == 0 )
@@ -6526,8 +6996,8 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 			spell_t* spell = getSpellFromItem(player, &item, false);
 			if ( !spell ) { return; }
 
-			int spellcastingAbility = std::min(std::max(0, stats[player]->getModifiedProficiency(spell->skillID)
-				+ statGetINT(stats[player], players[player]->entity)), 100);
+			int spellcastingAbility = getEffectiveSpellcastingAbility(
+				players[player]->entity, stats[player], spell);
 			int chance = ((100 - (spellcastingAbility)) / 3.0); // 33% after rolling to fizzle, 66% success
 			snprintf(buf, sizeof(buf), str.c_str(), chance);
 		}
@@ -6536,8 +7006,8 @@ void ItemTooltips_t::formatItemDetails(const int player, std::string tooltipType
 			spell_t* spell = getSpellFromItem(player, &item, false);
 			if ( !spell ) { return; }
 
-			int spellcastingAbility = std::min(std::max(0, stats[player]->getModifiedProficiency(spell->skillID)
-				+ statGetINT(stats[player], players[player]->entity)), 100);
+			int spellcastingAbility = getEffectiveSpellcastingAbility(
+				players[player]->entity, stats[player], spell);
 			int chance = (10 - (spellcastingAbility / 10)) * 10;
 			snprintf(buf, sizeof(buf), str.c_str(), chance);
 		}

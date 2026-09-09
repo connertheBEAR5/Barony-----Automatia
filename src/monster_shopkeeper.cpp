@@ -23,6 +23,7 @@
 #include "shops.hpp"
 #include "mod_tools.hpp"
 #include "prng.hpp"
+#include "skill_books.hpp"
 
 std::vector<Item*> generateShopkeeperConsumables(Entity& my, Stat& myStats, int storetype)
 {
@@ -480,7 +481,18 @@ void initShopkeeper(Entity* my, Stat* myStats)
 					// bookstore
 					for ( c = 0; c < numitems; c++ )
 					{
-						switch ( rng.rand() % 3 )
+						tmpItem = nullptr;
+						if ( automatianModeEnabled() && rng.rand() % 100 == 0 )
+						{
+							const ItemType manualType = rng.rand() % 2 == 0 ? SKILL_BOOK : SKILL_SCROLL;
+							const int targetSkill = SkillBooks::kEligibleSkills[
+								rng.rand() % SkillBooks::kEligibleSkills.size()];
+							tmpItem = newSkillManual(manualType, targetSkill,
+								static_cast<Status>(WORN + rng.rand() % 3),
+								rng.rand() % 5 == 0 ? -1 : 0, 1, false,
+								&myStats->inventory);
+						}
+						else switch ( rng.rand() % 3 )
 						{
 							case 0:
 							case 1:

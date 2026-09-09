@@ -13,6 +13,7 @@
 
 #include <vector>
 #include <string>
+#include <cstddef>
 
 #include "draw.hpp"
 
@@ -128,6 +129,21 @@ extern Uint32 cursorflash;
 extern char widthtext[4], heighttext[4], nametext[32], authortext[32], skyboxtext[4];
 extern char mapflagtext[MAPFLAGTEXTS][32];
 extern char spriteProperties[36][128];
+extern char proceduralRoomEnabledText[4];
+extern char proceduralRoomLevelsetText[PROCEDURAL_ROOM_LEVELSET_BYTES];
+extern char proceduralRoomCustomCategoryText[PROCEDURAL_ROOM_CUSTOM_CATEGORY_BYTES];
+extern char proceduralRoomWeightText[8];
+extern int proceduralRoomCategorySelection;
+extern ProceduralRoomDefinition proceduralRoomPendingDefinition;
+extern bool proceduralRoomHasPendingDefinition;
+
+void editorOpenProceduralRoomProperties();
+void editorApplyProceduralRoomProperties();
+void editorCancelProceduralRoomProperties();
+bool editorReadProceduralRoomDefinition(
+	ProceduralRoomDefinition& definition,
+	char* errorText,
+	std::size_t errorTextSize);
 extern char tmpSpriteProperties[36][128];
 static constexpr int MONSTER_PROPERTY_DISPOSITION = 32;
 static constexpr int MONSTER_PROPERTY_RECRUITABLE = 33;
@@ -240,6 +256,7 @@ void buttonHoverText(button_t* my);
 void buttonMap(button_t* my);
 void buttonAttributes(button_t* my);
 void buttonAttributesConfirm(button_t* my);
+void buttonProceduralRoomProperties(button_t* my);
 void buttonClearMap(button_t* my);
 void buttonClearMapConfirm(button_t* my);
 void buttonDialogue(button_t* my);

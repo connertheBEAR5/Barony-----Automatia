@@ -548,6 +548,25 @@ typedef enum ItemType
 	SPELLBOOK_HOLY_BEAM,
 	SPELLBOOK_DOMINATE,
 	MAGIC_GRIMOIRE,
+	// Feature-gated Automatia Illusion books. Appended after every existing
+	// item so old saves, maps, packets, achievements and S.A.M. IDs stay stable.
+	SPELLBOOK_MIRROR_OTHER,
+	SPELLBOOK_MIRROR_COPY,
+	SPELLBOOK_MIRROR_WALL,
+	SPELLBOOK_MIRROR_REFLECT,
+	SPELLBOOK_MIRROR_MIMIC,
+	SPELLBOOK_MIRROR_REFLECT_LOOT,
+	SPELLBOOK_PHANTASM_PATH,
+	SPELLBOOK_MIRROR_DUPLICATE_LOOT,
+	SPELLBOOK_MIRAGE_WALL,
+	SPELLBOOK_PARANOIA,
+	SPELLBOOK_VERTICAL_MIRAGE,
+	SPELLBOOK_SHADOW_STEP,
+	SPELLBOOK_STORE_MAGIC,
+	// Optional run-scoped skill manuals. These are code-defined so the base
+	// items.json and every existing item/S.A.M. runtime ID remain unchanged.
+	SKILL_BOOK,
+	SKILL_SCROLL,
 	ITEM_ENUM_MAX
 } ItemType;
 const int NUMITEMS = ITEM_ENUM_MAX;
@@ -558,9 +577,10 @@ constexpr Sint32 EDITOR_ITEM_ID_OFFSET = 2;
 
 // Total item-definition storage capacity.
 //
-// NUMITEMS remains the vanilla item count and must continue to be used by
-// vanilla enumeration, random loot generation, achievements, and balance
-// logic. NUM_ITEM_SLOTS is only for validated direct item-definition storage.
+// NUMITEMS remains the engine-owned append-only item count (base JSON plus
+// code-defined Automatia items) and continues to drive ordinary enumeration,
+// generation, achievements, and balance logic. NUM_ITEM_SLOTS is only for
+// validated direct item-definition storage, including S.A.M. runtime IDs.
 static_assert(
     NUMITEMS <= SAM_ITEM_ID_BASE,
     "Vanilla item IDs overlap the reserved S.A.M item range"
@@ -911,6 +931,11 @@ bool dropItem(Item* item, int player, const bool notifyMessage = true, const boo
 bool playerGreasyDropItem(const int player, Item* const item);
 bool playerThrowDuck(const int player, Item* const item, int charge);
 void useItem(Item* item, int player, Entity* usedBy = nullptr, bool unequipForDropping = false, bool serverCheckUse = false);
+bool itemIsSkillManual(const Item* item);
+int itemSkillManualSkill(const Item* item);
+Item* newSkillManual(ItemType type, int skill, Status status, Sint16 beatitude,
+	Sint16 count, bool identified, list_t* inventory);
+void item_SkillManual(Item*& item, int player);
 enum EquipItemResult : int
 {
 	EQUIP_ITEM_FAIL_CANT_UNEQUIP,

@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <vector>
+
 class SAMItemDefinitionBridge
 {
 public:
@@ -24,4 +26,8 @@ public:
 
 private:
     static int installedCount;
+    // Keep the previous live slots independently of the source registry. The
+    // registry is intentionally cleared before each rescan, so consulting it
+    // during cleanup would leave removed-mod definitions resident in items[].
+    static std::vector<int> installedRuntimeIds;
 };

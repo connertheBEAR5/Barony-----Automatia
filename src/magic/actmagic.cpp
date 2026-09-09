@@ -24,6 +24,7 @@
 #include "../scores.hpp"
 #include "../prng.hpp"
 #include "magic.hpp"
+#include "illusion_magic.hpp"
 #include "../mod_tools.hpp"
 #include "../status_effect_owner_encoding.hpp"
 
@@ -2425,6 +2426,21 @@ void actMagicMissile(Entity* my)   //TODO: Verify this function.
 					}
 				}
 
+				// Deterministic defence precedence after spell-specific immunity:
+				// Store Magic, ordinary Reflection, Mirror Reflect, ordinary Absorb.
+				// A successful capture removes this projectile here, so no later
+				// defence or hit path can resolve the same incoming spell again.
+				Entity* incomingCaster = spell && spell->caster
+					? uidToEntity(spell->caster) : parent;
+				if ( hit.entity && hitstats && spell
+					&& IllusionMagic::tryStoreIncoming(*hit.entity, *my,
+						*spell, incomingCaster, element->getDamage()) )
+				{
+					my->removeLightField();
+					list_RemoveNode(my->mynode);
+					return;
+				}
+
 				// count reflection
 				int reflection = 0;
 				if ( hitstats )
@@ -2483,6 +2499,17 @@ void actMagicMissile(Entity* my)   //TODO: Verify this function.
 							}
 						}
 					}
+				}
+				if ( !reflection && hit.entity && spell
+					&& IllusionMagic::shouldMirrorReflect(*hit.entity, *my,
+						*spell, incomingCaster) )
+				{
+					reflection = 3;
+					my->actmagicMirrorReflected = 1;
+					my->actmagicMirrorReflectedCaster = incomingCaster
+						? incomingCaster->getUID() : 0;
+					my->actmagicAdditionalDamage +=
+						IllusionMagic::mirrorReflectBonusDamage(*spell);
 				}
 
 				bool yourSpellHitsTheMonster = false;

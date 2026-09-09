@@ -4238,7 +4238,7 @@ real_t getMagicGrimoireEffectiveSkill(Stat* stats, int primarySkillID)
 int getMagicGrimoirePotencyPercent(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire)
 {
 	(void)caster;
-	if ( !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
+	if ( !automatianModeEnabled() || !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
 	{
 		return 0;
 	}
@@ -4251,7 +4251,7 @@ int getMagicGrimoirePotencyPercent(Entity* caster, Stat* stats, int primarySkill
 real_t getMagicGrimoireManaReduction(Entity* caster, Stat* stats, int primarySkillID, Item* grimoire)
 {
 	(void)caster;
-	if ( !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
+	if ( !automatianModeEnabled() || !stats || !grimoire || grimoire->type != MAGIC_GRIMOIRE )
 	{
 		return 0.0;
 	}
@@ -4272,28 +4272,34 @@ int getMagicGrimoireAdjustedManaCost(int baseCost, real_t reduction)
 
 void setMagicGrimoireCastContext(bool active, real_t potency)
 {
-	automatiaMagicGrimoireContextActive = active;
-	automatiaMagicGrimoireContextPotency = active ? std::max<real_t>(0.0, potency) : 0.0;
+	automatiaMagicGrimoireContextActive = active && automatianModeEnabled();
+	automatiaMagicGrimoireContextPotency = automatiaMagicGrimoireContextActive
+		? std::max<real_t>(0.0, potency) : 0.0;
 }
 
 bool magicGrimoireCastContextActive()
 {
-	return automatiaMagicGrimoireContextActive;
+	return automatianModeEnabled() && automatiaMagicGrimoireContextActive;
 }
 
 real_t magicGrimoireCastContextPotency()
 {
-	return automatiaMagicGrimoireContextPotency;
+	return magicGrimoireCastContextActive() ? automatiaMagicGrimoireContextPotency : 0.0;
 }
 
 bool magicGrimoireSpellSource(Entity* magicSourceParticle)
 {
-	return automatiaMagicGrimoireContextActive
-		|| (magicSourceParticle && magicSourceParticle->actmagicFromSpellbook == 2);
+	return automatianModeEnabled()
+		&& (automatiaMagicGrimoireContextActive
+			|| (magicSourceParticle && magicSourceParticle->actmagicFromSpellbook == 2));
 }
 
 real_t getMagicGrimoireSourcePotency(Entity* magicSourceParticle, real_t suppliedBonus)
 {
+	if ( !automatianModeEnabled() )
+	{
+		return 0.0;
+	}
 	if ( suppliedBonus > 0.0 )
 	{
 		return suppliedBonus;
@@ -4311,7 +4317,7 @@ real_t getMagicGrimoireSourcePotency(Entity* magicSourceParticle, real_t supplie
 
 void propagateMagicGrimoireSource(Entity* destination, Entity* source)
 {
-	if ( !destination )
+	if ( !automatianModeEnabled() || !destination )
 	{
 		return;
 	}
@@ -4334,7 +4340,7 @@ void propagateMagicGrimoireSource(Entity* destination, Entity* source)
 
 void applyMagicGrimoireUtilityScalingToSpell(spell_t* spell, real_t potency)
 {
-	if ( !spell || potency <= 0.0 || spell->magic_grimoire )
+	if ( !automatianModeEnabled() || !spell || potency <= 0.0 || spell->magic_grimoire )
 	{
 		return;
 	}
@@ -4361,7 +4367,7 @@ void applyMagicGrimoireUtilityScalingToSpell(spell_t* spell, real_t potency)
 
 void applyMagicGrimoireSummonBonus(Entity* summon, real_t potency)
 {
-	if ( !summon || potency <= 0.0 )
+	if ( !automatianModeEnabled() || !summon || potency <= 0.0 )
 	{
 		return;
 	}

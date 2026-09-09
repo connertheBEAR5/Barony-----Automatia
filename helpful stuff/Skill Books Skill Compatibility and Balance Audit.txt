@@ -1,0 +1,141 @@
+BARONY AUTOMATIA — SKILL BOOKS / SKILL SCROLLS
+SKILL COMPATIBILITY AND BALANCE AUDIT
+============================================================
+
+Scope
+-----
+
+This audit records the existing player proficiency model before and after the
+run-scoped Skill Book/Skill Scroll integration. The runtime has sixteen stored
+player proficiencies, each using the existing legal range 0..100. Appraisal is
+the current Lore-equivalent: it scales a manual but is intentionally not a
+manual target, preventing a self-amplifying Lore loop.
+
+All entries below use the stable constants in src/stat.hpp. The target table is
+encoded in src/skill_books.hpp and is shared by generation, item validation,
+tooltips, and use-time mutation.
+
+Skill matrix
+------------
+
+ID  Internal        Display        Trainable  Range   Manual  Reason / notes
+0   PRO_LOCKPICKING  Lockpicking    yes        0..100  yes     DEX; normal lock/trap training remains intact.
+1   PRO_STEALTH      Stealth        yes        0..100  yes     DEX; stealth progression remains intact.
+2   PRO_TRADING      Trading        yes        0..100  yes     CHR; buying/selling progression remains intact.
+3   PRO_APPRAISAL    Appraisal/Lore yes        0..100  no      Lore source for magnitude; excluded to avoid feedback.
+4   PRO_THAUMATURGY  Thaumaturgy    yes        0..100  yes     CON; spell progression and stat bookkeeping remain intact.
+5   PRO_LEADERSHIP   Leadership     yes        0..100  yes     CHR; follower systems read the same stored value.
+6   PRO_MYSTICISM    Mysticism      yes        0..100  yes     INT; spell progression remains unchanged.
+7   PRO_SORCERY      Sorcery        yes        0..100  yes     INT; spell progression remains unchanged.
+8   PRO_RANGED       Ranged         yes        0..100  yes     DEX; ranged combat reads the same bounded value.
+9   PRO_SWORD        Sword          yes        0..100  yes     STR; combat/stat-bonus bookkeeping remains intact.
+10  PRO_MACE         Mace           yes        0..100  yes     STR; combat/stat-bonus bookkeeping remains intact.
+11  PRO_AXE          Axe            yes        0..100  yes     STR; combat/stat-bonus bookkeeping remains intact.
+12  PRO_POLEARM      Polearm        yes        0..100  yes     STR; combat/stat-bonus bookkeeping remains intact.
+13  PRO_SHIELD       Shield         yes        0..100  yes     CON; combat/stat-bonus bookkeeping remains intact.
+14  PRO_UNARMED      Unarmed        yes        0..100  yes     STR; existing achievement checks remain intact.
+15  PRO_ALCHEMY      Alchemy        yes        0..100  yes     INT; the recipe-unlock side effect remains intact.
+
+Legal bounds and mutation
+-------------------------
+
+Stat::setProficiency is the authoritative clamp and persists the fixed
+PROFICIENCIES array through the existing character/run save paths. A manual
+uses the reader's current modified PRO_APPRAISAL value as Lore:
+
+    magnitude = clamp(1 + floor(Lore / 20), 1, 5)
+
+Lore 0..19, 20..39, 40..59, 60..79, and 80..100 therefore produce 1, 2, 3,
+4, and 5 points. Negative beatitude applies -magnitude; zero or positive
+beatitude applies +magnitude. The result is clamped to 0..100. A manual that
+cannot change a skill at its floor/cap is identified but is not consumed.
+
+The shared Entity::applySkillDelta path updates stat-bonus bookkeeping, the
+Alchemy recipe hook, and the established SKIL packet for a remote player. It
+honors the existing no-skills challenge. Skill Books do not create an account
+progression field or alter future character creation.
+
+Existing books, scrolls, appraisal, and identity
+------------------------------------------------
+
+Vanilla READABLE_BOOK, ordinary SCROLL items, spellbooks, and tomes retain
+their existing use paths and names. Skill Book and Skill Scroll are two
+code-defined visual variants of one Skill Manual behavior; they are appended
+after the existing item IDs and do not renumber JSON, save, or S.A.M. IDs.
+
+The normal appraisal GUI is reused. A 500-gold Skill Book or 350-gold Skill
+Scroll follows the existing value/Lore/perception appraisal tables and time
+calculation, making them substantially harder than mundane books at low
+appraisal. Unidentified names/descriptions remain generic and do not reveal the
+encoded target. After identification, the tooltip adds target, signed effect,
+current Lore magnitude, and “Permanent for this run.” Goblins are not sent
+through item_Spellbook, so their spell-memorization restriction does not block
+a Skill Manual.
+
+Persistence, multiplayer, and S.A.M.
+-------------------------------------
+
+The effect changes the existing player Stat proficiency array only. Existing
+character transfer/save/reload/disconnect/reconnect paths consequently carry
+the change for the current run, with no new sidecar or account save. The host
+derives the manual target from the authenticated inventory tuple and owns the
+mutation. A client can request normal USEI, but cannot forge a target,
+beatitude, count, appearance, or identity: the server matches the complete
+tuple against that player's actual Skill Manual before applying it. The normal
+SKIL packet shape is reused for remote proficiency synchronization.
+
+Native code-defined IDs are below the reserved S.A.M. runtime range. S.A.M.
+items continue to use their existing stable-ID packet/save adapters; a custom
+S.A.M. item is not silently treated as a Skill Manual merely because its
+appearance contains the marker.
+
+Generation and balance
+----------------------
+
+The authoritative `SV_FLAG_AUTOMATIAN_MODE` flag is OFF by default and is
+exposed as the one host-controlled “Automatian Mode” Game Settings/lobby
+choice. It jointly enables Skill Books/Skill Scrolls, Magic Grimoire content,
+and the Illusion Magic school. With Automatian Mode off, no manual is rolled
+and an explicitly encountered manual cannot be used. With it on:
+
+* general/chest inventory has one independent 1% manual roll;
+* bookstore shops have one independent 1% roll per generated slot;
+* empty authored readable-book props (the map-side bookcase/library source)
+  have a 1/75 conversion roll; authored text is never replaced;
+* target skill is uniformly selected from the fifteen eligible IDs;
+* 20% of generated manuals are cursed (-1 beatitude), otherwise they are
+  neutral; no oversized blessed bonus was added;
+* status is WORN..SERVICABLE and the item is unidentified;
+* level -1 keeps manuals out of ordinary itemLevelCurve selection.
+
+These are deliberately rare additive rolls, not a replacement for ordinary
+books/scrolls. Existing chest/shop capacity and inventory sorting remain in
+charge. Mirror Reflect Loot's fake visual has no Item identity, while Mirror
+Duplicate Loot copies a real item under its existing safety rules; there is no
+Skill Manual-specific duplication exception or reward multiplier.
+
+Run-level availability estimate
+--------------------------------
+
+The procedural sources do not have one fixed container count, so the honest
+pre-run expectation is calculated from the actual rolls rather than presented
+as a fixed per-dungeon promise:
+
+    expected manuals ~= 0.01 * (generated chest slots + bookstore slots)
+                       + (1 / 75) * empty readable-book props
+
+For example, a run that generates 40 eligible chest/shop slots and 30 empty
+bookcase props averages about 0.93 manuals (40/100 + 30/75), before the
+book-versus-scroll and target-skill split. Actual runs vary with map seed,
+container count, and shop generation; normal training remains the primary
+progression source.
+
+Validation coverage and limits
+------------------------------
+
+tests/skill_books_tests.cpp deterministically checks every Lore bucket, normal
+and cursed deltas, floor/cap clamping, all fifteen eligible IDs, Appraisal
+exclusion, marker encoding/decoding, authoritative flag wiring, tooltip
+identity gating, server inventory validation, and rare map generation. The
+normal CTest/build checks do not substitute for visual appraisal timing,
+controller input, audio output, or a two-real-client loot/late-join session.

@@ -1125,6 +1125,8 @@ namespace MainMenu {
 		bool assist_items_enabled = false;
 		bool cheats_enabled = false;
 		bool infinite_dungeon_enabled = false;
+		bool omnidirectional_movement_enabled = false;
+		bool automatian_mode_enabled = false;
 		bool skipintro = true;
 		int port_number = DEFAULT_PORT;
 		bool show_lobby_code = true;
@@ -3479,6 +3481,9 @@ namespace MainMenu {
 			svFlags = assist_items_enabled ? svFlags | SV_FLAG_ASSIST_ITEMS : svFlags & ~(SV_FLAG_ASSIST_ITEMS);
 		    svFlags = cheats_enabled ? svFlags | SV_FLAG_CHEATS : svFlags & ~(SV_FLAG_CHEATS);
 		    svFlags = infinite_dungeon_enabled ? svFlags | SV_FLAG_INFINITE_DUNGEON : svFlags & ~(SV_FLAG_INFINITE_DUNGEON);
+		    svFlags = omnidirectional_movement_enabled ? svFlags | SV_FLAG_OMNIDIRECTIONAL_MOVEMENT : svFlags & ~(SV_FLAG_OMNIDIRECTIONAL_MOVEMENT);
+		    svFlags = automatian_mode_enabled ? svFlags | SV_FLAG_AUTOMATIAN_MODE : svFlags & ~(SV_FLAG_AUTOMATIAN_MODE);
+		    svFlags &= ~SV_FLAG_LEGACY_SKILL_BOOKS;
 		}
 	    sendSvFlagsOverNet();
 		::skipintro = skipintro;
@@ -3593,6 +3598,8 @@ namespace MainMenu {
 		settings.assist_items_enabled = svFlags & SV_FLAG_ASSIST_ITEMS;
 		settings.cheats_enabled = svFlags & SV_FLAG_CHEATS;
 		settings.infinite_dungeon_enabled = svFlags & SV_FLAG_INFINITE_DUNGEON;
+		settings.omnidirectional_movement_enabled = svFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT;
+		settings.automatian_mode_enabled = automatianModeEnabled();
 		settings.skipintro = true;
 		settings.port_number = ::portnumber;
 		settings.show_lobby_code = !hidden_roomcode;
@@ -3612,7 +3619,7 @@ namespace MainMenu {
 	}
 
 	bool AllSettings::serialize(FileInterface* file) {
-	    int version = 25;
+	    int version = 29;
 	    file->property("version", version);
 	    file->property("mods", mods);
 		file->property("crossplay_enabled", crossplay_enabled);
@@ -3760,6 +3767,16 @@ namespace MainMenu {
 		file->property("assist_items_enabled", assist_items_enabled);
 		file->property("cheats_enabled", cheats_enabled);
 		file->property("infinite_dungeon_enabled", infinite_dungeon_enabled);
+		file->propertyVersion("omnidirectional_movement_enabled", version >= 26, omnidirectional_movement_enabled);
+		bool legacyIllusionMagicEnabled = automatian_mode_enabled;
+		bool legacySkillBooksEnabled = automatian_mode_enabled;
+		file->propertyVersion("illusion_magic_enabled", version >= 27, legacyIllusionMagicEnabled);
+		file->propertyVersion("skill_books_enabled", version >= 28, legacySkillBooksEnabled);
+		file->propertyVersion("automatian_mode_enabled", version >= 29, automatian_mode_enabled);
+		if ( file->isReading() && version < 29 )
+		{
+			automatian_mode_enabled = legacyIllusionMagicEnabled || legacySkillBooksEnabled;
+		}
 		file->property("skipintro", skipintro);
 		file->property("use_model_cache", no);
 		file->property("debug_keys_enabled", enableDebugKeys);
@@ -8131,6 +8148,8 @@ bind_failed:
 			allSettings.assist_items_enabled = svFlags & SV_FLAG_ASSIST_ITEMS;
 			allSettings.cheats_enabled = svFlags & SV_FLAG_CHEATS;
 			allSettings.infinite_dungeon_enabled = svFlags & SV_FLAG_INFINITE_DUNGEON;
+			allSettings.omnidirectional_movement_enabled = svFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT;
+			allSettings.automatian_mode_enabled = automatianModeEnabled();
 		}
 
 		y += settingsAddSubHeader(*settings_subwindow, y, "game", Language::get(5250));
@@ -8163,6 +8182,32 @@ bind_failed:
 				allSettings.infinite_dungeon_enabled = button.isPressed();
 			}
 		);
+		y += settingsAddBooleanOption(
+			*settings_subwindow,
+			y,
+			"omnidirectional_movement",
+			"Omnidirectional Movement",
+			"Use full-speed forward, backward, strafe, and normalized diagonal movement for ordinary players.",
+			allSettings.omnidirectional_movement_enabled,
+			[](Button& button)
+			{
+				soundToggleSetting(button);
+				allSettings.omnidirectional_movement_enabled = button.isPressed();
+			}
+		);
+		y += settingsAddBooleanOption(
+			*settings_subwindow,
+			y,
+			"automatian_mode",
+			"Automatian Mode",
+			"Enable Automatia's Magic Grimoire, Illusion magic school and spellbooks, and rare Lore-scaled Skill Books/Skill Scrolls for this server.",
+			allSettings.automatian_mode_enabled,
+			[](Button& button)
+			{
+				soundToggleSetting(button);
+				allSettings.automatian_mode_enabled = button.isPressed();
+			}
+		);
 		/*y += settingsAddBooleanOption(*settings_subwindow, y, "extra_life", Language::get(5265), Language::get(5266),
 			allSettings.extra_life_enabled, [](Button& button){soundToggleSetting(button); allSettings.extra_life_enabled = button.isPressed();});*/
 #ifndef NINTENDO
@@ -8181,6 +8226,8 @@ bind_failed:
 			{Setting::Type::Boolean, "classic_mode"},
 			{Setting::Type::Boolean, "keep_inventory"},
 			{Setting::Type::Boolean, "infinite_dungeon"},
+			{Setting::Type::Boolean, "omnidirectional_movement"},
+			{Setting::Type::Boolean, "automatian_mode"},
 			//{Setting::Type::Boolean, "extra_life"},
 			{Setting::Type::Boolean, "cheats"}});
 #else
@@ -8193,7 +8240,9 @@ bind_failed:
 			{Setting::Type::Boolean, "hardcore_mode"},
 			{Setting::Type::Boolean, "classic_mode"},
 			{Setting::Type::Boolean, "keep_inventory"},
-			{Setting::Type::Boolean, "infinite_dungeon"}});
+			{Setting::Type::Boolean, "infinite_dungeon"},
+			{Setting::Type::Boolean, "omnidirectional_movement"},
+			{Setting::Type::Boolean, "automatian_mode"}});
 			//{Setting::Type::Boolean, "extra_life"}}),
 #endif
 
@@ -8216,6 +8265,8 @@ bind_failed:
 					//{"setting_extra_life_button", SV_FLAG_LIFESAVING},
 					{"setting_assist_items_button", SV_FLAG_ASSIST_ITEMS},
 					{"setting_infinite_dungeon_button", SV_FLAG_INFINITE_DUNGEON},
+					{"setting_omnidirectional_movement_button", SV_FLAG_OMNIDIRECTIONAL_MOVEMENT},
+					{"setting_automatian_mode_button", SV_FLAG_AUTOMATIAN_MODE},
 					{"setting_cheats_button", SV_FLAG_CHEATS},
 				};
 			}
@@ -8244,6 +8295,7 @@ bind_failed:
 						//case SV_FLAG_LIFESAVING: options["setting_extra_life_button"] = SV_FLAG_LIFESAVING; break;
 						case SV_FLAG_ASSIST_ITEMS: options["setting_assist_items_button"] = SV_FLAG_ASSIST_ITEMS; break;
 						case SV_FLAG_INFINITE_DUNGEON: options["setting_infinite_dungeon_button"] = SV_FLAG_INFINITE_DUNGEON; break;
+						case SV_FLAG_AUTOMATIAN_MODE: options["setting_automatian_mode_button"] = SV_FLAG_AUTOMATIAN_MODE; break;
 						case SV_FLAG_CHEATS: options["setting_cheats_button"] = SV_FLAG_CHEATS; break;
 						}
 					}
@@ -15393,6 +15445,9 @@ failed:
 	static void characterCardGameFlagsMenu(int index) {
 		bool local = currentLobbyType == LobbyType::LobbyLocal;
 
+		// Keep the native artwork size. The twelve rows below use a compact
+		// cadence so the stock achievement panel remains at the bottom of the
+		// card instead of being stretched over the last controls.
 		auto card = initCharacterCard(index, 664);
         if (!card) {
             return;
@@ -15410,6 +15465,8 @@ failed:
 			allSettings.assist_items_enabled = lobbyWindowSvFlags & SV_FLAG_ASSIST_ITEMS;
 			allSettings.cheats_enabled = lobbyWindowSvFlags & SV_FLAG_CHEATS;
 			allSettings.infinite_dungeon_enabled = lobbyWindowSvFlags & SV_FLAG_INFINITE_DUNGEON;
+			allSettings.omnidirectional_movement_enabled = lobbyWindowSvFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT;
+			allSettings.automatian_mode_enabled = (lobbyWindowSvFlags & SV_FLAG_AUTOMATIAN_MODE) != 0;
 		}
 
 		static void (*back_fn)(int) = [](int index){
@@ -15426,6 +15483,9 @@ failed:
 				svFlags = allSettings.assist_items_enabled ? svFlags | SV_FLAG_ASSIST_ITEMS : svFlags & ~(SV_FLAG_ASSIST_ITEMS);
 			    svFlags = allSettings.cheats_enabled ? svFlags | SV_FLAG_CHEATS : svFlags & ~(SV_FLAG_CHEATS);
 			    svFlags = allSettings.infinite_dungeon_enabled ? svFlags | SV_FLAG_INFINITE_DUNGEON : svFlags & ~(SV_FLAG_INFINITE_DUNGEON);
+			    svFlags = allSettings.omnidirectional_movement_enabled ? svFlags | SV_FLAG_OMNIDIRECTIONAL_MOVEMENT : svFlags & ~(SV_FLAG_OMNIDIRECTIONAL_MOVEMENT);
+			    svFlags = allSettings.automatian_mode_enabled ? svFlags | SV_FLAG_AUTOMATIAN_MODE : svFlags & ~(SV_FLAG_AUTOMATIAN_MODE);
+			    svFlags &= ~SV_FLAG_LEGACY_SKILL_BOOKS;
 			    sendSvFlagsOverNet();
 			}
 			auto lobby = main_menu_frame->findFrame("lobby"); assert(lobby);
@@ -15453,16 +15513,6 @@ failed:
 			"backdrop"
 		);
 
-		// The stock Custom Difficulty artwork has the achievements status box
-		// baked into the lower panel. With the extra Infinite Dungeon row that
-		// box sits behind Enable Cheats, so paint over only that baked rectangle
-		// with the surrounding panel tone. Labels/buttons are created afterward
-		// and therefore remain fully interactive and visible above this cover.
-		auto achievementsBoxCover = card->addField("achievements_box_cover", 1);
-		achievementsBoxCover->setSize(SDL_Rect{ 48, 520, 228, 62 });
-		achievementsBoxCover->setText("");
-		achievementsBoxCover->setBackgroundColor(makeColor(26, 29, 36, 255));
-
 		auto header = card->addField("header", 64);
 		header->setSize(SDL_Rect{30, 8, 264, 50});
 		header->setFont(smallfont_outline);
@@ -15480,6 +15530,8 @@ failed:
 			Language::get(5384), // classic endings
 			Language::get(5385), // hardcore difficulty
 			"Infinite Dungeon",
+			"Omnidirectional\nMovement",
+			"Automatian\nMode",
 #ifndef NINTENDO
 			Language::get(5386), // cheats
 #endif
@@ -15488,20 +15540,26 @@ failed:
 		int num_settings = sizeof(game_settings_text) / sizeof(game_settings_text[0]);
 
 		/*
-		 * Keep the original desktop row cadence and widget alignment so the
-		 * label text, checkbox art, checked icon, and focus highlight all sit
-		 * on the same row just like the stock menu. To make room for the new
-		 * Infinite Dungeon row, move the achievements warning panel lower.
+		 * Keep a dedicated checkbox gutter on the right. The label fields stop
+		 * before that gutter so long names wrap cleanly instead of drawing over
+		 * the checkbox art. The compact cadence keeps the achievements warning
+		 * panel below the final checkbox. The original artwork only has eight
+		 * baked empty checkbox boxes, so each runtime button supplies its own
+		 * empty box as well as the checked icon.
 		 */
-		constexpr int gameFlagRowSpacing = 50;
-		constexpr int gameFlagLabelY = 61;
-		constexpr int gameFlagButtonY = 66;
+		constexpr int gameFlagRowSpacing = 38;
+		constexpr int gameFlagLabelY = 60;
+		constexpr int gameFlagButtonY = 60;
+		constexpr int gameFlagLabelX = 48;
+		constexpr int gameFlagLabelWidth = 180;
+		constexpr int gameFlagButtonX = 238;
 
 		for (int c = 0; c < num_settings; ++c) {
 			auto label = card->addField((std::string("label") + std::to_string(c)).c_str(), 128);
-			label->setSize(SDL_Rect{48, gameFlagLabelY + gameFlagRowSpacing * c, 194, 54});
+			label->setSize(SDL_Rect{gameFlagLabelX, gameFlagLabelY + gameFlagRowSpacing * c, gameFlagLabelWidth, 38});
 			label->setFont(smallfont_outline);
 			label->setText(game_settings_text[c]);
+			label->reflowTextToFit(0);
 			label->setColor(makeColor(166, 123, 81, 255));
 			label->setHJustify(Field::justify_t::LEFT);
 			label->setVJustify(Field::justify_t::CENTER);
@@ -15509,11 +15567,28 @@ failed:
 			auto setting = card->addButton((std::string("setting") + std::to_string(c)).c_str());
 			setting->setIcon("*images/ui/Main Menus/Play/PlayerCreation/LobbySettings/GameSettings/Fill_Checked_00.png");
 			setting->setStyle(Button::style_t::STYLE_CHECKBOX);
-			setting->setSize(SDL_Rect{238, gameFlagButtonY + gameFlagRowSpacing * c, 44, 44});
-			setting->setHighlightColor(0);
+			setting->setSize(SDL_Rect{gameFlagButtonX, gameFlagButtonY + gameFlagRowSpacing * c, 38, 38});
+			// The backdrop's empty boxes stop at the original eight options. Use
+			// the system white texture as a black fill so every option, including
+			// the new rows, has a visible unchecked state.
+			setting->setBackground("images/system/white.png");
+			setting->setColor(makeColor(8, 8, 8, 255));
+			setting->setHighlightColor(makeColor(8, 8, 8, 255));
 			setting->setBorderColor(0);
 			setting->setBorder(0);
-			setting->setColor(0);
+			setting->setDrawCallback([](const Widget&, const SDL_Rect rect) {
+				Image* white = Image::get("images/system/white.png");
+				if (!white) {
+					return;
+				}
+				const SDL_Rect viewport{0, 0, Frame::virtualScreenX, Frame::virtualScreenY};
+				const Uint32 border = makeColor(65, 48, 35, 255);
+				constexpr int borderWidth = 2;
+				white->drawColor(nullptr, SDL_Rect{rect.x, rect.y, rect.w, borderWidth}, viewport, border);
+				white->drawColor(nullptr, SDL_Rect{rect.x, rect.y + rect.h - borderWidth, rect.w, borderWidth}, viewport, border);
+				white->drawColor(nullptr, SDL_Rect{rect.x, rect.y, borderWidth, rect.h}, viewport, border);
+				white->drawColor(nullptr, SDL_Rect{rect.x + rect.w - borderWidth, rect.y, borderWidth, rect.h}, viewport, border);
+			});
 			setting->setWidgetSearchParent(((std::string("card") + std::to_string(index)).c_str()));
 			setting->addWidgetAction("MenuStart", "confirm");
 			setting->addWidgetAction("MenuPageRightAlt", "chat");
@@ -15680,6 +15755,36 @@ failed:
 					soundCheckmark(); allSettings.infinite_dungeon_enabled = button.isPressed();});
 				break;
 			case 9:
+				if ( gameModeManager.isServerflagDisabledForCurrentMode(SV_FLAG_OMNIDIRECTIONAL_MOVEMENT) )
+				{
+					label->setColor(makeColor(128, 128, 128, 255));
+				}
+				setting->setPressed(allSettings.omnidirectional_movement_enabled);
+				setting->setCallback([](Button& button){
+					if ( gameModeManager.isServerflagDisabledForCurrentMode(SV_FLAG_OMNIDIRECTIONAL_MOVEMENT) )
+					{
+						soundError();
+						button.setPressed(allSettings.omnidirectional_movement_enabled);
+						return;
+					}
+					soundCheckmark(); allSettings.omnidirectional_movement_enabled = button.isPressed();});
+				break;
+			case 10:
+				if ( gameModeManager.isServerflagDisabledForCurrentMode(SV_FLAG_AUTOMATIAN_MODE) )
+				{
+					label->setColor(makeColor(128, 128, 128, 255));
+				}
+				setting->setPressed(allSettings.automatian_mode_enabled);
+				setting->setCallback([](Button& button){
+					if ( gameModeManager.isServerflagDisabledForCurrentMode(SV_FLAG_AUTOMATIAN_MODE) )
+					{
+						soundError();
+						button.setPressed(allSettings.automatian_mode_enabled);
+						return;
+					}
+					soundCheckmark(); allSettings.automatian_mode_enabled = button.isPressed();});
+				break;
+			case 11:
 				if ( gameModeManager.isServerflagDisabledForCurrentMode(SV_FLAG_CHEATS) )
 				{
 					label->setColor(makeColor(128, 128, 128, 255));
@@ -15698,7 +15803,9 @@ failed:
 		}
 
 		auto achievements = card->addField("achievements", 256);
-		achievements->setSize(SDL_Rect{54, 567, 214, 34});
+		// CustomDifficulty_Window_02's achievement panel spans y=522..579;
+		// center the status field inside that baked panel rather than below it.
+		achievements->setSize(SDL_Rect{54, 533, 214, 34});
 		achievements->setFont(smallfont_no_outline);
 		achievements->setBackgroundColor(makeColor(0, 0, 0, 0));
 		achievements->setJustify(Field::justify_t::CENTER);
@@ -15774,8 +15881,14 @@ failed:
                     case 8:
                         button->setPressed((lobbyWindowSvFlags & SV_FLAG_INFINITE_DUNGEON));
                         break;
-                    case 9:
-                        button->setPressed((lobbyWindowSvFlags & SV_FLAG_CHEATS));
+					case 9:
+						button->setPressed((lobbyWindowSvFlags & SV_FLAG_OMNIDIRECTIONAL_MOVEMENT));
+						break;
+					case 10:
+						button->setPressed((lobbyWindowSvFlags & SV_FLAG_AUTOMATIAN_MODE));
+						break;
+					case 11:
+						button->setPressed((lobbyWindowSvFlags & SV_FLAG_CHEATS));
                         break;
                     }
                 }

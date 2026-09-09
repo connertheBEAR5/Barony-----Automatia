@@ -13,6 +13,7 @@
 #include "framework/sam_logger.hpp"
 #include "framework/sam_rooms.hpp"
 #include "framework/sam_workshop.hpp"
+#include "procedural_room_catalog_runtime.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -80,6 +81,12 @@ void SAMContentCatalog::rebuild(
             + manifest.ns
             + "@"
             + manifest.version
+            + "#"
+            + (
+                manifest.contentDigest.empty()
+                    ? std::string("unavailable")
+                    : manifest.contentDigest
+            )
         );
     }
 
@@ -105,6 +112,15 @@ void SAMContentCatalog::rebuild(
 		SAMRooms::contentFingerprintEntries(manifests);
 	currentEntries.insert(currentEntries.end(),
 		roomEntries.begin(), roomEntries.end());
+	/* Content mounts can change between sessions/mod reloads. Rebuild the
+	 * PhysFS-backed procedural catalog at the same authoritative content
+	 * boundary as the S.A.M. fingerprint instead of retaining a stale session
+	 * cache. */
+	ProceduralRoomCatalogRuntime::refresh();
+	const std::vector<std::string> proceduralRoomEntries =
+		ProceduralRoomCatalogRuntime::contentFingerprintEntries();
+	currentEntries.insert(currentEntries.end(),
+		proceduralRoomEntries.begin(), proceduralRoomEntries.end());
 
     std::sort(
         currentEntries.begin(),

@@ -18,6 +18,7 @@
 #include "../engine/audio/sound.hpp"
 #include "../net.hpp"
 #include "../magic/magic.hpp"
+#include "../magic/illusion_magic.hpp"
 #include "../menu.hpp"
 #include "../player.hpp"
 #include "interface.hpp"
@@ -4959,14 +4960,26 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
         }
         else
         {
-            if ( !item->identified )
-            {
-                if ( itemCategory(item) == BOOK )
-                {
-                    snprintf(buf, sizeof(buf), "%s %s\n%s (?)", ItemTooltips.getItemStatusAdjective(item->type, item->status).c_str(),
-                             Language::get(4214), getBookLocalizedNameFromIndex(item->appearance % numbooks).c_str());
-                    manuallyInsertedNewline = true;
-                }
+			if ( !item->identified )
+			{
+				if ( itemCategory(item) == BOOK )
+				{
+					if ( itemIsSkillManual(item) )
+					{
+						// Skill manual appearance encodes its target. Never pass it
+						// through the ordinary readable-book title lookup while
+						// unidentified; that would reveal a target-dependent title.
+						snprintf(buf, sizeof(buf), "%s %s",
+							ItemTooltips.getItemStatusAdjective(item->type, item->status).c_str(),
+							item->getName());
+					}
+					else
+					{
+						snprintf(buf, sizeof(buf), "%s %s\n%s (?)", ItemTooltips.getItemStatusAdjective(item->type, item->status).c_str(),
+								 Language::get(4214), getBookLocalizedNameFromIndex(item->appearance % numbooks).c_str());
+						manuallyInsertedNewline = true;
+					}
+				}
                 else if ( itemCategory(item) == SCROLL )
                 {
                     snprintf(buf, sizeof(buf), "%s %s\n%s %s (?)", ItemTooltips.getItemStatusAdjective(item->type, item->status).c_str(),
@@ -5521,7 +5534,8 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 						{
 							continue;
 						}
-                        int skillLVL = std::min(100, stats[player]->getModifiedProficiency(spell->skillID) + statGetINT(stats[player], players[player]->entity));
+                        int skillLVL = getEffectiveSpellcastingAbility(
+							players[player]->entity, stats[player], spell);
                         bool isGoblin = (stats[player]
                                          && (stats[player]->type == GOBLIN
                                              || (stats[player]->playerRace == RACE_GOBLIN && stats[player]->stat_appearance == 0)));
@@ -6067,8 +6081,9 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 						}
 						if ( tag.compare("spell_cast_success2") == 0 )
 						{
-							bool newbie = std::min(std::max(0, 
-								stats[player]->getModifiedProficiency(spell->skillID) + statGetINT(stats[player], players[player]->entity)), 100) < SKILL_LEVEL_BASIC;
+							bool newbie = getEffectiveSpellcastingAbility(
+								players[player]->entity, stats[player], spell)
+								< SKILL_LEVEL_BASIC;
 							if ( !newbie )
 							{
 								continue;
@@ -6076,7 +6091,10 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 						}
 						else
 						{
-							bool newbie = isSpellcasterBeginner(player, players[player]->entity, spell->skillID);
+							bool newbie = players[player]->entity->behavior != &actMonster
+								&& getEffectiveSpellcastingAbility(
+									players[player]->entity, stats[player], spell)
+									< SPELLCASTING_BEGINNER;
 							if ( !newbie )
 							{
 								continue;
@@ -6089,7 +6107,10 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 						{
 							continue;
 						}
-                        bool newbie = isSpellcasterBeginner(player, players[player]->entity, spell->skillID);
+                        bool newbie = players[player]->entity->behavior != &actMonster
+							&& getEffectiveSpellcastingAbility(
+								players[player]->entity, stats[player], spell)
+								< SPELLCASTING_BEGINNER;
                         if ( !newbie )
                         {
                             continue;
@@ -6594,7 +6615,8 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 					{
 						if ( skill.skillId == spell->skillID )
 						{
-							std::string spellSkillValue = skill.getSkillName();
+							std::string spellSkillValue = IllusionMagic::isSpell(spell->ID)
+								? "Illusion" : skill.getSkillName();
 							char spellTierBuf[128];
 							snprintf(spellTierBuf, sizeof(spellTierBuf), ItemTooltips.adjectives["spell_prefixes"]["tier"].c_str(), spell->getSpellTierName());
 							spellSkillValue += spellTierBuf;
@@ -6765,7 +6787,8 @@ void Player::HUD_t::updateFrameTooltip(Item* item, const int x, const int y, int
 						{
 							if ( skill.skillId == spell->skillID )
 							{
-								std::string spellSkillValue = skill.getSkillName();
+								std::string spellSkillValue = IllusionMagic::isSpell(spell->ID)
+									? "Illusion" : skill.getSkillName();
 								char spellTierBuf[128];
 								snprintf(spellTierBuf, sizeof(spellTierBuf), ItemTooltips.adjectives["spell_prefixes"]["tier"].c_str(), spell->getSpellTierName());
 								spellSkillValue += spellTierBuf;
@@ -9542,7 +9565,11 @@ void Player::Inventory_t::updateInventory()
 					bool greyBackground = false;
 					if ( auto spell = getSpellFromItem(player, item, true) )
 					{
-						if ( spell->skillID != spellPanel.spellFilterBySkill )
+						const bool matchesIllusion =
+							spellPanel.spellFilterBySkill == NUMPROFICIENCIES
+							&& IllusionMagic::isSpell(spell->ID);
+						if ( !matchesIllusion
+							&& spellPanel.spellFilterBySkill != spell->skillID )
 						{
 							greyBackground = true;
 						}
@@ -11077,7 +11104,11 @@ void Player::Inventory_t::updateInventory()
 							bool greyBackground = false;
 							if ( auto spell = getSpellFromItem(player, item, true) )
 							{
-								if ( spell->skillID != spellPanel.spellFilterBySkill )
+								const bool matchesIllusion =
+									spellPanel.spellFilterBySkill == NUMPROFICIENCIES
+									&& IllusionMagic::isSpell(spell->ID);
+								if ( !matchesIllusion
+									&& spellPanel.spellFilterBySkill != spell->skillID )
 								{
 									greyBackground = true;
 								}

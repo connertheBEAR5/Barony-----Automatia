@@ -1,0 +1,148 @@
+BARONY AUTOMATIA — PROCEDURAL ROOM GROUPS
+AUTHORING AND DEVELOPER GUIDE
+============================================================
+
+Procedural Room Groups describe an entire .lmp prefab that may participate in
+normal dungeon generation. They are separate from AuthoredRoomGroup cuboids:
+AuthoredRoomGroup is an editor selection/copy organization, while procedural
+metadata belongs to the map file and controls generator eligibility.
+
+MAPPER WORKFLOW
+---------------
+
+1. Create and save any room map. The filename may be arbitrary, for example
+   maps/automatia_proc_test_room.lmp. It does not need a mines00-style name.
+2. Open Map Properties (Map -> Attributes, or Ctrl+M).
+3. Choose “Procedural Generation...” and enable “Use as procedural room.”
+4. Choose a human-readable level set from the dropdown. The known keys are
+   Mines, Swamp, Labyrinth, Ruins, Hell, Caves, Citadel, and Underworld. The
+   Custom Level Set option preserves a safe key for a modded generator.
+5. Choose a Room Category. Normal uses the ordinary pool; Shop, Treasure
+   (Bronze/Iron/Gold/Silver), Special, and Secret Doorway use their matching
+   source-backed generator pools. Secret Doorway is compatible with Mines,
+   Swamp, and Labyrinth only. The category help text describes what its weight
+   controls and never changes the category's global spawn chance.
+   The final **Custom Room Group...** entry lets you type a safe name such as
+   `enemy wing` or `boss rooms`. Every enabled map using that name is grouped
+   for authoring/fingerprinting and is added to the ordinary room pool for
+   the selected level set. Custom names do not invent a new global spawn
+   chance; their weight competes with other ordinary-room candidates.
+6. Set Weight with the +/- controls or numeric field. It is a positive
+   relative value from 1 through 100000. The default
+   is 100; it is not a percentage.
+7. Use Validate Room to inspect the non-destructive status panel. Apply to Map
+   writes only the working copy, creates an undo point when it changes, and
+   returns to Map Properties. Save the .lmp, then close and reopen it to verify
+   the fields are restored.
+
+The map's path is intentionally not written into its metadata. PhysFS
+discovery supplies the current virtual path, so renaming or moving a room does
+not leave a stale self-reference inside the file.
+
+When the checkbox is disabled, retained level-set/category/custom-name/weight values are
+not registered. An enabled definition with an empty/unsafe level set,
+unsupported category, or invalid weight is rejected at Map Properties save.
+Malformed optional metadata causes that candidate to be skipped; it does not
+prevent ordinary map loading.
+
+DISCOVERY AND TESTING
+---------------------
+
+The runtime recursively enumerates the mounted virtual `maps/` namespace via
+PhysFS and inspects only `.lmp` files. Enabled metadata rooms are sorted by
+canonical virtual path, deduplicated, and appended to the existing numbered
+rooms and S.A.M. manifest rooms. A missing numbered file does not affect an
+arbitrarily named metadata room. Broken room files are logged and skipped.
+
+For a visible manual test, give the room an unmistakable floor/wall shape and
+put a distinctive entity in it. Generate the matching level set repeatedly,
+confirm the custom room appears alongside ordinary rooms, then disable the
+metadata and confirm it no longer appears. Marking it for one level set must
+not make it appear in another. For weight tests, compare a 100-weight room to
+a 1-weight room using several fixed seeds; the automated deterministic tests
+cover the exact interval math.
+
+Rooms may contain all 32 authored tile layers and existing entities such as a
+Mini Mimic, Text Source, mechanism, light, stairs, or transition sprite. The
+normal placement path copies them; no room rotation or automatic vertical-port
+matching is provided. This feature does not assemble independent playable
+floors or begin Z5/Z6 vertical generation.
+
+RUNTIME TRACE
+-------------
+
+    Map Properties UI (src/editor.cpp, src/buttons.cpp)
+        -> map_t::proceduralRoom
+        -> MPMD/PGRM metadata chunk (src/files.cpp)
+        -> PhysFS byte scan and ProceduralRoomCatalogRuntime
+        -> deterministic ProceduralRoomCatalog
+        -> generateDungeon() ordinary room pool (src/maps.cpp)
+        -> loadSubRoomData(), existing tile/entity placement
+        -> existing generated persistent-ID assignment on save
+
+`ProceduralRoomDefinition` is fixed-size and trivially copyable so existing
+Zed undo snapshots remain safe. PGRM has payload version 2 and stores enabled,
+category, weight, a bounded normalized level-set string, and (for the custom
+category) a bounded normalized group name. Version-1 PGRM payloads remain
+readable with an empty custom name. Missing PGRM means disabled; the outer
+MPMD version remains 1 and RGRP is untouched.
+
+The shared category descriptor table maps Normal, Shop, Treasure
+(Bronze/Iron/Gold/Silver), Special, and Secret Doorway to the corresponding
+generator pool. Existing global shop/treasure/special/secret chance rules are
+unchanged; metadata weight is applied only within the selected pool. Secret
+Doorway metadata is accepted only for the three source-backed biome pools.
+
+Vanilla numbered rooms and S.A.M. rooms receive default weight 100. If every
+available ordinary candidate has weight 100, the old uniform `map_rng` path is
+kept. When an enabled metadata candidate has a non-default weight, the pool is
+selected with one seeded `map_rng.rand()` value and wide (uint64) accumulation:
+the random value modulo the sum selects the half-open cumulative interval.
+Weights are relative and bounded, never percentages.
+
+PhysFS enumeration is normalized and sorted before registration. Shadowed
+virtual paths are exposed once by PhysFS and the catalog additionally
+deduplicates canonical paths. S.A.M. manifest paths are deduplicated against
+the resolved metadata path before loading, so one physical room is not selected
+twice merely because both systems found it. The catalog contributes content
+entries (including map-byte FNV identity) to the existing S.A.M. content
+fingerprint; no packet layout was changed.
+
+Placement continues to copy every MAPLAYERS (32) tile layer and calls the
+existing `setSpriteAttributes()` entity path. Local Entity::z,
+authoredMapLayer, playableFloor, transition fields, inventory/equipment,
+Text Source, dialogue, Mini Mimic, and S.A.M. stable item metadata remain
+entity properties; no field is inferred from another. Generated prefab copies
+reset persistentID to zero and use the existing deterministic generated-ID
+save pass, so repeated placements cannot share a source ID.
+
+The current source had a creature-list insertion error in both ordinary and
+subroom copy branches: the source prefab entity was inserted instead of the
+generated child. Both branches now call `childEntity->addToCreatureList()`.
+
+The catalog and generator are game/headless code and require no editor or
+rendering context. Server/host generation remains authoritative; clients that
+share the same mounted content, normalized catalog, metadata, and seed follow
+the same room index/RNG sequence. Late join observes the already generated
+world through the existing networking path. A real two-client run is still a
+manual acceptance boundary.
+
+AUTOMATED COVERAGE
+------------------
+
+`procedural_room_generation` covers disabled/default state, enabled metadata
+round trips, normalization, malformed/truncated payloads, unknown optional
+chunks, RGRP separation, arbitrary filenames, path sorting/deduplication,
+level-set matching, unsupported-category exclusion, weighted deterministic
+selection, bounded large sums, and source contracts for the editor, metadata,
+catalog, generator, and generated-child creature registration. Full graphical
+placement, save/reload of a generated live entity, headless launch, and
+multiplayer/late-join observation remain manual tests.
+
+CURRENT LIMITATIONS / FOLLOW-UP IDEAS
+-------------------------------------
+
+* No generic room rotation transform exists in the current generator.
+* No vertical-port or multi-prefab playable-floor topology matching exists.
+* The old numbered loader still follows its historical first-gap convention;
+  metadata rooms are intentionally independent of that convention.

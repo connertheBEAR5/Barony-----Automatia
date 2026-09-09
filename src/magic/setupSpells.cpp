@@ -13,6 +13,7 @@
 #include "../game.hpp"
 #include "../stat.hpp"
 #include "magic.hpp"
+#include "illusion_magic_model.hpp"
 #include "../mod_tools.hpp"
 
 std::map<int, spell_t*> allGameSpells;
@@ -3421,6 +3422,50 @@ void setupSpells()   ///TODO: Verify this function.
 		// elements
 		{ SPELL_ELEMENT_PROPULSION_MISSILE, SPELL_HOLY_BEAM }
 	);
+
+	// Illusion definitions always exist so saves and explicit authored/debug
+	// references remain decodable. Ordinary learning, casting, generation and
+	// UI exposure are all gated by the authoritative synchronized server flag.
+	for ( const auto& definition : IllusionMagic::definitions() )
+	{
+		spell = createSimpleSpell(
+			definition.id,
+			definition.difficulty,
+			definition.mana,
+			definition.mana,
+			1,
+			0,
+			definition.durationTicks,
+			definition.internalName,
+			definition.sustainMana);
+		spell->distance = definition.rangeWorldUnits;
+		spell->radius = definition.radiusWorldUnits;
+		// Illusion is a first-class derived school at runtime. Mysticism remains
+		// the legacy-compatible serialized skill key for spell/event contracts.
+		spell->skillID = PRO_MYSTICISM;
+		if ( definition.id == SPELL_STORE_MAGIC )
+		{
+			spell->sustainEffectDissipate = EFF_STORE_MAGIC;
+		}
+		switch ( definition.target )
+		{
+			case IllusionMagic::TargetType::TouchActor:
+			case IllusionMagic::TargetType::TouchEnemy:
+				spell->rangefinder = SpellRangefinderType::RANGEFINDER_TOUCH;
+				break;
+			case IllusionMagic::TargetType::TouchFloor:
+				spell->rangefinder =
+					SpellRangefinderType::RANGEFINDER_TOUCH_FLOOR_TILE;
+				break;
+			case IllusionMagic::TargetType::TouchWall:
+				spell->rangefinder =
+					SpellRangefinderType::RANGEFINDER_TOUCH_WALL_TILE;
+				break;
+			default:
+				spell->rangefinder = SpellRangefinderType::RANGEFINDER_NONE;
+				break;
+		}
+	}
 
 	//static const int SPELL_LIGHTNING_NEXUS = 182;
 	//static const int SPELL_LIFT = 184;

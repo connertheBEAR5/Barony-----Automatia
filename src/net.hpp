@@ -48,6 +48,7 @@ void sendMapSeedTCP(int c);
 void sendMapTCP(int c);
 void serverUpdateEntitySprite(Entity* entity);
 void serverUpdateEntitySkill(Entity* entity, int skill);
+void serverUpdatePlayerProficiency(int player, int skill, bool notify = false);
 void serverUpdateEntityFSkill(Entity* entity, int fskill);
 void serverUpdateEntityStatFlag(Entity* entity, int flag);
 void serverSpawnMiscParticles(Entity* entity, int particleType, int particleSprite, Uint32 optionalUid = 0, Uint32 duration = 0, Uint32 optionalData = 0);
@@ -200,7 +201,25 @@ const Uint32 SV_FLAG_KEEPINVENTORY = 1 << 7;
 const Uint32 SV_FLAG_LIFESAVING = 1 << 8;
 const Uint32 SV_FLAG_ASSIST_ITEMS = 1 << 9;
 const Uint32 SV_FLAG_INFINITE_DUNGEON = 1 << 10;
+// One opt-in, server-authoritative switch for the Automatia feature set:
+// Magic Grimoire, Illusion Magic, and Skill Books/Skill Scrolls. Reusing the
+// former Illusion bit keeps existing Illusion-enabled sessions compatible.
+const Uint32 SV_FLAG_AUTOMATIAN_MODE = 1 << 11;
+// Opt-in remastered player movement.  This is a server flag so every client
+// applies the same movement rules and the host remains authoritative.
+const Uint32 SV_FLAG_OMNIDIRECTIONAL_MOVEMENT = 1 << 12;
+// Retired after settings version 29. Keep the bit named so loading old
+// settings can normalize it away without changing the packet layout.
+const Uint32 SV_FLAG_LEGACY_SKILL_BOOKS = 1 << 13;
+// Legacy menu loops cover only the original flag rows. Modern Game Settings and
+// the lobby custom-game menu expose newer flags, including Automatian Mode and
+// omnidirectional movement, while the full 32-bit value remains synchronized.
 const Uint32 NUM_SERVER_FLAGS =  11;
+
+inline bool automatianModeEnabled()
+{
+	return (svFlags & SV_FLAG_AUTOMATIAN_MODE) != 0;
+}
 
 extern bool keepInventoryGlobal;
 

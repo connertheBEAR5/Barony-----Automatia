@@ -1,0 +1,660 @@
+Barony Automatia - Illusion Magic School UI and UX Guide
+=======================================================
+
+Purpose and visual language
+---------------------------
+
+Illusion Magic extends the existing Barony inventory, spell panel, status
+queue, rangefinder, item-effect picker, hotbar, fonts, icon frames, cursor
+animation, focus sounds, tooltips, and scroll behavior. It does not introduce
+HTML, a browser, a separate dashboard, or a second input system. Code-owned
+Illusion text is English fallback text so base data/localization JSON remains
+backward compatible; localization extraction is a future content pass.
+
+The authoritative session flag is `SV_FLAG_AUTOMATIAN_MODE`, exposed as the
+host-controlled “Automatian Mode” setting and enabled for tests with
+`--automatian-mode`. It jointly controls Illusion Magic, Skill Books/Skill
+Scrolls, and the Magic Grimoire. `--illusion-magic` and `--skill-books` remain
+compatibility aliases for the same mode. Mode-off behavior is part of every
+screen contract.
+
+
+SCREEN 1 - Known spell list and school filter
+---------------------------------------------
+
+1. Screen
+    Player inventory's existing spell panel and its school-filter control.
+
+2. Old behavior
+    The filter cycled All, Sorcery, Mysticism, and Thaumaturgy. Known spells
+    outside the current school were greyed using the existing panel behavior.
+
+3. New behavior
+    When enabled, one additional cycle value follows Thaumaturgy and displays
+    `Filtering: Illusion`. It matches only IDs 225..237. Illusion entries remain
+    normal `SPELL_ITEM` entries and can be selected, equipped, and placed on the
+    hotbar through established interactions.
+
+4. Reason
+    The school must be browsable without pretending that its derived rank is a
+    new serialized proficiency-array index.
+
+5. Reused Barony textures/widgets
+    Existing spell-panel frame, filter button, Mysticism-style school icon,
+    pixel font, item slots, grey/unusable treatment, cursor animation, tooltip
+    image, inventory scrollbar, and selection sounds.
+
+6. ASCII layout
+
+        +----------------------------------+
+        | SPELLS   [Filtering: Illusion]   |
+        | [Mirror Other] [Mirror Copy]     |
+        | [Mirror Wall ] [Mirror Reflect]  |
+        | ...                              |
+        | [Shadow Step ] [Store Magic]     |
+        +----------------------------------+
+
+7. Mouse
+    Click the existing filter button to cycle; use normal slot clicks/dragging.
+    Hitboxes and hover cursor are the unchanged inventory widgets. The mouse
+    wheel scrolls the normal inventory/spell-panel container.
+
+8. Keyboard
+    Existing inventory focus movement, confirm, cancel, and category/filter
+    bindings remain authoritative. No Illusion-only key is required.
+
+9. Controller
+    D-pad/left-stick follows the existing slot grid. Confirm activates the
+    focused slot; cancel exits; the established category/filter action cycles
+    to and from Illusion.
+
+10. Focus order
+    Filter control, then the existing row-major spell-slot order, then the
+    normal adjacent inventory controls. Hidden entries are not focus targets.
+
+11. Scroll behavior
+    One existing single-column/grid scroll region; focus follows its ordinary
+    auto-scroll. Switching filter does not create a nested scroll region.
+
+12. Tooltips
+    Each Illusion spell shows school, MP, requirement, target, applicable
+    duration, concise effect, essential caveat, and `highest Sorcery,
+    Mysticism, or Thaumaturgy` progression note.
+
+13. Flag-off behavior
+    The filter cycle skips Illusion. Any old saved Illusion `SPELL_ITEM` frame
+    is disabled/hidden and cannot be used.
+
+14. Flag-on behavior
+    Filter and valid learned entries appear immediately at normal screen
+    construction/update boundaries.
+
+15. Low-resolution behavior
+    Uses the already-tested inventory grid and scrollbar, no extra columns or
+    text beside the slot grid. The filter string remains in the compact header.
+
+16. Multiplayer notes
+    The client's list is presentation over its normal known-spell state, but
+    the synchronized host flag controls availability and the server validates
+    every cast.
+
+17. Manual graphical checks
+    Check All -> Sorcery -> Mysticism -> Thaumaturgy -> Illusion -> All at the
+    minimum supported resolution using mouse, keyboard, and controller. Confirm
+    grey states, focus, scrolling, and no off-flag entry or empty focus stop.
+
+
+SCREEN 2 - Spellbook, spell details, learning, and hotbar
+--------------------------------------------------------
+
+1. Screen
+    Inventory item tooltip for the 13 real Illusion spellbooks, learned spell
+    tooltip, book-reading result, learning notification, and hotbar slots.
+
+2. Old behavior
+    Normal books mapped one item to one registered spell and reused generic
+    proficiency, reading, learning, inventory, and hotbar presentation.
+
+3. New behavior
+    Thirteen append-only `SPELLBOOK_*` items map one-to-one to spell IDs
+    225..237. Identified names are `Spellbook of <spell>`; unidentified names
+    are `Flickering Spellbook`. Both book and learned spell get detailed
+    Illusion text. Requirements/fumble/extra-MP calculations use derived
+    Illusion proficiency consistently. Learned spells hotbar normally. Store
+    Magic's active icon adds a vault-count badge.
+
+4. Reason
+    Illusion spells must be genuinely obtainable and learnable, not debug-only
+    registry records, while preserving the established Barony interaction.
+
+5. Reused Barony textures/widgets
+    Confuse spellbook visual family, existing source spell icons, item tooltip
+    frame/templates, book-read feedback, known-spell insertion, inventory slot,
+    hotbar slot, mana display, casting animation, and normal sounds.
+
+6. ASCII layout
+
+        +---------------------------------------------+
+        | Spellbook of Mirror Wall                    |
+        | School: Illusion                            |
+        | MP: 8 | Requirement: 20 | Target: Floor     |
+        | Duration: 8 sec                             |
+        | Passable fake wall; hostiles route around.  |
+        | Progress: best of Sorc/Myst/Thaum.          |
+        +---------------------------------------------+
+
+7. Mouse
+    Hover for details; click/read/equip/drag exactly like an existing book.
+    Drag a learned spell into a normal hotbar slot and click to cast.
+
+8. Keyboard
+    Existing inventory navigation and confirm reads/uses the focused book;
+    established hotbar bindings cast learned spells. Cancel returns normally.
+
+9. Controller
+    Existing inventory focus, confirm, context actions, hotbar selection, cast,
+    and cancel work without hover-only requirements; tooltip text appears on
+    focus.
+
+10. Focus order
+    Normal inventory row-major order and hotbar order. No child controls are
+    added inside a tooltip.
+
+11. Scroll behavior
+    Long tooltip text uses the existing detail/tooltip placement. Inventory and
+    compendium scrolling remain unchanged; no second scrollbar is introduced.
+
+12. Tooltips
+    Every book and spell shows exact values and a spell-specific caveat. Fake
+    versus real loot, fake versus real geometry, exact four-tile Shadow Step,
+    runtime-only Store vault, and derived progression are visible rather than
+    discoverable only by trial.
+
+13. Flag-off behavior
+    Ordinary generation filters all 13 books, book/spell frames are disabled,
+    reading a specifically spawned legacy/debug book reports `Illusion Magic
+    is disabled for this game` without consuming it, and new learning fails.
+
+14. Flag-on behavior
+    Books participate in the normal eligible random-generation pool according
+    to their item level and value. Reading, learning, saving the known spell,
+    hotbar use, fumble, MP, and server cast paths are active.
+
+15. Low-resolution behavior
+    The existing single tooltip column wraps the appended detail text. Verify
+    that the longest Store/Duplicate caveat stays on screen and does not cover
+    the hotbar or action prompt.
+
+16. Multiplayer notes
+    Book possession and learned-spell display use normal replication/save
+    behavior. The server flag and server cast result win; a client cannot make
+    an off-session book teach or cast by editing local UI state.
+
+17. Manual graphical checks
+    Spawn/obtain every identified and unidentified book, inspect all 26 tooltip
+    variants, read each book at below/equal/above requirement, drag every spell
+    to hotbar, cast, save/reload known spells, and repeat the off-flag refusal.
+
+
+SCREEN 3 - World targeting and cast feedback
+---------------------------------------------
+
+1. Screen
+    First-person world view while aiming Mirror Wall, Mirage Wall, Vertical
+    Mirage, Phantasm Path, actor-touch spells, and Shadow Step.
+
+2. Old behavior
+    Existing touch-floor/touch-wall/target rangefinders indicated the tile or
+    entity accepted by generic spell targeting.
+
+3. New behavior
+    Mirror Wall and Vertical Mirage use the floor-tile reticle; Mirage Wall uses
+    the wall-outline mode; Phantasm Path uses four bounded floor-tile markers
+    that preview every route tile before cast. Cyan marks tiles that receive
+    selective support, green marks existing ground, and red marks blocked or
+    otherwise invalid tiles. Actor spells use the existing nearby target
+    selection. Shadow Step validates an exact four-tile backward destination
+    and produces explicit blocked/success feedback.
+
+4. Reason
+    Fake and selective geometry is unsafe to cast if the user cannot understand
+    what tile is being addressed or why a cast failed.
+
+5. Reused Barony textures/widgets
+    Existing rangefinder reticle, wall outline, crosshair, spell animation,
+    message log, magic particles, sounds, floor/wall intersection helpers, and
+    world entity visuals.
+
+6. ASCII layout
+
+            crosshair
+                +
+        [valid floor tile]          green/normal reticle
+        [real wall outline]         Mirage Wall
+        x x x x                     Phantasm preview tiles (cyan/green/red)
+        [blocked destination]       Shadow Step failure message
+
+7. Mouse
+    Aim with normal look controls and cast with the established attack/cast
+    input. There are no separate world-UI mouse buttons.
+
+8. Keyboard
+    Existing movement/look/hotbar/cast keys. Cast failure returns a concise
+    reason without moving the player or mutating geometry.
+
+9. Controller
+    Existing look, hotbar, and cast bindings; reticle is always visible when
+    the native rangefinder is active. Information is not hover-only.
+
+10. Focus order
+    Gameplay focus remains the world crosshair. Opening an item picker or
+    status tooltip transfers focus using its existing module behavior and
+    cancel returns to gameplay.
+
+11. Scroll behavior
+    None in the world targeting view. Hotbar cycling remains unchanged.
+
+12. Tooltips
+    Spell details state required substrate and reality: open supported ground,
+    real wall, real floor/fake pit, real gap/selective support, or exact
+    four-tile backward movement.
+
+13. Flag-off behavior
+    No Illusion spell can become an active cast/rangefinder through ordinary UI;
+    a stale hotbar item is hidden/inert.
+
+14. Flag-on behavior
+    Native target previews and authoritative success/failure feedback operate.
+    Phantasm Path uses the same bounded route resolver for its preview and its
+    server-authoritative bridge, so the accepted tile set cannot drift between
+    preview and cast. Actual overlays/effects are restricted to current
+    MapInstance and exact playable floor.
+
+15. Low-resolution behavior
+    World reticles remain center-screen and messages use the normal log. No
+    fixed-resolution overlay panel is added.
+
+16. Multiplayer notes
+    Client aim supplies normal cast target coordinates, never ownership scope.
+    The server re-derives target, real tile, current MapInstance, floor,
+    distance, authorization, and effect. Remote visuals arrive through ordinary
+    entities plus bounded `ILOV` snapshots.
+
+17. Manual graphical checks
+    Capture screenshots for valid and invalid wall/floor/gap casts on floors 1
+    and 2, equal X/Y on different floors, and divergent MapInstances. Verify
+    that the bounded Phantasm preview colors every route tile correctly and
+    matches the accepted bridge tiles after cast.
+
+
+SCREEN 4 - Fake-loot and real-duplicate item picker
+--------------------------------------------------
+
+1. Screen
+    Existing Generic GUI item-effect inventory selector opened after Mirror
+    Reflect Loot or Mirror Duplicate Loot is cast.
+
+2. Old behavior
+    The selector was used by scrolls, recharge, repair, enchant, and other
+    item-target effects with existing inventory focus and action prompts.
+
+3. New behavior
+    Two explicit modes filter out spell pseudo-items. Reflect Loot says `FAKE /
+    ILLUSORY - no value` and `Create FAKE / ILLUSORY loot`. Duplicate says
+    `REAL DUPLICATE - 100 MP paid on cast; mirrored curse, quantity 1` and marks
+    protected items invalid. The cast pays MP before the selector; selection
+    never charges a second time.
+
+4. Reason
+    A fake visual and a persistent real item must be impossible to confuse, and
+    unsafe/progression items must fail before and after a network request.
+
+5. Reused Barony textures/widgets
+    Generic item-effect frame, inventory grid, selected-item title, action
+    prompt, invalid-item coloring, cursor, confirmation flow, scroll region,
+    focus sounds, and close/cancel behavior.
+
+6. ASCII layout
+
+        +------------------------------------------------+
+        | MIRROR REFLECT LOOT / MIRROR DUPLICATE LOOT    |
+        | [inventory grid]                               |
+        | Source: Iron Sword                             |
+        | FAKE / ILLUSORY - no value                    |
+        |              -- or --                          |
+        | REAL DUPLICATE - 100 MP PAID; CURSED; QTY 1   |
+        | [Create/confirm]                    [Cancel]    |
+        +------------------------------------------------+
+
+7. Mouse
+    Hover/select a source with the existing hitboxes; click the normal action
+    target/confirmation. Mouse wheel scrolls inventory. Cancel closes without
+    creating anything; the already cast spell's MP is not refunded.
+
+8. Keyboard
+    Existing grid arrows, confirm, and cancel. Invalid sources remain visibly
+    invalid and confirm does not close/create.
+
+9. Controller
+    D-pad/left stick navigates the grid; confirm selects; cancel exits. Focused
+    text carries the fake/real distinction, so no hover is required.
+
+10. Focus order
+    Existing row-major eligible inventory grid, action confirmation, then
+    cancel/return according to Generic GUI conventions. Invalid items may be
+    focused for their rejection reason but cannot execute.
+
+11. Scroll behavior
+    Reuses the inventory selector's one scroll region and focus-following
+    behavior. No nested source list exists.
+
+12. Tooltips
+    Fake mode says it creates no real value. Real mode states 100 MP was paid,
+    quantity one, mirrored curse, and protected classes. An unsafe duplicate
+    prompt names quest/key/artifact/container/progression protection.
+
+13. Flag-off behavior
+    The spells cannot cast or open the picker. If a stale window exists across
+    a lifecycle boundary, the authoritative resolver rejects selection.
+
+14. Flag-on behavior
+    Picker remains open for the bounded pending-selection interval. Host/local
+    selection resolves directly; remote selection sends a request and closes
+    only after the normal request path accepts it.
+
+15. Low-resolution behavior
+    Uses the established single inventory grid and wrapped title/action areas.
+    Verify the long real-duplicate line wraps without covering confirm/cancel.
+
+16. Multiplayer notes
+    A client sends attributes for matching plus a S.A.M. stable ID when needed.
+    Server authenticates sender, finds the item in that live inventory, repeats
+    type/safety/stable-ID checks, and creates the result. A packet cannot select
+    another player's item or fabricate quantity/value.
+
+17. Manual graphical checks
+    Compare both modes side-by-side. Try mundane, stacked, blessed, neutral,
+    cursed, key, orb, artifact, grimoire, backpack, loot bag, quest-tagged,
+    registered S.A.M., and stale/unregistered S.A.M. sources. Confirm fake loot
+    cannot highlight/pick up and a valid real duplicate is quantity one.
+
+
+SCREEN 5 - Active effects, disguise identity, and capture feedback
+-----------------------------------------------------------------
+
+1. Screen
+    Existing status-effect queue/tooltips plus the normal message log and
+    first-person/third-person world rendering.
+
+2. Old behavior
+    Status effects used JSON-defined names/icons/descriptions; Reflection and
+    sustained spells used their established separate entries and timers.
+
+3. New behavior
+    Code-owned entries show `Mirror Other: <appearance>`, `Mirror Mimic:
+    <appearance>`, a separately named `Mirror Reflect`, and Store Magic. Store
+    capture reports `Stored: <Spell>`; a full vault reports `Stored Magic Vault
+    is full`. Disguise descriptions explicitly preserve real identity/faction.
+
+4. Reason
+    Players must know which deception is active and must never mistake Mirror
+    Reflect for ordinary Reflection or a disguise for an identity change.
+
+5. Reused Barony textures/widgets
+    Status-effect queue frames, source spell icons, hover/focus tooltip,
+    sustained-spell slot, timer behavior, message categories, particles,
+    sounds, and normal entity render pass.
+
+6. ASCII layout
+
+        [Mirror Other icon]  MIRROR OTHER: HUMAN
+        [Mirror Reflect]     distinct ward text
+        [Store Magic 2/4]    capture messages in normal log
+
+7. Mouse
+    Hover/click the existing effect icon for its normal focused tooltip. World
+    look and entity interaction still target the real caster, not the proxy.
+
+8. Keyboard
+    Existing status-effect focus shortcut/navigation, confirm, and cancel.
+    Capture feedback also appears in the normal log without opening a window.
+
+9. Controller
+    Existing status queue focus and tooltip behavior. Confirm/cancel close a
+    non-Store effect normally; no hover-only appearance name.
+
+10. Focus order
+    Queue order remains the existing status-effect ordering. Illusion entries
+    are ordinary queue entries; hidden Store backing effect is represented by
+    its sustained entry only.
+
+11. Scroll behavior
+    Existing effect queue/tooltip placement. No independent disguise list.
+
+12. Tooltips
+    Other: cosmetic only. Mimic: eligible AI only/bosses resist. Reflect: one
+    exclusive defense. Store: sustained finite vault. Appearance name is
+    resolved from the live proxy and falls back safely if unavailable.
+
+13. Flag-off behavior
+    Illusion effects cannot be newly applied; lifecycle cleanup retires live
+    proxies/visuals and clears Illusion statuses. Normal effect UI is unchanged.
+
+14. Flag-on behavior
+    Each effect uses its own name and source icon; world proxies follow the
+    owner on the same floor and expire with the effect.
+
+15. Low-resolution behavior
+    Compact existing icon queue and one wrapped tooltip. No new persistent HUD
+    panel except Store's count badge.
+
+16. Multiplayer notes
+    Host owns effect duration and proxy entities. Remote clients see normal
+    replicated visuals/statuses; they do not receive copied identity or private
+    vault contents. Proxies inherit the caster's spatial context.
+
+17. Manual graphical checks
+    Compare Mirror Other, Mirror Mimic, ordinary Reflection, and Mirror Reflect
+    icons/text. Observe owner and remote client views, appearance labels, proxy
+    follow/expiry, boss resistance, and no party/follower/inventory panel for a
+    decoy.
+
+
+SCREEN 6 - Store Magic compact HUD and vault interaction
+-------------------------------------------------------
+
+1. Screen
+    Store Magic's existing sustained-effect icon, numeric badge, and focused
+    status tooltip used as a compact vault rather than a separate dashboard.
+
+2. Old behavior
+    Sustained spell icons displayed normal timers/counters and a description;
+    they did not contain a finite spell list or release actions.
+
+3. New behavior
+    The icon displays `used/capacity`. Focus opens `STORE MAGIC - VAULT x/y`, a
+    slot strip, real derived tier, allowed spell identities, release MP,
+    captured potency, optional study percentage, and only tier-permitted action
+    text. Below 40 identities are `Stored pattern`; 40-59 can toggle
+    oldest/newest; 60+ selects exact slots and may discard; 80+ sees study.
+
+4. Reason
+    Store Magic needs visible capacity and deterministic choices without
+    creating a foreign-looking full-screen interface or exposing controls the
+    current tier cannot use.
+
+5. Reused Barony textures/widgets
+    Sustained-effect icon/frame, source spell icon, status focus module,
+    tooltip header/description, pixel font, virtual mouse hitbox, controller
+    toggles, confirm/cancel sounds, and existing overlay placement.
+
+6. ASCII layout
+
+        HUD: [Store icon 2/4]
+
+        +-------------------------------------------+
+        | STORE MAGIC - VAULT 2/4                  |
+        | Slots: [X][X][ ][ ]  Tier: Expert        |
+        | > 1. Fireball | 4 MP | potency 18        |
+        |   2. Slow     | 2 MP | potency 7         |
+        | Release: exact selected slot             |
+        | Discard: middle-click or Alt action      |
+        | Confirm/left-click releases              |
+        +-------------------------------------------+
+
+7. Mouse
+    Hover/focus Store icon. Left-click releases using the permitted mode;
+    right-click toggles oldest/newest or cycles exact slot; middle-click
+    discards an exact selected slot at proficiency 60+. Empty vault actions do
+    nothing. The cursor hitbox is the same visible status icon.
+
+8. Keyboard
+    Focus the normal status-effect module. Confirm releases; cancel closes;
+    Page Right Alt toggles oldest/newest or advances exact slot; the existing
+    Alt action discards only at 60+.
+
+9. Controller
+    D-pad/left-stick reaches Store through the normal status queue. Confirm
+    releases, cancel exits, page/category-alt advances choice, and Alt2
+    discards at 60+. Disallowed controls are ignored and omitted from text.
+
+10. Focus order
+    Existing effect queue order -> focused Store icon. Inside the embedded
+    view, a single selected slot index cycles; it is not a child-widget focus
+    trap. Cancel always returns out of the status module.
+
+11. Scroll behavior
+    Capacity is bounded to five, so no inner scrollbar is required. One-line
+    entries remain in the existing tooltip; slot cycling changes selection.
+
+12. Tooltips
+    Header, fill strip, tier, identity visibility, per-entry release MP/potency,
+    study percent at Master+, tier-legal action instructions, and the explicit
+    `Vault is runtime-only` caveat refresh while focused.
+
+13. Flag-off behavior
+    No Store status can be applied, no badge/vault appears, incoming spells are
+    not intercepted, and lifecycle cleanup clears runtime entries.
+
+14. Flag-on behavior
+    Badge and owner-only vault snapshot update during the normal tick. Capture,
+    full, release, discard, and learning results come from the server.
+
+15. Low-resolution behavior
+    One bounded 330-pixel tooltip with at most five compact rows. Check header
+    and the longest action text; it must reposition/wrap using existing tooltip
+    placement rather than run off screen.
+
+16. Multiplayer notes
+    Only the owner receives `ILVA` contents. `ILVR` contains a requested action,
+    not a spell/power/owner claim. The server authenticates player, derives
+    tier/slot/MP/effect, and sends the next snapshot. Other players see only
+    ordinary ward/cast visuals.
+
+17. Manual graphical checks
+    At proficiency 0, 20, 40, 60, 80, and 100, fill every slot and test mouse,
+    keyboard, and controller actions. Confirm hidden identities below 40,
+    random versus oldest/newest versus exact behavior, discard only at 60+,
+    study only at 80+, full feedback, MP display, no focus trap, and owner-only
+    contents with two clients.
+
+
+SCREEN 7 - Contextual tutorial/help content
+-------------------------------------------
+
+1. Screen
+    Spell/spellbook detail text, status text, picker prompts, and this maintained
+    guide. There is no separate full-screen tutorial browser in current Barony.
+
+2. Old behavior
+    No Illusion concepts or comparison guidance existed.
+
+3. New behavior
+    Contextual text teaches the critical distinction at the point of use:
+    Mirror Other vs Mimic, Mirror Wall vs Mirage Wall, Vertical Mirage vs
+    Phantasm Path, fake vs real loot, exact Shadow Step, and Store progression.
+    The developer/design guide contains the complete Store eligibility matrix.
+
+4. Reason
+    Complex deception mechanics need discoverable caveats without adding a UI
+    architecture that the game does not otherwise have.
+
+5. Reused Barony textures/widgets
+    Existing tooltips, action prompts, status descriptions, message log, and
+    spellbook details.
+
+6. ASCII layout
+
+        Spell focus -> concise effect -> reality caveat -> progression note
+        Cast        -> target/picker -> success or exact failure reason
+        Store icon  -> tier-legal controls and runtime-only warning
+
+7. Mouse
+    Hover/focus the relevant existing item, spell, or effect.
+
+8. Keyboard
+    Focus the same entries through normal inventory/status navigation.
+
+9. Controller
+    Focused items always show the information; no hover-only tutorial text.
+
+10. Focus order
+    No new tutorial focus layer. Context follows the currently focused normal
+    control.
+
+11. Scroll behavior
+    Uses its containing inventory/status tooltip behavior. This text guide is
+    maintained outside the game for testers/developers.
+
+12. Tooltips
+    Caveats are declarative and use `FAKE / ILLUSORY` and `REAL DUPLICATE` in
+    the two highest-risk flows.
+
+13. Flag-off behavior
+    No ordinary Illusion item/spell/status exists to surface its contextual
+    help. Normal UI remains unchanged.
+
+14. Flag-on behavior
+    Help appears contextually with each accessible feature.
+
+15. Low-resolution behavior
+    Short caveats wrap in existing single-column tooltips; no multi-column help
+    page is opened.
+
+16. Multiplayer notes
+    Tutorial text describes server authority; it does not expose or mutate
+    another player's state.
+
+17. Manual graphical checks
+    Verify every required distinction can be learned from focused text using
+    controller alone. A dedicated searchable in-game tutorial page was not
+    introduced; if product design requires one later, it should extend the
+    existing compendium/help system as a separately scoped localization task.
+
+
+Manual acceptance checklist
+----------------------------
+
+[ ] School/filter absent with flag off.
+[ ] School/filter visible with flag on.
+[ ] All 13 learned-spell tooltips and 13 spellbook tooltips are readable.
+[ ] All 13 spells enter and cast from the normal hotbar.
+[ ] All 13 spellbooks identify, read, teach, and preserve normal save behavior.
+[ ] Store Magic badge and vault text update.
+[ ] Store Magic mouse left/right/middle actions work.
+[ ] Keyboard confirm/cancel/page/alt actions work.
+[ ] Controller focus/confirm/cancel/page/alt actions work without a focus trap.
+[ ] Proficiency limitations match 0/20/40/60/80/100 tier UI.
+[ ] World target reticles are clear; Phantasm cyan/green/red route preview is clear.
+[ ] FAKE / ILLUSORY and REAL DUPLICATE cannot be confused.
+[ ] Minimum-resolution layout has no overlap or off-screen button/text.
+[ ] Multiplayer visuals show correctly on owner and remote clients.
+[ ] Two equal-X/Y actors on different floors receive no visual/navigation leak.
+[ ] Two divergent MapInstances receive no visual/navigation leak.
+[ ] Late join/reconnect derives the host flag and receives relevant snapshots.
+[ ] Fake loot cannot be picked up, equipped, sold, crafted, or persisted.
+[ ] Valid real duplicate persists normally; protected and stale S.A.M. items fail.
+
+These boxes remain manual until a real graphical, keyboard/controller, headless
+host, and two-client run is performed. Automated tests do not claim screenshots,
+audible sound, controller hardware behavior, or observed network rendering.

@@ -18,6 +18,7 @@
 #include "../items.hpp"
 #include "../player.hpp"
 #include "magic.hpp"
+#include "illusion_magic.hpp"
 #include "../net.hpp"
 #include "../scores.hpp"
 #include "../ui/MainMenu.hpp"
@@ -957,7 +958,8 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 	animation_manager->caster = caster->getUID();
 	animation_manager->spell = spell;
 
-	const bool usingMagicGrimoire = usingSpellbook
+	const bool usingMagicGrimoire = automatianModeEnabled()
+		&& usingSpellbook
 		&& stat
 		&& stat->shield
 		&& stat->shield->type == MAGIC_GRIMOIRE;
@@ -1070,12 +1072,18 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 		animation_manager->consumeMana = false;
 	}*/
 
-	if ( isSpellcasterBeginner(player, caster, spell->skillID) )   //There's a chance that caster is newer to magic (and thus takes longer to cast a spell).
+	const int spellBaseProficiency = IllusionMagic::proficiencyForSpell(
+		caster, stat, spell->ID, spell->skillID);
+	const int spellcastingAbility = getEffectiveSpellcastingAbility(
+		caster, stat, spell);
+	if ( caster->behavior != &actMonster
+		&& spellcastingAbility < SPELLCASTING_BEGINNER )
 	{
 		int chance = local_rng.rand() % 10;
-		if (chance >= stat->getModifiedProficiency(spell->skillID) / 15)
+		if (chance >= spellBaseProficiency / 15)
 		{
-			int amount = (local_rng.rand() % 50) / std::max(stat->getModifiedProficiency(spell->skillID) + statGetINT(stat, caster), 1);
+			int amount = (local_rng.rand() % 50)
+				/ std::max(spellcastingAbility, 1);
 			amount = std::min(amount, CASTING_EXTRA_TIMES_CAP);
 			animation_manager->times_to_circle += amount * HANDMAGIC_TICKS_PER_CIRCLE;
 		}
@@ -1085,7 +1093,7 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 		if ( !playerLearnedSpellbook(player, stat->shield) || (stat->shield->beatitude < 0 && !shouldInvertEquipmentBeatitude(stat)) )
 		{
 			// for every tier below the spell you are, add 3 circle for 1 tier, or add 2 for every additional tier.
-			int casterAbility = std::min(100, std::max(0, stat->getModifiedProficiency(spell->skillID) + statGetINT(stat, caster))) / 20;
+			int casterAbility = spellcastingAbility / 20;
 			if ( stat->shield->beatitude < 0 )
 			{
 				casterAbility = 0; // cursed book has cast penalty.
@@ -1096,7 +1104,8 @@ void fireOffSpellAnimation(spellcasting_animation_manager_t* animation_manager, 
 				animation_manager->times_to_circle += (std::min(5, 1 + 2 * (difficulty - casterAbility))) * HANDMAGIC_TICKS_PER_CIRCLE;
 			}
 		}
-		else if ( !isSpellcasterBeginner(player, caster, spell->skillID) )
+		else if ( caster->behavior == &actMonster
+			|| spellcastingAbility >= SPELLCASTING_BEGINNER )
 		{
 			if ( animation_manager->times_to_circle >= HANDMAGIC_TICKS_PER_CIRCLE )
 			{
@@ -2505,8 +2514,126 @@ void actRightHandMagic(Entity* my)
 #define HANDMAGIC_RANGEFINDER_COLOR_R my->fskill[1]
 #define HANDMAGIC_RANGEFINDER_COLOR_G my->fskill[2]
 #define HANDMAGIC_RANGEFINDER_COLOR_B my->fskill[3]
+#define HANDMAGIC_PATH_PREVIEW_INDEX my->skill[12]
+
+static void actPhantasmPathRangefinder(Entity* my)
+{
+	const int player = HANDMAGIC_PLAYERNUM;
+	auto retire = [my]() {
+		if ( auto indicator = AOEIndicators_t::getIndicator(
+			my->actSpriteUseCustomSurface) )
+		{
+			indicator->expired = true;
+		}
+		list_RemoveNode(my->mynode);
+	};
+	if ( player < 0 || player >= MAXPLAYERS || !players[player]
+		|| !players[player]->entity
+		|| players[player]->entity->playerCreatedDeathCam != 0
+		|| my->parent != players[player]->entity->getUID() )
+	{
+		retire();
+		return;
+	}
+
+	Entity* caster = players[player]->entity;
+	auto& castAnim = cast_animation[player];
+	if ( !IllusionMagic::enabled()
+		|| !(castAnim.active || castAnim.active_spellbook)
+		|| !castAnim.spell
+		|| castAnim.spell->ID != SPELL_PHANTASM_PATH
+		|| castAnim.rangefinder != RANGEFINDER_TOUCH_FLOOR_TILE
+		|| castAnim.stage == ANIM_SPELL_TOUCH_THROW
+		|| castAnim.stage == ANIM_SPELL_OVERCHARGE_THROW
+		|| castAnim.stage == ANIM_SPELL_CIRCLE )
+	{
+		my->flags[INVISIBLE] = true;
+		return;
+	}
+
+	const IllusionMagic::PhantasmPathPreview preview =
+		IllusionMagic::previewPhantasmPath(*caster,
+			static_cast<int>(std::floor(castAnim.target_x / 16.0)),
+			static_cast<int>(std::floor(castAnim.target_y / 16.0)));
+	const std::size_t index = static_cast<std::size_t>(
+		HANDMAGIC_PATH_PREVIEW_INDEX - 1);
+	if ( index >= preview.count )
+	{
+		my->flags[INVISIBLE] = true;
+		return;
+	}
+
+	if ( my->flags[INVISIBLE] )
+	{
+		my->bNeedsRenderPositionInit = true;
+	}
+	my->inheritSpatialContextFrom(caster);
+	my->flags[INVISIBLE] = false;
+	my->sprite = 222;
+	my->x = preview.tiles[index].coordinate.x * 16.0 + 8.0;
+	my->y = preview.tiles[index].coordinate.y * 16.0 + 8.0;
+	my->z = 7.495;
+	my->ditheringDisabled = true;
+	my->flags[SPRITE] = true;
+	my->flags[PASSABLE] = true;
+	my->flags[NOUPDATE] = true;
+	my->flags[UNCLICKABLE] = true;
+	my->flags[BRIGHT] = true;
+	my->flags[ENTITY_SKIP_CULLING] = true;
+	my->scalex = 0.72;
+	my->scaley = 0.72;
+	my->pitch = 0.0;
+	my->roll = -PI / 2;
+	my->yaw = 0.0;
+
+	switch ( preview.tiles[index].state )
+	{
+		case IllusionMagic::PhantasmPathPreviewTileState::ExistingGround:
+			HANDMAGIC_RANGEFINDER_COLOR_R = preview.castable ? 0.20 : 1.00;
+			HANDMAGIC_RANGEFINDER_COLOR_G = preview.castable ? 1.00 : 0.65;
+			HANDMAGIC_RANGEFINDER_COLOR_B = preview.castable ? 0.35 : 0.10;
+			break;
+		case IllusionMagic::PhantasmPathPreviewTileState::NeedsIllusionSupport:
+			HANDMAGIC_RANGEFINDER_COLOR_R = 0.15;
+			HANDMAGIC_RANGEFINDER_COLOR_G = 0.70;
+			HANDMAGIC_RANGEFINDER_COLOR_B = 1.00;
+			break;
+		case IllusionMagic::PhantasmPathPreviewTileState::Invalid:
+			HANDMAGIC_RANGEFINDER_COLOR_R = 1.00;
+			HANDMAGIC_RANGEFINDER_COLOR_G = 0.15;
+			HANDMAGIC_RANGEFINDER_COLOR_B = 0.12;
+			break;
+	}
+	HANDMAGIC_RANGEFINDER_ALPHA = 0.58 + 0.08 * sin(2 * PI
+		* (my->ticks % TICKS_PER_SECOND) / static_cast<real_t>(TICKS_PER_SECOND));
+
+	if ( !AOEIndicators_t::getIndicator(my->actSpriteUseCustomSurface) )
+	{
+		constexpr int size = 20;
+		my->actSpriteUseCustomSurface =
+			AOEIndicators_t::createIndicator(4, size, size * 2 + 4, -1);
+	}
+	if ( auto indicator = AOEIndicators_t::getIndicator(
+		my->actSpriteUseCustomSurface) )
+	{
+		indicator->cacheType = AOEIndicators_t::CACHE_CASTING;
+		indicator->gradient = 6;
+		indicator->radiusMin = 8;
+		indicator->castingTarget = true;
+		indicator->loop = true;
+		indicator->framesPerTick = 2;
+		indicator->ticksPerUpdate = 4;
+		indicator->delayTicks = 0;
+	}
+}
+
 void actMagicRangefinder(Entity* my)
 {
+	if ( HANDMAGIC_PATH_PREVIEW_INDEX > 0 )
+	{
+		actPhantasmPathRangefinder(my);
+		return;
+	}
 	my->flags[INVISIBLE_DITHER] = false;
 	if ( intro == true )
 	{
@@ -2542,6 +2669,15 @@ void actMagicRangefinder(Entity* my)
 		|| cast_anim.stage == ANIM_SPELL_OVERCHARGE_THROW
 		|| cast_anim.stage == ANIM_SPELL_CIRCLE )
 	{
+		my->flags[INVISIBLE] = true;
+		return;
+	}
+	if ( cast_anim.spell
+		&& cast_anim.spell->ID == SPELL_PHANTASM_PATH
+		&& IllusionMagic::enabled() )
+	{
+		// The four bounded tile markers replace the single endpoint marker so
+		// route length and every accepted/rejected tile are visible before cast.
 		my->flags[INVISIBLE] = true;
 		return;
 	}
