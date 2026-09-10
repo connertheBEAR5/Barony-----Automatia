@@ -1,4 +1,4 @@
-/*-------------------------------------------------------------------------------
+﻿/*-------------------------------------------------------------------------------
 
 	BARONY
 	File: castSpell.cpp
@@ -1084,7 +1084,12 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 	}
 	else if (element)
 	{
-		if (!strcmp(element->element_internal_name, spellElement_missile.element_internal_name))
+		bool spellElementHandled = false;
+#define BARONY_SPELL_BRANCH(condition) \
+		if (!spellElementHandled && (condition)) \
+			for (bool baronySpellBranchEntered = (spellElementHandled = true); \
+				baronySpellBranchEntered; baronySpellBranchEntered = false)
+		BARONY_SPELL_BRANCH(!strcmp(element->element_internal_name, spellElement_missile.element_internal_name))
 		{
 			//Set the propulsion to missile.
 			propulsion = PROPULSION_MISSILE;
@@ -1107,7 +1112,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				traveltime /= 4; // lava boulder casting.
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_missile_trio.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_missile_trio.element_internal_name) )
 		{
 			//Set the propulsion to missile.
 			propulsion = PROPULSION_MISSILE_TRIO;
@@ -1158,7 +1163,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}*/
-		else if (!strcmp(element->element_internal_name, spellElement_light.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_light.element_internal_name))
 		{
             if (using_magicstaff) {
 				bool removed = false;
@@ -1239,7 +1244,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_DEEP_SHADE].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_DEEP_SHADE].element_internal_name) )
 		{
 			if ( using_magicstaff ) {
 				for ( auto node = map.entities->first; node != nullptr; node = node->next ) {
@@ -1291,7 +1296,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 			playSoundEntity(entity, 165, 128);
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_invisible.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_invisible.element_internal_name))
 		{
 			node_t* spellnode = list_AddNodeLast(&caster->getStats()->magic_effects);
 			spellnode->element = copySpell(spell); //We need to save the spell since this is a channeled spell.
@@ -1338,7 +1343,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			playSoundEntity(caster, 166, 128 );
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_levitation.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_levitation.element_internal_name))
 		{
 			node_t* spellnode = list_AddNodeLast(&caster->getStats()->magic_effects);
 			spellnode->element = copySpell(spell); //We need to save the spell since this is a channeled spell.
@@ -1362,7 +1367,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			playSoundEntity(caster, 178, 128 );
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 170);
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_teleportation.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_teleportation.element_internal_name))
 		{
 			if ( caster->behavior == &actDeathGhost )
 			{
@@ -1457,7 +1462,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_JUMP )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_JUMP )
 		{
 			if ( caster && castSpellProps )
 			{
@@ -1486,7 +1491,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_selfPolymorph.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_selfPolymorph.element_internal_name) )
 		{
 			if ( caster->behavior == &actPlayer )
 			{
@@ -1504,11 +1509,11 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spellEffectPolymorph(caster, caster, true);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_strike.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_strike.element_internal_name) )
 		{
 			caster->attack(MONSTER_POSE_SPECIAL_WINDUP1, MAXCHARGE, nullptr); // this is server only, tells client to attack.
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_fear.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_fear.element_internal_name) )
 		{
 			playSoundEntity(caster, 79, 128);
 			playSoundEntity(caster, 405, 128);
@@ -1608,7 +1613,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_identify.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_identify.element_internal_name))
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -1651,7 +1656,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 			playSoundEntity(caster, 167, 128 );
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_removecurse.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_removecurse.element_internal_name))
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -1694,7 +1699,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 			playSoundEntity(caster, 167, 128 );
 		}
-		else if ( spell->ID == SPELL_ALTER_INSTRUMENT
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ALTER_INSTRUMENT
 			|| spell->ID == SPELL_METALLURGY
 			|| spell->ID == SPELL_GEOMANCY
 			|| spell->ID == SPELL_FORGE_KEY
@@ -1754,7 +1759,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 
 			playSoundEntity(caster, 167, 128);
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_magicmapping.element_internal_name))
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_magicmapping.element_internal_name))
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -1783,7 +1788,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 167, 128 );
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_CONJURE_FOOD].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_CONJURE_FOOD].element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -1796,7 +1801,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 167, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_MAGICIANS_ARMOR].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_MAGICIANS_ARMOR].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1841,7 +1846,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 2212);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_BLESS_FOOD].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_BLESS_FOOD].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1893,7 +1898,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 166, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_MAGIC_WELL].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_MAGIC_WELL].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1918,7 +1923,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 166, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_CRITICAL_SPELL].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_CRITICAL_SPELL].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1943,7 +1948,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 166, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_ABSORB_MAGIC].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_ABSORB_MAGIC].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1968,7 +1973,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 166, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FLAME_SHIELD].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FLAME_SHIELD].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -1987,7 +1992,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 166, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_NIMBLENESS].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_NIMBLENESS].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -2021,7 +2026,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_GREATER_MIGHT].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_GREATER_MIGHT].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -2055,7 +2060,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_COUNSEL].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_COUNSEL].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -2089,7 +2094,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_STURDINESS].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_PROF_STURDINESS].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -2123,7 +2128,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_DELAY_PAIN )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DELAY_PAIN )
 		{
 			if ( caster )
 			{
@@ -2164,7 +2169,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_SACRED_PATH )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SACRED_PATH )
 		{
 			if ( caster )
 			{
@@ -2181,7 +2186,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 171);
 			}
 		}
-		else if ( spell->ID == SPELL_FORCE_SHIELD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_FORCE_SHIELD )
 		{
 			if ( caster )
 			{
@@ -2197,7 +2202,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 171);
 			}
 		}
-		else if ( spell->ID == SPELL_REFLECTOR )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_REFLECTOR )
 		{
 			if ( caster )
 			{
@@ -2212,7 +2217,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 171);
 			}
 		}
-		else if ( spell->ID == SPELL_MANIFEST_DESTINY )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_MANIFEST_DESTINY )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -2270,7 +2275,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 171);
 			}
 		}
-		else if ( spell->ID == SPELL_SCRY_TRAPS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SCRY_TRAPS )
 		{
 			if ( caster )
 			{
@@ -2360,7 +2365,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 			}
 		}
-		else if ( spell->ID == SPELL_SCRY_TREASURES )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SCRY_TREASURES )
 		{
 			if ( caster )
 			{
@@ -2492,7 +2497,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 			}
 		}
-		else if ( spell->ID == SPELL_DONATION )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DONATION )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -2682,7 +2687,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_SCRY_ALLIES )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SCRY_ALLIES )
 		{
 			bool found = false;
 			bool foundExisting = false;
@@ -2765,7 +2770,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_CALL_ALLIES )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_CALL_ALLIES )
 		{
 			bool found = false;
 			if ( caster && caster->behavior == &actPlayer )
@@ -2820,7 +2825,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 167, 128);
 		}
-		else if ( spell->ID == SPELL_SEEK_ALLY )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SEEK_ALLY )
 		{
 			bool foundTarget = false;
 			if ( caster && caster->behavior == &actPlayer )
@@ -2945,7 +2950,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			//playSoundEntity(caster, 167, 128);
 		}
-		else if ( spell->ID == SPELL_SEEK_FOE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SEEK_FOE )
 		{
 			bool foundTarget = false;
 			if ( caster && caster->behavior == &actPlayer )
@@ -3028,7 +3033,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 167, 128);
 		}
-		else if ( spell->ID == SPELL_TURN_UNDEAD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_TURN_UNDEAD )
 		{
 			if ( caster )
 			{
@@ -3056,7 +3061,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 166, 64);
 			}
 		}
-		else if ( spell->ID == SPELL_MAXIMISE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_MAXIMISE )
 		{
 			if ( caster )
 			{
@@ -3146,7 +3151,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_MINIMISE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_MINIMISE )
 		{
 			if ( caster )
 			{
@@ -3275,7 +3280,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}*/
-		else if ( spell->ID == SPELL_COWARDICE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_COWARDICE )
 		{
 			if ( caster )
 			{
@@ -3330,7 +3335,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_COURAGE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_COURAGE )
 		{
 			if ( caster )
 			{
@@ -3383,7 +3388,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 			}
-		else if ( spell->ID == SPELL_TABOO )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_TABOO )
 		{
 			if ( caster )
 			{
@@ -3467,7 +3472,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 			}
-		else if ( spell->ID == SPELL_BOOBY_TRAP )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_BOOBY_TRAP )
 		{
 			if ( caster )
 			{
@@ -3495,7 +3500,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_DEMESNE_DOOR )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DEMESNE_DOOR )
 		{
 			if ( caster )
 			{
@@ -3527,7 +3532,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_SPIRIT_WEAPON )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SPIRIT_WEAPON )
 		{
 			if ( caster )
 			{
@@ -3561,7 +3566,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_FIRE_SPRITE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_FIRE_SPRITE )
 		{
 			if ( caster )
 			{
@@ -3609,7 +3614,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 164, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_FLAME_ELEMENTAL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_FLAME_ELEMENTAL )
 		{
 			if ( caster )
 			{
@@ -3657,7 +3662,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 164, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_NULL_AREA )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_NULL_AREA )
 		{
 			if ( caster )
 			{
@@ -3676,7 +3681,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_HEAL_PULSE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_HEAL_PULSE )
 		{
 			if ( caster )
 			{
@@ -3694,7 +3699,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_LIGHTNING_BOLT )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_LIGHTNING_BOLT )
 		{
 			if ( caster )
 			{
@@ -3731,7 +3736,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 806, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_ETERNALS_GAZE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ETERNALS_GAZE )
 		{
 			if ( caster )
 			{
@@ -3759,7 +3764,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_SHATTER_EARTH )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SHATTER_EARTH )
 		{
 			if ( caster )
 			{
@@ -3822,7 +3827,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_EARTH_ELEMENTAL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_EARTH_ELEMENTAL )
 		{
 			if ( caster )
 			{
@@ -3907,7 +3912,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_FIRE_WALL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_FIRE_WALL )
 		{
 			if ( caster )
 			{
@@ -3967,7 +3972,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 164, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_KINETIC_FIELD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_KINETIC_FIELD )
 		{
 			if ( caster )
 			{
@@ -4009,7 +4014,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_CHRONOMIC_FIELD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_CHRONOMIC_FIELD )
 		{
 			if ( caster )
 			{
@@ -4051,7 +4056,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_ICE_WAVE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ICE_WAVE )
 		{
 			if ( caster )
 			{
@@ -4112,7 +4117,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 171, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_DISRUPT_EARTH
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DISRUPT_EARTH
 			|| spell->ID == SPELL_EARTH_SPINES )
 		{
 			if ( caster )
@@ -4189,7 +4194,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 799, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_SLAM )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SLAM )
 		{
 			if ( caster )
 			{
@@ -4237,7 +4242,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 1719);
 			}
 		}
-		else if ( spell->ID == SPELL_ROOTS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ROOTS )
 		{
 			if ( caster )
 			{
@@ -4260,7 +4265,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_BASTION_MUSHROOM )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_BASTION_MUSHROOM )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -4299,7 +4304,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_BASTION_ROOTS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_BASTION_ROOTS )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -4355,7 +4360,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_MUSHROOM )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_MUSHROOM )
 		{
 			if ( caster )
 			{
@@ -4419,7 +4424,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_SHRUB )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SHRUB )
 		{
 			if ( caster )
 			{
@@ -4493,7 +4498,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_VOID_CHEST )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_VOID_CHEST )
 		{
 			if ( caster )
 			{
@@ -4560,7 +4565,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_COMMAND )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_COMMAND )
 		{
 			if ( caster && caster->behavior == &actPlayer && caster->getStats() )
 			{
@@ -4698,7 +4703,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_CURSE_FLESH || spell->ID == SPELL_REVENANT_CURSE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_CURSE_FLESH || spell->ID == SPELL_REVENANT_CURSE )
 		{
 			if ( caster )
 			{
@@ -4768,7 +4773,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				//playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_WINDGATE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_WINDGATE )
 		{
 			if ( caster )
 			{
@@ -4797,7 +4802,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_TUNNEL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_TUNNEL )
 		{
 			if ( caster )
 			{
@@ -4821,7 +4826,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_SABOTAGE || spell->ID == SPELL_HARVEST_TRAP )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SABOTAGE || spell->ID == SPELL_HARVEST_TRAP )
 		{
 			if ( caster )
 			{
@@ -5100,7 +5105,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_DEFACE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DEFACE )
 		{
 			if ( caster )
 			{
@@ -5500,7 +5505,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_KINETIC_PUSH )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_KINETIC_PUSH )
 		{
 			if ( caster && (caster->behavior == &actPlayer || caster->behavior == &actMonster) )
 			{
@@ -5590,7 +5595,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_TELEKINESIS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_TELEKINESIS )
 		{
 			if ( caster )
 			{
@@ -5700,7 +5705,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_DISARM || spell->ID == SPELL_STRIP )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DISARM || spell->ID == SPELL_STRIP )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -5824,7 +5829,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_DETECT_ENEMY )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DETECT_ENEMY )
 		{
 			if ( caster )
 			{
@@ -5923,7 +5928,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_PINPOINT || spell->ID == SPELL_PENANCE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_PINPOINT || spell->ID == SPELL_PENANCE )
 		{
 			if ( caster && caster->behavior == &actPlayer )
 			{
@@ -6061,7 +6066,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_detectFood.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_detectFood.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -6073,7 +6078,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			playSoundEntity(caster, 167, 128);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_salvageItem.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_salvageItem.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -6196,7 +6201,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_trollsBlood.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_trollsBlood.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -6250,7 +6255,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			playSoundEntity(caster, 168, 128);
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 169);
 		}
-		else if ( spell->ID == SPELL_HEAL_MINOR || spell->ID == SPELL_HEAL_OTHER )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_HEAL_MINOR || spell->ID == SPELL_HEAL_OTHER )
 		{
 			if ( caster )
 			{
@@ -6336,7 +6341,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_flutter.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_flutter.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -6362,7 +6367,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_BLOOD_WARD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_BLOOD_WARD )
 		{
 			if ( caster )
 			{
@@ -6390,7 +6395,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_TRUE_BLOOD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_TRUE_BLOOD )
 		{
 			if ( caster )
 			{
@@ -6418,7 +6423,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_DIVINE_ZEAL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_DIVINE_ZEAL )
 		{
 			if ( caster )
 			{
@@ -6451,7 +6456,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FLAME_CLOAK].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FLAME_CLOAK].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -6487,7 +6492,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_GUARD_BODY].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_GUARD_BODY].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -6534,7 +6539,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_GUARD_SPIRIT].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_GUARD_SPIRIT].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -6581,7 +6586,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_DIVINE_GUARD].element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_DIVINE_GUARD].element_internal_name) )
 		{
 			if ( caster )
 			{
@@ -6628,7 +6633,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_OVERCHARGE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_OVERCHARGE )
 		{
 			if ( caster )
 			{
@@ -6665,7 +6670,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_ENVENOM_WEAPON )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ENVENOM_WEAPON )
 		{
 			if ( caster )
 			{
@@ -6693,7 +6698,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_THORNS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_THORNS )
 		{
 			if ( caster )
 			{
@@ -6722,7 +6727,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_BLADEVINES )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_BLADEVINES )
 		{
 			if ( caster )
 			{
@@ -6751,7 +6756,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_ABUNDANCE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ABUNDANCE )
 		{
 			if ( caster )
 			{
@@ -6779,7 +6784,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_GREATER_ABUNDANCE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_GREATER_ABUNDANCE )
 		{
 			if ( caster )
 			{
@@ -6807,7 +6812,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_PRESERVE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_PRESERVE )
 		{
 			if ( caster )
 			{
@@ -6835,7 +6840,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_MIST_FORM )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_MIST_FORM )
 		{
 			if ( caster )
 			{
@@ -6863,7 +6868,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_LIGHTEN_LOAD )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_LIGHTEN_LOAD )
 		{
 			if ( caster )
 			{
@@ -6892,7 +6897,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_ATTRACT_ITEMS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_ATTRACT_ITEMS )
 		{
 			if ( caster )
 			{
@@ -6920,7 +6925,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_RETURN_ITEMS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_RETURN_ITEMS )
 		{
 			if ( caster )
 			{
@@ -6948,7 +6953,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 			}
-		else if ( spell->ID == SPELL_HOLOGRAM )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_HOLOGRAM )
 		{
 			if ( caster )
 			{
@@ -6968,7 +6973,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_SPORES )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SPORES )
 		{
 			if ( caster )
 			{
@@ -6997,7 +7002,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_dash.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_dash.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -7053,7 +7058,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				caster->setEffect(EFF_DASH, true, 30, false);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_speed.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_speed.element_internal_name) )
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -7109,7 +7114,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			playSoundEntity(caster, 178, 128);
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_heal.element_internal_name)
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_heal.element_internal_name)
 			|| (spell->ID == SPELL_EXTRAHEALING)
 			/*|| (spell->ID == SPELL_HEAL_OTHER && castSpellProps)*/ )
 		{
@@ -7240,7 +7245,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			//playSoundEntity(caster, 168, 128);
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 169);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_shapeshift.element_internal_name) 
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_shapeshift.element_internal_name)
 			&& caster && caster->behavior == &actPlayer )
 		{
 			Monster type = NOTHING;
@@ -7355,7 +7360,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if (!strcmp(element->element_internal_name, spellElement_cure_ailment.element_internal_name))     //TODO: Generalize it for NPCs too?
+		BARONY_SPELL_BRANCH (!strcmp(element->element_internal_name, spellElement_cure_ailment.element_internal_name))     //TODO: Generalize it for NPCs too?
 		{
 			for ( int i = 0; i < MAXPLAYERS; ++i )
 			{
@@ -7511,7 +7516,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			playSoundEntity(caster, 168, 128 );
 			spawnMagicEffectParticles(caster->x, caster->y, caster->z, 169);
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_summon.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_summon.element_internal_name) )
 		{
 			playSoundEntity(caster, 251, 128);
 			playSoundEntity(caster, 252, 128);
@@ -7588,7 +7593,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				serverSpawnMiscParticlesAtLocation(previousx / 16, previousy / 16, 0, PARTICLE_EFFECT_SPELL_SUMMON, 791);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_reflectMagic.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_reflectMagic.element_internal_name) )
 		{
 			if ( caster->behavior == &actMonster )
 			{
@@ -7623,7 +7628,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_amplifyMagic.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_amplifyMagic.element_internal_name) )
 		{
 			if ( caster->behavior == &actMonster )
 			{
@@ -7659,7 +7664,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				spawnMagicEffectParticles(caster->x, caster->y, caster->z, 174);
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_vampiricAura.element_internal_name) )
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_vampiricAura.element_internal_name) )
 		{
 			if ( caster->behavior == &actMonster )
 			{
@@ -7674,7 +7679,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 			}
 			//Also refactor the duration determining code.
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FORGE_METAL_SCRAP].element_internal_name)
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_FORGE_METAL_SCRAP].element_internal_name)
 			|| !strcmp(element->element_internal_name, spellElementMap[SPELL_FORGE_MAGIC_SCRAP].element_internal_name) )
 		{
 			if ( caster )
@@ -7712,7 +7717,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElement_slime_spray.element_internal_name)
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElement_slime_spray.element_internal_name)
 			|| !strcmp(element->element_internal_name, spellElementMap[SPELL_ELEMENT_PROPULSION_MAGIC_SPRAY].element_internal_name) )
 		{
 			int particle = -1;
@@ -7773,7 +7778,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( !strcmp(element->element_internal_name, spellElementMap[SPELL_ELEMENT_PROPULSION_FOCI_SPRAY].element_internal_name)
+		BARONY_SPELL_BRANCH ( !strcmp(element->element_internal_name, spellElementMap[SPELL_ELEMENT_PROPULSION_FOCI_SPRAY].element_internal_name)
 			&& (spell->ID == SPELL_FOCI_ARCS || spell->ID == SPELL_FOCI_FIRE || spell->ID == SPELL_FOCI_SNOW
 			|| spell->ID == SPELL_FOCI_NEEDLES || spell->ID == SPELL_FOCI_SANDBLAST || spell->ID == SPELL_BREATHE_FIRE) )
 		{
@@ -7963,7 +7968,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_FOCI_LIGHT_SANCTUARY
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_FOCI_LIGHT_SANCTUARY
 			|| spell->ID == SPELL_FOCI_LIGHT_JUSTICE
 			|| spell->ID == SPELL_FOCI_LIGHT_PURITY
 			|| spell->ID == SPELL_FOCI_LIGHT_PEACE
@@ -8115,7 +8120,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_IGNITE )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_IGNITE )
 		{
 			if ( caster )
 			{
@@ -8139,7 +8144,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 164, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_SHATTER_OBJECTS )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SHATTER_OBJECTS )
 		{
 			if ( caster )
 			{
@@ -8157,7 +8162,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 128);
 			}
 		}
-		else if ( spell->ID == SPELL_PROJECT_SPIRIT )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_PROJECT_SPIRIT )
 		{
 			if ( caster && caster->behavior == &actDeathGhost )
 			{
@@ -8214,7 +8219,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				}
 			}
 		}
-		else if ( spell->ID == SPELL_SIGIL )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SIGIL )
 		{
 			if ( caster )
 			{
@@ -8238,7 +8243,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 64);
 			}
 		}
-		else if ( spell->ID == SPELL_SANCTUARY )
+		BARONY_SPELL_BRANCH ( spell->ID == SPELL_SANCTUARY )
 		{
 			if ( caster )
 			{
@@ -8262,6 +8267,7 @@ Entity* castSpell(Uint32 caster_uid, spell_t* spell, bool using_magicstaff, bool
 				playSoundEntity(caster, 167, 64);
 			}
 		}
+#undef BARONY_SPELL_BRANCH
 
 		// intentional separate from else/if chain.
 		// disables propulsion if found a marked target.

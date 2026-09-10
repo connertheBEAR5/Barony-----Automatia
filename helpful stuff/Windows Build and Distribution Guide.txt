@@ -1,0 +1,225 @@
+BARONY AUTOMATIA - WINDOWS NATIVE BUILD AND DISTRIBUTION GUIDE
+==============================================================
+
+Purpose
+-------
+
+This is the native Windows x64 Release route for Barony Automatia. It uses
+MSVC, vcpkg's x64-windows triplet, Steamworks, the existing 15-player
+Automatia build, and dynamically linked OpenAL Soft. It does not use
+build-super-posix and does not package FMOD.
+
+The normal build directory is:
+
+    build
+
+The Release executables are:
+
+    build\Release\barony.exe
+    build\Release\editor.exe
+
+
+Required software
+-----------------
+
+* Visual Studio with the Desktop development with C++ workload and MSVC x64
+  tools. This build was validated with MSVC 19.51.36248.0 / tools 14.51.36231.
+* Windows 10/11 SDK. This build used 10.0.26100.0.
+* CMake 4.4 or a compatible current CMake.
+* Python 3 for tools\package_windows_release.py.
+* vcpkg, using one consistent x64-windows installation.
+* An authorized Steamworks SDK root containing
+  sdk\redistributable_bin\win64\steam_api64.dll.
+* The local nativefiledialog and patched PhysicsFS inputs used by this
+  checkout.
+* An authorized source of Barony game assets. Do not use it as a DLL source.
+
+Install the OpenAL audio dependencies into the same vcpkg triplet as the
+other game libraries:
+
+    <vcpkg>\vcpkg.exe install openal-soft:x64-windows libogg:x64-windows libvorbis:x64-windows
+
+Do not mix x64-windows DLLs with DLLs from another triplet, System32, another
+game, or a DLL download site.
+
+
+Configure the native x64 Release build
+--------------------------------------
+
+Run PowerShell from the repository root. Set paths for this machine without
+putting them into source files:
+
+    $VcpkgRoot = 'C:\path\to\vcpkg'
+    $SteamworksRoot = 'C:\path\to\steamworks_sdk_165'
+    $NfdInclude = 'C:\path\to\nativefiledialog-extended\src\include'
+    $NfdLibrary = 'C:\path\to\nativefiledialog-extended\build\src\Release\nfd.lib'
+    $PhysfsInclude = 'C:\path\to\patched-physfs\install\include'
+    $PhysfsLibrary = 'C:\path\to\patched-physfs\install\lib\physfs.lib'
+
+    cmake -S . -B build -G 'Visual Studio 18 2026' -A x64 `
+      -DCMAKE_TOOLCHAIN_FILE="$VcpkgRoot\scripts\buildsystems\vcpkg.cmake" `
+      -DVCPKG_TARGET_TRIPLET=x64-windows `
+      -DBARONY_AUDIO_BACKEND=OPENAL -DFMOD_ENABLED=OFF -DOPENAL_ENABLED=ON `
+      -DSTEAMWORKS_ENABLED=1 -DBARONY_SUPER_MULTIPLAYER=ON `
+      -DSAM_FRAMEWORK_ENABLED=ON -DEOS_ENABLED=0 `
+      -DGAME_ENABLED=1 -DEDITOR_ENABLED=1 -DBUILD_TESTING=ON `
+      -DSTEAMWORKS_ROOT="$SteamworksRoot" `
+      -DNFD_INCLUDE_DIR="$NfdInclude" -DNFD_LIBRARY="$NfdLibrary" `
+      -DPHYSFS_INCLUDE_DIR="$PhysfsInclude" -DPHYSFS_LIBRARY="$PhysfsLibrary" `
+      -DBARONY_PHYSFS_LIBRARY="$PhysfsLibrary" `
+      -DBARONY_WINDOWS_INSTALLER=OFF
+
+If the installed Visual Studio generator has a different name, use the
+current project-supported native MSVC generator shown by CMake rather than a
+Linux, MSYS, or POSIX preset.
+
+This configuration is intentionally explicit:
+
+* Steamworks is on.
+* 15-player Automatia support is on.
+* The audio backend is OpenAL; FMOD is off for this Release build.
+* EOS is off unless separately configured with its real SDK requirements.
+* PhysicsFS links to the selected patched import library and its paired DLL is
+  deployed after vcpkg's automatic dependency deployment.
+
+
+Build and test
+--------------
+
+Build the normal Release targets:
+
+    cmake --build build --config Release --parallel 6
+
+If a locally patched PhysicsFS runtime is selected, a full build also runs
+barony_selected_physfs_runtime. It can be run explicitly after a target-only
+build:
+
+    cmake --build build --config Release --target barony_selected_physfs_runtime
+
+Run the native CTest suite:
+
+    ctest --test-dir build -C Release --output-on-failure
+
+Use dumpbin or the package validator to audit imports. For example:
+
+    & 'C:\path\to\dumpbin.exe' /DEPENDENTS build\Release\barony.exe
+
+The executable must import OpenAL32.dll and must not import fmod.dll or
+fmodstudio.dll.
+
+
+Stage the audited release folder
+--------------------------------
+
+The staging script accepts all local paths as arguments. It copies assets only
+from the supplied asset root, and it never copies that installation's .exe or
+.dll files. DLLs come only from the selected vcpkg triplet, authorized
+Steamworks SDK, selected OpenAL root, and explicitly selected patched
+PhysicsFS build.
+
+    $AssetsRoot = 'C:\Program Files (x86)\Steam\steamapps\common\Barony'
+    $OpenALSource = "$VcpkgRoot\downloads\kcat-openal-soft-1.25.1.tar.gz"
+    $PhysfsDll = 'C:\path\to\patched-physfs\install\bin\physfs.dll'
+    $PhysfsSource = 'C:\path\to\patched-physfs\physfs-release-3.2.0'
+    $VcRedist = 'C:\Program Files\Microsoft Visual Studio\<version>\Community\VC\Redist\MSVC\<version>\vc_redist.x64.exe'
+
+    py -3 tools\package_windows_release.py `
+      --build-dir build\Release `
+      --output-dir build\BaronyAutomatia-Windows-x64 --clean `
+      --vcpkg-root $VcpkgRoot --triplet x64-windows `
+      --steamworks-sdk $SteamworksRoot --steamworks-version 'SDK 1.65' `
+      --openal-root "$VcpkgRoot\installed\x64-windows" `
+      --openal-source-archive $OpenALSource `
+      --physfs-dll $PhysfsDll --physfs-source $PhysfsSource --physfs-version 3.2.0 `
+      --assets-root $AssetsRoot --vc-redist $VcRedist `
+      --include-editor
+
+The output is:
+
+    build\BaronyAutomatia-Windows-x64
+
+It contains barony.exe, editor.exe when requested, the actual dependency
+closure, normal game assets, licenses, third-party source material, a manifest,
+notices, and prerequisites\VC_redist.x64.exe. It contains no FMOD DLL, object
+file, import library, Windows system DLL, or DLL borrowed from vanilla Barony.
+
+
+Validate an already staged folder
+---------------------------------
+
+    py -3 tools\package_windows_release.py `
+      --validate-only --output-dir build\BaronyAutomatia-Windows-x64
+
+The validator fails closed on missing/unknown dependencies, missing provenance
+or licenses, checksum errors, non-x64 files, absent OpenAL source, absent
+OpenAL32.dll, FMOD, missing Steamworks SDK provenance, and an unmarked patched
+PhysicsFS binary.
+
+
+Optional CMake package target
+-----------------------------
+
+Ordinary builds never package Steamworks or game assets. To enable the opt-in
+target, configure again with the following explicit paths:
+
+    -DBARONY_WINDOWS_RELEASE_PACKAGE_TARGET=ON
+    -DBARONY_WINDOWS_RELEASE_VCPKG_ROOT=<vcpkg-root>
+    -DBARONY_WINDOWS_RELEASE_ASSETS_ROOT=<authorized-asset-root>
+    -DBARONY_WINDOWS_RELEASE_OPENAL_SOURCE_ARCHIVE=<exact-openal-source-archive>
+    -DBARONY_WINDOWS_RELEASE_PHYSFS_SOURCE=<patched-physfs-source>
+    -DBARONY_WINDOWS_RELEASE_VC_REDIST=<official-vc-redist-x64-exe>
+
+Then run:
+
+    cmake --build build --config Release --target package_automatia_windows
+
+The target requires OpenAL and Steamworks to be configured and refuses missing
+inputs rather than silently producing a partial release.
+
+
+Steam side-by-side installer note
+---------------------------------
+
+The side-by-side installer is a single public EXE: users do not download a
+second DLL archive. It embeds the two Automatia executables, the audited DLL
+closure, license/notice material, corresponding source archives, the official
+VC++ redistributable, and the Steam-shortcut helper. It does not embed vanilla
+Barony assets.
+
+Configure this route with the audited package inputs above, plus:
+
+    -DBARONY_WINDOWS_INSTALLER=ON
+    -DBARONY_WINDOWS_STEAM_PATCH_INSTALLER=ON
+    -DBARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER=ON
+
+If NSIS is not on PATH, point CMake to a local or installed compiler:
+
+    -DBARONY_WINDOWS_NSIS_EXECUTABLE=C:\path\to\makensis.exe
+
+Then stage and package it:
+
+    cmake --build build --config Release --target package_automatia_windows
+    cpack --config build\CPackConfig.cmake -G NSIS -C Release
+
+The generated release file is:
+
+    build\installer\Barony-Automatia-Steam-<version>-windows-x64.exe
+
+When run by a player who has Barony installed through Steam, it finds Barony
+in Steam's primary library or another library listed in libraryfolders.vdf,
+creates a sibling "Barony Automatia" folder in that same library, and copies
+only vanilla assets into it. It excludes vanilla .exe files, .dll files, and
+Steam cloud configuration. Next it extracts Automatia's embedded executable
+and DLL payload beside those assets, installs the official VC++ runtime, and
+attempts to add a non-Steam shortcut named "Barony Automatia". Steam does not
+create a second owned AppID for the same purchase; the shortcut is a separate
+library entry, not another Steam installation record.
+
+This external side-by-side installer must not be treated as a Steam depot
+upload recipe. In particular, review Steamworks requirements before publishing
+steam_api64.dll or steam_appid.txt through a Steam depot.
+
+Run graphical smoke tests from the staged folder before release. Confirm menu
+music, UI and gameplay sounds, positional audio, volume controls, clean exit,
+Steam initialization, and --nosteam behavior. A headless/CI environment alone
+cannot certify those interactive checks.

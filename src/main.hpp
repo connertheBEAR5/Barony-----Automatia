@@ -31,6 +31,9 @@ typedef double real_t;
 #include <algorithm>
 #include "playable_z.hpp"
 #include "room_group.hpp"
+#ifdef ERROR
+#undef ERROR
+#endif
 #include "procedural_room.hpp"
 
 // the following functions are safe variants of C's string library.
@@ -124,6 +127,12 @@ extern bool autoLimbReload;
 #endif
 #define PATH_MAX 1024
 #include <windows.h>
+#ifdef GetObject
+#undef GetObject
+#endif
+#ifdef ERROR
+#undef ERROR
+#endif
 #pragma warning ( push )
 #pragma warning( disable : 4091 ) // disable typedef warnings from dbghelp.h
 #include <Dbghelp.h>
@@ -194,15 +203,21 @@ extern bool autoLimbReload;
 
 #ifdef WINDOWS
 #include <io.h>
+#ifdef _MSC_VER
+#include <direct.h>
+#endif
 #define F_OK 0	// check for existence
 #define X_OK 1	// check for execute permission
 #define W_OK 2	// check for write permission
 #define R_OK 4	// check for read permission
 
-#if _MSC_VER != 1900 //Don't need this if running visual studio 2015.
+#if defined(__MINGW32__) || defined(__MINGW64__)
 #define snprintf _snprintf
 #endif
 #define access _access
+#ifdef _MSC_VER
+#define mkdir(path, ...) _mkdir(path)
+#endif
 #endif
 
 #define PI 3.14159265358979323846

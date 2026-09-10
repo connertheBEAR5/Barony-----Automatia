@@ -369,7 +369,7 @@ Input::ControllerType Input::getControllerType(int index) {
     } else {
 #ifdef STEAMWORKS
         if (steamRuntimeAvailable() && SteamUtils()
-            && SteamUtils()->IsSteamRunningOnSteamDeck()) {
+            && SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck) {
             return ControllerType::SteamDeck;
         }
 #endif

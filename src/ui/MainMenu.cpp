@@ -19797,7 +19797,7 @@ failed:
 #else
 #ifdef STEAMWORKS
             const bool steamdeck = steamRuntimeAvailable() && SteamUtils()
-                && SteamUtils()->IsSteamRunningOnSteamDeck();
+                && SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck;
 #else
             constexpr bool steamdeck = false;
 #endif
@@ -29362,14 +29362,27 @@ failed:
 				tab->setWidgetDown(index == 0 ? "social_players_list"
 					: index == 1 ? "social_party_list"
 						: "social_invitations_list");
-				tab->setCallback(index == 0
-					? [](Button&) { soundActivate(); selectSocialCompactTab(
-						SocialCompactTab::Players); }
-					: index == 1
-						? [](Button&) { soundActivate(); selectSocialCompactTab(
-							SocialCompactTab::Party); }
-						: [](Button&) { soundActivate(); selectSocialCompactTab(
-							SocialCompactTab::Invitations); });
+				if ( index == 0 )
+				{
+					tab->setCallback([](Button&) {
+						soundActivate();
+						selectSocialCompactTab(SocialCompactTab::Players);
+					});
+				}
+				else if ( index == 1 )
+				{
+					tab->setCallback([](Button&) {
+						soundActivate();
+						selectSocialCompactTab(SocialCompactTab::Party);
+					});
+				}
+				else
+				{
+					tab->setCallback([](Button&) {
+						soundActivate();
+						selectSocialCompactTab(SocialCompactTab::Invitations);
+					});
+				}
 			}
 			playersRect = SDL_Rect{16, 104,
 				cardWidth - 32, statusY - 112};
@@ -34676,7 +34689,7 @@ failed:
 			button->setBackgroundHighlighted("*#images/ui/Main Menus/Mods/Upload/Button_High00.png");
 			button->setBackgroundActivated("*#images/ui/Main Menus/Mods/Upload/Button_Press00.png");
             if (steamRuntimeAvailable() && SteamUtils()
-                && SteamUtils()->IsSteamRunningOnSteamDeck()) {
+                && SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck) {
                 button->setTextColor(makeColorRGB(127, 127, 127));
                 button->setHighlightColor(makeColorRGB(127, 127, 127));
                 button->setColor(makeColorRGB(127, 127, 127));
@@ -34761,7 +34774,7 @@ failed:
 			});
 			button->setCallback([](Button& button) {
                 if (steamRuntimeAvailable() && SteamUtils()
-                    && SteamUtils()->IsSteamRunningOnSteamDeck()) {
+                    && SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck) {
                     soundError();
                     return;
                 }
@@ -34781,15 +34794,15 @@ failed:
 				}
 				if ( modsPath != "" )
 				{
-					result = NFD_PickFolder(modsPath.c_str(), &outPath);
+					result = NFD_PickFolder(&outPath, modsPath.c_str());
 				}
 				else
 				{
-					result = NFD_PickFolder(outputdir, &outPath); // hopefully this is absolute path?
+					result = NFD_PickFolder(&outPath, outputdir); // hopefully this is absolute path?
 				}
 				if ( result == NFD_ERROR )
 				{
-					result = NFD_PickFolder(PHYSFS_getBaseDir(), &outPath); // fallback path
+					result = NFD_PickFolder(&outPath, PHYSFS_getBaseDir()); // fallback path
 				}
 
 				if ( result == NFD_OKAY )

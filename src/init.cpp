@@ -289,7 +289,7 @@ int initApp(char const * const title, int fullscreen)
 			g_SteamWorkshop = new CSteamWorkshop();
 			g_SteamStatistics = new CSteamStatistics(g_SteamStats, g_SteamAPIGlobalStats, NUM_STEAM_STATISTICS);
 			if ( xres == 1280 && yres == 720 && SteamUtils()
-				&& SteamUtils()->IsSteamRunningOnSteamDeck() )
+				&& SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck )
 			{
 				// default steam deck native resolution
 				xres = 1280;

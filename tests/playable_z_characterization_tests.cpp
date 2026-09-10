@@ -48,7 +48,17 @@ std::string readFile(const std::filesystem::path& path)
     std::ifstream input(path, std::ios::binary);
     std::ostringstream contents;
     contents << input.rdbuf();
-    return input ? contents.str() : std::string{};
+    if ( !input )
+    {
+        return {};
+    }
+    std::string result = contents.str();
+    for ( std::size_t offset = 0;
+        (offset = result.find("\r\n", offset)) != std::string::npos; )
+    {
+        result.erase(offset, 1);
+    }
+    return result;
 }
 
 std::string section(

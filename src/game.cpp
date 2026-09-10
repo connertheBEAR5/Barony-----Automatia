@@ -25250,7 +25250,7 @@ bool handleEvents(void)
 #ifdef STEAMWORKS
                 // on steam deck, player 1 always needs a controller.
                 if (steamRuntimeAvailable() && SteamUtils()
-                    && SteamUtils()->IsSteamRunningOnSteamDeck()) {
+                    && SteamUtils()->IsRunningOnSteamHardware() == k_ESteamHardwareTypeSteamDeck) {
                     if (id >= 0 && !inputs.hasController(0)) {
                         bindControllerToPlayer(id, 0);
                     }

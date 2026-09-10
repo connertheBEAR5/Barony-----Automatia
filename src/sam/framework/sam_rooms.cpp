@@ -41,7 +41,11 @@ namespace
 		if ( file.empty() ) { return dir; }
 		const char last = dir[dir.size() - 1];
 		if ( last == '/' || last == '\\' ) { return dir + file; }
+#ifdef _WIN32
+		return dir + "\\" + file;
+#else
 		return dir + "/" + file;
+#endif
 	}
 
 	// Barony's own level names are lowercase; normalise so "Mine" and "mine" mean the same

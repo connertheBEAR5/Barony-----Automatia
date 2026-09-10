@@ -1,7 +1,15 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.10)
 project(barony)
 
 include(CTest)
+
+option(BARONY_ENABLE_GRAPHICAL_RUNTIME_CTEST
+	"Enable the full graphical Barony runtime characterization test under CTest" OFF)
+
+if (WIN32)
+	# Keep Windows' min/max macros out of the Automatia and RapidJSON code.
+	add_definitions(-DNOMINMAX)
+endif()
 
 if(BUILD_TESTING)
 	add_executable(
@@ -760,17 +768,15 @@ else( NOT WIN32 )
 	# compiler-specific flags separate and make the C++17 requirement explicit.
 	set(Windows 1)
 	if (MSVC)
-		set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MP")
-		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MP")
+		set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MP /std:c11 /experimental:c11atomics")
+		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MP /std:c11 /experimental:c11atomics")
 		set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MP /std:c++17")
 		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MP /std:c++17")
-		set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
 	elseif (MINGW)
 		set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -ffast-math -funroll-loops -malign-double -fstrict-aliasing")
 		set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${OPTIMIZATION_LEVEL} -ffast-math -funroll-loops -malign-double -fstrict-aliasing")
 		set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -std=c++17")
 		set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -std=c++17 ${OPTIMIZATION_LEVEL}")
-		set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -mwindows")
 	else()
 		message(WARNING
 			"Windows compiler '${CMAKE_CXX_COMPILER_ID}' has no tuned flag profile. "
@@ -802,6 +808,13 @@ IF (APPLE)
   find_package(IOKit REQUIRED)
 ELSE (APPLE)
 	find_package(OpenGL REQUIRED)
+	find_package(GLEW REQUIRED)
+	include_directories(${GLEW_INCLUDE_DIRS} ${GLEW_INCLUDE_DIR})
+	if (TARGET GLEW::GLEW)
+		set(BARONY_GLEW_LIBRARIES GLEW::GLEW)
+	else()
+		set(BARONY_GLEW_LIBRARIES ${GLEW_LIBRARIES})
+	endif()
 	IF(NOT WIN32)
 		INCLUDE(FindPkgConfig)
 		PKG_SEARCH_MODULE(SDL2 REQUIRED sdl2)
@@ -815,7 +828,38 @@ ELSE (APPLE)
 	find_package(SDL2_net REQUIRED) # ...why the duplication?
 	find_package(SDL2_ttf REQUIRED)
 ENDIF (APPLE)
-find_package(PhysFS REQUIRED)
+# Prefer the repository's FindPhysFS module here.  vcpkg's config package can
+# otherwise replace an explicitly supplied locally patched PhysFS library,
+# leaving the linked import library and staged runtime DLL out of sync.
+find_package(PhysFS REQUIRED MODULE)
+
+# Preserve the selected import library separately. The vcpkg package provider
+# can repopulate PHYSFS_LIBRARY after find_package(), but game/editor targets
+# must continue to link the same locally patched import library whose DLL is
+# selected below.
+set(BARONY_PHYSFS_LIBRARY "${PHYSFS_LIBRARY}" CACHE FILEPATH
+	"Exact PhysicsFS import library used by Barony targets")
+if (NOT EXISTS "${BARONY_PHYSFS_LIBRARY}")
+	message(FATAL_ERROR
+		"BARONY_PHYSFS_LIBRARY is not a valid PhysicsFS import library: ${BARONY_PHYSFS_LIBRARY}")
+endif()
+
+if (WIN32)
+	# Keep the runtime DLL paired with the exact PhysFS import library selected
+	# for this build. This matters when a locally patched PhysFS is supplied
+	# ahead of a package-manager copy.
+	get_filename_component(_barony_physfs_library_dir "${BARONY_PHYSFS_LIBRARY}" DIRECTORY)
+	find_file(BARONY_PHYSFS_RUNTIME_DLL
+		NAMES physfs.dll
+		PATHS
+			"${_barony_physfs_library_dir}"
+			"${_barony_physfs_library_dir}/../bin"
+		NO_DEFAULT_PATH)
+	if (NOT BARONY_PHYSFS_RUNTIME_DLL)
+		message(FATAL_ERROR
+			"PhysFS was found, but its Windows runtime physfs.dll was not found beside ${BARONY_PHYSFS_LIBRARY}.")
+	endif()
+endif()
 
 # The procedural-room generation characterization also exercises the
 # production PhysFS scanner.  The test target is declared above so it can keep
@@ -835,7 +879,7 @@ if (BUILD_TESTING AND TARGET procedural_room_generation_tests)
 	target_link_libraries(
 		procedural_room_generation_tests
 		PRIVATE
-		"${PHYSFS_LIBRARY}"
+		${BARONY_PHYSFS_LIBRARY}
 	)
 endif()
 find_package(RapidJson REQUIRED)
@@ -893,6 +937,19 @@ if ("x${BARONY_AUDIO_BACKEND_RESOLVED}" STREQUAL "xFMOD")
 		message(FATAL_ERROR "FMOD was selected but the FMOD library was not found.")
 	endif()
 	set(FMOD 1)
+	if (WIN32)
+		# FMOD's import library is not the runtime DLL. Keep the DLL beside the
+		# executables in developer builds as well as in the CPack payload.
+		get_filename_component(_barony_fmod_library_dir "${FMOD_LIBRARY}" DIRECTORY)
+		find_file(BARONY_FMOD_RUNTIME_DLL
+			NAMES fmod.dll
+			PATHS "${_barony_fmod_library_dir}"
+			NO_DEFAULT_PATH)
+		if (NOT BARONY_FMOD_RUNTIME_DLL)
+			message(FATAL_ERROR
+				"FMOD was found, but its Windows runtime fmod.dll was not found beside ${FMOD_LIBRARY}.")
+		endif()
+	endif()
 endif()
 if(NOT APPLE)
   #Linux needs these two.
@@ -1044,6 +1101,16 @@ else()
   endif (GAME_ENABLED)
 endif(APPLE)
 
+if (GAME_ENABLED AND WIN32)
+	# Only the game is a GUI subsystem executable; tests keep their console
+	# subsystem so their normal int main() entry points link on Windows.
+	if (BUILD_TESTING)
+		set_target_properties(barony PROPERTIES WIN32_EXECUTABLE FALSE)
+	else()
+		set_target_properties(barony PROPERTIES WIN32_EXECUTABLE TRUE)
+	endif()
+endif()
+
 if (GAME_ENABLED)
   if(BUILD_TESTING)
 	target_sources(
@@ -1065,6 +1132,18 @@ if (GAME_ENABLED)
 		PROPERTIES
 			WORKING_DIRECTORY "${PROJECT_BINARY_DIR}"
 	)
+	# This test launches the full graphical game loop. It is not a meaningful
+	# unattended Windows/CI test without a display, audio device, and explicit
+	# exit control; leave it visible but disabled unless an interactive runner
+	# opts in.
+	if (WIN32 AND NOT BARONY_ENABLE_GRAPHICAL_RUNTIME_CTEST)
+		set_tests_properties(
+			playable_z_runtime_characterization
+			PROPERTIES
+				DISABLED TRUE
+				LABELS "requires-interactive-windows-runtime"
+		)
+	endif()
   endif()
 	if (SAM_FRAMEWORK_ENABLED)
 	set(SAM_RUNTIME_21_SOURCES
@@ -1126,6 +1205,13 @@ if (GAME_ENABLED)
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lutf8lib.c"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lvm.c"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/lua54/lzio.c"
+	)
+	# MSVC exposes C11 <stdatomic.h> behind an experimental switch.  Keep this
+	# source-specific because the rest of the legacy C sources do not require it.
+	set_source_files_properties(
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/quickjs/quickjs-amalgam.c"
+		PROPERTIES
+			COMPILE_OPTIONS "/experimental:c11atomics"
 	)
 	target_sources(
 		barony
@@ -1268,7 +1354,8 @@ if (GAME_ENABLED)
 		target_link_libraries(barony -lpthread)
 	#endif(LINUX)
   endif()
-  target_link_libraries(barony ${OPENGL_LIBRARIES})
+	  target_link_libraries(barony ${OPENGL_LIBRARIES})
+	  target_link_libraries(barony ${BARONY_GLEW_LIBRARIES})
   target_link_libraries(barony ${THREADS_LIBRARIES}) # TODO: Not sure what this is doing, since it doesn't appear to be working in Linux!
   if (UNIX)
 	target_link_libraries(barony -lm)
@@ -1279,7 +1366,7 @@ if (GAME_ENABLED)
   if (FMOD)
     target_link_libraries(barony ${FMOD_LIBRARY})
   endif()
-  target_link_libraries(barony ${PHYSFS_LIBRARY})
+  target_link_libraries(barony ${BARONY_PHYSFS_LIBRARY})
   if(NOT APPLE)
 	#Remember, Mac isn't using find_package for PNG.
 	target_link_libraries(barony ${PNG_LIBRARY})
@@ -1307,6 +1394,9 @@ endif(GAME_ENABLED)
 
 set(BASE_DATA_DIR "./" CACHE INTERNAL "Base data dir")
 
+option(BARONY_WINDOWS_INSTALLER
+	"Enable the self-contained CPack/NSIS Windows installer target" OFF)
+
 if (NOT APPLE AND UNIX)
   include(GNUInstallDirs)
   if (DATA_DIR)
@@ -1321,11 +1411,11 @@ if (NOT APPLE AND UNIX)
 	)
   endif(GAME_ENABLED)
 else()
-  if (GAME_ENABLED)
+	if (GAME_ENABLED AND NOT BARONY_WINDOWS_INSTALLER)
 	install(TARGETS barony
 	  RUNTIME DESTINATION bin COMPONENT Runtime BUNDLE DESTINATION Resources
 	)
-  endif(GAME_ENABLED)
+  endif()
 endif()
 
 add_definitions(-DBASE_DATA_DIR=\"${BASE_DATA_DIR}\")
@@ -1352,6 +1442,9 @@ if (EDITOR_ENABLED)
 		add_executable(${EDITOR_EXE_NAME} ${EDITOR_SOURCES} ${EDITOR_RESOURCE_FILE})
 	endif()
   endif()
+	if (WIN32)
+		set_target_properties(${EDITOR_EXE_NAME} PROPERTIES WIN32_EXECUTABLE TRUE)
+	endif()
   target_compile_definitions(${EDITOR_EXE_NAME} PUBLIC EDITOR) # So that shared source files know this is the editor they're dealing with. # TODO: Try using this to disable some things we don't want in the editor?
 
   if (THEORAPLAYER_ENABLED)
@@ -1389,6 +1482,7 @@ if (EDITOR_ENABLED)
 	#endif(LINUX)
   endif()
   target_link_libraries(${EDITOR_EXE_NAME} ${OPENGL_LIBRARIES})
+  target_link_libraries(${EDITOR_EXE_NAME} ${BARONY_GLEW_LIBRARIES})
   target_link_libraries(${EDITOR_EXE_NAME} ${THREADS_LIBRARIES})
   if (UNIX)
 	target_link_libraries(${EDITOR_EXE_NAME} -lm)
@@ -1402,11 +1496,11 @@ if (EDITOR_ENABLED)
   endif()
   if(NOT APPLE)
 	#Remember, Mac isn't using find_package for FMOD and PNG.
-	target_link_libraries(${EDITOR_EXE_NAME} ${PHYSFS_LIBRARY})
+	target_link_libraries(${EDITOR_EXE_NAME} ${BARONY_PHYSFS_LIBRARY})
 	target_link_libraries(${EDITOR_EXE_NAME} ${PNG_LIBRARY})
   endif()
   if (APPLE)
-	target_link_libraries(${EDITOR_EXE_NAME} ${PHYSFS_LIBRARY})
+	target_link_libraries(${EDITOR_EXE_NAME} ${BARONY_PHYSFS_LIBRARY})
 	target_link_libraries(${EDITOR_EXE_NAME} ${IOKit_LIBRARY})
 	if (EOS_ENABLED)
 	  target_link_libraries(${EDITOR_EXE_NAME} ${EOS_LIBRARY})
@@ -1431,6 +1525,54 @@ if (EDITOR_ENABLED)
 	endif()
   endif()
 endif(EDITOR_ENABLED)
+
+# Visual Studio does not deploy FMOD's runtime DLL from its import library.
+# Keep local game/editor builds runnable directly from the Release directory;
+# the Windows install rules below use the same verified runtime file.
+if (WIN32 AND FMOD AND BARONY_FMOD_RUNTIME_DLL)
+	if (GAME_ENABLED)
+		add_custom_command(TARGET barony POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${BARONY_FMOD_RUNTIME_DLL}" "$<TARGET_FILE_DIR:barony>/fmod.dll"
+			COMMENT "Deploying FMOD runtime for barony"
+			VERBATIM)
+	endif()
+	if (EDITOR_ENABLED)
+		add_custom_command(TARGET ${EDITOR_EXE_NAME} POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${BARONY_FMOD_RUNTIME_DLL}" "$<TARGET_FILE_DIR:${EDITOR_EXE_NAME}>/fmod.dll"
+			COMMENT "Deploying FMOD runtime for editor"
+			VERBATIM)
+	endif()
+endif()
+
+# vcpkg's Visual Studio integration may deploy its own PhysFS DLL even when a
+# developer explicitly selected a locally patched PhysFS import library. This
+# dependent runtime target runs after the executable deployment steps, so its
+# verified companion DLL is the final file in a normal full build.
+if (WIN32 AND BARONY_PHYSFS_RUNTIME_DLL)
+	set(_barony_physfs_runtime_targets)
+	if (GAME_ENABLED)
+		list(APPEND _barony_physfs_runtime_targets barony)
+	endif()
+	if (EDITOR_ENABLED)
+		list(APPEND _barony_physfs_runtime_targets ${EDITOR_EXE_NAME})
+	endif()
+	if (GAME_ENABLED)
+		set(_barony_physfs_runtime_destination "$<TARGET_FILE_DIR:barony>/physfs.dll")
+	elseif (EDITOR_ENABLED)
+		set(_barony_physfs_runtime_destination
+			"$<TARGET_FILE_DIR:${EDITOR_EXE_NAME}>/physfs.dll")
+	endif()
+	if (_barony_physfs_runtime_targets)
+		add_custom_target(barony_selected_physfs_runtime ALL
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+				"${BARONY_PHYSFS_RUNTIME_DLL}" "${_barony_physfs_runtime_destination}"
+			COMMENT "Deploying the selected PhysicsFS runtime after vcpkg dependencies"
+			DEPENDS ${_barony_physfs_runtime_targets}
+			VERBATIM)
+	endif()
+endif()
 
 # Various install targets
 # 1) <TODO: insert proper description here...I think they're being used by the BSD maintainer(s)?>.
@@ -1488,10 +1630,43 @@ if (WIN32)
 		endif()
 	endif()
 
-	option(BARONY_WINDOWS_INSTALLER
-		"Enable the self-contained CPack/NSIS Windows installer target" OFF)
 	set(BARONY_AUTOMATIA_PACKAGE_VERSION "dev" CACHE STRING
 		"Version label embedded in the Windows installer filename and metadata")
+	set(BARONY_WINDOWS_DATA_DIR "${CMAKE_SOURCE_DIR}" CACHE PATH
+		"Directory containing the Windows runtime asset folders")
+	set(BARONY_WINDOWS_NSIS_EXECUTABLE "" CACHE FILEPATH
+		"Optional path to makensis.exe used for the Windows installer")
+	option(BARONY_WINDOWS_RELEASE_PACKAGE_TARGET
+		"Enable the opt-in audited Windows release staging target" OFF)
+	set(BARONY_WINDOWS_RELEASE_VCPKG_ROOT "" CACHE PATH
+		"vcpkg root used by the audited Windows release package")
+	set(BARONY_WINDOWS_RELEASE_ASSETS_ROOT "" CACHE PATH
+		"Authorized Barony asset source used by the audited Windows release package")
+	set(BARONY_WINDOWS_RELEASE_OPENAL_SOURCE_ARCHIVE "" CACHE FILEPATH
+		"Exact OpenAL Soft source archive paired with the staged OpenAL32.dll")
+	set(BARONY_WINDOWS_RELEASE_PHYSFS_SOURCE "" CACHE PATH
+		"Locally patched PhysicsFS source directory paired with physfs.dll")
+	set(BARONY_WINDOWS_RELEASE_VC_REDIST "" CACHE FILEPATH
+		"Official VC_redist.x64.exe from the Visual Studio Redist/MSVC directory")
+	set(BARONY_WINDOWS_RELEASE_OUTPUT_DIR
+		"${CMAKE_BINARY_DIR}/BaronyAutomatia-Windows-x64" CACHE PATH
+		"Audited Windows release staging directory")
+	option(BARONY_WINDOWS_STEAM_PATCH_INSTALLER
+		"Build the Steam-integrated Automatia installer payload" OFF)
+	option(BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER
+		"Install Automatia beside vanilla Barony and add it to Steam as a non-Steam shortcut" ON)
+	if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER AND NOT BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+		message(FATAL_ERROR
+			"In-place Steam patch installers are disabled for Automatia. "
+			"Enable BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER so vanilla Barony is read only.")
+	endif()
+	if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+		add_executable(barony_automatia_steam_shortcut
+			tools/barony_automatia_steam_shortcut.cpp)
+		set_target_properties(barony_automatia_steam_shortcut PROPERTIES
+			CXX_STANDARD 17
+			CXX_STANDARD_REQUIRED ON)
+	endif()
 
 	if (BARONY_WINDOWS_INSTALLER)
 		if (NOT GAME_ENABLED)
@@ -1540,47 +1715,153 @@ if (WIN32)
 				"BARONY_WIN32_LIBRARIES to the matching prefix or set the DLL directory explicitly.")
 		endif()
 
-		# Package the full standalone runtime, not an in-place replacement for a
-		# Steam-managed game. That makes install, update, and uninstall reversible.
-		install(TARGETS barony
-			RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
-			RUNTIME DESTINATION "." COMPONENT Runtime)
-		if (EDITOR_ENABLED)
-			install(TARGETS ${EDITOR_EXE_NAME}
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+			# A Steam install already contains all Barony assets. The patch installer
+			# carries only the rebuilt executables and their non-system DLLs.
+			if (NOT STEAMWORKS_ENABLED OR NOT OPENAL)
+				message(FATAL_ERROR
+					"BARONY_WINDOWS_STEAM_PATCH_INSTALLER requires Steamworks and the OpenAL backend.")
+			endif()
+			install(TARGETS barony
+				RUNTIME DESTINATION "." COMPONENT Runtime)
+			if (EDITOR_ENABLED)
+				install(TARGETS ${EDITOR_EXE_NAME}
+					RUNTIME DESTINATION "." COMPONENT Runtime)
+			endif()
+			install(TARGETS barony_automatia_steam_shortcut
+				RUNTIME DESTINATION "." COMPONENT Runtime)
+			set(_barony_patch_runtime_dll_names
+				SDL2.dll
+				SDL2_image.dll
+				SDL2_net.dll
+				SDL2_ttf.dll
+				fmt.dll
+				freetype.dll
+				glew32.dll
+				physfs.dll
+				libpng16.dll
+				z.dll
+				bz2.dll
+				brotlidec.dll
+				brotlicommon.dll
+				OpenAL32.dll
+				ogg.dll
+				vorbis.dll
+				vorbisfile.dll
+				steam_api64.dll)
+			foreach(_barony_patch_runtime_dll_name ${_barony_patch_runtime_dll_names})
+				unset(_barony_patch_runtime_dll CACHE)
+				unset(_barony_patch_runtime_dll)
+				if (_barony_patch_runtime_dll_name STREQUAL "physfs.dll")
+					set(_barony_patch_runtime_dll "${BARONY_PHYSFS_RUNTIME_DLL}")
+				else()
+					find_file(_barony_patch_runtime_dll
+						NAMES "${_barony_patch_runtime_dll_name}"
+						PATHS ${_barony_runtime_dirs_existing}
+						NO_DEFAULT_PATH)
+				endif()
+				if (NOT _barony_patch_runtime_dll)
+					message(FATAL_ERROR
+						"Could not find required Steam patch runtime DLL: ${_barony_patch_runtime_dll_name}")
+				endif()
+				install(FILES "${_barony_patch_runtime_dll}"
+					DESTINATION "." COMPONENT Runtime)
+			endforeach()
+			if (BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+				install(FILES
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/steam_appid.txt"
+					DESTINATION "." COMPONENT Runtime)
+			else()
+				install(FILES
+					"${BARONY_WINDOWS_DATA_DIR}/steam_appid.txt"
+					DESTINATION "." COMPONENT Runtime)
+			endif()
+
+			# The side-by-side installer contains every file it needs. It deliberately
+			# does not package vanilla Barony assets: its NSIS install logic copies those
+			# from the user's existing Steam installation instead.
+			if (BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+				if (NOT BARONY_WINDOWS_RELEASE_PACKAGE_TARGET)
+					message(FATAL_ERROR
+						"BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER requires "
+						"BARONY_WINDOWS_RELEASE_PACKAGE_TARGET so the single installer "
+						"can embed its audited notices, corresponding source, and VC redist.")
+				endif()
+				install(DIRECTORY
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/licenses/"
+					DESTINATION "automatia_licenses" COMPONENT Runtime)
+				install(DIRECTORY
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/third_party_source/"
+					DESTINATION "automatia_third_party_source" COMPONENT Runtime)
+				install(FILES
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/THIRD_PARTY_NOTICES.txt"
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/THIRD_PARTY_MANIFEST.json"
+					DESTINATION "automatia_licenses" COMPONENT Runtime)
+				install(FILES
+					"${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}/prerequisites/VC_redist.x64.exe"
+					DESTINATION "automatia_prerequisites" COMPONENT Runtime)
+				install(FILES "${CMAKE_SOURCE_DIR}/LICENSE.txt"
+					DESTINATION "automatia_licenses" RENAME "Automatia_LICENSE.txt"
+					COMPONENT Runtime)
+				# These original Automatia images are installed only to the private
+				# payload directory. The shortcut helper places copies in the active
+				# Steam user's grid directory after Steam is closed.
+				install(FILES
+					"${CMAKE_SOURCE_DIR}/tools/steam_artwork/barony_automatia_portrait.png"
+					"${CMAKE_SOURCE_DIR}/tools/steam_artwork/barony_automatia_hero.png"
+					"${CMAKE_SOURCE_DIR}/tools/steam_artwork/barony_automatia_icon.png"
+					DESTINATION "automatia_steam_artwork" COMPONENT Runtime)
+
+				set(BARONY_AUTOMATIA_SIDEBYSIDE_RUNTIME_FILES barony.exe)
+				if (EDITOR_ENABLED)
+					list(APPEND BARONY_AUTOMATIA_SIDEBYSIDE_RUNTIME_FILES editor.exe)
+				endif()
+				list(APPEND BARONY_AUTOMATIA_SIDEBYSIDE_RUNTIME_FILES
+					${_barony_patch_runtime_dll_names}
+					steam_appid.txt)
+			endif()
+		else()
+			# Package the full standalone runtime, not an in-place replacement for a
+			# Steam-managed game. That makes install, update, and uninstall reversible.
+			install(TARGETS barony
 				RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
 				RUNTIME DESTINATION "." COMPONENT Runtime)
-		endif()
-		install(DIRECTORY
-			"${CMAKE_SOURCE_DIR}/books"
-			"${CMAKE_SOURCE_DIR}/data"
-			"${CMAKE_SOURCE_DIR}/fonts"
-			"${CMAKE_SOURCE_DIR}/images"
-			"${CMAKE_SOURCE_DIR}/items"
-			"${CMAKE_SOURCE_DIR}/lang"
-			"${CMAKE_SOURCE_DIR}/maps"
-			"${CMAKE_SOURCE_DIR}/models"
-			"${CMAKE_SOURCE_DIR}/music"
-			"${CMAKE_SOURCE_DIR}/sound"
-			DESTINATION "." COMPONENT Runtime)
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/steam_appid.txt"
-			"${CMAKE_SOURCE_DIR}/gamecontrollerdb.txt"
-			"${CMAKE_SOURCE_DIR}/README.md"
-			"${CMAKE_SOURCE_DIR}/EDITING.txt"
-			"${CMAKE_SOURCE_DIR}/LICENSE.txt"
-			DESTINATION "." COMPONENT Runtime)
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/playernames-female.txt"
-			"${CMAKE_SOURCE_DIR}/playernames-male.txt"
-			OPTIONAL DESTINATION "." COMPONENT Runtime)
+			if (EDITOR_ENABLED)
+				install(TARGETS ${EDITOR_EXE_NAME}
+					RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
+					RUNTIME DESTINATION "." COMPONENT Runtime)
+			endif()
+			install(DIRECTORY
+				"${BARONY_WINDOWS_DATA_DIR}/books"
+				"${BARONY_WINDOWS_DATA_DIR}/data"
+				"${BARONY_WINDOWS_DATA_DIR}/fonts"
+				"${BARONY_WINDOWS_DATA_DIR}/images"
+				"${BARONY_WINDOWS_DATA_DIR}/items"
+				"${BARONY_WINDOWS_DATA_DIR}/lang"
+				"${BARONY_WINDOWS_DATA_DIR}/maps"
+				"${BARONY_WINDOWS_DATA_DIR}/models"
+				"${BARONY_WINDOWS_DATA_DIR}/music"
+				"${BARONY_WINDOWS_DATA_DIR}/sound"
+				DESTINATION "." COMPONENT Runtime)
+			install(FILES
+				"${BARONY_WINDOWS_DATA_DIR}/steam_appid.txt"
+				"${CMAKE_SOURCE_DIR}/gamecontrollerdb.txt"
+				"${CMAKE_SOURCE_DIR}/README.md"
+				"${CMAKE_SOURCE_DIR}/EDITING.txt"
+				"${CMAKE_SOURCE_DIR}/LICENSE.txt"
+				DESTINATION "." COMPONENT Runtime)
+			install(FILES
+				"${CMAKE_SOURCE_DIR}/playernames-female.txt"
+				"${CMAKE_SOURCE_DIR}/playernames-male.txt"
+				OPTIONAL DESTINATION "." COMPONENT Runtime)
 
-		# GET_RUNTIME_DEPENDENCIES runs from the generated install script and walks
-		# transitive DLLs. An unresolved dependency is an installation error rather
-		# than a broken installer silently reaching players.
-		install(RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
-			DESTINATION "." COMPONENT Runtime
-			DIRECTORIES ${_barony_runtime_dirs_existing}
-			PRE_EXCLUDE_REGEXES
+			# GET_RUNTIME_DEPENDENCIES runs from the generated install script and walks
+			# transitive DLLs. An unresolved dependency is an installation error rather
+			# than a broken installer silently reaching players.
+			install(RUNTIME_DEPENDENCY_SET barony_windows_runtime_dependencies
+				DESTINATION "." COMPONENT Runtime
+				DIRECTORIES ${_barony_runtime_dirs_existing}
+				PRE_EXCLUDE_REGEXES
 				"^api-ms-win-.*"
 				"^ext-ms-.*"
 				"^kernel32\\.dll$"
@@ -1600,16 +1881,46 @@ if (WIN32)
 				"^version\\.dll$"
 				"^imm32\\.dll$"
 				"^bcrypt\\.dll$"
-				"^setupapi\\.dll$")
+				"^setupapi\\.dll$"
+				"^(msvcp|vcruntime|ucrtbase).*\\.dll$"
+				"^azureattestmanager\\.dll$"
+				"^azureattestnormal\\.dll$"
+				"^wpaxholder\\.dll$")
+		endif()
 
 		set(CPACK_GENERATOR "NSIS")
-		set(CPACK_PACKAGE_NAME "Barony Automatia")
+		if (NOT "${BARONY_WINDOWS_NSIS_EXECUTABLE}" STREQUAL "")
+			if (NOT EXISTS "${BARONY_WINDOWS_NSIS_EXECUTABLE}")
+				message(FATAL_ERROR
+					"BARONY_WINDOWS_NSIS_EXECUTABLE does not name an existing makensis executable.")
+			endif()
+			set(CPACK_NSIS_EXECUTABLE "${BARONY_WINDOWS_NSIS_EXECUTABLE}")
+		endif()
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+			if (BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+				set(CPACK_PACKAGE_NAME "Barony Automatia Steam Installer")
+			else()
+				set(CPACK_PACKAGE_NAME "Barony Automatia Steam Patch")
+			endif()
+		else()
+			set(CPACK_PACKAGE_NAME "Barony Automatia")
+		endif()
 		set(CPACK_PACKAGE_VENDOR "Automatia")
 		set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
 			"Barony Automatia with editor, OpenAL, S.A.M., and extended multiplayer support")
 		set(CPACK_PACKAGE_VERSION "${BARONY_AUTOMATIA_PACKAGE_VERSION}")
-		set(CPACK_PACKAGE_FILE_NAME
-			"Barony-Automatia-${BARONY_AUTOMATIA_PACKAGE_VERSION}-windows-x64")
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+			if (BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+				set(CPACK_PACKAGE_FILE_NAME
+					"Barony-Automatia-Steam-${BARONY_AUTOMATIA_PACKAGE_VERSION}-windows-x64")
+			else()
+				set(CPACK_PACKAGE_FILE_NAME
+					"Barony-Automatia-Steam-Patch-${BARONY_AUTOMATIA_PACKAGE_VERSION}-windows-x64")
+			endif()
+		else()
+			set(CPACK_PACKAGE_FILE_NAME
+				"Barony-Automatia-${BARONY_AUTOMATIA_PACKAGE_VERSION}-windows-x64")
+		endif()
 		set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/installer")
 		set(CPACK_PACKAGE_INSTALL_DIRECTORY "Barony Automatia")
 		set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE.txt")
@@ -1625,9 +1936,328 @@ if (WIN32)
 		set(CPACK_NSIS_MUI_FINISHPAGE_RUN "barony.exe")
 		set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
 		set(CPACK_NSIS_MODIFY_PATH OFF)
-		set(CPACK_PACKAGE_EXECUTABLES "barony" "Barony Automatia")
-		if (EDITOR_ENABLED)
-			list(APPEND CPACK_PACKAGE_EXECUTABLES "editor" "Barony Automatia Editor")
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER AND BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+			# The real launch target is copied beside the user's Steam Barony assets.
+			# Do not create CPack's default Start-menu/finish-page shortcuts to the
+			# payload cache under LocalAppData, which intentionally has no game assets.
+			set(CPACK_NSIS_MUI_FINISHPAGE_RUN "")
+			set(CPACK_PACKAGE_EXECUTABLES "")
+		else()
+			set(CPACK_PACKAGE_EXECUTABLES "barony" "Barony Automatia")
+			if (EDITOR_ENABLED)
+				list(APPEND CPACK_PACKAGE_EXECUTABLES "editor" "Barony Automatia Editor")
+			endif()
+		endif()
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+			# The payload is installed under the user's local app directory, then
+			# copied into Steam's existing Barony directory. This keeps CPack's
+			# uninstaller from deleting the backed-up Steam files before restoration.
+			set(CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS [=[
+SetRegView 64
+ReadRegStr $R0 HKCU "Software\Valve\Steam" "SteamPath"
+StrCmp $R0 "" barony_automatia_try_lm64
+Goto barony_automatia_have_steam_root
+barony_automatia_try_lm64:
+ReadRegStr $R0 HKLM "Software\Valve\Steam" "InstallPath"
+StrCmp $R0 "" barony_automatia_try_32
+Goto barony_automatia_have_steam_root
+barony_automatia_try_32:
+SetRegView 32
+ReadRegStr $R0 HKCU "Software\Valve\Steam" "SteamPath"
+StrCmp $R0 "" barony_automatia_try_lm32
+Goto barony_automatia_have_steam_root
+barony_automatia_try_lm32:
+ReadRegStr $R0 HKLM "Software\Valve\Steam" "InstallPath"
+barony_automatia_have_steam_root:
+StrCmp $R0 "" barony_automatia_default_steam_root
+StrCpy $R1 "$R0\steamapps\common\Barony"
+IfFileExists "$R1\barony.exe" barony_automatia_steam_found barony_automatia_default_steam_root
+barony_automatia_default_steam_root:
+StrCpy $R1 "$PROGRAMFILES32\Steam\steamapps\common\Barony"
+IfFileExists "$R1\barony.exe" barony_automatia_steam_found barony_automatia_no_steam
+barony_automatia_no_steam:
+MessageBox MB_OK|MB_ICONSTOP "Steam's Barony installation was not found. Install Barony through Steam first, then run this installer again."
+Abort
+barony_automatia_steam_found:
+IfFileExists "$R1\barony.exe.automatia-original" barony_automatia_skip_backup_barony 0
+IfFileExists "$R1\barony.exe" 0 barony_automatia_skip_backup_barony
+CopyFiles /SILENT "$R1\barony.exe" "$R1\barony.exe.automatia-original"
+barony_automatia_skip_backup_barony:
+IfFileExists "$R1\editor.exe.automatia-original" barony_automatia_skip_backup_editor 0
+IfFileExists "$R1\editor.exe" 0 barony_automatia_skip_backup_editor
+CopyFiles /SILENT "$R1\editor.exe" "$R1\editor.exe.automatia-original"
+barony_automatia_skip_backup_editor:
+IfFileExists "$R1\steam_api64.dll.automatia-original" barony_automatia_skip_backup_steam 0
+IfFileExists "$R1\steam_api64.dll" 0 barony_automatia_skip_backup_steam
+CopyFiles /SILENT "$R1\steam_api64.dll" "$R1\steam_api64.dll.automatia-original"
+barony_automatia_skip_backup_steam:
+IfFileExists "$R1\OpenAL32.dll.automatia-original" barony_automatia_skip_backup_openal 0
+IfFileExists "$R1\OpenAL32.dll" 0 barony_automatia_skip_backup_openal
+CopyFiles /SILENT "$R1\OpenAL32.dll" "$R1\OpenAL32.dll.automatia-original"
+barony_automatia_skip_backup_openal:
+IfFileExists "$R1\ogg.dll.automatia-original" barony_automatia_skip_backup_ogg 0
+IfFileExists "$R1\ogg.dll.automatia-added" barony_automatia_skip_backup_ogg 0
+IfFileExists "$R1\ogg.dll" barony_automatia_backup_ogg barony_automatia_mark_added_ogg
+barony_automatia_backup_ogg:
+CopyFiles /SILENT "$R1\ogg.dll" "$R1\ogg.dll.automatia-original"
+Goto barony_automatia_skip_backup_ogg
+barony_automatia_mark_added_ogg:
+FileOpen $0 "$R1\ogg.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_ogg:
+IfFileExists "$R1\vorbis.dll.automatia-original" barony_automatia_skip_backup_vorbis 0
+IfFileExists "$R1\vorbis.dll.automatia-added" barony_automatia_skip_backup_vorbis 0
+IfFileExists "$R1\vorbis.dll" barony_automatia_backup_vorbis barony_automatia_mark_added_vorbis
+barony_automatia_backup_vorbis:
+CopyFiles /SILENT "$R1\vorbis.dll" "$R1\vorbis.dll.automatia-original"
+Goto barony_automatia_skip_backup_vorbis
+barony_automatia_mark_added_vorbis:
+FileOpen $0 "$R1\vorbis.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_vorbis:
+IfFileExists "$R1\vorbisfile.dll.automatia-original" barony_automatia_skip_backup_vorbisfile 0
+IfFileExists "$R1\vorbisfile.dll.automatia-added" barony_automatia_skip_backup_vorbisfile 0
+IfFileExists "$R1\vorbisfile.dll" barony_automatia_backup_vorbisfile barony_automatia_mark_added_vorbisfile
+barony_automatia_backup_vorbisfile:
+CopyFiles /SILENT "$R1\vorbisfile.dll" "$R1\vorbisfile.dll.automatia-original"
+Goto barony_automatia_skip_backup_vorbisfile
+barony_automatia_mark_added_vorbisfile:
+FileOpen $0 "$R1\vorbisfile.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_vorbisfile:
+IfFileExists "$R1\SDL2.dll.automatia-original" barony_automatia_skip_backup_sdl2 0
+IfFileExists "$R1\SDL2.dll" 0 barony_automatia_skip_backup_sdl2
+CopyFiles /SILENT "$R1\SDL2.dll" "$R1\SDL2.dll.automatia-original"
+barony_automatia_skip_backup_sdl2:
+IfFileExists "$R1\SDL2_image.dll.automatia-original" barony_automatia_skip_backup_sdl2_image 0
+IfFileExists "$R1\SDL2_image.dll" 0 barony_automatia_skip_backup_sdl2_image
+CopyFiles /SILENT "$R1\SDL2_image.dll" "$R1\SDL2_image.dll.automatia-original"
+barony_automatia_skip_backup_sdl2_image:
+IfFileExists "$R1\SDL2_net.dll.automatia-original" barony_automatia_skip_backup_sdl2_net 0
+IfFileExists "$R1\SDL2_net.dll" 0 barony_automatia_skip_backup_sdl2_net
+CopyFiles /SILENT "$R1\SDL2_net.dll" "$R1\SDL2_net.dll.automatia-original"
+barony_automatia_skip_backup_sdl2_net:
+IfFileExists "$R1\SDL2_ttf.dll.automatia-original" barony_automatia_skip_backup_sdl2_ttf 0
+IfFileExists "$R1\SDL2_ttf.dll" 0 barony_automatia_skip_backup_sdl2_ttf
+CopyFiles /SILENT "$R1\SDL2_ttf.dll" "$R1\SDL2_ttf.dll.automatia-original"
+barony_automatia_skip_backup_sdl2_ttf:
+IfFileExists "$R1\freetype.dll.automatia-original" barony_automatia_skip_backup_freetype 0
+IfFileExists "$R1\freetype.dll.automatia-added" barony_automatia_skip_backup_freetype 0
+IfFileExists "$R1\freetype.dll" barony_automatia_backup_freetype barony_automatia_mark_added_freetype
+barony_automatia_backup_freetype:
+CopyFiles /SILENT "$R1\freetype.dll" "$R1\freetype.dll.automatia-original"
+Goto barony_automatia_skip_backup_freetype
+barony_automatia_mark_added_freetype:
+FileOpen $0 "$R1\freetype.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_freetype:
+IfFileExists "$R1\glew32.dll.automatia-original" barony_automatia_skip_backup_glew 0
+IfFileExists "$R1\glew32.dll" 0 barony_automatia_skip_backup_glew
+CopyFiles /SILENT "$R1\glew32.dll" "$R1\glew32.dll.automatia-original"
+barony_automatia_skip_backup_glew:
+IfFileExists "$R1\physfs.dll.automatia-original" barony_automatia_skip_backup_physfs 0
+IfFileExists "$R1\physfs.dll" 0 barony_automatia_skip_backup_physfs
+CopyFiles /SILENT "$R1\physfs.dll" "$R1\physfs.dll.automatia-original"
+barony_automatia_skip_backup_physfs:
+IfFileExists "$R1\libpng16.dll.automatia-original" barony_automatia_skip_backup_png 0
+IfFileExists "$R1\libpng16.dll" 0 barony_automatia_skip_backup_png
+CopyFiles /SILENT "$R1\libpng16.dll" "$R1\libpng16.dll.automatia-original"
+barony_automatia_skip_backup_png:
+IfFileExists "$R1\z.dll.automatia-original" barony_automatia_skip_backup_z 0
+IfFileExists "$R1\z.dll.automatia-added" barony_automatia_skip_backup_z 0
+IfFileExists "$R1\z.dll" barony_automatia_backup_z barony_automatia_mark_added_z
+barony_automatia_backup_z:
+CopyFiles /SILENT "$R1\z.dll" "$R1\z.dll.automatia-original"
+Goto barony_automatia_skip_backup_z
+barony_automatia_mark_added_z:
+FileOpen $0 "$R1\z.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_z:
+IfFileExists "$R1\bz2.dll.automatia-original" barony_automatia_skip_backup_bz2 0
+IfFileExists "$R1\bz2.dll.automatia-added" barony_automatia_skip_backup_bz2 0
+IfFileExists "$R1\bz2.dll" barony_automatia_backup_bz2 barony_automatia_mark_added_bz2
+barony_automatia_backup_bz2:
+CopyFiles /SILENT "$R1\bz2.dll" "$R1\bz2.dll.automatia-original"
+Goto barony_automatia_skip_backup_bz2
+barony_automatia_mark_added_bz2:
+FileOpen $0 "$R1\bz2.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_bz2:
+IfFileExists "$R1\brotlidec.dll.automatia-original" barony_automatia_skip_backup_brotlidec 0
+IfFileExists "$R1\brotlidec.dll.automatia-added" barony_automatia_skip_backup_brotlidec 0
+IfFileExists "$R1\brotlidec.dll" barony_automatia_backup_brotlidec barony_automatia_mark_added_brotlidec
+barony_automatia_backup_brotlidec:
+CopyFiles /SILENT "$R1\brotlidec.dll" "$R1\brotlidec.dll.automatia-original"
+Goto barony_automatia_skip_backup_brotlidec
+barony_automatia_mark_added_brotlidec:
+FileOpen $0 "$R1\brotlidec.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_brotlidec:
+IfFileExists "$R1\brotlicommon.dll.automatia-original" barony_automatia_skip_backup_brotlicommon 0
+IfFileExists "$R1\brotlicommon.dll.automatia-added" barony_automatia_skip_backup_brotlicommon 0
+IfFileExists "$R1\brotlicommon.dll" barony_automatia_backup_brotlicommon barony_automatia_mark_added_brotlicommon
+barony_automatia_backup_brotlicommon:
+CopyFiles /SILENT "$R1\brotlicommon.dll" "$R1\brotlicommon.dll.automatia-original"
+Goto barony_automatia_skip_backup_brotlicommon
+barony_automatia_mark_added_brotlicommon:
+FileOpen $0 "$R1\brotlicommon.dll.automatia-added" w
+FileClose $0
+barony_automatia_skip_backup_brotlicommon:
+WriteRegStr HKCU "Software\Automatia\Barony Steam Patch" "SteamInstallDir" "$R1"
+MessageBox MB_OK|MB_ICONINFORMATION "Barony Automatia will patch:$\n$R1$\nClose Barony before continuing."
+]=])
+			string(REPLACE "\\" "\\\\" CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS}")
+			string(REPLACE "\"" "\\\"" CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS}")
+			set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS [=[
+ReadRegStr $R1 HKCU "Software\Automatia\Barony Steam Patch" "SteamInstallDir"
+SetOutPath "$R1"
+CopyFiles /SILENT "$INSTDIR\barony.exe" "$R1"
+CopyFiles /SILENT "$INSTDIR\editor.exe" "$R1"
+CopyFiles /SILENT "$INSTDIR\steam_api64.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\OpenAL32.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\ogg.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\vorbis.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\vorbisfile.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\SDL2.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\SDL2_image.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\SDL2_net.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\SDL2_ttf.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\freetype.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\glew32.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\physfs.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\libpng16.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\z.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\bz2.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\brotlidec.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\brotlicommon.dll" "$R1"
+CopyFiles /SILENT "$INSTDIR\steam_appid.txt" "$R1"
+]=])
+			string(REPLACE "\\" "\\\\" CPACK_NSIS_EXTRA_INSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_INSTALL_COMMANDS}")
+			string(REPLACE "\"" "\\\"" CPACK_NSIS_EXTRA_INSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_INSTALL_COMMANDS}")
+			set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS [=[
+ReadRegStr $R1 HKCU "Software\Automatia\Barony Steam Patch" "SteamInstallDir"
+IfFileExists "$R1\barony.exe.automatia-original" 0 barony_automatia_no_restore_barony
+Delete "$R1\barony.exe"
+Rename "$R1\barony.exe.automatia-original" "$R1\barony.exe"
+barony_automatia_no_restore_barony:
+IfFileExists "$R1\editor.exe.automatia-original" 0 barony_automatia_no_restore_editor
+Delete "$R1\editor.exe"
+Rename "$R1\editor.exe.automatia-original" "$R1\editor.exe"
+barony_automatia_no_restore_editor:
+IfFileExists "$R1\steam_api64.dll.automatia-original" 0 barony_automatia_no_restore_steam
+Delete "$R1\steam_api64.dll"
+Rename "$R1\steam_api64.dll.automatia-original" "$R1\steam_api64.dll"
+barony_automatia_no_restore_steam:
+IfFileExists "$R1\OpenAL32.dll.automatia-original" 0 barony_automatia_no_restore_openal
+Delete "$R1\OpenAL32.dll"
+Rename "$R1\OpenAL32.dll.automatia-original" "$R1\OpenAL32.dll"
+barony_automatia_no_restore_openal:
+IfFileExists "$R1\ogg.dll.automatia-original" 0 barony_automatia_no_restore_ogg
+Delete "$R1\ogg.dll"
+Rename "$R1\ogg.dll.automatia-original" "$R1\ogg.dll"
+barony_automatia_no_restore_ogg:
+IfFileExists "$R1\ogg.dll.automatia-added" 0 barony_automatia_done_restore_ogg
+Delete "$R1\ogg.dll"
+Delete "$R1\ogg.dll.automatia-added"
+barony_automatia_done_restore_ogg:
+IfFileExists "$R1\vorbis.dll.automatia-original" 0 barony_automatia_no_restore_vorbis
+Delete "$R1\vorbis.dll"
+Rename "$R1\vorbis.dll.automatia-original" "$R1\vorbis.dll"
+barony_automatia_no_restore_vorbis:
+IfFileExists "$R1\vorbis.dll.automatia-added" 0 barony_automatia_done_restore_vorbis
+Delete "$R1\vorbis.dll"
+Delete "$R1\vorbis.dll.automatia-added"
+barony_automatia_done_restore_vorbis:
+IfFileExists "$R1\vorbisfile.dll.automatia-original" 0 barony_automatia_no_restore_vorbisfile
+Delete "$R1\vorbisfile.dll"
+Rename "$R1\vorbisfile.dll.automatia-original" "$R1\vorbisfile.dll"
+barony_automatia_no_restore_vorbisfile:
+IfFileExists "$R1\vorbisfile.dll.automatia-added" 0 barony_automatia_done_restore_vorbisfile
+Delete "$R1\vorbisfile.dll"
+Delete "$R1\vorbisfile.dll.automatia-added"
+barony_automatia_done_restore_vorbisfile:
+IfFileExists "$R1\SDL2.dll.automatia-original" 0 barony_automatia_no_restore_sdl2
+Delete "$R1\SDL2.dll"
+Rename "$R1\SDL2.dll.automatia-original" "$R1\SDL2.dll"
+barony_automatia_no_restore_sdl2:
+IfFileExists "$R1\SDL2_image.dll.automatia-original" 0 barony_automatia_no_restore_sdl2_image
+Delete "$R1\SDL2_image.dll"
+Rename "$R1\SDL2_image.dll.automatia-original" "$R1\SDL2_image.dll"
+barony_automatia_no_restore_sdl2_image:
+IfFileExists "$R1\SDL2_net.dll.automatia-original" 0 barony_automatia_no_restore_sdl2_net
+Delete "$R1\SDL2_net.dll"
+Rename "$R1\SDL2_net.dll.automatia-original" "$R1\SDL2_net.dll"
+barony_automatia_no_restore_sdl2_net:
+IfFileExists "$R1\SDL2_ttf.dll.automatia-original" 0 barony_automatia_no_restore_sdl2_ttf
+Delete "$R1\SDL2_ttf.dll"
+Rename "$R1\SDL2_ttf.dll.automatia-original" "$R1\SDL2_ttf.dll"
+barony_automatia_no_restore_sdl2_ttf:
+IfFileExists "$R1\freetype.dll.automatia-original" 0 barony_automatia_no_restore_freetype
+Delete "$R1\freetype.dll"
+Rename "$R1\freetype.dll.automatia-original" "$R1\freetype.dll"
+barony_automatia_no_restore_freetype:
+IfFileExists "$R1\freetype.dll.automatia-added" 0 barony_automatia_done_restore_freetype
+Delete "$R1\freetype.dll"
+Delete "$R1\freetype.dll.automatia-added"
+barony_automatia_done_restore_freetype:
+IfFileExists "$R1\glew32.dll.automatia-original" 0 barony_automatia_no_restore_glew
+Delete "$R1\glew32.dll"
+Rename "$R1\glew32.dll.automatia-original" "$R1\glew32.dll"
+barony_automatia_no_restore_glew:
+IfFileExists "$R1\physfs.dll.automatia-original" 0 barony_automatia_no_restore_physfs
+Delete "$R1\physfs.dll"
+Rename "$R1\physfs.dll.automatia-original" "$R1\physfs.dll"
+barony_automatia_no_restore_physfs:
+IfFileExists "$R1\libpng16.dll.automatia-original" 0 barony_automatia_no_restore_png
+Delete "$R1\libpng16.dll"
+Rename "$R1\libpng16.dll.automatia-original" "$R1\libpng16.dll"
+barony_automatia_no_restore_png:
+IfFileExists "$R1\z.dll.automatia-original" 0 barony_automatia_no_restore_z
+Delete "$R1\z.dll"
+Rename "$R1\z.dll.automatia-original" "$R1\z.dll"
+barony_automatia_no_restore_z:
+IfFileExists "$R1\z.dll.automatia-added" 0 barony_automatia_done_restore_z
+Delete "$R1\z.dll"
+Delete "$R1\z.dll.automatia-added"
+barony_automatia_done_restore_z:
+IfFileExists "$R1\bz2.dll.automatia-original" 0 barony_automatia_no_restore_bz2
+Delete "$R1\bz2.dll"
+Rename "$R1\bz2.dll.automatia-original" "$R1\bz2.dll"
+barony_automatia_no_restore_bz2:
+IfFileExists "$R1\bz2.dll.automatia-added" 0 barony_automatia_done_restore_bz2
+Delete "$R1\bz2.dll"
+Delete "$R1\bz2.dll.automatia-added"
+barony_automatia_done_restore_bz2:
+IfFileExists "$R1\brotlidec.dll.automatia-original" 0 barony_automatia_no_restore_brotlidec
+Delete "$R1\brotlidec.dll"
+Rename "$R1\brotlidec.dll.automatia-original" "$R1\brotlidec.dll"
+barony_automatia_no_restore_brotlidec:
+IfFileExists "$R1\brotlidec.dll.automatia-added" 0 barony_automatia_done_restore_brotlidec
+Delete "$R1\brotlidec.dll"
+Delete "$R1\brotlidec.dll.automatia-added"
+barony_automatia_done_restore_brotlidec:
+IfFileExists "$R1\brotlicommon.dll.automatia-original" 0 barony_automatia_no_restore_brotlicommon
+Delete "$R1\brotlicommon.dll"
+Rename "$R1\brotlicommon.dll.automatia-original" "$R1\brotlicommon.dll"
+barony_automatia_no_restore_brotlicommon:
+IfFileExists "$R1\brotlicommon.dll.automatia-added" 0 barony_automatia_done_restore_brotlicommon
+Delete "$R1\brotlicommon.dll"
+Delete "$R1\brotlicommon.dll.automatia-added"
+barony_automatia_done_restore_brotlicommon:
+DeleteRegValue HKCU "Software\Automatia\Barony Steam Patch" "SteamInstallDir"
+DeleteRegKey /ifempty HKCU "Software\Automatia\Barony Steam Patch"
+]=])
+			string(REPLACE "\\" "\\\\" CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS}")
+			string(REPLACE "\"" "\\\"" CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS
+				"${CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS}")
+		endif()
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER AND BARONY_WINDOWS_STEAM_SIDEBYSIDE_INSTALLER)
+			include("${CMAKE_SOURCE_DIR}/cmake/BaronySteamSideBySideInstaller.cmake")
 		endif()
 		include(CPack)
 
@@ -1635,12 +2265,62 @@ if (WIN32)
 		if (EDITOR_ENABLED)
 			list(APPEND _barony_windows_installer_dependencies ${EDITOR_EXE_NAME})
 		endif()
+		if (BARONY_WINDOWS_STEAM_PATCH_INSTALLER)
+			list(APPEND _barony_windows_installer_dependencies barony_automatia_steam_shortcut)
+		endif()
 		add_custom_target(windows-installer
 			COMMAND "${CMAKE_CPACK_COMMAND}" --config "${CMAKE_BINARY_DIR}/CPackConfig.cmake" -G NSIS
 			DEPENDS ${_barony_windows_installer_dependencies}
 			WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
 			COMMENT "Creating the Barony Automatia Windows NSIS installer"
 			VERBATIM)
+	endif()
+
+	if (BARONY_WINDOWS_RELEASE_PACKAGE_TARGET)
+		if (NOT STEAMWORKS_ENABLED OR NOT OPENAL)
+			message(FATAL_ERROR
+				"package_automatia_windows requires Steamworks and the OpenAL backend.")
+		endif()
+		foreach(_barony_release_required_path
+			BARONY_WINDOWS_RELEASE_VCPKG_ROOT
+			BARONY_WINDOWS_RELEASE_ASSETS_ROOT
+			BARONY_WINDOWS_RELEASE_OPENAL_SOURCE_ARCHIVE
+			BARONY_WINDOWS_RELEASE_PHYSFS_SOURCE
+			BARONY_WINDOWS_RELEASE_VC_REDIST)
+			if (NOT EXISTS "${${_barony_release_required_path}}")
+				message(FATAL_ERROR
+					"package_automatia_windows requires ${_barony_release_required_path} to name an existing path.")
+			endif()
+		endforeach()
+		find_package(Python3 REQUIRED COMPONENTS Interpreter)
+		set(_barony_release_editor_argument)
+		if (EDITOR_ENABLED)
+			list(APPEND _barony_release_editor_argument --include-editor)
+		endif()
+		add_custom_target(package_automatia_windows
+			COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/package_windows_release.py"
+				--build-dir "${CMAKE_BINARY_DIR}/$<CONFIG>"
+				--output-dir "${BARONY_WINDOWS_RELEASE_OUTPUT_DIR}"
+				--clean
+				--vcpkg-root "${BARONY_WINDOWS_RELEASE_VCPKG_ROOT}"
+				--triplet "${VCPKG_TARGET_TRIPLET}"
+				--steamworks-sdk "${STEAMWORKS_ROOT}"
+				--openal-root "${BARONY_WINDOWS_RELEASE_VCPKG_ROOT}/installed/${VCPKG_TARGET_TRIPLET}"
+				--openal-source-archive "${BARONY_WINDOWS_RELEASE_OPENAL_SOURCE_ARCHIVE}"
+				--physfs-dll "${BARONY_PHYSFS_RUNTIME_DLL}"
+				--physfs-source "${BARONY_WINDOWS_RELEASE_PHYSFS_SOURCE}"
+				--assets-root "${BARONY_WINDOWS_RELEASE_ASSETS_ROOT}"
+				--vc-redist "${BARONY_WINDOWS_RELEASE_VC_REDIST}"
+				--compiler "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+				--windows-sdk "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+				${_barony_release_editor_argument}
+			DEPENDS barony_selected_physfs_runtime
+			WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+			COMMENT "Staging and validating the audited Barony Automatia Windows release"
+			VERBATIM)
+	endif()
+	if (TARGET windows-installer AND TARGET package_automatia_windows)
+		add_dependencies(windows-installer package_automatia_windows)
 	endif()
 endif()
 

@@ -66,7 +66,7 @@ bool writeBinaryFile(const std::filesystem::path& path,
 	return output.good();
 }
 
-int testPhysfsRuntimeDiscovery()
+int testPhysfsRuntimeDiscovery(const char* argv0)
 {
 	const bool wasInitialized = PHYSFS_isInit() != 0;
 	const std::filesystem::path root =
@@ -110,7 +110,8 @@ int testPhysfsRuntimeDiscovery()
 	};
 
 	if ( !wasInitialized
-		&& !PHYSFS_init("procedural_room_generation_tests") )
+		&& !PHYSFS_init(argv0)
+		&& !PHYSFS_init(nullptr) )
 	{
 		std::fprintf(stderr, "PHYSFS_init failed: %s\n",
 			PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode()));
@@ -221,7 +222,7 @@ int testPhysfsRuntimeDiscovery()
 }
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	ProceduralRoomDefinition definition;
 	proceduralRoomDefinitionReset(definition);
@@ -382,6 +383,6 @@ int main()
 	CHECK(mapsSource.find("CATEGORY_SECRET_DOORWAY") != std::string::npos);
 	CHECK(mapsSource.find("CATEGORY_CUSTOM") != std::string::npos);
 #endif
-	CHECK(testPhysfsRuntimeDiscovery() == 0);
+	CHECK(testPhysfsRuntimeDiscovery(argc > 0 ? argv[0] : nullptr) == 0);
 	return 0;
 }
