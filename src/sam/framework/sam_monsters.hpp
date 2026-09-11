@@ -65,6 +65,18 @@ public:
 	// has no id of its own -- the name is the only thing that identifies it at the moment
 	// the engine stamps a variant onto a live Stat. Returns 0 for anything unknown, which
 	// is every vanilla monster, so the engine's trait check is a no-op without a mod.
+	// A declared variant, addressable by its "namespace:slug" id. Traits and bodies are
+	// keyed by DISPLAY NAME (which is not unique); this is keyed by the id, which is, and
+	// it is what lets a script summon a mod's own monster instead of only a vanilla one.
+	struct VariantRef
+	{
+		std::string variantFile;  // on-disk stem under data/custom-monsters/ (no .json)
+		std::string baseType;     // validated base species name
+		std::string displayName;  // what the variant calls itself
+	};
+	// nullptr when the id was never declared, or when no mod is loaded.
+	static const VariantRef* variantForId(const std::string& nsColonSlug);
+
 	static unsigned long long traitsForName(const char* variantName);
 
 	// A mod-declared custom BODY for a monster variant. Model IDS, not engine indices:
@@ -79,6 +91,15 @@ public:
 		std::string model;                 // idle / fallback (required)
 		std::vector<std::string> fly;      // movement cycle; empty = never animate
 		std::string attack;                // shown while attacking; empty = use idle
+		// v2.5 extra states. Each is optional and falls back to `attack`, then `model`.
+		//   cast  -- while winding up or releasing a spell (MONSTER_ATTACK's magic poses,
+		//            which already cross the wire, so every player sees it)
+		//   death -- the corpse poof, carried through the gib path
+		// A "hurt" state is NOT offered: it would need a per-entity was-just-hit marker,
+		// every monster skill[] slot is already aliased, and a framework-side map would make
+		// the flash host-only. Better absent than half-present.
+		std::string cast;
+		std::string death;
 		int frameTicks = 10;               // ticks per fly frame (vanilla rat uses 10)
 		// Slide the model relative to the creature's actual position, along its OWN facing.
 		// The entity origin is where the engine spawns attacks and measures range from, and

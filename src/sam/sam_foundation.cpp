@@ -2,7 +2,7 @@
 
     Automatia S.A.M Integration
     File: sam_foundation.cpp
-    Stage: S.A.M. 2.1 integration
+    Stage: S.A.M. 2.8 integration
 
 -------------------------------------------------------------------------------*/
 
@@ -217,7 +217,7 @@ void SAMFoundation::onModLoad(
     );
     SAM_INFO(
         "CORE",
-        "S.A.M 2.1 runtime registries and sandbox lifecycle active"
+        "S.A.M 2.8 runtime registries and sandbox lifecycle active"
     );
 
     SAMLoadStats stats;

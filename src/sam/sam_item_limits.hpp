@@ -18,7 +18,7 @@ inline constexpr int SAM_ITEM_ID_LIMIT = NUM_ITEM_SLOTS;
 inline constexpr int SAM_ITEM_CAPACITY =
     SAM_ITEM_ID_LIMIT - SAM_ITEM_ID_BASE;
 
-// S.A.M. 2.1 currently assigns its built-in Hunter's Workbench at this fixed slot.
+// S.A.M. 2.8 assigns its built-in Hunter's Workbench at this fixed slot.
 // The Automatia adapter must reserve/validate this slot before enabling the built-in;
 // keeping the number in the shared contract makes a collision impossible to overlook.
 inline constexpr int SAM_BUILTIN_ITEM_ID_BASE = 6000;

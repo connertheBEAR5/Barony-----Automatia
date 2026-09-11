@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------------
 
-    Narrow engine adapter used by the S.A.M. 2.1 scripting runtimes.
+    Narrow engine adapter used by the S.A.M. 2.8 scripting runtimes.
 
     Framework headers must not include Barony's full game graph.  The implementation
     owns the engine-specific details, including Playable-Z spawn inheritance.
@@ -23,3 +23,8 @@ Entity* samSpawnGroundItem(
     int tileY);
 
 bool samMonsterHasTrait(const Stat* stats, std::uint64_t traitBit);
+
+int samPlayableBoundsX1();
+int samPlayableBoundsY1();
+int samPlayableBoundsX2();
+int samPlayableBoundsY2();

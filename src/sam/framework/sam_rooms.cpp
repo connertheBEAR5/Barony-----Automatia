@@ -20,14 +20,14 @@ namespace
 {
 	const char* MOD = "ROOMS";
 
-	// One injected room. sortKey is derived only from mod namespace and declared path,
-	// never load or directory-enumeration order. A digest orders conflicting duplicate
-	// keys before deduplication so an installation root cannot choose the effective bytes.
+	// One injected room. sortKey is what makes multiplayer safe: it is derived only from
+	// the mod namespace and the declared path, never from load order or directory listing
+	// order, so two machines with the same mods always produce the same sequence.
 	struct Room
 	{
 		std::string sortKey;   // "<namespace>/<relative path>"
 		std::string absPath;   // resolved absolute .lmp
-		std::string digest;    // byte digest when building the multiplayer catalog
+		std::string digest;    // byte digest used by the multiplayer catalog
 	};
 	using RoomsByLevelset = std::map<std::string, std::vector<Room>>;
 
@@ -41,11 +41,7 @@ namespace
 		if ( file.empty() ) { return dir; }
 		const char last = dir[dir.size() - 1];
 		if ( last == '/' || last == '\\' ) { return dir + file; }
-#ifdef _WIN32
-		return dir + "\\" + file;
-#else
 		return dir + "/" + file;
-#endif
 	}
 
 	// Barony's own level names are lowercase; normalise so "Mine" and "mine" mean the same
@@ -65,10 +61,8 @@ namespace
 	bool digestFile(const std::string& path, std::string& output)
 	{
 		std::ifstream input(path.c_str(), std::ios::binary);
-		if ( !input )
-		{
-			return false;
-		}
+		if ( !input ) { return false; }
+
 		constexpr std::uint64_t offsetBasis = 14695981039346656037ull;
 		constexpr std::uint64_t prime = 1099511628211ull;
 		std::uint64_t hash = offsetBasis;
@@ -83,10 +77,8 @@ namespace
 				hash *= prime;
 			}
 		}
-		if ( !input.eof() )
-		{
-			return false;
-		}
+		if ( !input.eof() ) { return false; }
+
 		std::ostringstream text;
 		text << std::hex << std::setfill('0') << std::setw(16) << hash;
 		output = text.str();
@@ -105,16 +97,16 @@ namespace
 				if ( levelset.empty() ) { continue; }
 				for ( const std::string& relativePath : declaration.second )
 				{
-					if ( relativePath.empty() ) { continue; }
-					if ( SAMErrors::relPathEscapes(relativePath) )
+					if ( relativePath.empty() || SAMErrors::relPathEscapes(relativePath) )
 					{
-						if ( logWarnings )
+						if ( logWarnings && !relativePath.empty() )
 						{
 							SAM_WARN(MOD, "Mod [" + manifest.ns + "] room path '"
 								+ relativePath + "' escapes the mod folder - ignoring it.");
 						}
 						continue;
 					}
+
 					Room room;
 					room.sortKey = manifest.ns + "/"
 						+ canonicalRelativeKey(relativePath);
@@ -123,9 +115,9 @@ namespace
 					{
 						if ( logWarnings )
 						{
-							SAM_WARN(MOD, "Mod [" + manifest.ns + "] declares missing or unreadable room '"
-								+ relativePath + "' for levelset '" + levelset
-								+ "' (looked for " + room.absPath + ").");
+							SAM_WARN(MOD, "Mod [" + manifest.ns
+								+ "] declares missing or unreadable room '" + relativePath
+								+ "' for levelset '" + levelset + "'.");
 						}
 						continue;
 					}
@@ -139,12 +131,8 @@ namespace
 			auto& rooms = levelsetRooms.second;
 			std::sort(rooms.begin(), rooms.end(), [](const Room& a, const Room& b) {
 				if ( a.sortKey != b.sortKey ) { return a.sortKey < b.sortKey; }
-				/* A repeated namespace/path may come from malformed duplicate mod
-				 * input. Select its effective bytes by digest, never by an absolute
-				 * installation path that can sort differently on another peer. */
 				if ( a.digest != b.digest ) { return a.digest < b.digest; }
-				if ( a.absPath != b.absPath ) { return a.absPath < b.absPath; }
-				return false;
+				return a.absPath < b.absPath;
 			});
 			rooms.erase(std::unique(rooms.begin(), rooms.end(),
 				[](const Room& a, const Room& b) { return a.sortKey == b.sortKey; }),
@@ -160,14 +148,12 @@ void SAMRooms::applyAll(const std::vector<SAMModManifest>& mods)
 
 	RoomsByLevelset gathered = gatherRooms(mods, true);
 
-	for ( auto& kv : gathered )
+	for ( const auto& kv : gathered )
 	{
-		// THE invariant. Canonical logical key plus content ordering, rather than mod load
-		// order or installation path, defines the generator's shared RNG index space.
 		std::vector<std::string>& out = s_byLevelset[kv.first];
 		out.reserve(kv.second.size());
-		for ( const Room& r : kv.second ) { out.push_back(r.absPath); }
-		s_count += (int)out.size();
+		for ( const Room& room : kv.second ) { out.push_back(room.absPath); }
+		s_count += static_cast<int>(out.size());
 
 		SAM_INFO(MOD, "Levelset '" + kv.first + "' gains " + std::to_string(out.size())
 			+ " room(s) from mods.");

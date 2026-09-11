@@ -16,6 +16,7 @@ See LICENSE for details.
 #include "items.hpp"
 #ifdef SAM_FRAMEWORK_ENABLED
 #include "sam/sam_item_registry_foundation.hpp"
+#include "sam/framework/sam_combat.hpp"
 #include "sam/framework/sam_items.hpp"
 #endif
 #include "monster.hpp"
@@ -31568,6 +31569,19 @@ real_t Entity::getDamageTableEquipmentMod(Stat& myStats, Item& item, real_t base
 real_t Entity::getDamageTableMultiplier(Entity* my, Stat& myStats, DamageTableType damageType, int* magicResistance, int* outNumSources)
 {
 	real_t damageMultiplier = damagetables[myStats.type][damageType];
+#ifdef SAM_FRAMEWORK_ENABLED
+	// SAM 2.8 keeps these overrides outside monster.hpp's translation-unit-local
+	// damagetables array. Consult the shared registry at the engine read site.
+	if ( SAMCombat::anySpeciesResist() )
+	{
+		double overrideMultiplier = damageMultiplier;
+		if ( SAMCombat::speciesResist(static_cast<int>(myStats.type),
+			static_cast<int>(damageType), &overrideMultiplier) )
+		{
+			damageMultiplier = static_cast<real_t>(overrideMultiplier);
+		}
+	}
+#endif
 	if ( myStats.getEffectActive(EFF_SHADOW_TAGGED) )
 	{
 		if ( myStats.type == LICH || myStats.type == LICH_FIRE || myStats.type == LICH_ICE
@@ -33099,6 +33113,24 @@ bool Entity::modifyDamageMultipliersFromEffects(Entity* hitentity, Entity* attac
 		}
 		result = true;
 	}
+
+#ifdef SAM_FRAMEWORK_ENABLED
+	// All ordinary melee, projectile, spell, and typed-script damage paths pass
+	// through this function. Dispatch SAM 2.8's hook only after Barony's own
+	// defensive effects have supplied the final mutable multiplier.
+	double samMultiplier = static_cast<double>(damageMultiplier);
+	if ( SAMCombat::fireDamageMultiplierHook(
+		static_cast<long long>(hitentity->uid),
+		attacker ? static_cast<long long>(attacker->uid) : 0,
+		samMultiplier,
+		static_cast<int>(damageTableType),
+		projectile ? static_cast<long long>(projectile->uid) : 0,
+		spellID) )
+	{
+		damageMultiplier = static_cast<real_t>(samMultiplier);
+		result = true;
+	}
+#endif
 
 	return result;
 }

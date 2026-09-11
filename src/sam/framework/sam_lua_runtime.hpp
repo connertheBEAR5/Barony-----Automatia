@@ -30,6 +30,11 @@
 #include <cstddef>
 #include <cstdint>
 
+// Forward declaration only. This header is deliberately dependency-light -- it must not
+// drag the engine in -- and a pointer to an incomplete type is all the resolver exports need.
+class Entity;
+class Stat;   // batch 4: the combat readers hand one back rather than making JS re-fetch it
+
 namespace SAMLua
 {
 	// An event handed from C++ to a Lua script. It is a bag of COPIED primitives
@@ -102,11 +107,25 @@ namespace SAMLua
 	int  behaviorIndexFor(const std::string& fullName);
 	// Invoked by the trampoline every frame for one entity. Runs ONLY the owning script.
 	void runBehavior(int index, unsigned long long uid);
+
+	// ---- additive per-monster behaviours (sam_attach_behavior) ---------------------
+	// A LIVING monster keeps its own actMonster; the script runs after it. The engine
+	// calls anyMonsterBehaviours() once per monster per tick, so it must stay trivial.
+	extern bool g_anyMonsterBehaviors;
+	inline bool anyMonsterBehaviors() { return g_anyMonsterBehaviors; }
+	// -1 when nothing is attached to this uid.
+	int  monsterBehaviorIndexFor(unsigned long long uid);
+	void attachMonsterBehavior(unsigned long long uid, int index);
+	void detachMonsterBehavior(unsigned long long uid);
+	void clearMonsterBehaviors();
 	// Dropped when mods reload, so a behaviour cannot outlive the script that defined it.
 	void clearBehaviors();
 	// Detach a behaviour's function by name without touching the row's identity. Used by the
 	// JS runtime when a behaviour errors, so the pointer is cleared before the value is freed.
-	void clearBehaviorFn(const std::string& fullName);
+	// Clear a row's JS handle -- but only if the row still holds exactly `jsFn`. Returns
+	// whether it did, which is the caller's licence to free that handle: a row that has
+	// changed hands since the call started already had its old value released.
+	bool clearBehaviorFnIf(const std::string& fullName, void* jsFn);
 	// Turn an entity. Shared by both runtimes. `radians` is the same convention
 	// sam_get_facing returns and sam_spawn_projectile takes. Returns false for an unknown
 	// uid, a player (their facing is theirs), or a non-finite angle.
@@ -199,6 +218,87 @@ namespace SAMLua
 	// Fire on_action_pressed/on_action_released for a player. Called by pollActions on
 	// the host, and by the 'SAMA' packet handler for a remote client's edges.
 	void dispatchAction(int player, int actionIndex, bool pressed);
+
+	// ---- v2.4 toolkit: shared between the two runtimes -----------------------------
+	// These live here rather than being duplicated per runtime so Lua and JS cannot drift.
+	// randomDraw in particular MUST be shared: two runtimes with their own counters would
+	// return different numbers for the same stream name, which is the exact desync the
+	// deterministic stream exists to prevent.
+	long long randomDraw(const std::string& ns, const std::string& stream, long long lo, long long hi);
+	int lobbyFlag(const std::string& name, bool& ok);   // ok=false for an unknown name
+	const char* lobbyFlagNames();
+	std::string modDataDir(const std::string& ns);      // dir holding this ns's save_data
+	// The entity resolver every WRITER goes through: refuses a client, a shared sentinel uid
+	// (0/-2/-3/-4, which dozens of gibs and sparks hold at once) and a limb (rewritten from its
+	// owner every frame). Shared so the two runtimes cannot drift apart, which is how six other
+	// resolvers in this project did.
+	Entity* resolveWritableEntity(long long uid, const char* who);
+	// A named entity flag -> its index in Entity::flags, or -1 (already warned) for an unknown
+	// name or, when forWrite, for a flag the engine or another function owns. Shared so both
+	// runtimes accept exactly the same names and give exactly the same reasons.
+	int resolveEntityFlag(const char* name, bool forWrite, const char* who);
+	// Is this one of OUR companions? Its act function rewrites z every tick, so sam_set_elevation
+	// has to refuse it for the same reason it refuses players and monsters. Tested by behaviour
+	// pointer, never by the skill[19] marker, which is a general vanilla slot.
+	bool isCompanionEntity(const Entity* e);
+	// The shove itself. Shared because WHERE a shove goes differs by target -- a player takes it
+	// as monsterKnockbackVelocity, a monster as a real vel_x/vel_y with a separate recovery rate,
+	// and both discard it entirely without EFF_KNOCKBACK first. Not knowledge worth two copies of.
+	bool applyForceTo(Entity* e, double force, double angle, int ticks);
+	// Damage immunity a script declared (sam_set_damage_immune). isDamageImmune is called from
+	// Entity::modHP and answers false instantly when no mod has asked for anything.
+	// clearDamageImmune runs on every floor change and on a new run, and clears the pending-removal
+	// queue with it. Entity uids are NOT per-level -- the counter runs for the whole game -- but
+	// the engine rolls it back for throwaway particles, so a remembered uid can come to name
+	// something else. Clearing on each boundary bounds how long a stale entry can do damage.
+	bool isDamageImmune(unsigned int uid);
+	void setDamageImmune(unsigned int uid, bool on);
+	void clearDamageImmune();
+	// Carry out entity removals a script asked for. Called once per frame from the main loop,
+	// beside SAMItems::drainDestroyQueue, for the same reason: by then no engine hook is on the
+	// stack holding a pointer we are about to free.
+	void drainRemoveQueue();
+	// Ask for an entity to be removed on the next frame. Shared with the JS runtime so there is
+	// ONE queue and one drain, not two that can disagree about ordering.
+	bool queueRemoveEntity(unsigned int uid, const char* who);
+	Entity* resolveReadableEntity(long long uid, const char* who);
+	// ---- batch 4, combat ----------------------------------------------------------------
+	// The combat readers' resolver: an entity that HAS a Stat. Shared because "what counts as a
+	// creature" is one decision, and getting it wrong is silent -- Entity::getStats() answers
+	// nullptr for everything except a monster, a player and a player's limb, and Entity::getHP()
+	// then answers 0 rather than -1, so a reader that skipped the check would report a door at
+	// zero health rather than saying a door has none.
+	Entity* resolveCombatant(long long uid, Stat** outStats);
+	// The writer's twin: refuses a client, a sentinel uid and a limb first, then says out loud
+	// that this uid has no health to change.
+	Entity* resolveCombatantWritable(long long uid, const char* who, Stat** outStats);
+	// A damage-type name -> its DamageTableType value. Shared so both runtimes accept exactly
+	// the same seven words and refuse an eighth with the same sentence.
+	bool damageTypeFromName(const char* name, const char* who, int* out);
+	// The reader's resolver: nullptr for a shared sentinel uid (0, -2, -3, -4), and SILENT about
+	// it, because 0 is the value this API itself returns for "no entity".
+	Entity* resolveEntityQuiet(long long uid);
+	// The mod-data key codec, shared so both runtimes cannot disagree about what file a key
+	// maps to. Percent-encoded, one-to-one, decodable -- see samEncodeKey in the .cpp for why
+	// the old lossy '_' substitution both hid keys from sam_list_data_keys and let two keys
+	// destroy each other.
+	// Rename a data file an older build wrote under the previous key-to-filename scheme, so a mod
+	// that saved "high.score" on 2.6.1 can still read it back. Shared, so the JS runtime -- which
+	// builds the same path from its own copy of the code -- cannot forget to do it.
+	void migrateLegacyDataFile(const std::string& dir, const std::string& key);
+	// Resolve a bare asset id ("ship", not "mymod:ship") in a NAMED namespace. The JS runtime keeps
+	// its own current-namespace global, so it has to say whose id this is; without that its mods
+	// never got the bare-id fallback at all, and a JS handler fired from a Lua event resolved its
+	// id inside the Lua mod's namespace.
+	int resolveModelAssetIn(const std::string& id, const std::string& ns);
+	int resolveSoundAssetIn(const std::string& id, const std::string& ns);
+	std::string encodeDataKey(const std::string& key);
+	std::string decodeDataKey(const std::string& fileStem);
+
+	// Clears every named RNG stream's draw counter. MUST run when a run starts, or two
+	// machines that have been running for different lengths of time draw different numbers
+	// from the same stream and the determinism guarantee is a lie.
+	void resetRandomStreams();
 
 	// ---- mod-defined networking ("SAMP") ------------------------------------------
 	// One generic envelope so a mod can send its own data between host and clients.
@@ -307,7 +407,13 @@ namespace SAMLua
 	// function and touches no vanilla code path — pure no-op unless a mod spawns one.
 	//   spawnCompanion(player 0..3, "ns:model", scale>0) -> new entity uid, or 0 on failure.
 	//   companionPunch(uid) -> false unless uid is a live companion; else starts a thrust.
-	unsigned long long spawnCompanion(int player, const std::string& modelId, double scale);
+	// assetNs: whose bare model id ("ship", not "mymod:ship") this is. Defaults to empty,
+	// meaning "the Lua runtime's current mod" -- which is right for every Lua caller and
+	// WRONG for a JavaScript one, because that runtime keeps a separate current-namespace
+	// global. Without it a JS mod never got the bare-id fallback at all, and a JS handler
+	// fired from a Lua event resolved its own id inside the firing Lua mod's namespace.
+	unsigned long long spawnCompanion(int player, const std::string& modelId, double scale,
+		const std::string& assetNs = std::string());
 	bool companionPunch(unsigned long long uid);
 
 	// v1.4.0 — sam_get_facing(player) reader. Returns the player's facing yaw in radians,
@@ -371,8 +477,14 @@ namespace SAMLua
 	//   angle: radians, same convention as sam_get_facing
 	//   speed: world pixels per tick (a vanilla arrow is around 8)
 	// Returns the projectile's uid, or 0 on failure. Host only.
+	// assetNs: whose bare model id ("ship", not "mymod:ship") this is. Defaults to empty,
+	// meaning "the Lua runtime's current mod" -- which is right for every Lua caller and
+	// WRONG for a JavaScript one, because that runtime keeps a separate current-namespace
+	// global. Without it a JS mod never got the bare-id fallback at all, and a JS handler
+	// fired from a Lua event resolved its own id inside the firing Lua mod's namespace.
 	unsigned long long spawnProjectile(int owner, double tileX, double tileY, double angle,
-		double speed, int damage, int lifetimeTicks, const std::string& modelId);
+		double speed, int damage, int lifetimeTicks, const std::string& modelId,
+		const std::string& assetNs = std::string());
 
 	// Fired by the projectile behavior on contact, to Lua and JS alike.
 	void dispatchProjectileHit(unsigned long long projectile, unsigned long long target,

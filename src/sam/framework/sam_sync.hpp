@@ -39,8 +39,15 @@ class SAMSync
 {
 public:
 	// Canonical fingerprint of the currently loaded S.A.M mod list:
-	// "ns@version;ns@version;..." sorted ascending. Empty string = no mods.
+	// "ns@version+digest;ns@version+digest;..." sorted ascending, where digest is the
+	// mod's contentDigest (absent, with its '+', when a mod declares no files).
+	// Empty string = no mods.
 	static std::string generateFingerprint();
+
+	// The same fingerprint with every "+digest" removed: "ns@version;...". Two
+	// fingerprints that agree here name the same mods at the same versions, and any
+	// remaining difference is in the FILES. Saves use this to tell the two apart.
+	static std::string stripDigests(const std::string& fingerprint);
 
 	// Host only (multiplayer == SERVER): send our fingerprint to the given
 	// connected player slot (1..MAXPLAYERS-1) as chunked "SAMF" safe packets.
@@ -70,4 +77,23 @@ public:
 
 	// Reset all reassembly + comparison state (called on mod load/unload).
 	static void clear();
+
+	// --- who is actually running S.A.M -------------------------------------------------
+	//
+	// A machine without S.A.M cannot report that it lacks S.A.M, so the only evidence is
+	// SILENCE. A client that has it acknowledges the fingerprint; the host records that, and
+	// names whoever stayed quiet at the moment it starts to matter.
+
+	// CLIENT: "I received your fingerprint and I am running S.A.M." Sent once, on a complete
+	// receive. Rides the existing client->host SAMF packet with one extra byte, so an older
+	// host reads it as a re-request and simply answers again.
+	static void acknowledgeFingerprint();
+
+	// HOST: remember that this player answered. Called from the SAMF server handler.
+	static void noteClientAck(int player);
+
+	// BOTH: called once when a game starts. On the host it names every connected player who
+	// never acknowledged; on a client it says so if the host never sent a fingerprint at all.
+	// Silent when nothing is loaded, and silent in singleplayer.
+	static void reportModPresence();
 };

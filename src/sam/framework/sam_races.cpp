@@ -18,6 +18,7 @@
 #include "stat.hpp"     // Stat members (STR..CHR, HP/MP, playerRace)
 #include "monster.hpp"  // Monster enum, monstertypename[], NUMMONSTERS
 #include "player.hpp"   // players[], MAXPLAYERS (applySpells)
+#include "entity.hpp"  // Entity::behavior (isRaceHeadOnMonster)
 #include "net.hpp"      // multiplayer, CLIENT, intro
 #include "mod_tools.hpp" // ItemTooltips.spellItems (vanilla spell-name resolve)
 #include "magic/magic.hpp" // addSpell
@@ -36,6 +37,22 @@ static const char* MOD = "RACES";
 
 namespace
 {
+	// FNV-1a 32 over the race's "namespace:race" id. The same function the rest of the
+	// framework uses for its compact hashes (sam_sync.cpp, sam_backup.cpp); repeated here
+	// rather than shared because those two are file-local and this one has to be stable
+	// FOREVER -- it is on the wire, so changing it would desynchronise two builds.
+	uint32_t samRaceKeyFromIdString(const std::string& s)
+	{
+		uint32_t h = 2166136261u;
+		for ( unsigned char c : s )
+		{
+			h ^= (uint32_t)c;
+			h *= 16777619u;
+		}
+		// 0 is reserved to mean "no custom race", so nudge the one input that could produce it.
+		return ( h == 0u ) ? 1u : h;
+	}
+
 	std::string joinPath(const std::string& dir, const std::string& file)
 	{
 		if ( dir.empty() ) { return file; }
@@ -100,12 +117,16 @@ namespace
 		return false;
 	}
 
-	// Every model index any registered race uses as a head. Rebuilt by resolveLimbModels
-	// and consulted by isRaceHeadSprite; empty in vanilla.
-	std::set<int> s_raceHeadSprites;
+	// Every model index a registered race uses as a head, and the host body that head was
+	// authored for. Rebuilt by resolveLimbModels; consulted by isRaceHeadSprite and by
+	// Entity::getMonsterTypeFromSprite; empty in vanilla. Class head overrides keep a
+	// separate map with its own lifetime (resolveAppearance owns it).
+	std::map<int, int> s_headHost;        // head sprite -> host Monster (races)
+	std::map<int, int> s_classHeadHost;   // head sprite -> host Monster (classes)
 
 	// Registry — EMPTY in vanilla (the whole no-op guarantee).
 	std::map<int, SAMRaceDef> s_byId;            // runtime id 200..255 -> def
+	std::map<uint32_t, int> s_byKey;             // stable cross-machine key -> local runtime id
 	std::map<std::string, int> s_byIdString;      // "ns:race" -> id
 	int s_nextId = SAM_RACE_ID_BASE;
 }
@@ -247,23 +268,161 @@ void SAMRaces::loadFromManifest(const SAMModManifest& manifest)
 						"check the spelling", "that entry ignored; the rest of the race loaded.", true);
 					continue;
 				}
-				if ( !it.value().is_string() )
+				// A slot value may be a bare path (the original form) or an object carrying a
+				// transform next to the model: { "model": "...", "scale": 1.2, "offset": {...} }.
+				// A race hosted on a body of different proportions would otherwise have to
+				// re-author its .vox to fit somebody else's skeleton.
+				bool samHaveObjForm = false;
+				if ( it.value().is_object() )
 				{
-					// A bare 1025 rather than "1025" is the easy mistake, and the schema
-					// only catches it for people using the builder.
-					SAMErrors::reportSemantic(MOD, fileLabel, "/limb_models/" + it.key(),
-						it.value().dump(), "not a string",
-						"a quoted model reference, e.g. \"1025\" or \"" + manifest.ns + ":body\"",
-						"put quotes around it",
-						"that limb keeps the host body's model.", true);
-					continue;
+					const auto& o = it.value();
+					if ( !o.contains("model") || !o["model"].is_string() )
+					{
+						SAMErrors::reportSemantic(MOD, fileLabel, "/limb_models/" + it.key(),
+							it.value().dump(), "an object with no \"model\"",
+							"an object like { \"model\": \"models/torso.vox\", \"scale\": 1.2 }",
+							"add the model", "that limb keeps the host body's model.", true);
+						continue;
+					}
+					samHaveObjForm = true;
+					const std::string samLimbPath = o["model"].get<std::string>();
+					if ( samLimbPath.empty() ) { continue; }
+					def.limbModels[it.key()] = samLimbPath;
+
+					SAMRaceDef::LimbXform xf;
+					auto num = [&](const char* k, double d) -> double {
+						return ( o.contains(k) && o[k].is_number() ) ? o[k].get<double>() : d;
+					};
+					xf.scale = num("scale", 1.0);
+					if ( xf.scale <= 0.0 ) { xf.scale = 1.0; }
+					xf.pitch = num("pitch", 0.0);
+					xf.roll  = num("roll", 0.0);
+					if ( o.contains("offset") && o["offset"].is_object() )
+					{
+						const auto& off = o["offset"];
+						if ( off.contains("x") && off["x"].is_number() ) { xf.offX = off["x"].get<double>(); }
+						if ( off.contains("y") && off["y"].is_number() ) { xf.offY = off["y"].get<double>(); }
+						if ( off.contains("z") && off["z"].is_number() ) { xf.offZ = off["z"].get<double>(); }
+					}
+					xf.any = ( xf.scale != 1.0 || xf.pitch != 0.0 || xf.roll != 0.0
+						|| xf.offX != 0.0 || xf.offY != 0.0 || xf.offZ != 0.0 );
+					if ( xf.any )
+					{
+						// "head" is not in kLimbSlots: the engine sets the head outside the limb
+						// path entirely, so there is nowhere to apply a transform to it. Say so
+						// rather than accept the keys and silently drop them.
+						if ( it.key() == "head" )
+						{
+							SAMErrors::reportSemantic(MOD, fileLabel, "/limb_models/head", "",
+								"a transform on the head",
+								"a transform on torso, arm_right, arm_left, leg_right or leg_left",
+								"remove the scale/offset/pitch/roll from head",
+								"the head model still applies; its transform is ignored.", true);
+						}
+						for ( const LimbSlot& sl : kLimbSlots )
+						{
+							if ( it.key() == sl.key ) { def.limbXform[sl.limbType] = xf; break; }
+						}
+					}
 				}
-				if ( it.value().get<std::string>().empty() ) { continue; }
-				def.limbModels[it.key()] = it.value().get<std::string>();
+
+				if ( !samHaveObjForm )
+				{
+					if ( !it.value().is_string() )
+					{
+						// A bare 1025 rather than "1025" is the easy mistake, and the schema
+						// only catches it for people using the builder.
+						SAMErrors::reportSemantic(MOD, fileLabel, "/limb_models/" + it.key(),
+							it.value().dump(), "not a string or an object",
+							"a quoted model reference, e.g. \"1025\" or \"" + manifest.ns + ":body\"",
+							"put quotes around it",
+							"that limb keeps the host body's model.", true);
+						continue;
+					}
+					if ( it.value().get<std::string>().empty() ) { continue; }
+					def.limbModels[it.key()] = it.value().get<std::string>();
+				}
 			}
 		}
 
-		readMonsterList("allies", def.allies);
+		// "extra_limbs": [ { "slot": "tail", "model": "...", "attach": "body", ... } ]
+	if ( j.contains("extra_limbs") )
+	{
+		if ( !j["extra_limbs"].is_array() )
+		{
+			SAMErrors::reportSemantic(MOD, fileLabel, "/extra_limbs", "", "not an array",
+				"an array of limb objects", "fix or remove it",
+				"extra limbs ignored for this race.", true);
+		}
+		else
+		{
+			for ( const auto& el : j["extra_limbs"] )
+			{
+				if ( !el.is_object() || !el.contains("model") || !el["model"].is_string() ) { continue; }
+				if ( def.extraLimbs.size() >= 13 )
+				{
+					SAM_WARN(MOD, "Race [" + def.id + "] declares more than 13 extra limbs. Barony leaves"
+						" exactly 13 limb slots unused, so the rest are ignored.");
+					break;
+				}
+				SAMRaceDef::SAMExtraLimb lim;
+				lim.model = el["model"].get<std::string>();
+				if ( el.contains("attach") && el["attach"].is_string() )
+				{
+					const std::string a = el["attach"].get<std::string>();
+					if ( a == "body" || a == "head" || a == "torso" ) { lim.attach = a; }
+					else
+					{
+						SAM_WARN(MOD, "Race [" + def.id + "] extra limb attach '" + a
+							+ "' is not one of body, head, torso -- using body.");
+					}
+				}
+				auto rd = [&](const char* k, double dflt) -> double {
+					return ( el.contains(k) && el[k].is_number() ) ? el[k].get<double>() : dflt;
+				};
+				if ( el.contains("offset") && el["offset"].is_object() )
+				{
+					const auto& o = el["offset"];
+					if ( o.contains("forward") && o["forward"].is_number() ) { lim.offFwd = o["forward"].get<double>(); }
+					if ( o.contains("side") && o["side"].is_number() )       { lim.offSide = o["side"].get<double>(); }
+					if ( o.contains("up") && o["up"].is_number() )           { lim.offUp = o["up"].get<double>(); }
+				}
+				if ( el.contains("focal") && el["focal"].is_object() )
+				{
+					const auto& o = el["focal"];
+					if ( o.contains("x") && o["x"].is_number() ) { lim.focalX = o["x"].get<double>(); }
+					if ( o.contains("y") && o["y"].is_number() ) { lim.focalY = o["y"].get<double>(); }
+					if ( o.contains("z") && o["z"].is_number() ) { lim.focalZ = o["z"].get<double>(); }
+				}
+				lim.pitch = rd("pitch", 0.0);
+				lim.roll = rd("roll", 0.0);
+				lim.yawOffsetDeg = rd("yaw_offset", 0.0);
+				lim.scale = rd("scale", 1.0);
+				if ( lim.scale <= 0.0 ) { lim.scale = 1.0; }
+				if ( el.contains("sway") && el["sway"].is_boolean() ) { lim.sway = el["sway"].get<bool>(); }
+				def.extraLimbs.push_back(lim);
+			}
+		}
+	}
+
+	// "first_person": { "arm": "models/x.vox", "hand_left": "models/y.vox" }
+	if ( j.contains("first_person") )
+	{
+		if ( !j["first_person"].is_object() )
+		{
+			SAMErrors::reportSemantic(MOD, fileLabel, "/first_person", "", "not an object",
+				"an object like { \"arm\": \"models/arm.vox\" }", "fix or remove it",
+				"first-person models ignored for this race.", true);
+		}
+		else
+		{
+			const auto& fp = j["first_person"];
+			if ( fp.contains("arm") && fp["arm"].is_string() ) { def.fpArm = fp["arm"].get<std::string>(); }
+			if ( fp.contains("hand_left") && fp["hand_left"].is_string() ) { def.fpHandLeft = fp["hand_left"].get<std::string>(); }
+		}
+	}
+
+	readMonsterList("allies", def.allies);
 		readMonsterList("enemies", def.enemies);
 
 		// Declaring both is a contradiction the author needs to resolve, not something to
@@ -288,6 +447,26 @@ void SAMRaces::loadFromManifest(const SAMModManifest& manifest)
 		def.numericId = s_nextId++;
 		s_byId[def.numericId] = def;
 		s_byIdString[def.id] = def.numericId;
+
+		// The cross-machine key. FNV-1a over the id string the mod author wrote, which is the
+		// one name for this race that every machine agrees on. A collision would silently swap
+		// two races between players, so it is checked rather than assumed: with a handful of
+		// races the odds are negligible, but "negligible" is not a thing to find out about
+		// from a bug report.
+		{
+			const uint32_t key = samRaceKeyFromIdString(def.id);
+			auto clash = s_byKey.find(key);
+			if ( clash != s_byKey.end() )
+			{
+				SAM_ERROR(MOD, "Race id [" + def.id + "] hashes to the same cross-machine key as ["
+					+ s_byId[clash->second].id + "]. One of the two must be renamed or they will"
+					" swap places between players in multiplayer. Keeping the first.");
+			}
+			else
+			{
+				s_byKey[key] = def.numericId;
+			}
+		}
 		SAM_INFO(MOD, "Registered race: " + def.name + " [" + def.id + "] -> id "
 			+ std::to_string(def.numericId) + " on body " + def.hostBodyName
 			+ " (STR " + std::to_string(def.str) + " DEX " + std::to_string(def.dex)
@@ -325,9 +504,27 @@ namespace
 	// afternoon of wondering why their arm vanished.
 	int resolveModelRef(const std::string& ref, const std::string& raceId, const std::string& slot)
 	{
+		// 1. a model this mod declared, or a mod-relative .vox path (registration turned
+		//    that path into an id already).
 		int idx = SAMModels::modelIndexForId(ref);
 		if ( idx >= 0 ) { return idx; }
 
+		// 2. a VANILLA model named by its path. Tried before the numeric form because it
+		//    is the readable one: "gharbad_head.vox" says what it is, where 1025 says
+		//    nothing and is one subtraction away from being a different model entirely.
+		bool ambiguous = false;
+		idx = SAMModels::vanillaModelIndexForPath(ref, &ambiguous);
+		if ( idx >= 0 ) { return idx; }
+		if ( ambiguous )
+		{
+			SAM_ERROR(MOD, "Race [" + raceId + "] limb_models." + slot + " '" + ref
+				+ "' matches more than one model — several creatures ship a file with that"
+				" name. Give the folder too, e.g."
+				" \"models/creatures/goatman/goatman_named/" + ref + "\".");
+			return -1;
+		}
+
+		// 3. a raw index, still accepted so every mod written before this keeps working.
 		char* end = nullptr;
 		const long n = std::strtol(ref.c_str(), &end, 10);
 		if ( end && *end == '\0' )
@@ -345,21 +542,51 @@ namespace
 		}
 
 		SAM_WARN(MOD, "Race [" + raceId + "] limb_models." + slot + " '" + ref
-			+ "' is not a registered model — ignoring it (that limb keeps the host body's"
-			" own model). Declare it in mod.json \"models\", or use a raw vanilla index.");
+			+ "' is not a model this game knows — ignoring it (that limb keeps the host"
+			" body's own model). Use a path from models.txt (\"gharbad_head.vox\" or the"
+			" full \"models/creatures/...\" form), an id you declared in mod.json"
+			" \"models\", or a raw index.");
 		return -1;
 	}
 }
 
 void SAMRaces::resolveLimbModels()
 {
-	s_raceHeadSprites.clear();
+	s_headHost.clear();
 	for ( auto& kv : s_byId )
 	{
 		SAMRaceDef& def = kv.second;
 		def.limbModelIdx.clear();
 		def.headModelIdx = -1;
-		if ( def.limbModels.empty() ) { continue; }
+		def.fpArmIdx = -1;
+		def.fpHandLeftIdx = -1;
+		// Only the limb/head resolution below needs limb_models. extra_limbs and the
+		// first-person models are independent, and short-circuiting on an empty limb map meant
+		// a race that declared ONLY a tail or ONLY a first-person arm resolved neither: the
+		// .vox loaded, the index was never looked up, and nothing drew.
+		if ( def.limbModels.empty() && def.extraLimbs.empty()
+			&& def.fpArm.empty() && def.fpHandLeft.empty() ) { continue; }
+
+		// A player on a RAT or SPIDER host body is not animated as a humanoid: actplayer sets
+		// isHumanoid = false for those two, and the whole bodypart loop that calls
+		// setDefaultPlayerModel sits inside `if ( isHumanoid )`. The four body limbs are
+		// therefore never assigned and the mod's models are silently ignored -- only the head
+		// works, because it is set earlier and outside that branch. Both bodies are otherwise
+		// legal in the schema, so say this out loud rather than let it look like a bad path.
+		{
+			bool declaredBodyLimb = false;
+			for ( const LimbSlot& slot : kLimbSlots )
+			{
+				if ( def.limbModels.find(slot.key) != def.limbModels.end() ) { declaredBodyLimb = true; break; }
+			}
+			if ( declaredBodyLimb && (def.hostMonster == RAT || def.hostMonster == SPIDER) )
+			{
+				SAM_WARN(MOD, "Race [" + def.id + "] declares body limb_models, but its host_body "
+					"never reaches the limb path: a rat/spider player is animated as a creature, not "
+					"a humanoid, so torso/arm/leg models are ignored. Only 'head' applies on this "
+					"host body. Use a humanoid host_body if you need the limbs.");
+			}
+		}
 
 		for ( const LimbSlot& slot : kLimbSlots )
 		{
@@ -367,6 +594,27 @@ void SAMRaces::resolveLimbModels()
 			if ( it == def.limbModels.end() ) { continue; }
 			const int idx = resolveModelRef(it->second, def.id, slot.key);
 			if ( idx >= 0 ) { def.limbModelIdx[slot.limbType] = idx; }
+		}
+
+		for ( size_t ei = 0; ei < def.extraLimbs.size(); ++ei )
+		{
+			SAMRaceDef::SAMExtraLimb& lim = def.extraLimbs[ei];
+			lim.modelIdx = -1;
+			const int idx = resolveModelRef(lim.model, def.id, "extra_limbs[" + std::to_string(ei) + "]");
+			if ( idx >= 0 ) { lim.modelIdx = idx; }
+		}
+
+		// First-person models resolve exactly like limbs, and for the same reason they cannot
+		// resolve at parse time: the model table does not exist yet during mod load.
+		if ( !def.fpArm.empty() )
+		{
+			const int idx = resolveModelRef(def.fpArm, def.id, "first_person.arm");
+			if ( idx >= 0 ) { def.fpArmIdx = idx; }
+		}
+		if ( !def.fpHandLeft.empty() )
+		{
+			const int idx = resolveModelRef(def.fpHandLeft, def.id, "first_person.hand_left");
+			if ( idx >= 0 ) { def.fpHandLeftIdx = idx; }
 		}
 
 		auto head = def.limbModels.find("head");
@@ -378,7 +626,7 @@ void SAMRaces::resolveLimbModels()
 				def.headModelIdx = idx;
 				// Whatever the head resolved to -- our .vox or a vanilla monster limb --
 				// the engine has to agree it is a player head, or multiplayer breaks.
-				s_raceHeadSprites.insert(idx);
+				s_headHost[idx] = def.hostMonster;
 			}
 		}
 
@@ -398,6 +646,43 @@ int SAMRaces::limbModelFor(int raceId, int limbType)
 	if ( it == s_byId.end() ) { return -1; }
 	auto lit = it->second.limbModelIdx.find(limbType);
 	return ( lit == it->second.limbModelIdx.end() ) ? -1 : lit->second;
+}
+
+const std::vector<SAMRaceDef::SAMExtraLimb>* SAMRaces::extraLimbsFor(int raceId)
+{
+	if ( raceId < SAM_RACE_ID_BASE || s_byId.empty() ) { return nullptr; }
+	auto it = s_byId.find(raceId);
+	if ( it == s_byId.end() || it->second.extraLimbs.empty() ) { return nullptr; }
+	return &it->second.extraLimbs;
+}
+
+int SAMRaces::fpArmModelFor(int raceId)
+{
+	if ( raceId < SAM_RACE_ID_BASE || s_byId.empty() ) { return -1; }
+	auto it = s_byId.find(raceId);
+	return ( it == s_byId.end() ) ? -1 : it->second.fpArmIdx;
+}
+
+int SAMRaces::fpHandLeftModelFor(int raceId)
+{
+	if ( raceId < SAM_RACE_ID_BASE || s_byId.empty() ) { return -1; }
+	auto it = s_byId.find(raceId);
+	return ( it == s_byId.end() ) ? -1 : it->second.fpHandLeftIdx;
+}
+
+const SAMRaceDef::LimbXform* SAMRaces::limbXformFor(int raceId, int limbType)
+{
+	if ( raceId < SAM_RACE_ID_BASE || s_byId.empty() ) { return nullptr; }
+	auto it = s_byId.find(raceId);
+	if ( it == s_byId.end() || it->second.limbXform.empty() ) { return nullptr; }
+	auto xit = it->second.limbXform.find(limbType);
+	if ( xit == it->second.limbXform.end() || !xit->second.any ) { return nullptr; }
+	return &xit->second;
+}
+
+bool SAMRaces::usesLimbOverride(int raceId, int limbType)
+{
+	return limbModelFor(raceId, limbType) >= 0;
 }
 
 int SAMRaces::headModelFor(int raceId)
@@ -422,7 +707,79 @@ bool SAMRaces::clientEnemyView(int player, int monsterType, bool vanilla)
 
 bool SAMRaces::isRaceHeadSprite(int sprite)
 {
-	return !s_raceHeadSprites.empty() && s_raceHeadSprites.count(sprite) > 0;
+	return hostMonsterForHeadSprite(sprite) != 0;
+}
+
+int SAMRaces::hostMonsterForHeadSprite(int sprite)
+{
+	if ( !s_headHost.empty() )
+	{
+		auto it = s_headHost.find(sprite);
+		if ( it != s_headHost.end() ) { return it->second; }
+	}
+	if ( !s_classHeadHost.empty() )
+	{
+		auto it = s_classHeadHost.find(sprite);
+		if ( it != s_classHeadHost.end() ) { return it->second; }
+	}
+	return 0;
+}
+
+void SAMRaces::noteClassHeadSprite(int sprite, int hostMonster)
+{
+	if ( sprite > 0 && hostMonster > 0 ) { s_classHeadHost[sprite] = hostMonster; }
+}
+
+void SAMRaces::clearClassHeadNotes() { s_classHeadHost.clear(); }
+
+bool SAMRaces::isRaceHeadOnMonster(const Entity* e)
+{
+	if ( !e || (s_headHost.empty() && s_classHeadHost.empty()) ) { return false; }
+	return e->behavior == &actMonster && hostMonsterForHeadSprite(e->sprite) != 0;
+}
+
+std::vector<std::string> SAMRaces::limbModelPaths()
+{
+	// A limb reference is a path when it has a directory part and a .vox suffix; a bare
+	// "ns:name" id and a raw index have neither. A path that is already a vanilla model
+	// (models/creatures/...) must NOT be appended -- that would register a second copy of
+	// a stock file -- so those resolve through vanillaModelIndexForPath instead.
+	std::vector<std::string> out;
+	for ( const auto& kv : s_byId )
+	{
+		// The first-person models are ordinary mod-relative paths and need registering the
+		// same as any limb, or they resolve to nothing and silently fall back to the host body.
+		for ( const auto& lim : kv.second.extraLimbs )
+		{
+			const std::string& ref = lim.model;
+			if ( ref.size() < 5 || ref.find('/') == std::string::npos ) { continue; }
+			std::string t = ref.substr(ref.size() - 4);
+			for ( char& c : t ) { c = (char)std::tolower((unsigned char)c); }
+			if ( t != ".vox" ) { continue; }
+			if ( SAMModels::vanillaModelIndexForPath(ref) >= 0 ) { continue; }
+			if ( std::find(out.begin(), out.end(), ref) == out.end() ) { out.push_back(ref); }
+		}
+		for ( const std::string& fpRef : { kv.second.fpArm, kv.second.fpHandLeft } )
+		{
+			if ( fpRef.size() < 5 || fpRef.find('/') == std::string::npos ) { continue; }
+			std::string t = fpRef.substr(fpRef.size() - 4);
+			for ( char& c : t ) { c = (char)std::tolower((unsigned char)c); }
+			if ( t != ".vox" ) { continue; }
+			if ( SAMModels::vanillaModelIndexForPath(fpRef) >= 0 ) { continue; }
+			if ( std::find(out.begin(), out.end(), fpRef) == out.end() ) { out.push_back(fpRef); }
+		}
+		for ( const auto& lm : kv.second.limbModels )
+		{
+			const std::string& ref = lm.second;
+			if ( ref.size() < 5 || ref.find('/') == std::string::npos ) { continue; }
+			std::string tail = ref.substr(ref.size() - 4);
+			for ( char& c : tail ) { c = (char)std::tolower((unsigned char)c); }
+			if ( tail != ".vox" ) { continue; }
+			if ( SAMModels::vanillaModelIndexForPath(ref) >= 0 ) { continue; }
+			if ( std::find(out.begin(), out.end(), ref) == out.end() ) { out.push_back(ref); }
+		}
+	}
+	return out;
 }
 
 int SAMRaces::declaredAllegiance(int raceId, int monsterType)
@@ -448,10 +805,12 @@ void SAMRaces::clear()
 {
 	// The head set outlives the defs otherwise, and a stale entry makes
 	// isPlayerHeadSprite answer true for a model no race uses any more.
-	s_raceHeadSprites.clear();
+	s_headHost.clear();
+	s_classHeadHost.clear();
 	s_byId.clear();
 	s_byIdString.clear();
 	s_nextId = SAM_RACE_ID_BASE;
+	s_byKey.clear();
 }
 
 bool SAMRaces::any() { return !s_byId.empty(); }
@@ -474,6 +833,7 @@ void SAMRaces::applySpells(int player)
 	if ( player < 0 || player >= MAXPLAYERS || !players[player] || !stats[player] ) { return; }
 	const SAMRaceDef* def = get(stats[player]->playerRace);
 	if ( !def ) { return; }
+	if ( stats[player]->stat_appearance != 0 ) { return; }   // abilities disabled: no innate spells
 	const bool isLocalPlayer = players[player]->isLocalPlayer();
 	if ( !isLocalPlayer && multiplayer == CLIENT && intro == false ) { return; }
 
@@ -518,6 +878,33 @@ int SAMRaces::raceIdAtIndex(int index)
 	return it->first;
 }
 
+uint32_t SAMRaces::raceKeyFor(int raceId)
+{
+	if ( raceId < SAM_RACE_ID_BASE || s_byId.empty() ) { return 0; }
+	auto it = s_byId.find(raceId);
+	if ( it == s_byId.end() ) { return 0; }
+	return samRaceKeyFromIdString(it->second.id);
+}
+
+int SAMRaces::raceIdForKey(uint32_t key)
+{
+	if ( key == 0 || s_byKey.empty() ) { return -1; }
+	auto it = s_byKey.find(key);
+	return ( it != s_byKey.end() ) ? it->second : -1;
+}
+
+std::string SAMRaces::canonicalName(int raceId)
+{
+	if ( raceId >= SAM_RACE_ID_BASE )
+	{
+		const SAMRaceDef* def = get(raceId);
+		return def ? def->id : std::string();
+	}
+	const int mon = (int)getMonsterFromPlayerRace(raceId);
+	if ( mon >= 0 && mon < NUMMONSTERS ) { return std::string(monstertypename[mon]); }
+	return std::string();
+}
+
 int SAMRaces::raceIdForIdString(const std::string& idString)
 {
 	auto it = s_byIdString.find(idString);
@@ -548,6 +935,10 @@ void SAMRaces::applyStats(int raceId, Stat* myStats)
 	auto it = s_byId.find(raceId);
 	if ( it == s_byId.end() ) { return; }
 	const SAMRaceDef& d = it->second;
+	// "Disable monster abilities" (stat_appearance != 0) keeps the look and drops the
+	// abilities, exactly as it does for a vanilla goatman or vampire. The deltas are an
+	// ability; the body is not.
+	if ( myStats->stat_appearance != 0 ) { return; }
 	myStats->STR += d.str;
 	myStats->DEX += d.dex;
 	myStats->CON += d.con;

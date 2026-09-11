@@ -21,11 +21,13 @@
 #pragma once
 
 #include <string>
+#include <cstdint>   // uint32_t: the cross-machine race key
 #include <vector>
 #include <map>
 
 struct SAMModManifest;  // from sam_workshop.hpp (full type only needed in the .cpp)
 class Stat;             // Barony stat.hpp — forward declared so this header stays light
+class Entity;           // Barony entity.hpp — same reason
 
 // Custom race ids occupy [200, 255]. Barony networks playerRace as one byte and
 // never range-checks it, so values in this window round-trip save + net intact,
@@ -78,6 +80,41 @@ struct SAMRaceDef
 	// parse time because the model table does not exist yet. -1 means "not set", which
 	// is different from 0: index 0 is models/system/null.vox and draws nothing.
 	std::map<std::string, std::string> limbModels;
+
+	// v2.5 "first_person": what YOU see of your own body. Separate from limb_models because
+	// these are different models in every vanilla race too -- the third-person arm and the
+	// first-person arm are not the same .vox -- and because they never leave this machine.
+	// v2.5 per-limb transform. A race hosted on a body of different proportions would
+	// otherwise have to re-author its .vox to fit somebody else's skeleton.
+	struct LimbXform
+	{
+		double scale = 1.0;
+		double offX = 0.0, offY = 0.0, offZ = 0.0;   // in the limb's own frame (focal)
+		double pitch = 0.0, roll = 0.0;              // added to whatever the animation set
+		bool any = false;                            // false = nothing to apply, skip it
+	};
+	// keyed by LIMB_HUMANOID_*, like limbModelIdx
+	std::map<int, LimbXform> limbXform;
+
+	// v2.5 "extra_limbs": models hung on the limb slots Barony allocates and never uses.
+	struct SAMExtraLimb
+	{
+		std::string model;        // as written; resolved after the model table exists
+		int modelIdx = -1;
+		std::string attach = "body";   // body | head | torso
+		double offFwd = 0.0, offSide = 0.0, offUp = 0.0;
+		double focalX = 0.0, focalY = 0.0, focalZ = 0.0;
+		double pitch = 0.0, roll = 0.0, yawOffsetDeg = 0.0;
+		double scale = 1.0;
+		bool sway = false;        // the SALAMANDER-style ping-pong used by tails
+	};
+	// At most 13: children indices 16..28 are the slots the engine leaves unused.
+	std::vector<SAMExtraLimb> extraLimbs;
+
+	std::string fpArm;         // the bare forearm/hand that holds your weapon
+	std::string fpHandLeft;    // the left casting hand
+	int fpArmIdx = -1;         // resolved by resolveLimbModels; -1 = use the host body's
+	int fpHandLeftIdx = -1;
 	std::map<int, int> limbModelIdx;   // LIMB_HUMANOID_* -> engine model index
 	int headModelIdx = -1;
 };
@@ -117,6 +154,29 @@ public:
 	// Reverse lookup: runtime race id for a "namespace:race" id string, or -1.
 	static int raceIdForIdString(const std::string& idString);
 
+	// The identifier a SCRIPT sees for this race: a custom race's "ns:race" id, or the vanilla
+	// race's own name ("skeleton"). The same string sam_get_race returns, exported so the
+	// engine's event sites can emit it instead of a raw language-file lookup -- the one in
+	// menu.cpp was emitting the literal string "DEPRECATED" for every vanilla race.
+	static std::string canonicalName(int raceId);
+
+	// ---- cross-machine race identity ------------------------------------------------
+	//
+	// A race's numeric id is assigned in registration order and is therefore MACHINE-LOCAL:
+	// id 200 is "whichever race mod this machine happened to walk first". Sending that number
+	// to another player is how a modded body arrives as the wrong creature. These two turn the
+	// race's "namespace:race" id -- which every machine agrees on, because the mod author
+	// wrote it -- into a stable 32-bit key that can travel instead.
+	//
+	// raceKeyFor returns 0 for a vanilla race, an unregistered id, or an empty registry, and 0
+	// is never a valid key: it is the value that means "no custom race here", so a packet that
+	// carries a zero key is indistinguishable from one sent by a machine with no race mods.
+	static uint32_t raceKeyFor(int raceId);
+
+	// The LOCAL id for a key, or -1 when this machine does not have that race. -1 is the
+	// signal to leave whatever the caller already had alone rather than guess.
+	static int raceIdForKey(uint32_t key);
+
 	// --- application into the running game (defined only in the game build) ---
 	// The Monster body a race renders as. For a registered SAM race -> its host
 	// monster; for anything else -> HUMAN. This is the single mapping the engine's
@@ -155,6 +215,26 @@ public:
 	// leave the host body's own model alone. -1 for every vanilla race.
 	static int limbModelFor(int raceId, int limbType);
 
+	// True when this race supplies its own model for that limb. The engine adds +2 to an arm
+	// sprite to reach the bent / weapon-holding variant, which only works because vanilla
+	// authors those variants at consecutive indices. A mod's limb is a single appended index
+	// with nothing reserved after it, so the caller must skip that arithmetic. See the
+	// guarded += 2 sites in actplayer.cpp.
+	static bool usesLimbOverride(int raceId, int limbType);
+
+	// The transform for one limb, or nullptr when this race declares none. Read every frame
+	// by the player limb loop.
+	static const SAMRaceDef::LimbXform* limbXformFor(int raceId, int limbType);
+
+	// First-person models for this race, or -1 to leave the host body's alone. Local only:
+	// the HUD arm and casting hands are never networked.
+	// The extra limbs this race declares, or nullptr. Read every frame by the player limb
+	// loop, so it hands back the vector rather than copying.
+	static const std::vector<SAMRaceDef::SAMExtraLimb>* extraLimbsFor(int raceId);
+
+	static int fpArmModelFor(int raceId);
+	static int fpHandLeftModelFor(int raceId);
+
 	// The model this race draws as its head, or -1. Kept apart from limbModelFor
 	// because the engine sets the head on the player entity itself rather than through
 	// the limb path, and never gates it behind an equipment check.
@@ -165,6 +245,30 @@ public:
 	// not in it (Gharbad's head is a monster limb, not a player head), and answering
 	// false there breaks the client's player-entity binding in multiplayer.
 	static bool isRaceHeadSprite(int sprite);
+
+	// The host body a head sprite belongs to (a Monster enum value), or 0 for a sprite no
+	// race or class uses as a head. Entity::getMonsterTypeFromSprite consults this so the
+	// engine can still tell WHAT a player wearing a custom head is: weapon focal points,
+	// camera height and a dozen other things derive the body from the head model, and a
+	// head that is in no monsterSprites[] row used to answer NOTHING -- limbs[0], all zeros.
+	static int hostMonsterForHeadSprite(int sprite);
+
+	// A class head override has the same problem; classes register theirs here, keyed by
+	// the race they were authored for. Cleared at the start of every resolveAppearance.
+	static void noteClassHeadSprite(int sprite, int hostMonster);
+	static void clearClassHeadNotes();
+
+	// True when a MONSTER (not a player) is wearing a sprite some race or class uses as a
+	// head -- Gharbad the boss wears gharbad_head.vox, and so does a race built on him.
+	// Client-side code that read isPlayerHeadSprite as "this is a player" needs this to
+	// keep treating the monster as a monster.
+	static bool isRaceHeadOnMonster(const Entity* e);
+
+	// Mod-relative .vox paths named in limb_models, for SAMItems::registerModModels to append
+	// to the model table in the same batch as item and class models. Without this a path in
+	// limb_models resolved nowhere: the resolver's comment promised a registration that
+	// nothing performed.
+	static std::vector<std::string> limbModelPaths();
 
 	// Does this player SEE that monster type as hostile?
 	//

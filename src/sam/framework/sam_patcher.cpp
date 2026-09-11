@@ -26,6 +26,7 @@
 #include "sam_patcher.hpp"
 #include "sam_workshop.hpp"   // SAMModManifest
 #include "sam_logger.hpp"
+#include "sam_errors.hpp"   // writeFileAtomic
 #include "nlohmann/json.hpp"
 
 #include "main.hpp"           // physfs.h + core
@@ -46,6 +47,34 @@ using json = nlohmann::ordered_json;
 namespace fs = std::filesystem;
 
 static const char* MOD = "PATCHER";
+
+// One spelling per file. applyAll keys its map by this string and writes the overlay to it
+// with truncate, so "items/items.json", "./items/items.json" and "/items/items.json" used
+// to be three keys merging the same base into the same file -- the last one silently
+// destroying the other two. PhysFS treats them as one path; so do we.
+static std::string canonicalTarget(const std::string& raw)
+{
+	std::string t = raw;
+	for ( char& c : t ) { if ( c == '\\' ) { c = '/'; } }
+	while ( t.compare(0, 2, "./") == 0 ) { t = t.substr(2); }
+	size_t b = 0;
+	while ( b < t.size() && t[b] == '/' ) { ++b; }
+	t = t.substr(b);
+	std::string out;
+	out.reserve(t.size());
+	for ( char c : t ) { if ( !(c == '/' && !out.empty() && out.back() == '/') ) { out += c; } }
+	return out;
+}
+
+// Files the engine reads POSITIONALLY: entry i of the "items" object becomes items[i], so
+// deleting or inserting an entry shifts every entry after it onto the next one's stats.
+// The patcher uses ordered_json precisely so a re-dump cannot reorder keys; that does
+// not cover deletion or insertion, so those are refused at the roots concerned.
+static bool isPositionalRoot(const std::string& target, const std::string& parentPointer)
+{
+	if ( target != "items/items.json" ) { return false; }
+	return parentPointer == "/items" || parentPointer == "/spells";
+}
 
 // Our private overlay folder. Deliberately OUTSIDE ./mods/ so Barony's Local
 // Mods browser never lists it as a fake mod (it scans ./mods/ subfolders). We
@@ -161,6 +190,21 @@ static bool applyOne(json& doc, const json& op, const std::string& target,
 				+ "]) — skipped. Check the field name/spelling.");
 			return false;
 		}
+		{
+			// The engine reads every field by TYPE with rapidjson accessors that are only
+			// asserted in debug builds; a string where it expects an int is silent
+			// corruption or a crash in Release, not a warning. The old value's type is the
+			// contract. (int <-> float is fine.)
+			const json& cur = doc[ptr];
+			const json& nv = op["value"];
+			const bool bothNumeric = cur.is_number() && nv.is_number();
+			if ( !bothNumeric && cur.type() != nv.type() )
+			{
+				SAM_WARN(MOD, "edit_field: '" + path + "' in " + target + " is a " + std::string(cur.type_name())
+					+ " but [" + modNs + "] supplied a " + std::string(nv.type_name()) + " — skipped.");
+				return false;
+			}
+		}
 		warnIfContested();
 		doc[ptr] = op["value"];
 		return true;
@@ -210,6 +254,14 @@ static bool applyOne(json& doc, const json& op, const std::string& target,
 		}
 		const json::json_pointer parent = ptr.parent_pointer();
 		const std::string key = ptr.back();
+		if ( isPositionalRoot(target, parent.to_string()) )
+		{
+			SAM_ERROR(MOD, "remove_field: '" + path + "' in " + target + " (from [" + modNs
+				+ "]) would delete a whole entry from a file the engine reads POSITIONALLY -- every"
+				" entry after it would take the next one's stats. Refused. Edit the entry's fields"
+				" instead, or set item_level to -1 to keep it out of generation.");
+			return false;
+		}
 		if ( doc.contains(parent) && doc[parent].is_object() )
 		{
 			doc[parent].erase(key);
@@ -233,6 +285,13 @@ static bool applyOne(json& doc, const json& op, const std::string& target,
 		{
 			SAM_WARN(MOD, "add_entry: parent of '" + path + "' in " + target
 				+ " is not an object (from [" + modNs + "]) — skipped.");
+			return false;
+		}
+		if ( isPositionalRoot(target, parent.to_string()) )
+		{
+			SAM_ERROR(MOD, "add_entry: '" + path + "' in " + target + " (from [" + modNs
+				+ "]) would insert a whole entry into a file the engine reads POSITIONALLY, shifting"
+				" every entry after it. Refused. Use the S.A.M custom-item system to add an item.");
 			return false;
 		}
 		warnIfContested();
@@ -301,7 +360,13 @@ void SAMPatcher::applyAll(const std::vector<SAMModManifest>& mods)
 				SAM_ERROR(MOD, "Patch " + path + " (from [" + m.ns + "]) needs a string 'target' and an array 'operations' — skipped.");
 				continue;
 			}
-			const std::string target = tIt->get<std::string>();
+			const std::string rawTarget = tIt->get<std::string>();
+			const std::string target = canonicalTarget(rawTarget);
+			if ( target != rawTarget )
+			{
+				SAM_WARN(MOD, "Patch " + path + " (from [" + m.ns + "]) target '" + rawTarget
+					+ "' read as '" + target + "'.");
+			}
 			for ( const json& op : *oIt )
 			{
 				if ( op.is_object() )
@@ -414,16 +479,13 @@ void SAMPatcher::applyAll(const std::vector<SAMModManifest>& mods)
 			continue;
 		}
 		const std::string outPath = joinPath(overlayRealDir(), target);
-		std::error_code ec;
-		fs::create_directories(fs::path(outPath).parent_path(), ec);
-		std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
-		if ( !out.is_open() )
+		// Temp file + rename: the overlay is mounted ahead of the base file, so a
+		// half-written one would replace a good vanilla JSON with a broken one.
+		if ( !SAMErrors::writeFileAtomic(outPath, merged) )
 		{
 			SAM_ERROR(MOD, "Could not write overlay for '" + target + "' at " + outPath + " — patches for this file skipped.");
 			continue;
 		}
-		out << merged;
-		out.close();
 
 		++s_filesPatched;
 		s_opsApplied += appliedHere;

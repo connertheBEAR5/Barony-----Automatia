@@ -75,3 +75,25 @@ bool samMonsterHasTrait(const Stat* stats, const std::uint64_t traitBit)
     }
     return (SAMMonsters::traitsForName(stats->name) & traitBit) != 0;
 }
+
+int samPlayableBoundsX1()
+{
+    return map.width > 2 ? 1 : 0;
+}
+
+int samPlayableBoundsY1()
+{
+    return map.height > 2 ? 1 : 0;
+}
+
+int samPlayableBoundsX2()
+{
+    return map.width > 2 ? static_cast<int>(map.width) - 2
+                         : static_cast<int>(map.width) - 1;
+}
+
+int samPlayableBoundsY2()
+{
+    return map.height > 2 ? static_cast<int>(map.height) - 2
+                          : static_cast<int>(map.height) - 1;
+}

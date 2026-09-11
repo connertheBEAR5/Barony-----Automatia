@@ -44,6 +44,11 @@ public:
 	// Forget everything (mod unload / new game).
 	static void clear();
 
+	// Canonical room-content descriptors used by Automatia's multiplayer content
+	// catalog. Entries include the levelset, stable namespace/path, and file digest.
+	static std::vector<std::string> contentFingerprintEntries(
+		const std::vector<SAMModManifest>& mods);
+
 	// True if ANY mod injected a room. The generator's fast path checks this so a vanilla
 	// game never touches this registry while building a floor.
 	static bool any();
@@ -51,13 +56,6 @@ public:
 	// Absolute .lmp paths to append to `levelset`'s room pool, ALREADY SORTED into the
 	// canonical order every machine agrees on. Empty for a levelset nobody added to.
 	static const std::vector<std::string>& roomsFor(const std::string& levelset);
-
-	// Canonical effective room-content descriptors used by the S.A.M multiplayer
-	// catalog. Each entry includes levelset, stable namespace/path, and a digest
-	// of the .lmp bytes. Invalid, missing, and duplicate declarations are omitted
-	// exactly as they are from the generated room pool.
-	static std::vector<std::string> contentFingerprintEntries(
-		const std::vector<SAMModManifest>& mods);
 
 	// Totals for the load summary.
 	static int count();        // rooms registered

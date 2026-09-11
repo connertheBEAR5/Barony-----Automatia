@@ -42,6 +42,7 @@
 #include "magic/magic.hpp"   // addSpell
 #include "sam_spells.hpp"    // SAMSpells::getSpellByName (custom starting spells)
 #include "monster.hpp"       // Monster enum (samRaceKey maps the drawn body to a race key)
+#include "sam_races.hpp"     // noteClassHeadSprite: a class head has to tell the engine which body it belongs to
 #include <cctype>
 #include <cstdlib>           // free
 #include <system_error>
@@ -668,15 +669,60 @@ int SAMClasses::classIdAtIndex(int index)
 	return -1;
 }
 
+std::string SAMClasses::canonicalName(int classId, int player)
+{
+	if ( classId >= SAM_CLASS_ID_BASE )
+	{
+		const SAMClassDef* def = getClass(classId);
+		return def ? def->id : std::string();
+	}
+#ifndef EDITOR
+	// Game build only. playerClassLangEntry lives behind main.hpp, which this file includes
+	// under #ifndef EDITOR -- editor.exe links sam_classes.cpp but not the class-name tables,
+	// so an unguarded call here is an editor build error. Same fence as everything else in
+	// this file that reaches into engine internals.
+	const char* n = playerClassLangEntry(classId, player);
+	return n ? std::string(n) : std::string();
+#else
+	(void)player;
+	return std::string();
+#endif
+}
+
 int SAMClasses::classIdForIdString(const std::string& idString)
 {
 	for ( const auto& kv : s_registry )
 	{
-		if ( kv.second.id == idString )
+		// Case-INSENSITIVE. The vanilla-name branch beside every caller of this lowercases, so an
+		// exact match here meant "MyMod:Sword" missed a declared "mymod:sword" while "Steel_Sword"
+		// resolved fine. Ids are stored exactly as the mod wrote them, so the fold happens here.
+		auto samFold = [](std::string v) {
+			for ( char& c : v ) { c = (char)std::tolower((unsigned char)c); }
+			return v;
+		};
+		if ( samFold(kv.second.id) == samFold(idString) )
 		{
 			return kv.first;
 		}
 	}
+	// Then the VANILLA class names, so what sam_get_class returns for a stock class resolves
+	// too. Without this there was no path at all from a vanilla class name to its id, in either
+	// runtime -- the producer and every consumer simply could not meet.
+#ifndef EDITOR
+	// Game build only, for the same reason as canonicalName above.
+	{
+		std::string want = idString;
+		for ( char& c : want ) { c = (char)std::tolower((unsigned char)c); }
+		for ( int c = 0; c < NUMCLASSES; ++c )
+		{
+			const char* n = playerClassLangEntry(c, 0);
+			if ( !n || !n[0] ) { continue; }
+			std::string have = n;
+			for ( char& ch : have ) { ch = (char)std::tolower((unsigned char)ch); }
+			if ( have == want ) { return c; }
+		}
+	}
+#endif
 	return -1;
 }
 
@@ -1008,22 +1054,50 @@ namespace
 			default:           return "";
 		}
 	}
+
+	// The inverse: which host body an appearance.races key names. "default" names none.
+	int monsterForRaceKey(const std::string& key)
+	{
+		static const struct { const char* k; int m; } kMap[] = {
+			{ "HUMAN", HUMAN }, { "SKELETON", SKELETON }, { "VAMPIRE", VAMPIRE }, { "SUCCUBUS", SUCCUBUS },
+			{ "GOATMAN", GOATMAN }, { "AUTOMATON", AUTOMATON }, { "INCUBUS", INCUBUS }, { "GOBLIN", GOBLIN },
+			{ "INSECTOID", INSECTOID }, { "RAT", RAT }, { "TROLL", TROLL }, { "SPIDER", SPIDER },
+			{ "IMP", CREATURE_IMP }, { "GNOME", GNOME }, { "GREMLIN", GREMLIN }, { "DRYAD", DRYAD },
+			{ "MYCONID", MYCONID }, { "SALAMANDER", SALAMANDER },
+		};
+		for ( const auto& e : kMap ) { if ( key == e.k ) { return e.m; } }
+		return 0;
+	}
 }
 
 void SAMClasses::resolveAppearance()
 {
 	s_customHeadSprites.clear();
+	SAMRaces::clearClassHeadNotes();
 	for ( auto& kv : s_registry )
 	{
 		SAMClassDef& def = kv.second;
 		def.appearanceHeadIdx.clear();
 		for ( const auto& hv : def.appearanceHeads )
 		{
-			// A custom .vox registered by SAMModels wins; otherwise fall back to a plain
-			// numeric index so a modder can name a vanilla head directly.
+			// A custom .vox registered by SAMModels wins; then a VANILLA model named by
+			// its models.txt path, which is the readable form; then a raw index, kept so
+			// every class written before this keeps working.
 			int idx = SAMModels::modelIndexForId(hv.second);
 			bool headExplained = false;   // a precise message was already emitted below
 			if ( idx < 0 )
+			{
+				bool ambiguous = false;
+				idx = SAMModels::vanillaModelIndexForPath(hv.second, &ambiguous);
+				if ( ambiguous )
+				{
+					SAM_ERROR(MOD, "Class [" + def.id + "] head for " + hv.first + " '"
+						+ hv.second + "' matches more than one model — several creatures ship"
+						" a file with that name. Give the folder too.");
+					headExplained = true;
+				}
+			}
+			if ( idx < 0 && !headExplained )
 			{
 				char* end = nullptr;
 				const long n = std::strtol(hv.second.c_str(), &end, 10);
@@ -1064,6 +1138,11 @@ void SAMClasses::resolveAppearance()
 			// limbs (Gharbad's head, say), which are not in it. Leaving those unwidened
 			// broke the client's player-entity binding in multiplayer.
 			s_customHeadSprites.insert(idx);
+			// And tell the engine which BODY this head belongs to, or getMonsterTypeFromSprite
+			// answers NOTHING for a player wearing it and every limb that derives its focal
+			// point from the race lands on limbs[0]. "default" names no single body; a head
+			// under it keeps whatever the vanilla lookup says.
+			if ( const int host = monsterForRaceKey(hv.first) ) { SAMRaces::noteClassHeadSprite(idx, host); }
 			SAM_DEBUG(MOD, "  [" + def.id + "] head for " + hv.first + " -> model " + std::to_string(idx));
 		}
 

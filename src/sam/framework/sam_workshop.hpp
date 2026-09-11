@@ -68,11 +68,10 @@ struct SAMModManifest
 	std::string modPath;      // absolute directory this mod was loaded from
 	std::string displayName;  // Workshop/local display name (from mountedFilepaths)
 
-	// Deterministic digest of the manifest plus the content paths it declares.
-	// It is computed during scan, stored with the resolved manifest, and included
-	// in SAMF so matching namespace/version strings cannot hide different mod
-	// payloads on two peers. The digest is a session/content diagnostic, never a
-	// persistent item identity.
+	// 16 hex chars: FNV-1a 64 over every file the manifest DECLARES (sorted relative
+	// path + bytes, '\r' dropped so a CRLF checkout digests like an LF one). Rides in the
+	// multiplayer fingerprint next to the version so two players on the same mod version
+	// with different files are told so. Empty when the manifest declares no files.
 	std::string contentDigest;
 };
 

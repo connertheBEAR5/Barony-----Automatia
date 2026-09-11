@@ -24,11 +24,10 @@
 
 #include "sam_sync.hpp"
 #include "sam_workshop.hpp"
-#include "../sam_content_catalog.hpp"
 #include "sam_logger.hpp"
 
-#include "../../main.hpp"   // multiplayer/SERVER/CLIENT, MAXPLAYERS, net_packet, net_clients, net_sock, client_disconnected, stringCopy
-#include "../../net.hpp"    // sendPacketSafe
+#include "main.hpp"   // multiplayer/SERVER/CLIENT, MAXPLAYERS, net_packet, net_clients, net_sock, client_disconnected, stringCopy
+#include "net.hpp"    // sendPacketSafe
 
 #include <algorithm>
 #include <cstdio>
@@ -56,6 +55,12 @@ static std::string s_mismatchDetails;
 static std::map<std::string, bool> s_seenFingerprints;
 static int s_fpPromptCount = 0;
 
+// --- presence: who answered the fingerprint --------------------------------------------
+// Host-side, indexed by player slot. Only meaningful for a connected client, and only until
+// clear() runs on the next connection.
+static bool s_clientAcked[MAXPLAYERS] = { false };
+static bool s_reportedPresence = false;
+
 /*-------------------------------------------------------------------------------
 	Local helpers
 -------------------------------------------------------------------------------*/
@@ -79,9 +84,16 @@ static std::string hashString(const std::string& fp)
 	return std::string(buf);
 }
 
-// Parse "ns@version+digest;..." into a ns -> opaque version token map. The
-// catalog pseudo-entry intentionally uses the same envelope, while regular
-// manifests may carry a 16-hex declared-content digest after their version.
+// Split a "version+digest" token. digest is empty when the token carries none (a mod
+// with no declared files, or a fingerprint from a build before digests existed).
+static void splitVersionToken(const std::string& token, std::string& version, std::string& digest)
+{
+	const size_t plus = token.find('+');
+	version = token.substr(0, plus);
+	digest = ( plus == std::string::npos ) ? std::string() : token.substr(plus + 1);
+}
+
+// Parse "ns@version+digest;..." into a ns -> "version+digest" map.
 static std::map<std::string, std::string> parseFingerprint(const std::string& fp)
 {
 	std::map<std::string, std::string> mods;
@@ -104,66 +116,6 @@ static std::map<std::string, std::string> parseFingerprint(const std::string& fp
 	return mods;
 }
 
-struct FingerprintVersion
-{
-	std::string version;
-	std::string contentDigest;
-};
-
-static bool looksLikeContentDigest(const std::string& value)
-{
-	if ( value.size() != 16 )
-	{
-		return false;
-	}
-	for ( const char character : value )
-	{
-		if ( !(character >= '0' && character <= '9')
-			&& !(character >= 'a' && character <= 'f')
-			&& !(character >= 'A' && character <= 'F') )
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
-static FingerprintVersion splitFingerprintVersion(const std::string& value)
-{
-	FingerprintVersion result;
-	const std::size_t separator = value.rfind('+');
-	if ( separator != std::string::npos )
-	{
-		const std::string candidate = value.substr(separator + 1);
-		if ( looksLikeContentDigest(candidate) )
-		{
-			result.version = value.substr(0, separator);
-			result.contentDigest = candidate;
-			return result;
-		}
-	}
-	result.version = value;
-	return result;
-}
-
-static int manifestEntryCount(const std::map<std::string, std::string>& entries)
-{
-	return static_cast<int>(entries.size())
-		- (entries.count("__sam_content_catalog__") ? 1 : 0);
-}
-
-static std::string fingerprintEntryDescription(const std::string& namespaceId,
-	const std::string& value)
-{
-	const FingerprintVersion parsed = splitFingerprintVersion(value);
-	std::string result = namespaceId + " v" + parsed.version;
-	if ( !parsed.contentDigest.empty() )
-	{
-		result += " content " + parsed.contentDigest;
-	}
-	return result;
-}
-
 // Compare the received host fingerprint against our own; fill the mismatch
 // state and log the outcome.
 static void compareFingerprints()
@@ -175,15 +127,9 @@ static void compareFingerprints()
 
 	if ( !s_mismatch )
 	{
-		const auto parsed = parseFingerprint(local);
-		const int n = manifestEntryCount(parsed);
-		SAM_INFO(MOD, "Mod and content fingerprints MATCH host ("
-			+ std::to_string(n)
-			+ " mod(s), catalog "
-			+ SAMContentCatalog::fingerprint()
-			+ ", hash "
-			+ hashString(local)
-			+ ").");
+		const int n = static_cast<int>(parseFingerprint(local).size());
+		SAM_INFO(MOD, "Mod fingerprints MATCH host (" + std::to_string(n)
+			+ " mod(s), hash " + hashString(local) + ").");
 		return;
 	}
 
@@ -193,50 +139,37 @@ static void compareFingerprints()
 	std::vector<std::string> issues;
 	for ( const auto& kv : hostMods )
 	{
+		std::string hostVer, hostDigest;
+		splitVersionToken(kv.second, hostVer, hostDigest);
 		auto it = localMods.find(kv.first);
 		if ( it == localMods.end() )
 		{
-			issues.push_back("missing ["
-				+ fingerprintEntryDescription(kv.first, kv.second) + "]");
+			issues.push_back("missing [" + kv.first + " v" + hostVer + "]");
+			continue;
 		}
-		else if ( it->second != kv.second )
+		std::string localVer, localDigest;
+		splitVersionToken(it->second, localVer, localDigest);
+		if ( localVer != hostVer )
 		{
-			if ( kv.first == "__sam_content_catalog__" )
-			{
-				issues.push_back(
-					"content catalog [host "
-					+ kv.second
-					+ ", you "
-					+ it->second
-					+ "]"
-				);
-			}
-			else
-			{
-				const FingerprintVersion host = splitFingerprintVersion(kv.second);
-				const FingerprintVersion local = splitFingerprintVersion(it->second);
-				if ( host.version != local.version )
-				{
-					issues.push_back("version [" + kv.first + ": host v"
-						+ host.version + ", you v" + local.version + "]");
-				}
-				else
-				{
-					issues.push_back("content [" + kv.first + ": host "
-						+ (host.contentDigest.empty() ? std::string("none") : host.contentDigest)
-						+ ", you "
-						+ (local.contentDigest.empty() ? std::string("none") : local.contentDigest)
-						+ "]");
-				}
-			}
+			issues.push_back("version [" + kv.first + ": host v" + hostVer
+				+ ", you v" + localVer + "]");
+		}
+		else if ( localDigest != hostDigest )
+		{
+			// Same mod, same version, different bytes: an edited item, a room one side
+			// does not have, a stale download. Before digests this was invisible and
+			// surfaced as a desync mid-run.
+			issues.push_back("files [" + kv.first + " v" + hostVer
+				+ ": your copy's files differ from the host's]");
 		}
 	}
 	for ( const auto& kv : localMods )
 	{
 		if ( hostMods.find(kv.first) == hostMods.end() )
 		{
-			issues.push_back("extra ["
-				+ fingerprintEntryDescription(kv.first, kv.second) + "]");
+			std::string ver, digest;
+			splitVersionToken(kv.second, ver, digest);
+			issues.push_back("extra [" + kv.first + " v" + ver + "]");
 		}
 	}
 
@@ -249,8 +182,8 @@ static void compareFingerprints()
 	}
 
 	SAM_WARN(MOD, "S.A.M mod MISMATCH with host — host hash " + hashString(s_hostFingerprint)
-		+ " (" + std::to_string(manifestEntryCount(hostMods)) + " mod(s)), local hash " + hashString(local)
-		+ " (" + std::to_string(manifestEntryCount(localMods)) + " mod(s)), " + std::to_string(issues.size())
+		+ " (" + std::to_string(hostMods.size()) + " mod(s)), local hash " + hashString(local)
+		+ " (" + std::to_string(localMods.size()) + " mod(s)), " + std::to_string(issues.size())
 		+ " issue(s):");
 	for ( size_t i = 0; i < issues.size(); ++i )
 	{
@@ -272,23 +205,10 @@ std::string SAMSync::generateFingerprint()
 	std::vector<std::string> entries;
 	for ( const SAMModManifest& m : SAMWorkshop::manifests() )
 	{
+		// "+digest" only when the mod declares files; see SAMModManifest::contentDigest.
 		entries.push_back(m.ns + "@" + m.version
 			+ (m.contentDigest.empty() ? std::string() : "+" + m.contentDigest));
 	}
-
-	// Stage SAM-1Q1: temporary runtime IDs are safe across multiplayer
-	// only when both sides have the same stable content catalog.
-	const std::string& catalogFingerprint =
-		SAMContentCatalog::fingerprint();
-	entries.push_back(
-		"__sam_content_catalog__@"
-		+ (
-			catalogFingerprint.empty()
-				? std::string("unavailable")
-				: catalogFingerprint
-		)
-	);
-
 	std::sort(entries.begin(), entries.end());
 
 	std::string fp;
@@ -301,6 +221,24 @@ std::string SAMSync::generateFingerprint()
 		fp += entries[i];
 	}
 	return fp;
+}
+
+std::string SAMSync::stripDigests(const std::string& fingerprint)
+{
+	std::string out;
+	size_t start = 0;
+	while ( start < fingerprint.size() )
+	{
+		size_t end = fingerprint.find(';', start);
+		if ( end == std::string::npos ) { end = fingerprint.size(); }
+		std::string entry = fingerprint.substr(start, end - start);
+		const size_t plus = entry.find('+');
+		if ( plus != std::string::npos ) { entry.erase(plus); }
+		if ( !out.empty() ) { out += ";"; }
+		out += entry;
+		start = end + 1;
+	}
+	return out;
 }
 
 void SAMSync::sendFingerprint(int player)
@@ -316,7 +254,7 @@ void SAMSync::sendFingerprint(int player)
 
 	std::string fp = generateFingerprint();
 	const std::string hash = hashString(fp);
-	const int numMods = manifestEntryCount(parseFingerprint(fp));
+	const int numMods = static_cast<int>(parseFingerprint(fp).size());
 
 	int numchunks = fp.empty() ? 0 : (1 + static_cast<int>((fp.size() - 1) / CHUNK_SIZE));
 	if ( numchunks > MAX_CHUNKS )
@@ -500,4 +438,89 @@ void SAMSync::clear()
 	s_mismatchDetails.clear();
 	s_seenFingerprints.clear();
 	s_fpPromptCount = 0;
+	for ( int i = 0; i < MAXPLAYERS; ++i ) { s_clientAcked[i] = false; }
+	s_reportedPresence = false;
+}
+
+/*-------------------------------------------------------------------------------
+	Presence -- who in this game is running S.A.M at all
+-------------------------------------------------------------------------------*/
+
+void SAMSync::acknowledgeFingerprint()
+{
+	if ( multiplayer != CLIENT )
+	{
+		return;
+	}
+	// The same packet the re-request uses, with one byte appended. A host on an older build
+	// reads the first five bytes, treats it as a request, and re-sends the fingerprint --
+	// harmless, and the client's receive path already dedups an identical fingerprint.
+	memcpy(net_packet->data, "SAMF", 4);
+	net_packet->data[4] = static_cast<Uint8>(clientnum);
+	net_packet->data[5] = 1;   // 1 == acknowledgement, not a request
+	net_packet->len = 6;
+	net_packet->address.host = net_server.host;
+	net_packet->address.port = net_server.port;
+	sendPacketSafe(net_sock, -1, net_packet, 0);
+	SAM_DEBUG(MOD, "Told the host we are running S.A.M.");
+}
+
+void SAMSync::noteClientAck(int player)
+{
+	if ( player < 0 || player >= MAXPLAYERS )
+	{
+		return;
+	}
+	s_clientAcked[player] = true;
+	SAM_DEBUG(MOD, "Player " + std::to_string(player) + " is running S.A.M.");
+}
+
+void SAMSync::reportModPresence()
+{
+	if ( multiplayer == SINGLE || s_reportedPresence )
+	{
+		return;
+	}
+	s_reportedPresence = true;
+
+	const std::string local = SAMSync::generateFingerprint();
+
+	if ( multiplayer == SERVER )
+	{
+		// Nothing of ours is at stake if we have no mods: a player without S.A.M sees a
+		// perfectly ordinary game, which is the correct outcome and not worth a warning.
+		if ( local.empty() )
+		{
+			return;
+		}
+		for ( int i = 1; i < MAXPLAYERS; ++i )
+		{
+			if ( client_disconnected[i] || s_clientAcked[i] )
+			{
+				continue;
+			}
+			// Silence, and the wait is over: a machine running S.A.M would have answered.
+			SAM_WARN(MOD, "Player " + std::to_string(i) + " is NOT running S.A.M. Anything your"
+				" mods add -- a custom race's body, a custom monster -- will look like whatever"
+				" it was built on to them, and scripts will not run on their machine.");
+			messagePlayer(0, MESSAGE_MISC, "Player %d does not have S.A.M. Your mods will look"
+				" wrong to them.", i);
+		}
+		return;
+	}
+
+	// CLIENT. A vanilla host never sends a fingerprint, and until now that was
+	// indistinguishable from one that had not arrived yet. By the time a game starts, it is
+	// not: the packet is not coming.
+	if ( !s_haveHostFingerprint && !local.empty() )
+	{
+		// Worded as the evidence, not the conclusion. The overwhelmingly likely cause is a host
+		// without S.A.M, but a fingerprint swallowed by the pre-lobby filter would look the same,
+		// and claiming the wrong thing to a player is worse than describing what happened.
+		SAM_WARN(MOD, "Never received a mod list from the host, so the host is almost certainly"
+			" not running S.A.M. None of your mods are active in this game and your character"
+			" will look ordinary to everyone, yourself included.");
+		messagePlayer(clientnum, MESSAGE_MISC, "No mod list from the host: your mods are not"
+			" active in this game.");
+	}
 }

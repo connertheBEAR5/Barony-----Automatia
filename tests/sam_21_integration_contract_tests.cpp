@@ -78,6 +78,8 @@ bool testIntegratedSourceSeams()
     const std::string maps = readSource("src/maps.cpp");
 	const std::string rooms = readSource("src/sam/framework/sam_rooms.cpp");
 	const std::string catalog = readSource("src/sam/sam_content_catalog.cpp");
+	const std::string sounds = readSource("src/sam/framework/sam_sounds.cpp");
+	const std::string entity = readSource("src/entity.cpp");
 	const std::string net = readSource("src/net.cpp");
 	const std::string mainMenu = readSource("src/ui/MainMenu.cpp");
     const std::string game = readSource("src/game.cpp");
@@ -85,16 +87,20 @@ bool testIntegratedSourceSeams()
     const std::string itemsHeader = readSource("src/items.hpp");
     EXPECT(!logger.empty() && !foundation.empty() && !loader.empty());
 
-    EXPECT(contains(logger, "SAM_FRAMEWORK_VERSION \"2.1.0\""));
+	EXPECT(contains(logger, "SAM_FRAMEWORK_VERSION \"2.8.0\""));
     EXPECT(contains(foundation, "SAMItems::setRuntimeIdResolver"));
     EXPECT(contains(foundation, "SAMLoader::load"));
+	EXPECT(contains(loader, "SAMLoader::loadResolvedManifests"));
     EXPECT(contains(foundation, "sam:hunters_workbench"));
     EXPECT(!contains(lua, "MAXPLAYERS == 4"));
     EXPECT(contains(lua, "std::array<double, MAXPLAYERS> g_samMoveSpeed"));
     EXPECT(contains(maps, "SAMRooms::roomsFor(levelset)"));
-	EXPECT(contains(rooms, "contentFingerprintEntries"));
 	EXPECT(contains(rooms, "room.sortKey"));
+	EXPECT(contains(rooms, "contentFingerprintEntries"));
 	EXPECT(contains(catalog, "roomEntries"));
+	EXPECT(contains(sounds, "defined(USE_OPENAL)"));
+	EXPECT(contains(entity, "SAMCombat::speciesResist"));
+	EXPECT(contains(entity, "SAMCombat::fireDamageMultiplierHook"));
 	EXPECT(contains(net, "{'SAMF'"));
 	EXPECT(contains(net, "SAMSync::receiveFingerprint"));
 	EXPECT(contains(net, "SAMSync::sendFingerprint"));

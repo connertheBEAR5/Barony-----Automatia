@@ -58,6 +58,8 @@ namespace
 	std::map<std::string, unsigned long long> s_monsterTraits;
 	// variant display name -> mod-declared body model id ("ns:model"). Empty in vanilla.
 	std::map<std::string, SAMMonsters::BodyDef> s_monsterBodies;
+	// "ns:slug" -> what it takes to summon it. Keyed by ID, unlike the two maps above.
+	std::map<std::string, SAMMonsters::VariantRef> s_variantsById;
 	bool s_anyBodyDeclared = false;
 
 	unsigned long long samMonsterTraitBit(const std::string& name)
@@ -373,6 +375,15 @@ static Translated translateMonster(const json& in, const std::string& modNs, con
 		return tr;
 	}
 	tr.name = in["name"].get<std::string>();
+	// Stat::name is char[128] and the engine copies into it with strcpy, twice (the
+	// StatEntry, then the live Stat). Clamp here, with a word, rather than let a long
+	// display name overrun two engine buffers at spawn time.
+	if ( tr.name.size() > 127 )
+	{
+		SAM_WARN(MOD, "Monster '" + id + "' name is " + std::to_string(tr.name.size())
+			+ " characters; the engine holds 127. Truncated.");
+		tr.name.resize(127);
+	}
 
 	// S.A.M: mod-declared engine traits for this monster. Recorded by NAME, because a custom
 	// monster is a variant of a vanilla Monster type and shares that type -- the name is what
@@ -418,6 +429,8 @@ static Translated translateMonster(const json& in, const std::string& modNs, con
 		SAMMonsters::BodyDef bd;
 		if ( b.contains("model") && b["model"].is_string() ) { bd.model = b["model"].get<std::string>(); }
 		if ( b.contains("attack") && b["attack"].is_string() ) { bd.attack = b["attack"].get<std::string>(); }
+		if ( b.contains("cast") && b["cast"].is_string() )     { bd.cast = b["cast"].get<std::string>(); }
+		if ( b.contains("death") && b["death"].is_string() )   { bd.death = b["death"].get<std::string>(); }
 		if ( b.contains("hitbox") && b["hitbox"].is_number_integer() )
 		{
 			// Hard ceiling of 127, because sizex/sizey go out in the entity packet as a Sint8
@@ -586,6 +599,14 @@ static Translated translateMonster(const json& in, const std::string& modNs, con
 			if ( F.contains("num_followers") && F["num_followers"].is_number_integer() )
 			{
 				numFollowers = F["num_followers"].get<int>();
+				// The engine runs one spawn per follower per leader at map generation, each
+				// re-reading the variant file from disk. No clamp existed anywhere.
+				if ( numFollowers < 0 || numFollowers > 8 )
+				{
+					SAM_WARN(MOD, "Monster '" + tr.name + "' num_followers " + std::to_string(numFollowers)
+						+ " is outside 0..8 — clamped.");
+					numFollowers = ( numFollowers < 0 ) ? 0 : 8;
+				}
 			}
 			if ( F.contains("follower_variants") && F["follower_variants"].is_object() )
 			{
@@ -726,6 +747,7 @@ static void mergeSpawn(json& curve, const std::string& variantFile, const std::s
 void SAMMonsters::clear()
 {
 	s_monsterBodies.clear();
+	s_variantsById.clear();
 	s_anyBodyDeclared = false;
 	s_monsterTraits.clear();
 	if ( s_mounted )
@@ -738,6 +760,12 @@ void SAMMonsters::clear()
 	s_filesWritten = 0;
 	s_declared = 0;
 	s_curveLevels = 0;
+}
+
+const SAMMonsters::VariantRef* SAMMonsters::variantForId(const std::string& nsColonSlug)
+{
+	auto it = s_variantsById.find(nsColonSlug);
+	return ( it != s_variantsById.end() ) ? &it->second : nullptr;
 }
 
 unsigned long long SAMMonsters::traitsForName(const char* variantName)
@@ -868,6 +896,16 @@ void SAMMonsters::applyAll(const std::vector<SAMModManifest>& mods)
 
 			++s_filesWritten;
 			writtenVariants.insert(tr.variantFile);
+			// Record it by ID as well, so sam_spawn_monster("ns:slug") can find it. Done
+			// here rather than at parse time so an id only ever resolves to a file that
+			// actually reached disk.
+			{
+				SAMMonsters::VariantRef ref;
+				ref.variantFile = tr.variantFile;
+				ref.baseType    = tr.baseType;
+				ref.displayName = tr.name;
+				s_variantsById[m.ns + ":" + tr.slug] = ref;
+			}
 			SAM_INFO(MOD, "Registered monster: " + tr.name + " [" + m.ns + ":" + tr.slug + "] — variant of "
 				+ tr.baseType + " -> data/custom-monsters/" + tr.variantFile + ".json");
 

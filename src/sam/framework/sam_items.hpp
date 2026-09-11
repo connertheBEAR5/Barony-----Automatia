@@ -28,14 +28,10 @@
 #include <vector>
 #include <map>
 #include <functional>
-
+#include <cstdint>   // uint32_t in the deferred-destroy queue; this header stays free of SDL
 #include "../sam_item_limits.hpp"
 
 struct SAMModManifest;  // from sam_workshop.hpp (full type only needed in the .cpp)
-
-// Custom and framework-owned item slots come from the shared Automatia/S.A.M contract
-// in sam_item_limits.hpp. Keeping this header free of items.hpp avoids pulling the full
-// engine item model into every framework registry consumer.
 
 // One parsed item JSON (mirrors item.schema.json).
 struct SAMItemDef
@@ -60,6 +56,13 @@ struct SAMItemDef
 	// registerModModels(); overrides modelFromItem when both are set.
 	std::string model;              // world/held model
 	std::string modelFp;            // optional separate first-person model
+	// v2.5 state models. Keys: broken, cursed, blessed, unidentified. Each optional; an
+	// undeclared state falls through to `model` / `modelFp`. Resolved to engine indices by
+	// registerModModels, like every other model reference.
+	std::map<std::string, std::string> modelStates;
+	std::map<std::string, std::string> modelFpStates;
+	std::map<std::string, int> modelStateIdx;
+	std::map<std::string, int> modelFpStateIdx;
 	std::string modelFromItem;      // vanilla ItemType name (e.g. "SILVER_SHIELD") to clone the 3D model from
 	std::string icon;               // mod-relative PNG path — loaded into the inventory icon
 
@@ -116,11 +119,10 @@ struct SAMItemPatch
 class SAMItems
 {
 public:
+	// Automatia assigns session ids from its stable-identity catalog before the
+	// rich runtime installs definitions. Supplying this resolver makes the 2.8
+	// registry consume that mapping instead of allocating a competing sequence.
 	using RuntimeIdResolver = std::function<int(const std::string&)>;
-
-	// Automatia assigns session ids from its stable-identity catalog before the rich
-	// 2.1 definitions are installed. Supplying this resolver makes this registry a
-	// consumer of that mapping instead of a second competing allocator.
 	static void setRuntimeIdResolver(RuntimeIdResolver resolver);
 	static void clearRuntimeIdResolver();
 
@@ -141,6 +143,18 @@ public:
 
 	// Reverse lookup: runtime slot id for a "namespace:item" id string, or -1.
 	static int itemIdForIdString(const std::string& idString);
+
+	// Save-file identity. Numeric ids are handed out per mod SET (sorted by namespace,
+	// then declaration order), so a save has to remember what each id MEANT.
+	//   saveIdTable()       -> "5000=ns:a;5001=ns:b;..." for every registered custom item
+	//                          (written into the save's additional_data as "sam_itemids").
+	//   remapSavedItemIds() -> for that table, savedId -> the id the same NAME has now
+	//                          (oldToNew), and savedId -> name for the ones whose mod is
+	//                          not loaded (unresolved). Returns false when the table is
+	//                          empty (a save from before this existed): touch nothing.
+	static std::string saveIdTable();
+	static bool remapSavedItemIds(const std::string& savedTable,
+		std::map<int, int>& oldToNew, std::map<int, std::string>& unresolved);
 
 	// Custom item ids eligible for RANDOM GENERATION in `category` at a dungeon depth
 	// between minLevel and maxLevel, appended to `out`. This is how modded items reach
@@ -165,6 +179,12 @@ public:
 	// renderer calls this for type >= SAM_ITEM_ID_BASE so a custom slot serves its
 	// own icon directly, independent of the vanilla images[]/appearance indexing.
 	static std::string getIconPath(int itemId);
+
+	// The model a custom item should draw given its state, or -1 to use its ordinary one.
+	// Called from itemModel / itemModelFirstperson, which both hold the Item, so this needs
+	// no new plumbing and nothing new on the wire: status, beatitude and identified are all
+	// already saved and networked.
+	static int stateModelFor(int itemType, int status, int beatitude, bool identified, bool firstPerson);
 
 	// Absolute path to this kit's art for one panel role, or "" when the item declares no
 	// skin, omits that role, or the file is missing. The caller falls back to vanilla art.
@@ -202,4 +222,21 @@ public:
 	// Name of a Category enum value ("WEAPON", "ARMOR", "GEM", ...), or "" if unknown.
 	// Reverse of the internal categoryFromName; lets scripts read an item's category.
 	static std::string categoryName(int category);
+
+	// ---- deferred destruction ---------------------------------------------------
+	// A script can only run because the engine called into it, and that engine frame is
+	// still holding the item pointer: useItem keeps using `item` after firing
+	// player.on_item_use (items.cpp:2955 then :2983), and dropItem dereferences after
+	// player.on_item_dropped (items.cpp:2032 then :2049). So a script-initiated destroy is
+	// NEVER safe to perform on the spot, and there is no case to detect: it is always
+	// queued and always drained later.
+	//
+	// queueDestroy returns false only for a uid it can already tell will be refused
+	// (equipped, or not resolvable), so a script gets a truthful answer immediately rather
+	// than a success that quietly does nothing.
+	static bool queueDestroy(uint32_t itemUid, int owner);
+
+	// Called once per frame from game.cpp, after gameLogic() has returned and before any
+	// script runs, so nothing on the stack can be holding what we are about to free.
+	static void drainDestroyQueue();
 };

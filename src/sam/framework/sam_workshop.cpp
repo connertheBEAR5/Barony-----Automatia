@@ -14,9 +14,8 @@
 
 #include <cstdio>
 #include <cstdlib>  // strtol
-#include <array>
-#include <cstdint>
 #include <fstream>
+#include <iterator>   // istreambuf_iterator (contentDigestFor)
 #include <sstream>
 #include <set>
 
@@ -73,159 +72,6 @@ static std::string joinPath(const std::string& dir, const std::string& file)
 		return dir + file;
 	}
 	return dir + "/" + file;
-}
-
-// A content digest must be cheap enough to calculate on every mod reload and
-// must never materialize an untrusted .ogg/.vox/.lmp in one giant string. Keep
-// it streaming and incorporate both the logical path and the bytes so two
-// different path/content boundaries cannot alias each other.
-static void mixDigestRawBytes(std::uint64_t& hash, const char* bytes,
-	const std::size_t length)
-{
-	constexpr std::uint64_t prime = 1099511628211ull;
-	for ( std::size_t index = 0; index < length; ++index )
-	{
-		hash ^= static_cast<unsigned char>(bytes[index]);
-		hash *= prime;
-	}
-
-	// Callers delimit logical fields (path, then payload) after streaming a
-	// complete field. Do not delimit each read chunk: that would make the digest
-	// an accidental function of this implementation's buffer size.
-}
-
-static void finishDigestField(std::uint64_t& hash)
-{
-	constexpr std::uint64_t prime = 1099511628211ull;
-	const char separator = static_cast<char>(0xFF);
-	hash ^= static_cast<unsigned char>(separator);
-	hash *= prime;
-}
-
-static bool mixDigestFile(std::uint64_t& hash, const std::string& path)
-{
-	std::ifstream input(path.c_str(), std::ios::binary);
-	if ( !input.is_open() )
-	{
-		return false;
-	}
-
-	std::array<char, 64 * 1024> buffer{};
-	while ( input )
-	{
-		input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-		const std::streamsize count = input.gcount();
-		if ( count > 0 )
-		{
-			mixDigestRawBytes(hash, buffer.data(),
-				static_cast<std::size_t>(count));
-		}
-	}
-	return input.eof();
-}
-
-static std::string canonicalRelativePath(std::string path)
-{
-	std::replace(path.begin(), path.end(), '\\', '/');
-	return path;
-}
-
-static void appendCompanionScriptPaths(std::vector<std::string>& paths,
-	const std::string& declaredPath)
-{
-	std::string base = declaredPath;
-	if ( base.size() >= 5
-		&& base.compare(base.size() - 5, 5, ".json") == 0 )
-	{
-		base.resize(base.size() - 5);
-	}
-	paths.push_back(base + ".ts");
-	paths.push_back(base + ".js");
-	paths.push_back(base + ".lua");
-}
-
-// The manifest controls behaviour just as much as its declared payloads, and
-// class/item/race companion scripts are discovered automatically by SAMLoader.
-// Include both. Missing expected files are represented explicitly, so a peer
-// with a missing room or script cannot appear content-identical.
-static std::string contentDigestFor(const SAMModManifest& manifest)
-{
-	std::vector<std::string> relativePaths;
-	relativePaths.push_back("mod.json");
-
-	auto appendPath = [&relativePaths](const std::string& path) {
-		if ( !path.empty() && !SAMErrors::relPathEscapes(path) )
-		{
-			relativePaths.push_back(canonicalRelativePath(path));
-		}
-	};
-	auto appendAll = [&appendPath](const std::vector<std::string>& paths) {
-		for ( const std::string& path : paths )
-		{
-			appendPath(path);
-		}
-	};
-
-	appendAll(manifest.classes);
-	appendAll(manifest.items);
-	appendAll(manifest.patches);
-	appendAll(manifest.monsters);
-	appendAll(manifest.spells);
-	appendAll(manifest.effects);
-	appendAll(manifest.races);
-	appendAll(manifest.sounds);
-	appendAll(manifest.recipes);
-	appendAll(manifest.plugins);
-	for ( const auto& model : manifest.models )
-	{
-		appendPath(model.second);
-	}
-	for ( const auto& image : manifest.images )
-	{
-		appendPath(image.second);
-	}
-	for ( const auto& roomSet : manifest.rooms )
-	{
-		appendAll(roomSet.second);
-	}
-
-	for ( const std::string& declaredPath : manifest.classes )
-	{
-		appendCompanionScriptPaths(relativePaths, canonicalRelativePath(declaredPath));
-	}
-	for ( const std::string& declaredPath : manifest.items )
-	{
-		appendCompanionScriptPaths(relativePaths, canonicalRelativePath(declaredPath));
-	}
-	for ( const std::string& declaredPath : manifest.races )
-	{
-		appendCompanionScriptPaths(relativePaths, canonicalRelativePath(declaredPath));
-	}
-	appendCompanionScriptPaths(relativePaths, "main.json");
-
-	std::sort(relativePaths.begin(), relativePaths.end());
-	relativePaths.erase(std::unique(relativePaths.begin(), relativePaths.end()),
-		relativePaths.end());
-
-	constexpr std::uint64_t offsetBasis = 14695981039346656037ull;
-	std::uint64_t hash = offsetBasis;
-	static const char missing[] = "<missing>";
-	for ( const std::string& relativePath : relativePaths )
-	{
-		mixDigestRawBytes(hash, relativePath.data(), relativePath.size());
-		finishDigestField(hash);
-		if ( SAMErrors::relPathEscapes(relativePath)
-			|| !mixDigestFile(hash, joinPath(manifest.modPath, relativePath)) )
-		{
-			mixDigestRawBytes(hash, missing, sizeof(missing) - 1);
-		}
-		finishDigestField(hash);
-	}
-
-	char output[17] = {};
-	std::snprintf(output, sizeof(output), "%016llx",
-		static_cast<unsigned long long>(hash));
-	return output;
 }
 
 // Parse "MAJOR.MINOR.PATCH" leniently; missing parts default to 0. Uses strtol
@@ -346,6 +192,58 @@ static bool checkVersions(const SAMModManifest& m, const std::string& baronyVers
 	return true;
 }
 
+// Content digest: FNV-1a 64 over every file the manifest DECLARES, each as its relative
+// path followed by its bytes, in sorted order so mount order cannot change the result.
+// '\r' bytes are dropped so a Windows (CRLF) checkout of the same mod digests like a Linux
+// one. Only declared files are walked: a .vox or .ogg that a JSON merely refers to is not
+// (the JSON naming it is). A declared file that is missing digests as "<missing>", so the
+// U13 case -- a room one side does not have -- shows up as a digest difference.
+static std::string contentDigestFor(const SAMModManifest& m)
+{
+	std::vector<std::string> rels;
+	auto addAll = [&](const std::vector<std::string>& v) { rels.insert(rels.end(), v.begin(), v.end()); };
+	addAll(m.classes); addAll(m.items); addAll(m.patches); addAll(m.monsters); addAll(m.spells);
+	addAll(m.effects); addAll(m.races); addAll(m.sounds); addAll(m.recipes);
+	for ( const auto& kv : m.models ) { rels.push_back(kv.second); }
+	for ( const auto& kv : m.images ) { rels.push_back(kv.second); }
+	for ( const auto& set : m.rooms ) { addAll(set.second); }
+	if ( rels.empty() ) { return std::string(); }
+	std::sort(rels.begin(), rels.end());
+	rels.erase(std::unique(rels.begin(), rels.end()), rels.end());
+
+	unsigned long long h = 14695981039346656037ULL;
+	auto mix = [&h](const char* data, size_t n)
+	{
+		for ( size_t i = 0; i < n; ++i )
+		{
+			const unsigned char c = static_cast<unsigned char>(data[i]);
+			if ( c == '\r' ) { continue; }
+			h ^= c;
+			h *= 1099511628211ULL;
+		}
+		h ^= 0xFFu; // field separator so "ab"+"c" and "a"+"bc" differ
+		h *= 1099511628211ULL;
+	};
+	for ( const auto& rel : rels )
+	{
+		mix(rel.data(), rel.size());
+		std::ifstream f(joinPath(m.modPath, rel), std::ios::binary);
+		if ( f.is_open() )
+		{
+			std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+			mix(bytes.data(), bytes.size());
+		}
+		else
+		{
+			static const char kMissing[] = "<missing>";
+			mix(kMissing, sizeof(kMissing) - 1);
+		}
+	}
+	char buf[24];
+	snprintf(buf, sizeof(buf), "%016llx", h);
+	return std::string(buf);
+}
+
 // Parse one mod.json document into a manifest. Returns false (and logs) if the
 // JSON is malformed or a required field is missing.
 static bool parseManifest(const std::string& jsonText, const std::string& modPath,
@@ -380,41 +278,31 @@ static bool parseManifest(const std::string& jsonText, const std::string& modPat
 	auto getStringArray = [&](const char* key, bool arePaths) -> std::vector<std::string> {
 		std::vector<std::string> result;
 		auto it = j.find(key);
-		if ( it == j.end() )
+		if ( it != j.end() && it->is_array() )
 		{
-			return result;
-		}
-		if ( !it->is_array() )
-		{
-			SAMErrors::reportSemantic(MOD, fileLabel,
-				std::string("/") + key, it->dump().substr(0, 40),
-				"not an array", "a JSON array: [ ... ]",
-				"wrap the entries in [ ]", "nothing under that key loaded.", true);
-			return result;
-		}
-		for ( const auto& element : *it )
-		{
-			if ( !element.is_string() )
+			for ( const auto& element : *it )
 			{
-				SAMErrors::reportSemantic(MOD, fileLabel,
-					std::string("/") + key, element.dump().substr(0, 40),
-					"not a string", "a quoted relative path",
-					"put quotes around that entry", "that entry ignored.", true);
-				continue;
+				if ( !element.is_string() )
+				{
+					SAMErrors::reportSemantic(MOD, fileLabel, std::string("/") + key, element.dump().substr(0, 40),
+						"not a string", "a quoted path, e.g. \"classes/knight.json\"", "put quotes around it",
+						"that entry ignored.", true);
+					continue;
+				}
+				const std::string s = element.get<std::string>();
+				// Path-traversal guard: these array entries are RELATIVE file paths
+				// that the loaders join onto the mod folder and then open/execute.
+				// Reject any that escape the mod dir so a crafted "../.." entry can't
+				// reach files outside it. (Centralized here so classes/items/patches/
+				// monsters/spells/plugins are all covered.)
+				if ( arePaths && SAMErrors::relPathEscapes(s) )
+				{
+					SAM_WARN(MOD, std::string("Manifest '") + key + "' entry '" + s
+						+ "' escapes the mod folder — ignored.");
+					continue;
+				}
+				result.push_back(s);
 			}
-			const std::string s = element.get<std::string>();
-			// Path-traversal guard: these array entries are RELATIVE file paths
-			// that the loaders join onto the mod folder and then open/execute.
-			// Reject any that escape the mod dir so a crafted "../.." entry can't
-			// reach files outside it. (Centralized here so classes/items/patches/
-			// monsters/spells/plugins are all covered.)
-			if ( arePaths && SAMErrors::relPathEscapes(s) )
-			{
-				SAM_WARN(MOD, std::string("Manifest '") + key + "' entry '" + s
-					+ "' escapes the mod folder — ignored.");
-				continue;
-			}
-			result.push_back(s);
 		}
 		return result;
 	};
@@ -427,40 +315,40 @@ static bool parseManifest(const std::string& jsonText, const std::string& modPat
 	out.frameworkMaxVersion = stripVersionPrefix(getString("framework_max_version"));
 	out.baronyMinVersion = stripVersionPrefix(getString("barony_min_version"));
 	out.baronyMaxVersion = stripVersionPrefix(getString("barony_max_version"));
-	out.incompatibleWithBaronyVersion = stripVersionPrefix(
-		getString("incompatible_with_barony_version"));
+	out.incompatibleWithBaronyVersion = stripVersionPrefix(getString("incompatible_with_barony_version"));
 	out.description = getString("description");
 
-	// The schema catches this in the browser builder, but hand-authored mods
-	// reach this loader directly. Report typos instead of silently producing an
-	// empty registry and a mystery "my mod did nothing" bug report.
+	// Report what the schema would have caught. A mod.json is usually hand-written, and a
+	// misspelled or wrong-typed key used to load without a word and register nothing --
+	// "my classes don't show up" with an empty log. The builder validates against the
+	// schema; the loader is the last line for everyone else.
 	{
-		static const char* const knownKeys[] = {
-			"$schema", "namespace", "name", "author", "version",
-			"framework_min_version", "framework_max_version",
-			"barony_min_version", "barony_max_version",
-			"incompatible_with_barony_version", "dependencies", "classes",
-			"items", "patches", "monsters", "spells", "effects", "races",
-			"sounds", "recipes", "plugins", "models", "images", "rooms",
-			"description", nullptr
-		};
-		for ( auto field = j.begin(); field != j.end(); ++field )
+		static const char* const kKnown[] = { "$schema", "namespace", "name", "author", "version",
+			"framework_min_version", "framework_max_version", "barony_min_version", "barony_max_version",
+			"incompatible_with_barony_version", "dependencies", "classes", "items", "patches", "monsters",
+			"spells", "effects", "races", "sounds", "recipes", "plugins", "models", "images", "rooms",
+			"description", nullptr };
+		static const char* const kArrays[] = { "dependencies", "classes", "items", "patches", "monsters",
+			"spells", "effects", "races", "sounds", "recipes", "plugins", "models", "images", nullptr };
+		for ( auto it = j.begin(); it != j.end(); ++it )
 		{
 			bool known = false;
-			for ( const char* const* key = knownKeys; *key; ++key )
-			{
-				if ( field.key() == *key )
-				{
-					known = true;
-					break;
-				}
-			}
+			for ( const char* const* k = kKnown; *k; ++k ) { if ( it.key() == *k ) { known = true; break; } }
 			if ( !known )
 			{
-				SAMErrors::reportSemantic(MOD, fileLabel,
-					"/" + field.key(), "", "not a mod.json key",
-					"one of the documented mod.json keys",
-					"fix the spelling or remove it", "that key ignored.", true);
+				SAMErrors::reportSemantic(MOD, fileLabel, "/" + it.key(), "", "not a mod.json key",
+					"one of the keys in mod.schema.json (check the spelling and the case)",
+					"fix or remove it", "that key ignored.", true);
+			}
+		}
+		for ( const char* const* k = kArrays; *k; ++k )
+		{
+			auto it = j.find(*k);
+			if ( it != j.end() && !it->is_array() )
+			{
+				SAMErrors::reportSemantic(MOD, fileLabel, std::string("/") + *k, it->dump().substr(0, 40),
+					"not an array", "a JSON array: [ ... ]", "wrap the value in [ ]",
+					"nothing under that key loaded.", true);
 			}
 		}
 	}
@@ -468,44 +356,15 @@ static bool parseManifest(const std::string& jsonText, const std::string& modPat
 	// existing levelset's pool. Parsed here; ordering/validation happens in SAMRooms.
 	{
 		auto it = j.find("rooms");
-		if ( it != j.end() && !it->is_object() )
-		{
-			SAMErrors::reportSemantic(MOD, fileLabel, "/rooms",
-				it->dump().substr(0, 40), "not an object",
-				"an object such as { \"mine\": [\"rooms/example.lmp\"] }",
-				"wrap room sets in { }", "room declarations ignored.", true);
-		}
-		else if ( it != j.end() )
+		if ( it != j.end() && it->is_object() )
 		{
 			for ( auto r = it->begin(); r != it->end(); ++r )
 			{
-				if ( !r.value().is_array() )
-				{
-					SAMErrors::reportSemantic(MOD, fileLabel,
-						"/rooms/" + r.key(), r.value().dump().substr(0, 40),
-						"not an array", "an array of relative .lmp paths",
-						"wrap that room set in [ ]", "that room set ignored.", true);
-					continue;
-				}
+				if ( !r.value().is_array() ) { continue; }
 				std::vector<std::string> paths;
 				for ( const auto& el : r.value() )
 				{
-					if ( !el.is_string() )
-					{
-						SAMErrors::reportSemantic(MOD, fileLabel,
-							"/rooms/" + r.key(), el.dump().substr(0, 40),
-							"not a string", "a quoted relative .lmp path",
-							"put quotes around that entry", "that room ignored.", true);
-						continue;
-					}
-					const std::string path = el.get<std::string>();
-					if ( SAMErrors::relPathEscapes(path) )
-					{
-						SAM_WARN(MOD, "Manifest room path '" + path
-							+ "' escapes the mod folder — ignored.");
-						continue;
-					}
-					paths.push_back(path);
+					if ( el.is_string() ) { paths.push_back(el.get<std::string>()); }
 				}
 				if ( !paths.empty() ) { out.rooms.emplace_back(r.key(), paths); }
 			}
@@ -721,22 +580,24 @@ std::vector<SAMModManifest> SAMWorkshop::scan(
 
 		manifest.contentDigest = contentDigestFor(manifest);
 
-		// Namespace is the deterministic stable-id ordering key. Letting two
-		// mounted folders claim it means the winning content depends on mount
-		// order; refuse the later claimant rather than silently assigning a
-		// different runtime table on another peer.
-		const auto existing = std::find_if(found.begin(), found.end(),
-			[&manifest](const SAMModManifest& earlier) {
-				return earlier.ns == manifest.ns;
-			});
-		if ( existing != found.end() )
+		// Two mods sharing a namespace break the one thing the namespace sort exists to
+		// guarantee: their sort key is equal, so their relative order -- and every content id
+		// after them -- is whatever the mount order happened to be, and the multiplayer
+		// fingerprint cannot see it because both machines produce the same sorted NAME list.
+		// Keep the first, refuse the rest, loudly.
+		bool dupNs = false;
+		for ( const auto& prior : found )
 		{
-			SAM_ERROR(MOD, "Mod at '" + manifest.modPath + "' uses namespace ["
-				+ manifest.ns + "], already claimed by '" + existing->modPath
-				+ "' — NOT loaded. Give every mod a unique namespace.");
-			continue;
+			if ( prior.ns == manifest.ns )
+			{
+				SAM_ERROR(MOD, "Mod at '" + manifest.modPath + "' uses namespace [" + manifest.ns
+					+ "], already taken by the mod at '" + prior.modPath
+					+ "' -- NOT loaded. Every mod needs a namespace of its own.");
+				dupNs = true;
+				break;
+			}
 		}
-
+		if ( dupNs ) { continue; }
 		found.push_back(manifest);
 	}
 

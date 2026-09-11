@@ -13,9 +13,10 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#include <cctype>
 
-// Engine build: pull in the selected backend's sound globals. In a standalone
-// tooling build these headers are absent, so appendSounds() remains a no-op stub.
+// Engine build: pull in the selected backend's sound globals. In the standalone/editor build these
+// headers are absent, so appendSounds() compiles to a no-op stub.
 #if defined(__has_include) && __has_include("main.hpp")
 #	define SAM_SOUNDS_HAVE_BARONY 1
 #	include "main.hpp"                  // Config (USE_FMOD), umbrella decls
@@ -141,10 +142,22 @@ void SAMSounds::clear()
 	s_index.clear();
 }
 
+	// Case-INSENSITIVE, like the vanilla-name branch beside every caller of this. Mod ids are
+	// stored exactly as written, so an exact match meant "MyMod:Sword" missed a declared
+	// "mymod:sword" while "Steel_Sword" resolved fine -- an asymmetry a modder cannot see.
 int SAMSounds::soundIndexForId(const std::string& id)
 {
 	auto it = s_index.find(id);
-	return (it != s_index.end()) ? it->second : -1;
+	if ( it != s_index.end() ) { return it->second; }
+	std::string want = id;
+	for ( char& c : want ) { c = (char)std::tolower((unsigned char)c); }
+	for ( const auto& kv : s_index )
+	{
+		std::string have = kv.first;
+		for ( char& c : have ) { c = (char)std::tolower((unsigned char)c); }
+		if ( have == want ) { return kv.second; }
+	}
+	return -1;
 }
 
 int SAMSounds::count() { return static_cast<int>(s_index.size()); }
@@ -231,13 +244,13 @@ int SAMSounds::appendSounds()
 	{
 		const StagedSound& s = s_staged[i];
 		const Uint32 idx = oldCount + (Uint32)i;
-#ifdef USE_FMOD
+		#ifdef USE_FMOD
 		FMOD_MODE flags = FMOD_DEFAULT | FMOD_3D | FMOD_LOWMEM;
 		if ( s.loop ) { flags |= FMOD_LOOP_NORMAL; }
 		FMOD::Sound* snd = nullptr;
 		FMOD_RESULT r = fmod_system->createSound(s.absPath.c_str(), flags, nullptr, &snd);
 		const bool loaded = r == FMOD_OK && snd != nullptr;
-#elif defined(USE_OPENAL)
+		#elif defined(USE_OPENAL)
 		OPENAL_BUFFER* snd = nullptr;
 		const bool loaded = OPENAL_CreateSound(s.absPath.c_str(), true, &snd) != 0
 			&& snd != nullptr;
@@ -245,7 +258,7 @@ int SAMSounds::appendSounds()
 		{
 			OPENAL_Sound_SetDefaultLoop(snd, s.loop ? AL_TRUE : AL_FALSE);
 		}
-#endif
+		#endif
 		sounds[idx] = snd; // may be null on failure — play paths guard sounds[snd]==nullptr
 		if ( !loaded )
 		{

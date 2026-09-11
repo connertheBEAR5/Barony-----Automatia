@@ -21,6 +21,7 @@
 #include "sam_logger.hpp"
 #include "sam_errors.hpp"
 #include "sam_models.hpp" // custom .vox registration (appendModels / modelIndexForId)
+#include "sam_races.hpp"     // limbModelPaths: race limb .vox files join the same model batch
 #include "sam_monsters.hpp" // body-model resolution report
 #include "sam_spells.hpp" // resolve "ns:spell" / vanilla spell-name payloads to ids
 #include "sam_classes.hpp" // class appearance model paths (whole-body + heads) to append
@@ -34,11 +35,15 @@
 #include "main.hpp"    // list_t/string_t, stringCopy, stringDeconstructor, list_* helpers
 #include "items.hpp"   // items[], ItemGeneric, ItemType, Category, ItemEquippableSlot, NUM_ITEM_SLOTS
 #ifndef EDITOR
+#include "player.hpp"                // players[], inputs.getUIInteraction, inventoryUI
+#include "stat.hpp"                  // stats[] equipment slots
+#include "interface/interface.hpp"   // GenericGUI transmuteItemTarget
 #include "mod_tools.hpp" // ItemTooltips.itemNameStringToItemID — resolves "model_from_item" names
 #endif
 
 #include <fstream>
 #include <sstream>
+#include <cctype>     // std::toupper -- slotFromName/categoryFromName fold their own input
 #include <cstring>
 #include <cstdlib>
 #include <set>
@@ -72,46 +77,6 @@ struct SAMItemSaved
 	std::map<std::string, Sint32> attributes;
 };
 static std::map<int, SAMItemSaved> s_itemPatches;
-
-#ifndef EDITOR
-static Uint64 samTraitMask(const std::vector<std::string>& traits, const std::string& stableId,
-	bool warnUnknown)
-{
-	struct SamTraitName { const char* name; Uint64 bit; };
-	static const SamTraitName kTraitNames[] = {
-		{ "ranged",           SAMItemTrait::RANGED },
-		{ "quiver",           SAMItemTrait::QUIVER },
-		{ "foci",             SAMItemTrait::FOCI },
-		{ "instrument",       SAMItemTrait::INSTRUMENT },
-		{ "thrown_ball",      SAMItemTrait::THROWN_BALL },
-		{ "shield_slot",      SAMItemTrait::SHIELD_SLOT },
-		{ "potion_bad",       SAMItemTrait::POTION_BAD },
-		{ "automaton_food",   SAMItemTrait::AUTOMATON_FOOD },
-		{ "tinker_throwable", SAMItemTrait::TINKER_THROWABLE },
-		{ "usable",           SAMItemTrait::USABLE },
-		{ "beatitude_ac",     SAMItemTrait::BEATITUDE_AC },
-	};
-	Uint64 mask = 0;
-	for ( const std::string& trait : traits )
-	{
-		bool matched = false;
-		for ( const auto& known : kTraitNames )
-		{
-			if ( trait == known.name )
-			{
-				mask |= known.bit;
-				matched = true;
-				break;
-			}
-		}
-		if ( warnUnknown && !matched )
-		{
-			SAM_WARN(MOD, "Item [" + stableId + "] declares unknown trait '" + trait + "' — ignored.");
-		}
-	}
-	return mask;
-}
-#endif
 
 /*-------------------------------------------------------------------------------
 	Local helpers
@@ -227,8 +192,22 @@ static bool listContains(const std::vector<std::string>& v, const std::string& s
 	return false;
 }
 
-static Category categoryFromName(const std::string& n)
+// Case-folded HERE rather than at each call site. The bindings fold `category` before handing it
+// over and do not fold `slot` (sam_lua_runtime.cpp:7161-7162, sam_js_runtime.cpp:5477-5478), so a
+// perfectly ordinary lowercase "equippable_in_slot_weapon" was refused as a typo. Folding inside
+// makes the contract "a name, in any case" for every caller, the loader included, instead of
+// something each one has to remember.
+static std::string samFoldName(const std::string& s)
 {
+	std::string o;
+	o.reserve(s.size());
+	for ( char c : s ) { o += (char)std::toupper((unsigned char)c); }
+	return o;
+}
+
+static Category categoryFromName(const std::string& nIn)
+{
+	const std::string n = samFoldName(nIn);   // see slotFromName: the caller should not have to
 	if ( n == "WEAPON" ) { return WEAPON; }
 	if ( n == "ARMOR" ) { return ARMOR; }
 	if ( n == "AMULET" ) { return AMULET; }
@@ -244,7 +223,10 @@ static Category categoryFromName(const std::string& n)
 	if ( n == "BOOK" ) { return BOOK; }
 	if ( n == "SPELL_CAT" ) { return SPELL_CAT; }
 	if ( n == "TOME_SPELL" ) { return TOME_SPELL; }
-	return WEAPON; // fallback
+	// NOT `return WEAPON`. A fallback that is a real value is worse than an error: patching an
+	// item with a category this did not recognise turned armour into a weapon and reported
+	// success. -1 means "not a category", and the caller refuses.
+	return (Category)(-1);
 }
 
 // Reverse of categoryFromName: Category enum value -> name string. Exposed via SAMItems so
@@ -272,8 +254,9 @@ std::string SAMItems::categoryName(int category)
 	}
 }
 
-static ItemEquippableSlot slotFromName(const std::string& n)
+static ItemEquippableSlot slotFromName(const std::string& nIn)
 {
+	const std::string n = samFoldName(nIn);
 	if ( n == "EQUIPPABLE_IN_SLOT_WEAPON" ) { return EQUIPPABLE_IN_SLOT_WEAPON; }
 	if ( n == "EQUIPPABLE_IN_SLOT_SHIELD" ) { return EQUIPPABLE_IN_SLOT_SHIELD; }
 	if ( n == "EQUIPPABLE_IN_SLOT_MASK" ) { return EQUIPPABLE_IN_SLOT_MASK; }
@@ -284,8 +267,40 @@ static ItemEquippableSlot slotFromName(const std::string& n)
 	if ( n == "EQUIPPABLE_IN_SLOT_CLOAK" ) { return EQUIPPABLE_IN_SLOT_CLOAK; }
 	if ( n == "EQUIPPABLE_IN_SLOT_AMULET" ) { return EQUIPPABLE_IN_SLOT_AMULET; }
 	if ( n == "EQUIPPABLE_IN_SLOT_RING" ) { return EQUIPPABLE_IN_SLOT_RING; }
+	// NO_EQUIP is a real, declarable slot meaning "cannot be worn", and it is the DEFAULT for any
+	// item that does not name one (see the loader). It has to be accepted by name -- rejecting it
+	// made every non-equippable item log an error on every load.
+	if ( n == "NO_EQUIP" ) { return NO_EQUIP; }
+	// Anything else is NOT a slot. This used to fall back to NO_EQUIP, which is a real value, so
+	// a typo in a patch silently made the item unequippable and the call still answered true.
+	return (ItemEquippableSlot)(-1);
+}
+
+// The registration sites all want the same thing: keep working, but stop being silent.
+// Returns the default and logs once per bad value, naming the field and the item.
+static Category categoryOrDefault(const std::string& n, const std::string& who)
+{
+	const Category c = categoryFromName(n);
+	if ( (int)c >= 0 ) { return c; }
+	// An item that declares NO category at all is not a typo, it is a JSON that left the field
+	// out. Keep the old default quietly for that; only a value that was actually WRITTEN and is
+	// wrong deserves the complaint below.
+	if ( n.empty() ) { return WEAPON; }
+	SAM_ERROR(MOD, "Item [" + who + "] declares category '" + n + "', which is not one of the"
+		" valid categories. Treating it as WEAPON, which is probably not what you meant --"
+		" fix the category and the tooltip and the equip slot will follow.");
+	return WEAPON;
+}
+
+static ItemEquippableSlot slotOrDefault(const std::string& n, const std::string& who)
+{
+	const ItemEquippableSlot s = slotFromName(n);
+	if ( (int)s >= 0 ) { return s; }
+	SAM_ERROR(MOD, "Item [" + who + "] declares slot '" + n + "', which is not one of the valid"
+		" EQUIPPABLE_IN_SLOT_* names. Treating it as not equippable.");
 	return NO_EQUIP;
 }
+
 
 static std::string samLower(const std::string& in)
 {
@@ -431,8 +446,8 @@ static std::string samTooltipKeyFor(const std::string& srcKey, const std::string
 // AND re-called after any vanilla tooltip reload (readTooltipsFromFile) clears the map.
 static void injectCustomTooltip(int id, const SAMItemDef& def)
 {
-	const Category cat = categoryFromName(def.category);
-	const ItemEquippableSlot eslot = slotFromName(def.slot);
+	const Category cat = categoryOrDefault(def.category, def.id);
+	const ItemEquippableSlot eslot = slotOrDefault(def.slot, def.id);
 	// A declared weapon skill wins over both, because it decides the tooltip key and so the
 	// skill the tooltip names. Falls back to the slot/category pick when nothing is declared.
 	// Gated on the equip slot: weapon_skill means nothing on a shield or a helm, and letting
@@ -490,8 +505,8 @@ static bool registerItemAt(int id, SAMItemDef def)
 {
 	def.numericId = id;
 
-	const Category cat = categoryFromName(def.category);
-	const ItemEquippableSlot eslot = slotFromName(def.slot);
+	const Category cat = categoryOrDefault(def.category, def.id);
+	const ItemEquippableSlot eslot = slotOrDefault(def.slot, def.id);
 	ItemGeneric& slot = items[id];
 
 	// Placeholder visuals cloned from a vanilla item. For an EQUIPPABLE item pick
@@ -621,7 +636,33 @@ static bool registerItemAt(int id, SAMItemDef def)
 	// names warn rather than failing the item, so a mod written for a newer framework still
 	// loads on an older exe -- it just does not get that behaviour.
 	{
-		slot.samTraits = samTraitMask(def.traits, def.id, true);
+		struct SamTraitName { const char* name; Uint64 bit; };
+		static const SamTraitName kTraitNames[] = {
+			{ "ranged",           SAMItemTrait::RANGED },
+			{ "quiver",           SAMItemTrait::QUIVER },
+			{ "foci",             SAMItemTrait::FOCI },
+			{ "instrument",       SAMItemTrait::INSTRUMENT },
+			{ "thrown_ball",      SAMItemTrait::THROWN_BALL },
+			{ "shield_slot",      SAMItemTrait::SHIELD_SLOT },
+			{ "potion_bad",       SAMItemTrait::POTION_BAD },
+			{ "automaton_food",   SAMItemTrait::AUTOMATON_FOOD },
+			{ "tinker_throwable", SAMItemTrait::TINKER_THROWABLE },
+			{ "usable",           SAMItemTrait::USABLE },
+			{ "beatitude_ac",     SAMItemTrait::BEATITUDE_AC },
+		};
+		slot.samTraits = 0;
+		for ( const std::string& t : def.traits )
+		{
+			bool matched = false;
+			for ( const auto& kn : kTraitNames )
+			{
+				if ( t == kn.name ) { slot.samTraits |= kn.bit; matched = true; break; }
+			}
+			if ( !matched )
+			{
+				SAM_WARN(MOD, "Item [" + def.id + "] declares unknown trait '" + t + "' — ignored.");
+			}
+		}
 		if ( slot.samTraits != 0 )
 		{
 			SAM_DEBUG(MOD, "  traits: " + std::to_string(def.traits.size()) + " declared");
@@ -639,8 +680,8 @@ static bool registerItemAt(int id, SAMItemDef def)
 	return true;
 }
 
-// Consume Automatia's stable-id mapping when integrated. The standalone fallback scans
-// the same full range while skipping the one fixed framework-owned workbench slot.
+// Consume Automatia's stable-id mapping when integrated. The standalone fallback
+// retains the upstream sequential allocation below the framework-owned band.
 static bool registerItem(SAMItemDef def)
 {
 	if ( s_runtimeIdResolver )
@@ -649,19 +690,18 @@ static bool registerItem(SAMItemDef def)
 		if ( resolved < SAM_ITEM_ID_BASE || resolved >= NUM_ITEM_SLOTS )
 		{
 			SAM_ERROR(MOD, "Stable item [" + def.id
-				+ "] has no valid Automatia runtime mapping — skipping definition.");
+				+ "] has no valid Automatia runtime mapping - skipping definition.");
 			return false;
 		}
 		return registerItemAt(resolved, std::move(def));
 	}
 
-	// Standalone/upstream fallback. Integrated Automatia always supplies the resolver.
-	while ( s_nextItemId == SAM_ITEM_HUNTERS_WORKBENCH ) { ++s_nextItemId; }
 	const int id = s_nextItemId;
-	if ( id >= NUM_ITEM_SLOTS )
+	if ( id >= SAM_BUILTIN_ITEM_ID_BASE )
 	{
-		SAM_ERROR(MOD, "Item registry full at " + std::to_string(NUM_ITEM_SLOTS)
-			+ " slots — skipping '" + def.id + "'.");
+		SAM_ERROR(MOD, "Item registry full (next id " + std::to_string(id) + " >= "
+			+ std::to_string(SAM_BUILTIN_ITEM_ID_BASE) + ", the start of the framework's reserved band) — skipping '"
+			+ def.id + "'.");
 		return false;
 	}
 	s_nextItemId = id + 1;
@@ -796,6 +836,35 @@ void SAMItems::loadFromManifest(const SAMModManifest& manifest)
 		def.level = getInt("level", -1);
 		def.model = getStr("model");
 		def.modelFp = getStr("model_fp");
+		// v2.5 state models: a different look when broken / cursed / blessed / unidentified.
+		// Unknown keys are reported rather than ignored, because a typo here is silent -- the
+		// item simply keeps its ordinary model and nothing says why.
+		for ( const char* which : { "model_states", "model_fp_states" } )
+		{
+			if ( !j.contains(which) ) { continue; }
+			if ( !j[which].is_object() )
+			{
+				SAMErrors::reportSemantic(MOD, fileLabel, std::string("/") + which, "", "not an object",
+					"an object like { \"broken\": \"models/x.vox\" }", "fix or remove it",
+					"state models ignored for this item.", true);
+				continue;
+			}
+			for ( auto sit = j[which].begin(); sit != j[which].end(); ++sit )
+			{
+				const std::string k = sit.key();
+				if ( k != "broken" && k != "cursed" && k != "blessed" && k != "unidentified" )
+				{
+					SAMErrors::reportSemantic(MOD, fileLabel, std::string("/") + which + "/" + k, "",
+						"not a state this item can vary by",
+						"one of: broken, cursed, blessed, unidentified", "check the spelling",
+						"that entry ignored; the rest of the item loaded.", true);
+					continue;
+				}
+				if ( !sit.value().is_string() || sit.value().get<std::string>().empty() ) { continue; }
+				if ( !strcmp(which, "model_states") ) { def.modelStates[k] = sit.value().get<std::string>(); }
+				else                                  { def.modelFpStates[k] = sit.value().get<std::string>(); }
+			}
+		}
 		def.modelFromItem = getStr("model_from_item");
 		def.icon = getStr("icon");
 		def.weaponSkill = samLower(getStr("weapon_skill"));
@@ -926,7 +995,6 @@ void SAMItems::clear()
 			items[id].setIdentifiedName("");
 			items[id].setUnidentifiedName("");
 			items[id].attributes.clear();
-			items[id].samTraits = 0;
 		}
 	}
 	s_registry.clear();
@@ -951,11 +1019,10 @@ void SAMItems::reapplyAfterDataReload()
 		slot.weight = def.weight;
 		slot.gold_value = def.goldValue;
 		slot.level = def.level;
-		slot.category = categoryFromName(def.category);
-		slot.item_slot = slotFromName(def.slot);
+		slot.category = categoryOrDefault(def.category, def.id);
+		slot.item_slot = slotOrDefault(def.slot, def.id);
 		slot.attributes.clear();
 		for ( const auto& a : def.attributes ) { slot.attributes[a.first] = a.second; }
-		slot.samTraits = samTraitMask(def.traits, def.id, false);
 		injectCustomTooltip(id, def);
 	}
 	if ( !s_registry.empty() )
@@ -1052,6 +1119,30 @@ bool SAMItems::patchItem(int id, const SAMItemPatch& p)
 		s_itemPatches[id] = s;
 	}
 
+	// EVERY CHECK BEFORE THE FIRST WRITE. These two guards used to sit BELOW the weight,
+	// gold_value and level assignments, so the message "Nothing was patched on this item" was
+	// printed after three things had been patched on the item -- permanently, for the rest of the
+	// session -- and the false it returned told the script the same untruth. A function that
+	// validates has to finish validating before it touches anything.
+	//
+	// A patch names a field on an item that ALREADY WORKS, so an unrecognised value must not be
+	// written. The old fallbacks turned an unknown category into WEAPON and an unknown slot into
+	// NO_EQUIP -- both real values, both applied, and the call still returned true. So a typo
+	// quietly made armour a weapon, or made an item permanently unequippable, and reported
+	// success. Refuse the whole patch and name the field instead.
+	if ( p.hasCategory && (int)categoryFromName(p.category) < 0 )
+	{
+		SAM_ERROR(MOD, "patch_item: '" + p.category + "' is not a valid category. Nothing was"
+			" patched on this item.");
+		return false;
+	}
+	if ( p.hasSlot && (int)slotFromName(p.slot) < 0 )
+	{
+		SAM_ERROR(MOD, "patch_item: '" + p.slot + "' is not a valid EQUIPPABLE_IN_SLOT_* name."
+			" Nothing was patched on this item.");
+		return false;
+	}
+
 	if ( p.hasWeight )   { slot.weight = p.weight; }
 	if ( p.hasValue )    { slot.gold_value = p.value; }
 	if ( p.hasLevel )    { slot.level = p.level; }
@@ -1077,11 +1168,101 @@ int SAMItems::itemIdForIdString(const std::string& idString)
 {
 	for ( const auto& kv : s_registry )
 	{
-		if ( kv.second.id == idString )
+		// Case-INSENSITIVE. The vanilla-name branch beside every caller of this lowercases, so an
+		// exact match here meant "MyMod:Sword" missed a declared "mymod:sword" while "Steel_Sword"
+		// resolved fine. Ids are stored exactly as the mod wrote them, so the fold happens here.
+		auto samFold = [](std::string v) {
+			for ( char& c : v ) { c = (char)std::tolower((unsigned char)c); }
+			return v;
+		};
+		if ( samFold(kv.second.id) == samFold(idString) )
 		{
 			return kv.first;
 		}
 	}
+	return -1;
+}
+
+std::string SAMItems::saveIdTable()
+{
+	std::string out;
+	for ( const auto& kv : s_registry )
+	{
+		if ( kv.second.id.empty() ) { continue; }
+		if ( !out.empty() ) { out += ';'; }
+		out += std::to_string(kv.first) + "=" + kv.second.id;
+	}
+	return out;
+}
+
+bool SAMItems::remapSavedItemIds(const std::string& savedTable,
+	std::map<int, int>& oldToNew, std::map<int, std::string>& unresolved)
+{
+	oldToNew.clear();
+	unresolved.clear();
+	if ( savedTable.empty() ) { return false; }
+
+	// The registry is only populated while a mod set is MOUNTED. getSaveGameInfo also runs
+	// from the main menu's save-slot list, and S.A.M unloads (clearing every registry) on the
+	// way back to that menu -- so a save read there would find every "ns:item" unresolvable
+	// and condemn the lot. Observed in testing: quitting to the menu announced a still-loaded
+	// mod's sword as dropped, seconds before the real load restored it correctly.
+	// No mods mounted means "not ready to judge", NOT "every mod was removed". Touch nothing.
+	// A player who really did remove every mod is still told by warnIfModSetChanged, and
+	// their items keep the ids they had, exactly as before this feature existed.
+	if ( SAMWorkshop::manifests().empty() ) { return false; }
+	size_t start = 0;
+	while ( start < savedTable.size() )
+	{
+		size_t end = savedTable.find(';', start);
+		if ( end == std::string::npos ) { end = savedTable.size(); }
+		const std::string entry = savedTable.substr(start, end - start);
+		const size_t eq = entry.find('=');
+		if ( eq != std::string::npos && eq > 0 )
+		{
+			const int savedId = std::atoi(entry.substr(0, eq).c_str());
+			const std::string name = entry.substr(eq + 1);
+			if ( savedId >= SAM_ITEM_ID_BASE && !name.empty() )
+			{
+				const int now = itemIdForIdString(name);
+				if ( now >= 0 ) { oldToNew[savedId] = now; }
+				else { unresolved[savedId] = name; }
+			}
+		}
+		start = end + 1;
+	}
+	return true;
+}
+
+int SAMItems::stateModelFor(int itemType, int status, int beatitude, bool identified, bool firstPerson)
+{
+	if ( s_registry.empty() ) { return -1; }
+	auto it = s_registry.find(itemType);
+	if ( it == s_registry.end() ) { return -1; }
+	// When an item declares a world state but no first-person twin, fall back to the world
+	// table for the first-person view. Otherwise the two disagree, and the HUD decides the
+	// first-person SCALE by testing itemModelFirstperson(item) == itemModel(item) -- so a
+	// broken sword would have rendered at the wrong size in the hand.
+	const std::map<std::string, int>& tbl =
+		( firstPerson && !it->second.modelFpStateIdx.empty() ) ? it->second.modelFpStateIdx
+		: ( firstPerson ? it->second.modelStateIdx : it->second.modelStateIdx );
+	if ( tbl.empty() ) { return -1; }
+
+	// Most specific first. Broken outranks a blessing because a ruined item reads as ruined
+	// whatever else is true of it.
+	auto pick = [&](const char* key) -> int {
+		auto k = tbl.find(key);
+		return ( k == tbl.end() ) ? -1 : k->second;
+	};
+	// Broken first: a ruined item reads as ruined whatever else is true of it.
+	if ( status == 0 )   { const int i = pick("broken");       if ( i >= 0 ) { return i; } }
+	// Unidentified BEFORE beatitude, and this ordering is the point: a player who has not
+	// identified an item is not supposed to know whether it is blessed or cursed. Testing
+	// beatitude first both made `unidentified` unreachable for any enchanted item AND leaked
+	// the blessing through the model.
+	if ( !identified )   { const int i = pick("unidentified"); if ( i >= 0 ) { return i; } }
+	if ( beatitude < 0 ) { const int i = pick("cursed");       if ( i >= 0 ) { return i; } }
+	if ( beatitude > 0 ) { const int i = pick("blessed");      if ( i >= 0 ) { return i; } }
 	return -1;
 }
 
@@ -1226,6 +1407,12 @@ void SAMItems::registerModModels()
 	{
 		want(kv.second, kv.second.model, "model");
 		want(kv.second, kv.second.modelFp, "model_fp");
+		// State models are ordinary model references and go in the same batch, or they would
+		// resolve to nothing and the state would silently never show.
+		// Non-const: `want` takes the path by mutable reference (a map's VALUES are mutable
+		// even though its keys are not), and it normalises the path in place.
+		for ( auto& ms : kv.second.modelStates )   { want(kv.second, ms.second, "model_states"); }
+		for ( auto& ms : kv.second.modelFpStates ) { want(kv.second, ms.second, "model_fp_states"); }
 	}
 	// Class appearance models (whole-body overrides like a jet, and custom heads) share the
 	// one model table, so register them in the SAME batch. resolveAppearance() (which runs
@@ -1239,6 +1426,19 @@ void SAMItems::registerModModels()
 		}
 		if ( seen.insert(p).second ) { reqs.push_back({ p, p }); }
 	}
+	// Race limb models named by a mod-relative .vox path ("limb_models": { "head":
+	// "models/x.vox" }). Same batch, same escape guard, path-as-id like items and class
+	// heads. Before this, such a path resolved nowhere and the modder was told to declare
+	// an id or use a number -- the resolver's own comment claimed registration happened.
+	for ( const std::string& p : SAMRaces::limbModelPaths() )
+	{
+		if ( SAMErrors::relPathEscapes(p) )
+		{
+			SAM_WARN(MOD, "Race limb model path '" + p + "' escapes the mod folder — ignoring it.");
+			continue;
+		}
+		if ( seen.insert(p).second ) { reqs.push_back({ p, p }); }
+	}
 	// v1.4.0 — standalone models a mod declares in mod.json "models" (for sam_spawn_companion
 	// and other decorative entities, tied to no item/class). Registered under their FRIENDLY
 	// id (not the path), so scripts spawn by "ns:name". Same escape-guard; dedup by id.
@@ -1248,10 +1448,22 @@ void SAMItems::registerModModels()
 		{
 			if ( SAMErrors::relPathEscapes(md.second) ) { continue; } // belt-and-braces (parse already guards)
 			if ( seen.insert("id:" + md.first).second ) { reqs.push_back({ md.first, md.second }); }
+			else
+			{
+				// Two mods claiming one model id. This dedupe runs BEFORE appendModels, so its
+				// own collision warning never fires and the loser silently renders the winner's
+				// art -- impossible to diagnose from in-game. mod.json ids are taken verbatim
+				// and are not forced to carry the namespace, so "sword" is a global name.
+				SAM_WARN(MOD, "Model id [" + md.first + "] is already claimed by another mod; "
+					"[" + m.ns + "]'s copy is ignored and its model will render as the other "
+					"mod's. Namespace your model ids so two mods cannot collide.");
+			}
 		}
 	}
-	if ( reqs.empty() ) { return; }
-
+	// NOT `if ( reqs.empty() ) return;`. appendModels has to be called even with nothing to
+	// register, because that is the call that FREES the previous load's models and resets the
+	// table to its pinned base. Returning early here left an unloaded mod's voxels and GPU
+	// buffers allocated and its ids still resolving in the registry.
 	SAMModels::appendModels(reqs);
 
 	// Point each item at what it asked for. This runs after model_from_item has already
@@ -1288,6 +1500,30 @@ void SAMItems::registerModModels()
 					+ "' -> model index " + std::to_string(idx));
 			}
 		}
+		// State models. A state whose model fails to resolve is dropped rather than left as a
+		// dangling index, so it falls back to the ordinary model instead of drawing nothing.
+		def.modelStateIdx.clear();
+		def.modelFpStateIdx.clear();
+		for ( const auto& ms : def.modelStates )
+		{
+			const int idx = SAMModels::modelIndexForId(ms.second);
+			if ( idx >= 0 ) { def.modelStateIdx[ms.first] = idx; }
+			else
+			{
+				SAM_WARN(MOD, "Item [" + def.id + "] model_states." + ms.first + " '" + ms.second
+					+ "' did not resolve to a model; that state keeps the item's ordinary model.");
+			}
+		}
+		for ( const auto& ms : def.modelFpStates )
+		{
+			const int idx = SAMModels::modelIndexForId(ms.second);
+			if ( idx >= 0 ) { def.modelFpStateIdx[ms.first] = idx; }
+			else
+			{
+				SAM_WARN(MOD, "Item [" + def.id + "] model_fp_states." + ms.first + " '" + ms.second
+					+ "' did not resolve to a model; that state keeps the item's ordinary model.");
+			}
+		}
 	}
 
 	// Monster body models: report what resolved and, crucially, what did NOT. A monster's
@@ -1297,3 +1533,169 @@ void SAMItems::registerModModels()
 	SAMMonsters::reportBodyResolution();
 #endif
 }
+
+
+/*-------------------------------------------------------------------------------
+	SAMItems: deferred item destruction
+
+	Game-only. This file also compiles into the map editor, which has no players[],
+	no inputs, no GenericGUI and no consumeItem, so the real implementation is
+	guarded and the editor gets no-ops that keep the symbols linkable.
+-------------------------------------------------------------------------------*/
+#ifdef EDITOR
+
+bool SAMItems::queueDestroy(uint32_t, int) { return false; }
+void SAMItems::drainDestroyQueue() {}
+
+#else
+
+namespace
+{
+	// uid + the player whose bag it is. Stored by UID rather than by pointer on purpose:
+	// between queueing and draining the item may be destroyed by ordinary gameplay, and a
+	// stale pointer would be undetectable where a stale uid simply fails to resolve.
+	struct SamPendingDestroy { uint32_t uid; int owner; };
+	std::vector<SamPendingDestroy> s_pendingDestroy;
+
+	// True if this exact Item (by POINTER, not by value) is in one of the player's ten
+	// equipment slots. itemSlot cannot be used here: it matches through itemCompare, so it
+	// happily reports a spare identical sword as the equipped one.
+	bool samItemIsEquippedByPointer(const Item* it, int player)
+	{
+		if ( !it || player < 0 || player >= MAXPLAYERS || !stats[player] ) { return false; }
+		const Stat* s = stats[player];
+		return ( it == s->weapon || it == s->shield || it == s->helmet || it == s->breastplate
+			|| it == s->gloves || it == s->shoes || it == s->cloak || it == s->amulet
+			|| it == s->ring || it == s->mask );
+	}
+
+	// Null every raw Item* the UI keeps outside the inventory list. list_RemoveNode clears
+	// some of these (list.cpp:100-131) and misses others, and the ones it misses are read
+	// every frame while a window is open.
+	void samForgetItemPointer(const Item* it)
+	{
+		if ( !it ) { return; }
+		for ( int i = 0; i < MAXPLAYERS; ++i )
+		{
+			if ( !players[i] ) { continue; }
+			auto* ui = inputs.getUIInteraction(i);
+			if ( ui && ui->selectedItem == it ) { ui->selectedItem = nullptr; }
+			// closeBookGUI, not a bare null: the engine's own two sites call it
+			// (items.cpp:1926, :1987) because it also clears bBookOpen and openBookName,
+			// hides the frame and returns the player to the previous module. Nulling alone
+			// leaves them staring at a book that no longer exists.
+			if ( players[i]->bookGUI.openBookItem == it )
+			{
+				players[i]->bookGUI.closeBookGUI();
+			}
+			if ( GenericGUI[i].transmuteItemTarget == it )
+			{
+				GenericGUI[i].transmuteItemTarget = nullptr;
+			}
+		}
+	}
+}
+
+bool SAMItems::queueDestroy(uint32_t itemUid, int owner)
+{
+	Item* it = uidToItem((Uint32)itemUid);
+	if ( !it )
+	{
+		SAM_WARN("ITEM", "destroy: no item with uid " + std::to_string((unsigned long long)itemUid)
+			+ " (item uids only resolve for a LOCAL player's own items).");
+		return false;
+	}
+	// Refused rather than handled, because unequipping on the script's behalf would change
+	// the player's loadout as a side effect of asking for a delete.
+	for ( int p = 0; p < MAXPLAYERS; ++p )
+	{
+		if ( samItemIsEquippedByPointer(it, p) )
+		{
+			SAM_WARN("ITEM", "destroy refused: that item is equipped. Unequip it first;"
+				" destroying an equipped item can clear the wrong slot, because the engine's"
+				" own slot cleanup matches by value and cannot tell two identical items apart.");
+			return false;
+		}
+	}
+	for ( const auto& q : s_pendingDestroy )
+	{
+		if ( q.uid == itemUid ) { return true; }   // already queued; not an error
+	}
+	s_pendingDestroy.push_back({ itemUid, owner });
+	return true;
+}
+
+void SAMItems::drainDestroyQueue()
+{
+	if ( s_pendingDestroy.empty() ) { return; }
+
+	// Swapped out first: destroying an item can run engine code, and anything that queues
+	// more work during this pass belongs to the NEXT frame, not to an unbounded loop here.
+	std::vector<SamPendingDestroy> batch;
+	batch.swap(s_pendingDestroy);
+
+	for ( const auto& q : batch )
+	{
+		Item* it = uidToItem((Uint32)q.uid);
+		if ( !it ) { continue; }   // ordinary gameplay got there first; nothing to do
+
+		// Re-check: the item may have been equipped between queueing and now.
+		bool equipped = false;
+		for ( int p = 0; p < MAXPLAYERS; ++p )
+		{
+			if ( samItemIsEquippedByPointer(it, p) ) { equipped = true; break; }
+		}
+		if ( equipped )
+		{
+			SAM_WARN("ITEM", "destroy skipped: the item was equipped before the queue drained.");
+			continue;
+		}
+
+		samForgetItemPointer(it);
+
+		// consumeItem decrements and only frees at zero (items.cpp:2436). Zero the stack
+		// first so one call really does destroy, instead of shaving one arrow off forty.
+		it->count = 1;
+		Item* tmp = it;
+		const int owner = ( q.owner >= 0 && q.owner < MAXPLAYERS ) ? q.owner : clientnum;
+
+		// consumeItem's own cleanup nulls whichever slot itemSlot matches (items.cpp:2445),
+		// and itemSlot matches through itemCompare, which cannot tell two identical items
+		// apart. Destroying a spare sword therefore nulls the slot holding the WORN one, and
+		// the unequip is saved. Deciding by pointer above is not enough, because the damage
+		// happens inside the engine call. Snapshot the slots and put back anything that was
+		// cleared while still holding a live item other than the one we are destroying.
+		Item* before[MAXPLAYERS][10] = {};
+		for ( int p = 0; p < MAXPLAYERS; ++p )
+		{
+			if ( !stats[p] ) { continue; }
+			Item* const slots[10] = { stats[p]->weapon, stats[p]->shield, stats[p]->helmet,
+				stats[p]->breastplate, stats[p]->gloves, stats[p]->shoes, stats[p]->cloak,
+				stats[p]->amulet, stats[p]->ring, stats[p]->mask };
+			for ( int k = 0; k < 10; ++k ) { before[p][k] = slots[k]; }
+		}
+
+		consumeItem(tmp, owner);
+
+		for ( int p = 0; p < MAXPLAYERS; ++p )
+		{
+			if ( !stats[p] ) { continue; }
+			Item** slots[10] = { &stats[p]->weapon, &stats[p]->shield, &stats[p]->helmet,
+				&stats[p]->breastplate, &stats[p]->gloves, &stats[p]->shoes, &stats[p]->cloak,
+				&stats[p]->amulet, &stats[p]->ring, &stats[p]->mask };
+			for ( int k = 0; k < 10; ++k )
+			{
+				// Cleared, but what it held was not the item we destroyed: itemSlot matched a
+				// twin. Put it back.
+				if ( *slots[k] == nullptr && before[p][k] != nullptr && before[p][k] != it )
+				{
+					*slots[k] = before[p][k];
+					SAM_WARN("ITEM", "destroy: the engine cleared an equipment slot holding an"
+						" identical item; restored it.");
+				}
+			}
+		}
+	}
+}
+
+#endif // EDITOR

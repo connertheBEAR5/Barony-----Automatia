@@ -17,7 +17,8 @@
 #include "sam_sounds.hpp"
 #include "sam_recipes.hpp"
 #include "sam_workbench.hpp"
-#include "sam_rooms.hpp"     // prefab rooms injected into vanilla levelsets
+#include "sam_rooms.hpp"
+#include "sam_combat.hpp"     // prefab rooms injected into vanilla levelsets
 #ifndef EDITOR
 #include "sam_hud.hpp"   // script HUD, cleared on unload
 #include "sam_images.hpp" // mod-supplied pictures (overlay + HUD art)
@@ -57,8 +58,7 @@ void SAMLoader::load(const std::vector<std::pair<std::string, std::string>>& mou
 	}
 	SAM_INFO("CORE", "Scanning " + std::to_string(mountedPaths.size()) + " mounted mod path(s) for mod.json...");
 
-	const std::vector<SAMModManifest> manifests =
-		SAMWorkshop::scan(mountedPaths, baronyVersion);
+	const std::vector<SAMModManifest> manifests = SAMWorkshop::scan(mountedPaths, baronyVersion);
 	loadResolvedManifests(manifests, baronyVersion, false);
 }
 
@@ -69,9 +69,7 @@ void SAMLoader::loadResolvedManifests(const std::vector<SAMModManifest>& mods,
 	{
 		SAMLogger::beginModLoad();
 	}
-	SAM_INFO("CORE", "S.A.M initializing..."
-		+ (baronyVersion.empty() ? std::string()
-			: (" (Barony " + baronyVersion + ")")));
+	SAM_INFO("CORE", "S.A.M initializing..." + (baronyVersion.empty() ? std::string() : (" (Barony " + baronyVersion + ")")));
 
 	// Fully rebuild the class + item registries every load (loadMods fires on
 	// every Play, so appending would double-register).
@@ -80,14 +78,16 @@ void SAMLoader::loadResolvedManifests(const std::vector<SAMModManifest>& mods,
 #ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
 	SAMEffects::clear(); // drop custom status effects -> vanilla
 	SAMRaces::clear(); // drop custom playable races -> vanilla
-	// Body entries cache resolved model indices per entity. A reload may reuse
-	// those slots for different .vox files, so retaining this cache would make
-	// a live monster render with an unrelated model until it respawned.
+	// SAMBodies caches RESOLVED engine model indices per entity uid. The model range is freed
+	// and rebuilt later in this same load, so anything cached from the previous one points at
+	// a slot that may now hold a different model. It was cleared only on unload, which never
+	// runs on a mods-on -> mods-on reload.
 	SAMBodies::clear();
 	SAMSounds::clear(); // drop staged custom sounds (engine table reset on next append)
 	SAMRecipes::clear(); // drop tinkering recipes -> vanilla craftable grid
 	SAMWorkbench::clear(); // and the built-in bench, so it re-installs this cycle
 	SAMRooms::clear(); // drop injected rooms -> vanilla room pools
+	SAMCombat::clear(); // drop species damage-resistance overrides -> vanilla damagetables
 	SAMHud::clearAll(); // a mod's HUD must never outlive the mod that drew it
 	SAMImages::clear(); // drop the image registry + every live overlay
 	SAMUi::closeAll();  // a panel must never outlive the mod that opened it
@@ -140,10 +140,7 @@ void SAMLoader::loadResolvedManifests(const std::vector<SAMModManifest>& mods,
 	// that initGameDatafiles made at startup, and the bench must come back whether or not
 	// this load cycle has any mods in it.
 #ifndef EDITOR   // these subsystems are GAME_SOURCES only; the editor links neither
-	if ( !mods.empty() )
-	{
-		SAMWorkbench::install();
-	}
+	SAMWorkbench::install();
 #endif
 
 	int totalClasses = 0;
@@ -341,6 +338,7 @@ void SAMLoader::unload()
 	SAMSounds::clear();        // drop staged custom sounds
 	SAMRecipes::clear();       // drop tinkering recipes
 	SAMWorkbench::clear();     // drop the built-in bench registration
+	SAMCombat::clear();        // drop species damage-resistance overrides
 #endif
 	SAMMonsterPatch::clear();  // reverts sam_patch_monster overrides (F5)
 	// Rooms are NOT optional to clear. The registry holds ABSOLUTE paths, so unmounting the
@@ -361,11 +359,12 @@ void SAMLoader::unload()
 	// background, which skips the Frame::guiDestroy branch -- so without this the mod's
 	// widgets keep drawing over a main menu that now claims to be vanilla.
 	SAMHud::clearAll();   // drop the script HUD container and every widget under it
-	// NOTE: do NOT call SAMModels::clear() here. The id->index map IS the append-time
-	// duplicate guard: appendModels skips an id already in it. Dropping the map on unload
-	// makes the next load re-append every .vox the engine still holds, growing the model
-	// table and its VBOs without bound across mods-off/mods-on cycles. The stale-index
-	// concern it was meant to address is handled by ids being re-resolved on each load.
+	// NOTE: calling SAMModels::clear() here is unnecessary, not dangerous -- appendModels
+	// clears the map itself and rebuilds its whole range from a pinned base on every load.
+	// It used to be dangerous: the map was the only thing stopping a re-append, so dropping
+	// it grew the model table and its VBOs without bound across mods-off/mods-on cycles.
+	// That is no longer how it works, and the table now returns to base + N every load.
+	// Leaving it out anyway, because the unload path has no reason to touch it.
 	SAMBodies::clear();   // drop custom creature body tags (they cache model indices)
 	SAMSync::clear();
 	SAMPatcher::clear();  // unmount + wipe the generated patch overlay

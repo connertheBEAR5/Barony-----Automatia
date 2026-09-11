@@ -29,11 +29,8 @@ public:
 	static void load(const std::vector<std::pair<std::string, std::string>>& mountedPaths,
 		const std::string& baronyVersion = "", bool beginLogSection = true);
 
-	// Reuse the authoritative result of SAMWorkshop::scan() when another
-	// integration seam has already scanned the same mounted content to build a
-	// stable-id catalog. This avoids reparsing every manifest and prevents a
-	// file edited mid-load from producing different foundation/runtime views.
-	// The caller must pass the current resolved workshop result.
+	// Reuse an authoritative workshop scan when Automatia has already resolved
+	// these manifests to construct its stable-id catalog.
 	static void loadResolvedManifests(const std::vector<SAMModManifest>& manifests,
 		const std::string& baronyVersion = "", bool beginLogSection = true);
 

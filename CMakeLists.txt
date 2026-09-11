@@ -833,12 +833,23 @@ ENDIF (APPLE)
 # leaving the linked import library and staged runtime DLL out of sync.
 find_package(PhysFS REQUIRED MODULE)
 
-# Preserve the selected import library separately. The vcpkg package provider
-# can repopulate PHYSFS_LIBRARY after find_package(), but game/editor targets
-# must continue to link the same locally patched import library whose DLL is
-# selected below.
-set(BARONY_PHYSFS_LIBRARY "${PHYSFS_LIBRARY}" CACHE FILEPATH
-	"Exact PhysicsFS import library used by Barony targets")
+# Preserve one concrete import library separately. The vcpkg package provider
+# commonly reports a standard CMake `optimized;...;debug;...` list here, which
+# is valid for target_link_libraries() but not for FILEPATH/EXISTS checks. The
+# packaged Windows Release binaries must use the first existing (release)
+# import library so their staged runtime DLL stays paired with it.
+set(_barony_physfs_import_library "")
+foreach(_barony_physfs_candidate IN LISTS PHYSFS_LIBRARY)
+	if (EXISTS "${_barony_physfs_candidate}")
+		set(_barony_physfs_import_library "${_barony_physfs_candidate}")
+		break()
+	endif()
+endforeach()
+if (NOT _barony_physfs_import_library)
+	message(FATAL_ERROR "PhysFS did not provide a concrete import library: ${PHYSFS_LIBRARY}")
+endif()
+set(BARONY_PHYSFS_LIBRARY "${_barony_physfs_import_library}" CACHE FILEPATH
+	"Exact PhysicsFS import library used by Barony targets" FORCE)
 if (NOT EXISTS "${BARONY_PHYSFS_LIBRARY}")
 	message(FATAL_ERROR
 		"BARONY_PHYSFS_LIBRARY is not a valid PhysicsFS import library: ${BARONY_PHYSFS_LIBRARY}")
@@ -886,7 +897,22 @@ find_package(RapidJson REQUIRED)
 INCLUDE_DIRECTORIES(${RAPID_JSON_INCLUDE_DIR})
 
 if (STEAMWORKS_ENABLED)
-	find_package(NFD REQUIRED)
+	# Keep the Steam build self-contained. The repository already vendors
+	# nativefiledialog-extended, while the old FindNFD module only searches an
+	# externally preinstalled binary and makes a fresh Windows configure fail.
+	set(_barony_bundled_nfd_dir
+		"${PROJECT_SOURCE_DIR}/build-deps/nativefiledialog-extended")
+	if (EXISTS "${_barony_bundled_nfd_dir}/src/include/nfd.h")
+		set(NFD_BUILD_TESTS OFF CACHE BOOL "Build nativefiledialog tests" FORCE)
+		set(NFD_INSTALL OFF CACHE BOOL "Install nativefiledialog" FORCE)
+		add_subdirectory("${_barony_bundled_nfd_dir}"
+			"${CMAKE_BINARY_DIR}/nativefiledialog-extended" EXCLUDE_FROM_ALL)
+		set(NFD_LIBRARY nfd)
+		set(NFD_LIBRARIES nfd)
+		set(NFD_INCLUDE_DIR "${_barony_bundled_nfd_dir}/src/include")
+	else()
+		find_package(NFD REQUIRED)
+	endif()
 	INCLUDE_DIRECTORIES(${NFD_INCLUDE_DIR})
 
 	if (UNIX AND NOT APPLE)
@@ -1146,11 +1172,12 @@ if (GAME_ENABLED)
 	endif()
   endif()
 	if (SAM_FRAMEWORK_ENABLED)
-	set(SAM_RUNTIME_21_SOURCES
+	set(SAM_RUNTIME_28_SOURCES
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_backup.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_bodies.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_catalog.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_classes.cpp"
+		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_combat.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_effects.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_event.cpp"
 		"${PROJECT_SOURCE_DIR}/src/sam/framework/sam_hud.cpp"
@@ -1216,7 +1243,7 @@ if (GAME_ENABLED)
 	target_sources(
 		barony
 		PRIVATE
-			${SAM_RUNTIME_21_SOURCES}
+			${SAM_RUNTIME_28_SOURCES}
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_automatia_adapter.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_foundation.cpp"
 			"${PROJECT_SOURCE_DIR}/src/sam/sam_class_registry_foundation.cpp"
@@ -1245,7 +1272,7 @@ if (GAME_ENABLED)
 	)
 	message(
 		STATUS
-		"Building Automatia with S.A.M 2.1.0 runtime and stable-identity adapters"
+		"Building Automatia with S.A.M 2.8.0 runtime and stable-identity adapters"
 	)
   endif()
 
